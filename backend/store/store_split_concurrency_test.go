@@ -27,8 +27,8 @@ func TestOpenServerKeepsReadSlotAlongsideTenantWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := userDB.Stats().MaxOpenConnections; got != 2 {
-		t.Fatalf("user database MaxOpenConnections = %d, want one writer plus one WAL read slot", got)
+	if got := userDB.Stats().MaxOpenConnections; got != 4 {
+		t.Fatalf("user database MaxOpenConnections = %d, want one writer plus three WAL read slots", got)
 	}
 
 	message, err := st.CreateMessage(ctx, CreateMessage{

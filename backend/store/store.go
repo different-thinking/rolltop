@@ -82,11 +82,12 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 		return nil, err
 	}
 	// SQLite permits exactly one writer per database. The sync runner serializes
-	// those writer turns per tenant; retain one additional connection so account
-	// and settings reads can use WAL snapshots instead of queueing behind an
-	// active sync write. Separate users have separate Store instances.
-	db.SetMaxOpenConns(2)
-	db.SetMaxIdleConns(2)
+	// those writer turns per tenant; retain several additional connections so
+	// message rendering, account settings, and sender decoration reads can take
+	// WAL snapshots without queueing behind the active mirror writer. Separate
+	// users still have separate Store instances.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	s := &Store{
 		db:                db,
 		dataDir:           dataDir,

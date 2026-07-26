@@ -156,17 +156,10 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 	thread := s.apiThreadMessagesTimed(r.Context(), cu.User.ID, views, timing)
 	stop()
 	timing.seeds = len(views)
-	stop = timing.measure(&timing.compose)
-	choicesDone := timing.measure(&timing.composeChoices)
-	composeChoices := s.composeIdentityChoicesLite(r.Context(), cu)
-	choicesDone()
-	fromDone := timing.measure(&timing.composeFrom)
-	composeFrom := s.composeFromLabelFromChoices(r.Context(), cu, composeChoices)
-	fromDone()
-	identitiesDone := timing.measure(&timing.composeIdentities)
-	fromIdentities := apiComposeIdentitiesFromChoices(composeChoices)
-	identitiesDone()
-	stop()
+	// Identity choices may need a contended SQLite read while a mirror is
+	// writing. They are only needed after the user presses Reply/Forward, where
+	// /api/compose already loads the complete, security-aware choices. Keep that
+	// optional compose work out of the message-open critical path.
 	snoozedUntil := ""
 	if snooze, snoozeErr := s.store.MessageSnoozeForUser(r.Context(), cu.User.ID, msg.ID); snoozeErr == nil {
 		if snooze.SnoozedUntil.After(time.Now()) {
@@ -189,8 +182,8 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 	writeJSONCached(w, r, map[string]any{
 		"message":         apiMessageFromRecord(msg, msg.BodyText),
 		"thread":          thread,
-		"compose_from":    composeFrom,
-		"from_identities": fromIdentities,
+		"compose_from":    "",
+		"from_identities": []apiComposeIdentity{},
 		"mailbox_id":      msg.MailboxID,
 		"raw_blob_url":    fmt.Sprintf("/blobs/%d", msg.BlobID),
 		"conversation":    len(views),
