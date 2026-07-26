@@ -206,3 +206,22 @@ func TestCanReplyAllFalseForSingleExternalSender(t *testing.T) {
 		t.Fatalf("reply-all should be hidden when reply would only address one external sender")
 	}
 }
+
+func TestComposeIdentityCacheKeepsSecurityAwareChoicesSeparate(t *testing.T) {
+	server := &Server{composeIdentityCache: map[int64]composeIdentityCacheEntry{}}
+	choices := []composeIdentity{{ID: 7, Email: "me@example.test", Header: "Me <me@example.test>"}}
+
+	server.rememberComposeIdentityChoices(1, choices, false)
+	if _, ok := server.cachedComposeIdentityChoices(1, true); ok {
+		t.Fatal("lightweight identity cache satisfied a security-aware request")
+	}
+	if got, ok := server.cachedComposeIdentityChoices(1, false); !ok || len(got) != 1 || got[0].ID != choices[0].ID {
+		t.Fatalf("lightweight cache = %#v, ok=%t", got, ok)
+	}
+
+	choices[0].HasSecurityPrivateKey = true
+	server.rememberComposeIdentityChoices(1, choices, true)
+	if got, ok := server.cachedComposeIdentityChoices(1, true); !ok || len(got) != 1 || !got[0].HasSecurityPrivateKey {
+		t.Fatalf("security-aware cache = %#v, ok=%t", got, ok)
+	}
+}
