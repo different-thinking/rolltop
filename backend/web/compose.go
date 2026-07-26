@@ -620,6 +620,28 @@ func (s *Server) rememberComposeIdentityChoices(userID int64, choices []composeI
 	s.composeIdentityMu.Unlock()
 }
 
+// touchComposeIdentityCache provides sliding expiry for a user who is actively
+// using Rolltop. It intentionally never populates a cold cache: compose remains
+// the only path that performs identity and security-provider work.
+func (s *Server) touchComposeIdentityCache(userID int64) {
+	if s == nil || userID <= 0 {
+		return
+	}
+	now := time.Now()
+	s.composeIdentityMu.Lock()
+	defer s.composeIdentityMu.Unlock()
+	entry, ok := s.composeIdentityCache[userID]
+	if !ok {
+		return
+	}
+	if now.After(entry.expiresAt) || len(entry.choices) == 0 {
+		delete(s.composeIdentityCache, userID)
+		return
+	}
+	entry.expiresAt = now.Add(composeIdentityCacheTTL)
+	s.composeIdentityCache[userID] = entry
+}
+
 func (s *Server) clearComposeIdentityCache(userID int64) {
 	if s == nil || userID <= 0 {
 		return

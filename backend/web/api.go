@@ -111,6 +111,10 @@ func (s *Server) requireAPIAuth(w http.ResponseWriter, r *http.Request) (current
 		writeAPIError(w, http.StatusUnauthorized, "login required")
 		return currentUser{}, false
 	}
+	// Keep an already-warm compose identity cache available while this signed-in
+	// user is active. This only touches memory; it never adds a database lookup
+	// to ordinary mail, search, or event requests.
+	s.touchComposeIdentityCache(cu.User.ID)
 	return cu, true
 }
 

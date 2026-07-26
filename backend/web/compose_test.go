@@ -225,3 +225,37 @@ func TestComposeIdentityCacheKeepsSecurityAwareChoicesSeparate(t *testing.T) {
 		t.Fatalf("security-aware cache = %#v, ok=%t", got, ok)
 	}
 }
+
+func TestTouchComposeIdentityCacheExtendsActiveCacheOnly(t *testing.T) {
+	server := &Server{composeIdentityCache: map[int64]composeIdentityCacheEntry{}}
+	server.touchComposeIdentityCache(1)
+	if len(server.composeIdentityCache) != 0 {
+		t.Fatal("touch populated a cold compose identity cache")
+	}
+
+	server.rememberComposeIdentityChoices(1, []composeIdentity{{ID: 7, Email: "me@example.test"}}, true)
+	server.composeIdentityMu.Lock()
+	entry := server.composeIdentityCache[1]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	server.composeIdentityCache[1] = entry
+	server.composeIdentityMu.Unlock()
+	server.touchComposeIdentityCache(1)
+	if _, ok := server.cachedComposeIdentityChoices(1, true); ok {
+		t.Fatal("touch retained an expired compose identity cache")
+	}
+
+	server.rememberComposeIdentityChoices(1, []composeIdentity{{ID: 7, Email: "me@example.test"}}, true)
+	server.composeIdentityMu.Lock()
+	entry = server.composeIdentityCache[1]
+	entry.expiresAt = time.Now().Add(time.Minute)
+	server.composeIdentityCache[1] = entry
+	before := entry.expiresAt
+	server.composeIdentityMu.Unlock()
+	server.touchComposeIdentityCache(1)
+	server.composeIdentityMu.Lock()
+	after := server.composeIdentityCache[1].expiresAt
+	server.composeIdentityMu.Unlock()
+	if !after.After(before) {
+		t.Fatalf("cache expiry after touch = %v, want after %v", after, before)
+	}
+}
