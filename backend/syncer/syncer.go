@@ -5,6 +5,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -476,7 +477,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		return run, err
 	}
 	generationRecoveryPhase(ctx, "imap-mailbox-status", "")
-	plan := s.planMailboxes(ctx, account, mailboxNames, lastUIDs)
+	plan, planErr := s.planMailboxes(ctx, account, mailboxNames, lastUIDs)
 	requestedSet := requestedMailboxSet(requestedMailboxes)
 	progress.MailboxesTotal = len(plan)
 	for _, item := range plan {
@@ -500,6 +501,11 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 			errText = err.Error()
 			return run, err
 		}
+	}
+	if planErr != nil {
+		status = "failed"
+		errText = planErr.Error()
+		return run, planErr
 	}
 
 	for _, planned := range plan {
@@ -1345,13 +1351,13 @@ func maxUID(uids []uint32) uint32 {
 // planMailboxes makes progress meaningful before the first message arrives.
 // IMAP STATUS is cheap compared with fetching bodies, and UIDNEXT lets us
 // estimate remaining work per folder without mutating the remote mailbox.
-func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32) []MailboxPlan {
+func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32) ([]MailboxPlan, error) {
 	plans := make([]MailboxPlan, 0, len(names))
 	for _, name := range names {
 		status, err := s.Fetcher.MailboxStatus(ctx, account, name)
 		if err != nil {
 			plans = append(plans, MailboxPlan{Name: name, LastUID: lastUIDs[name]})
-			continue
+			return plans, fmt.Errorf("read IMAP status for mailbox %q: %w", name, err)
 		}
 		pending := 0
 		if status.UIDNext > 0 {
@@ -1362,7 +1368,7 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 		}
 		plans = append(plans, MailboxPlan{Name: name, Status: status, LastUID: lastUIDs[name], Pending: pending})
 	}
-	return plans
+	return plans, nil
 }
 
 // updateSyncProgress persists a progress snapshot and immediately notifies the

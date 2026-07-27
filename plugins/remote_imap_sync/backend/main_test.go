@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,13 @@ import (
 )
 
 var testMasterKey = []byte("0123456789abcdef0123456789abcdef")
+
+func TestSanitizeRemoteErrorTreatsTLSDeadlineAsTimeout(t *testing.T) {
+	err := fmt.Errorf("connect TLS to IMAP server example.test:993: %w", context.DeadlineExceeded)
+	if got := sanitizeRemoteError(err); got != "The IMAP server timed out." {
+		t.Fatalf("sanitized error = %q, want timeout", got)
+	}
+}
 
 type testAPIHost struct {
 	plugins.APIHost

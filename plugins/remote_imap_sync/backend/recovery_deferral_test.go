@@ -28,6 +28,17 @@ type foregroundRecoveryHost struct {
 	activateOnBegin bool
 }
 
+type blockingForegroundHost struct {
+	plugins.BackendStartHost
+	attempts chan struct{}
+}
+
+func (h *blockingForegroundHost) BeginForegroundOperation(ctx context.Context, _ int64) (func(), error) {
+	h.attempts <- struct{}{}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func newForegroundRecoveryHost() *foregroundRecoveryHost {
 	return &foregroundRecoveryHost{active: map[int64]bool{}, held: map[int64]bool{}}
 }
@@ -152,6 +163,76 @@ func TestRemoteSyncRunHoldsOptionalForegroundReservationThroughCopyWork(t *testi
 	}
 	if held || begins != 1 || releases != 1 {
 		t.Fatalf("foreground reservation held=%t begins=%d releases=%d, want false/1/1", held, begins, releases)
+	}
+}
+
+func TestRemoteSyncCoordinatorWaitTimesOutBeforeRunStarts(t *testing.T) {
+	fixture := newBackendFixture(t)
+	item := createRecoveryDeferredRoutine(t, fixture)
+	host := &blockingForegroundHost{attempts: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	worker := &routineWorker{
+		host: host, store: fixture.store, item: item, ctx: ctx, cancel: cancel,
+		foregroundTimeout: 20 * time.Millisecond,
+	}
+
+	started := time.Now()
+	err := worker.runOnce("scheduled", 1)
+	if !errors.Is(err, errRemoteSyncCoordinatorTimeout) {
+		t.Fatalf("coordinator wait error = %v, want retryable coordinator timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("coordinator wait took %s, want bounded return", elapsed)
+	}
+	select {
+	case <-host.attempts:
+	default:
+		t.Fatal("foreground coordinator was not consulted")
+	}
+	if got := sanitizeRemoteError(err); got != "Local mailbox work is still finishing. The remote sync will retry shortly." {
+		t.Fatalf("coordinator error text = %q", got)
+	}
+	var runCount int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_remote_imap_sync_runs
+		WHERE user_id = ? AND routine_id = ?`, item.UserID, item.ID).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 0 {
+		t.Fatalf("coordinator timeout created %d runs before copy work started, want 0", runCount)
+	}
+}
+
+func TestRemoteSyncRunLoopRetriesAfterCoordinatorTimeout(t *testing.T) {
+	fixture := newBackendFixture(t)
+	item := createRecoveryDeferredRoutine(t, fixture)
+	host := &blockingForegroundHost{attempts: make(chan struct{}, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := &routineWorker{
+		host: host, store: fixture.store, item: item, ctx: ctx, cancel: cancel,
+		triggers: make(chan string, 1), foregroundTimeout: 5 * time.Millisecond,
+		retryDelayFunc: func(int) time.Duration { return time.Millisecond },
+	}
+	done := make(chan struct{})
+	go func() {
+		worker.runLoop()
+		close(done)
+	}()
+	worker.Trigger("startup")
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		select {
+		case <-host.attempts:
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatalf("coordinator acquisition attempt %d did not start", attempt)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("remote sync retry loop did not stop after cancellation")
 	}
 }
 

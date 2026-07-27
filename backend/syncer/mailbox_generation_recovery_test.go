@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -235,6 +236,38 @@ func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 			t.Fatalf("failed recovery did not retry on the timer: calls=%d", fetcher.calls.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestMailboxStatusFailureEndsSyncWithOriginalError(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "status-failure@example.test", "Status Failure", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := recoveryTestAccount(t, ctx, db, user.ID, "status-failure")
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &recoveryFailingFetcher{moveTestFetcher: &moveTestFetcher{}}
+	service := &Service{Store: db, Fetcher: fetcher}
+
+	run, err := service.SyncUserAccountMailboxes(ctx, user.ID, account.ID, []string{mailbox.Name})
+	if err == nil || !strings.Contains(err.Error(), "recovery IMAP unavailable") {
+		t.Fatalf("sync error = %v, want original mailbox status failure", err)
+	}
+	saved, err := db.GetSyncRunForUser(ctx, user.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "failed" || !strings.Contains(saved.Error, "recovery IMAP unavailable") {
+		t.Fatalf("saved run status=%q error=%q, want failed original status error", saved.Status, saved.Error)
 	}
 }
 

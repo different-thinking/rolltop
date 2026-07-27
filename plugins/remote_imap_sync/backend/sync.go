@@ -26,9 +26,11 @@ const (
 	remoteSyncChunkSize                   = 25
 	remoteSyncChunkYield                  = 500 * time.Millisecond
 	mailboxGenerationRecoveryPollInterval = 2 * time.Second
+	remoteSyncForegroundAcquireTimeout    = 90 * time.Second
 )
 
 var errRemoteSyncDeferredForRecovery = errors.New("remote IMAP sync deferred for mailbox recovery")
+var errRemoteSyncCoordinatorTimeout = errors.New("local mailbox work did not yield for remote IMAP sync")
 
 type workerKey struct {
 	userID    int64
@@ -231,6 +233,8 @@ type routineWorker struct {
 	stopOnce sync.Once
 
 	recoveryPollInterval time.Duration
+	foregroundTimeout    time.Duration
+	retryDelayFunc       func(int) time.Duration
 	watchSourceMailbox   func(context.Context, store.MailAccount, string, func()) error
 	searchSourceMailbox  func(context.Context, store.MailAccount, string, uint32, time.Time) (imapclient.MailboxUIDSearch, error)
 }
@@ -307,7 +311,7 @@ func (w *routineWorker) runLoop() {
 			continue
 		}
 		failures++
-		delay := retryDelay(failures)
+		delay := w.retryDelay(failures)
 		select {
 		case <-w.ctx.Done():
 			return
@@ -330,7 +334,7 @@ func (w *routineWorker) idleLoop() {
 			failures++
 			log.Printf("remote imap sync idle recovery gate user_id=%d routine_id=%d: %s",
 				w.item.UserID, w.item.ID, sanitizeRemoteError(err))
-			if waitForRemoteSyncChunk(w.ctx, retryDelay(failures)) != nil {
+			if waitForRemoteSyncChunk(w.ctx, w.retryDelay(failures)) != nil {
 				return
 			}
 			continue
@@ -352,7 +356,7 @@ func (w *routineWorker) idleLoop() {
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-time.After(retryDelay(failures)):
+		case <-time.After(w.retryDelay(failures)):
 		}
 	}
 }
@@ -373,7 +377,15 @@ func (w *routineWorker) runOnce(trigger string, failureAttempt int) error {
 		return err
 	}
 	foreground := remoteSyncForegroundReservation{worker: w, userID: item.UserID}
-	if err := foreground.Acquire(w.ctx); err != nil {
+	foregroundCtx, cancelForeground := context.WithTimeout(w.ctx, w.foregroundAcquireTimeout())
+	err = foreground.Acquire(foregroundCtx)
+	cancelForeground()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && w.ctx.Err() == nil {
+			log.Printf("remote imap sync coordinator wait timed out user_id=%d routine_id=%d trigger=%s retry_in=%s",
+				item.UserID, item.ID, trigger, retryDelay(failureAttempt))
+			return fmt.Errorf("%w: %v", errRemoteSyncCoordinatorTimeout, err)
+		}
 		return err
 	}
 	defer foreground.Release()
@@ -662,6 +674,20 @@ func (w *routineWorker) beginForegroundOperation(ctx context.Context, userID int
 		return func() {}, nil
 	}
 	return release, nil
+}
+
+func (w *routineWorker) foregroundAcquireTimeout() time.Duration {
+	if w != nil && w.foregroundTimeout > 0 {
+		return w.foregroundTimeout
+	}
+	return remoteSyncForegroundAcquireTimeout
+}
+
+func (w *routineWorker) retryDelay(failures int) time.Duration {
+	if w != nil && w.retryDelayFunc != nil {
+		return w.retryDelayFunc(failures)
+	}
+	return retryDelay(failures)
 }
 
 type remoteSyncForegroundReservation struct {

@@ -262,7 +262,11 @@ func (r *Runner) Start(userID int64) bool {
 			delete(r.autoRunning, userID)
 			delete(r.autoCancels, userID)
 			r.finishWorkActivityLocked(runnerUserWorkActivityKey(runnerWorkAccountSync, userID))
+			pendingInboxAccounts := r.takeAccountPendingForMailboxLocked(userID, "INBOX")
 			r.mu.Unlock()
+			for accountID := range pendingInboxAccounts {
+				r.QueueAccountMailboxes(userID, accountID, []string{"INBOX"})
+			}
 			r.refreshGenerationRecoveryGateForUser(r.context(), userID)
 			r.RefreshSenderStats(userID)
 			r.StartAttachmentIndex(userID)

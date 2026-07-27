@@ -813,10 +813,12 @@ func sanitizeRemoteError(err error) string {
 		return "The destination account is no longer available."
 	case strings.Contains(message, "authentication"), strings.Contains(message, "login"):
 		return "IMAP authentication failed. Check the username and app password."
+	case errors.Is(err, errRemoteSyncCoordinatorTimeout):
+		return "Local mailbox work is still finishing. The remote sync will retry shortly."
+	case errors.Is(err, context.DeadlineExceeded), strings.Contains(message, "timeout"), strings.Contains(message, "deadline"):
+		return "The IMAP server timed out."
 	case strings.Contains(message, "certificate"), strings.Contains(message, "tls"):
 		return "The IMAP server's TLS connection could not be verified."
-	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline"):
-		return "The IMAP server timed out."
 	case strings.Contains(message, "no such host"), strings.Contains(message, "connection refused"):
 		return "The IMAP server could not be reached."
 	case errors.Is(err, context.Canceled):
