@@ -1015,11 +1015,11 @@ func (s *Server) apiAccountFolder(w http.ResponseWriter, r *http.Request, rest s
 			writeAPIError(w, http.StatusServiceUnavailable, "Sync is not configured.")
 			return
 		}
-		if !s.syncRunner.StartAccountMailboxes(cu.User.ID, mb.AccountID, []string{mb.Name}) {
-			writeAPIError(w, http.StatusConflict, "Sync is already running for this folder.")
+		if !s.syncRunner.QueueAccountMailboxes(cu.User.ID, mb.AccountID, []string{mb.Name}) {
+			writeAPIError(w, http.StatusServiceUnavailable, "Sync could not be queued.")
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, map[string]any{"ok": true, "queued": true})
 	case "purge-search-index":
 		if s.syncer == nil || s.syncer.Search == nil || s.syncRunner == nil {
 			writeAPIError(w, http.StatusServiceUnavailable, "Search indexing is not configured.")

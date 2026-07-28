@@ -51,6 +51,7 @@ type Runner struct {
 	foregroundDeferredAuto     map[int64]bool
 	foregroundDeferredBoxes    map[int64]map[string]string
 	foregroundDeferredAccts    map[int64]map[string]deferredAccountMailbox
+	autoDeferredAccts          map[int64]map[string]deferredAccountMailbox
 	attachmentPending          map[int64]bool
 	attachmentCancels          map[int64]context.CancelFunc
 	attachmentDone             map[int64]chan struct{}
@@ -119,6 +120,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		foregroundDeferredAuto:     map[int64]bool{},
 		foregroundDeferredBoxes:    map[int64]map[string]string{},
 		foregroundDeferredAccts:    map[int64]map[string]deferredAccountMailbox{},
+		autoDeferredAccts:          map[int64]map[string]deferredAccountMailbox{},
 		attachmentPending:          map[int64]bool{},
 		attachmentCancels:          map[int64]context.CancelFunc{},
 		attachmentDone:             map[int64]chan struct{}{},
@@ -262,10 +264,10 @@ func (r *Runner) Start(userID int64) bool {
 			delete(r.autoRunning, userID)
 			delete(r.autoCancels, userID)
 			r.finishWorkActivityLocked(runnerUserWorkActivityKey(runnerWorkAccountSync, userID))
-			pendingInboxAccounts := r.takeAccountPendingForMailboxLocked(userID, "INBOX")
+			deferredAccountMailboxes := r.takeAutoDeferredAccountMailboxesLocked(userID)
 			r.mu.Unlock()
-			for accountID := range pendingInboxAccounts {
-				r.QueueAccountMailboxes(userID, accountID, []string{"INBOX"})
+			for _, request := range deferredAccountMailboxes {
+				r.QueueAccountMailboxes(userID, request.accountID, []string{request.mailbox})
 			}
 			r.refreshGenerationRecoveryGateForUser(r.context(), userID)
 			r.RefreshSenderStats(userID)
@@ -835,12 +837,7 @@ func (r *Runner) reserveOrQueueAccountMailboxes(userID, accountID int64, mailbox
 	}
 	defer r.mu.Unlock()
 	if r.autoRunning[userID] {
-		if r.accountMailboxPending == nil {
-			r.accountMailboxPending = map[string]bool{}
-		}
-		for _, key := range keys {
-			r.accountMailboxPending[key] = true
-		}
+		r.deferAutoAccountMailboxesLocked(userID, accountID, mailboxes)
 		return nil, false
 	}
 	if r.generationRecoveryAccountMailboxesGatedLocked(userID, accountID, mailboxes) {
@@ -904,6 +901,29 @@ func (r *Runner) deferForegroundAccountMailboxesLocked(userID, accountID int64, 
 		key := accountMailboxKey(userID, accountID, mailbox)
 		r.foregroundDeferredAccts[userID][key] = deferredAccountMailbox{accountID: accountID, mailbox: mailbox}
 	}
+}
+
+func (r *Runner) deferAutoAccountMailboxesLocked(userID, accountID int64, mailboxes []string) {
+	if r.autoDeferredAccts == nil {
+		r.autoDeferredAccts = map[int64]map[string]deferredAccountMailbox{}
+	}
+	if r.autoDeferredAccts[userID] == nil {
+		r.autoDeferredAccts[userID] = map[string]deferredAccountMailbox{}
+	}
+	for _, mailbox := range uniqueMailboxes(mailboxes) {
+		key := accountMailboxKey(userID, accountID, mailbox)
+		r.autoDeferredAccts[userID][key] = deferredAccountMailbox{accountID: accountID, mailbox: mailbox}
+	}
+}
+
+func (r *Runner) takeAutoDeferredAccountMailboxesLocked(userID int64) []deferredAccountMailbox {
+	deferred := r.autoDeferredAccts[userID]
+	out := make([]deferredAccountMailbox, 0, len(deferred))
+	for _, request := range deferred {
+		out = append(out, request)
+	}
+	delete(r.autoDeferredAccts, userID)
+	return out
 }
 
 func (r *Runner) takeForegroundReplayLocked(userID int64) generationRecoveryReplay {

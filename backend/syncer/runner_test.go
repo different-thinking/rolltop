@@ -270,6 +270,28 @@ func TestRunnerAccountReservationReleasesAccountQualifiedPendingRerun(t *testing
 	}
 }
 
+func TestRunnerAccountQueueDefersThroughAutomaticPassWithOriginalMailboxName(t *testing.T) {
+	r := NewRunner(nil)
+	const userID = int64(7)
+	const accountID = int64(101)
+	r.mu.Lock()
+	r.autoRunning[userID] = true
+	r.mu.Unlock()
+
+	if !r.QueueAccountMailboxes(userID, accountID, []string{"INBOX.TaxStuff"}) {
+		t.Fatal("manual folder refresh was not accepted while automatic sync was running")
+	}
+	r.mu.Lock()
+	deferred := r.takeAutoDeferredAccountMailboxesLocked(userID)
+	r.mu.Unlock()
+	if len(deferred) != 1 || deferred[0].accountID != accountID || deferred[0].mailbox != "INBOX.TaxStuff" {
+		t.Fatalf("deferred account mailboxes = %+v, want original account and mailbox name", deferred)
+	}
+	if r.accountMailboxPending[accountMailboxKey(userID, accountID, "INBOX.TaxStuff")] {
+		t.Fatal("automatic-pass deferral leaked into a reservation-bound pending key")
+	}
+}
+
 func TestGenerationRecoveryReplayCoalescesGlobalAndAccountMailboxRequests(t *testing.T) {
 	runner := NewRunner(nil)
 	replay := runner.coalesceGenerationRecoveryReplay(generationRecoveryReplay{

@@ -98,6 +98,7 @@ export function MailView({
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const [manualRefreshGeneration, setManualRefreshGeneration] = useState(0);
   const loaded = useRef(false);
+  const manualViewSyncKey = useRef("");
   const [error, setError] = useState("");
   const [showingSavedPage, setShowingSavedPage] = useState(false);
   const [hasPrev, setHasPrev] = useState(false);
@@ -172,6 +173,29 @@ export function MailView({
       if (newMessageTimer.current !== null) window.clearTimeout(newMessageTimer.current);
     };
   }, []);
+
+  // A manual folder is refreshed when the user enters its view. The ref
+  // coalesces chrome/SSE rerenders, while a new component mount (browser
+  // refresh) or navigating away and back permits one fresh request.
+  useEffect(() => {
+    if (!mailbox || effectiveMode !== "manual") {
+      manualViewSyncKey.current = "";
+      return;
+    }
+    const nextKey = `${userID}:${mailbox.id}`;
+    if (manualViewSyncKey.current === nextKey) return;
+    manualViewSyncKey.current = nextKey;
+    let cancelled = false;
+    api.syncFolder(csrf, mailbox.id).catch((err) => {
+      // Older servers may still answer with a conflict if another sync won the
+      // race. Its event stream will refresh this view, so that is not an error.
+      if (err instanceof ApiError && err.status === 409) return;
+      if (!cancelled) addToast(`Folder refresh failed: ${messageFromError(err)}`, "error");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [userID, mailbox?.id, effectiveMode, csrf, addToast]);
 
   // Route changes should feel immediate: clear the old page before the server
   // responds so the user is not looking at stale rows for another folder.
