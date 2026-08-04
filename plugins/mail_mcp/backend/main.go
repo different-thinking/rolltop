@@ -985,6 +985,7 @@ func writeConsentPage(host plugins.APIHost, w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", consentPageCSP(redirectURI))
 	action := html.EscapeString(r.URL.RequestURI())
 	client := html.EscapeString(firstNonEmpty(clientID, "Unknown client"))
 	redirect := html.EscapeString(redirectURI)
@@ -1027,6 +1028,34 @@ func writeConsentPage(host plugins.APIHost, w http.ResponseWriter, r *http.Reque
   </main>
 </body>
 </html>`, client, scope, redirect, action, token)
+}
+
+func consentPageCSP(redirectURI string) string {
+	const policy = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
+	parsed, err := url.Parse(strings.TrimSpace(redirectURI))
+	if err != nil {
+		return policy + "; base-uri 'none'"
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if parsed.User != nil || (scheme != "http" && scheme != "https") || !validCSPHost(parsed.Host) {
+		return policy + "; base-uri 'none'"
+	}
+	return policy + " " + scheme + "://" + parsed.Host + "; base-uri 'none'"
+}
+
+func validCSPHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, ch := range host {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
+		case ch == '.', ch == '-', ch == ':', ch == '[', ch == ']':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func newConsentToken(host plugins.APIHost, r *http.Request) (string, error) {

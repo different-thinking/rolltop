@@ -214,6 +214,28 @@ func TestConsentTokenValidation(t *testing.T) {
 	}
 }
 
+func TestConsentPageAllowsOAuthRedirectOrigin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/mail_mcp/oauth/authorize?response_type=code", nil)
+	rec := httptest.NewRecorder()
+
+	writeConsentPage(testAPIHost{}, rec, req, "ChatGPT", "https://chatgpt.com/connector/oauth/callback", "mail.readonly")
+
+	policy := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(policy, "form-action 'self' https://chatgpt.com;") {
+		t.Fatalf("consent CSP = %q, want ChatGPT callback origin", policy)
+	}
+	if strings.Contains(policy, "/connector/oauth/callback") {
+		t.Fatalf("consent CSP = %q, want origin without callback path", policy)
+	}
+}
+
+func TestConsentPageCSPRejectsUnsafeRedirectHost(t *testing.T) {
+	policy := consentPageCSP("https://chatgpt.com;form-action-https://evil.example/callback")
+	if strings.Contains(policy, "evil.example") || policy != "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" {
+		t.Fatalf("consent CSP = %q, want self-only fallback", policy)
+	}
+}
+
 func TestListMessagesSupportsDateQuery(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
