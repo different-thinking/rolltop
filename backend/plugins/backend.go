@@ -252,6 +252,7 @@ type ProtectedAPIHandler func(APIHost, string, http.ResponseWriter, *http.Reques
 
 // ProtectedAPIRoute describes one protected /api route owned by a backend
 // plugin. Path is relative to /api, for example "plugins/example/settings".
+// Prefix matches both Path itself and slash-delimited descendants of Path.
 type ProtectedAPIRoute struct {
 	Path   string
 	Prefix bool

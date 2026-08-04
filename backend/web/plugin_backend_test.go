@@ -143,6 +143,40 @@ func TestBackendPluginRegistersAndUnregistersProtectedAPIRoutes(t *testing.T) {
 	}
 }
 
+func TestProtectedAPIPrefixRouteMatchesRootAndChildren(t *testing.T) {
+	registry := newProtectedAPIRouteRegistry()
+	handler := func(plugins.APIHost, string, http.ResponseWriter, *http.Request) {}
+	handle, err := registry.register("mail_mcp", plugins.ProtectedAPIRoute{
+		Path:   "plugins/mail_mcp/grants",
+		Prefix: true,
+		Handle: handler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(handle.Unregister)
+
+	for _, path := range []string{
+		"plugins/mail_mcp/grants",
+		"plugins/mail_mcp/grants/42",
+		"/plugins/mail_mcp/grants/42/",
+	} {
+		route, ok := registry.match(path)
+		if !ok || route.pluginID != "mail_mcp" {
+			t.Fatalf("match(%q) = %+v, %t; want mail_mcp route", path, route, ok)
+		}
+	}
+	for _, path := range []string{
+		"plugins/mail_mcp/grant",
+		"plugins/mail_mcp/grants-old",
+		"plugins/mail_mcp",
+	} {
+		if route, ok := registry.match(path); ok {
+			t.Fatalf("match(%q) = %+v, true; want no boundary-crossing match", path, route)
+		}
+	}
+}
+
 func TestEnabledBackendPluginsSkipsLoadFailuresAndReportsAdminError(t *testing.T) {
 	ctx := context.Background()
 	pluginID := "missing_backend"

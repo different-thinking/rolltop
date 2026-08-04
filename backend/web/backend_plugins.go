@@ -586,7 +586,7 @@ func (r *protectedAPIRouteRegistry) match(apiPath string) (protectedAPIRouteEntr
 	}
 	var best protectedAPIRouteEntry
 	for _, route := range r.routes {
-		if !route.prefix || !strings.HasPrefix(path, route.path+"/") {
+		if !route.prefix || (path != route.path && !strings.HasPrefix(path, route.path+"/")) {
 			continue
 		}
 		if best.path == "" || len(route.path) > len(best.path) {
