@@ -288,7 +288,7 @@ func (s *Server) apiRebuildIMAPAccountSearchIndex(w http.ResponseWriter, r *http
 		writeAPIError(w, http.StatusBadRequest, "No search-visible folders are available to rebuild.")
 		return
 	}
-	run, started, err := s.syncRunner.StartAccountMaintenanceToCompletion(cu.User.ID, account, mailboxes, "Rebuilding full-text indexes", func(ctx context.Context, runID int64, progress *store.SyncProgress) error {
+	run, started, err := s.syncRunner.StartAccountSearchRebuildToCompletion(cu.User.ID, account, mailboxes, "Rebuilding full-text indexes", func(ctx context.Context, runID int64, progress *store.SyncProgress) error {
 		for i, mailbox := range mailboxes {
 			if err := s.rebuildMailboxSearchIndex(ctx, cu.User.ID, mailbox, runID, progress); err != nil {
 				return err
@@ -1048,7 +1048,7 @@ func (s *Server) apiAccountFolder(w http.ResponseWriter, r *http.Request, rest s
 			writeAPIError(w, http.StatusServiceUnavailable, "Search indexing is not configured.")
 			return
 		}
-		run, started, err := s.syncRunner.StartMailboxMaintenanceToCompletion(cu.User.ID, mb, "Rebuilding full-text index", func(ctx context.Context, runID int64, progress *store.SyncProgress) error {
+		run, started, err := s.syncRunner.StartMailboxSearchRebuildToCompletion(cu.User.ID, mb, "Rebuilding full-text index", func(ctx context.Context, runID int64, progress *store.SyncProgress) error {
 			return s.rebuildMailboxSearchIndex(ctx, cu.User.ID, mb, runID, progress)
 		})
 		if !started && err == nil {

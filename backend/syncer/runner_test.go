@@ -1227,6 +1227,67 @@ func TestForegroundOperationDoesNotCancelExplicitMailboxMaintenance(t *testing.T
 	waitForRunnerUserIdle(t, r, user.ID)
 }
 
+func TestForegroundOperationProceedsDuringSearchRebuild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "foreground-search-rebuild@example.test", "Foreground Search Rebuild", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993,
+		Username: user.Email, EncryptedPassword: "secret", UseTLS: true, Mailbox: "Archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRunnerWithContext(ctx, &Service{Store: db})
+	rebuildStarted := make(chan struct{})
+	rebuildCanceled := make(chan struct{}, 1)
+	releaseRebuild := make(chan struct{})
+	if _, started, err := r.StartMailboxSearchRebuildToCompletion(user.ID, mailbox, "Rebuilding full-text index", func(workCtx context.Context, _ int64, _ *store.SyncProgress) error {
+		close(rebuildStarted)
+		select {
+		case <-workCtx.Done():
+			rebuildCanceled <- struct{}{}
+			return workCtx.Err()
+		case <-releaseRebuild:
+			return nil
+		}
+	}); err != nil || !started {
+		t.Fatalf("start search rebuild: started=%t err=%v", started, err)
+	}
+	select {
+	case <-rebuildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("search rebuild did not start")
+	}
+
+	acquireCtx, acquireCancel := context.WithTimeout(ctx, time.Second)
+	finish, err := r.BeginForegroundOperation(acquireCtx, user.ID)
+	acquireCancel()
+	if err != nil {
+		t.Fatalf("foreground operation waited behind search rebuild: %v", err)
+	}
+	finish()
+	select {
+	case <-rebuildCanceled:
+		t.Fatal("foreground operation canceled search rebuild")
+	default:
+	}
+	close(releaseRebuild)
+	waitForRunnerUserIdle(t, r, user.ID)
+}
+
 func TestForegroundOperationsAreSerializedPerUser(t *testing.T) {
 	r := NewRunner(nil)
 	const userID = int64(85)

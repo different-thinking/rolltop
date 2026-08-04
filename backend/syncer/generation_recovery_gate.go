@@ -893,9 +893,16 @@ func (r *Runner) mailboxWriterRunningLocked(userID int64) bool {
 	prefix := mailboxKey(userID, "")
 	attachmentKey := mailboxKey(userID, "__attachments__")
 	for key := range r.mailboxRunning {
-		if key != attachmentKey && strings.HasPrefix(key, prefix) {
-			return true
+		if key == attachmentKey || !strings.HasPrefix(key, prefix) {
+			continue
 		}
+		// Search-only rebuilds re-derive documents from durable rows and
+		// converge with concurrent inserts, so a foreground operation does not
+		// wait for them. Destructive maintenance still blocks.
+		if r.workActivities[runnerMailboxWorkActivityKey(key)].kind == runnerWorkMailboxSearchMaintenance {
+			continue
+		}
+		return true
 	}
 	return false
 }

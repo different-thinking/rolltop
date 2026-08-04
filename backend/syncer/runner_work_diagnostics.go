@@ -15,8 +15,13 @@ const (
 	runnerWorkSenderStats        = "sender_stats"
 	runnerWorkMailboxSync        = "mailbox_sync"
 	runnerWorkMailboxMaintenance = "mailbox_maintenance"
-	runnerWorkRecoveryReplay     = "recovery_replay"
-	runnerWorkAttachmentIndex    = "attachment_index"
+	// runnerWorkMailboxSearchMaintenance marks full-text rebuilds that only add
+	// or refresh search documents from durable SQLite rows. Unlike destructive
+	// maintenance they cannot conflict with a concurrent foreground operation,
+	// so foreground work is allowed to proceed while they run.
+	runnerWorkMailboxSearchMaintenance = "mailbox_search_maintenance"
+	runnerWorkRecoveryReplay           = "recovery_replay"
+	runnerWorkAttachmentIndex          = "attachment_index"
 )
 
 type runnerWorkActivity struct {

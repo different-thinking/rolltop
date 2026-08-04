@@ -376,7 +376,7 @@ func (r *Runner) QueueAccountMailboxes(userID, accountID int64, mailboxes []stri
 // Work on another mailbox of the same account may continue concurrently. A
 // pending generation recovery blocks admission and cancels active maintenance.
 func (r *Runner) StartMailboxMaintenance(userID int64, mailbox store.Mailbox, label string, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
-	return r.startMailboxMaintenance(userID, mailbox, label, nil, fn)
+	return r.startMailboxMaintenance(userID, mailbox, label, false, nil, fn)
 }
 
 // StartMailboxMaintenanceWithSetup reserves one account/mailbox, waits for any
@@ -388,7 +388,7 @@ func (r *Runner) StartMailboxMaintenanceWithSetup(userID int64, mailbox store.Ma
 	if setup == nil {
 		return store.SyncRun{}, false, fmt.Errorf("maintenance setup function is required")
 	}
-	return r.startMailboxMaintenance(userID, mailbox, label, setup, fn)
+	return r.startMailboxMaintenance(userID, mailbox, label, false, setup, fn)
 }
 
 // StartMailboxMaintenanceToCompletion runs an explicit user-requested task
@@ -399,7 +399,16 @@ func (r *Runner) StartMailboxMaintenanceToCompletion(userID int64, mailbox store
 	return r.StartMailboxMaintenanceWithSetup(userID, mailbox, label, func(context.Context) error { return nil }, fn)
 }
 
-func (r *Runner) startMailboxMaintenance(userID int64, mailbox store.Mailbox, label string, setup func(context.Context) error, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
+// StartMailboxSearchRebuildToCompletion runs a full-text rebuild to completion
+// like StartMailboxMaintenanceToCompletion, but marks the reservation as
+// search-only. A rebuild re-derives search documents from durable SQLite rows
+// and converges with concurrent inserts, so foreground operations such as
+// sending do not have to wait behind it.
+func (r *Runner) StartMailboxSearchRebuildToCompletion(userID int64, mailbox store.Mailbox, label string, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
+	return r.startMailboxMaintenance(userID, mailbox, label, true, func(context.Context) error { return nil }, fn)
+}
+
+func (r *Runner) startMailboxMaintenance(userID int64, mailbox store.Mailbox, label string, searchOnly bool, setup func(context.Context) error, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
 	ctx := r.context()
 	if ctx.Err() != nil {
 		return store.SyncRun{}, false, nil
@@ -414,7 +423,7 @@ func (r *Runner) startMailboxMaintenance(userID int64, mailbox store.Mailbox, la
 	if userID <= 0 || mailbox.AccountID <= 0 || len(mailboxes) == 0 {
 		return store.SyncRun{}, false, fmt.Errorf("mailbox is required")
 	}
-	keys, ok := r.reserveAccountMailboxesForMaintenance(userID, mailbox.AccountID, mailboxes)
+	keys, ok := r.reserveAccountMailboxesForMaintenance(userID, mailbox.AccountID, mailboxes, searchOnly)
 	if !ok {
 		return store.SyncRun{}, false, nil
 	}
@@ -483,16 +492,23 @@ func (r *Runner) startMailboxMaintenance(userID int64, mailbox store.Mailbox, la
 // local maintenance task in the background. It is used for destructive local
 // cache work such as deleting an IMAP account from Rolltop.
 func (r *Runner) StartAccountMaintenance(userID int64, account store.MailAccount, mailboxes []store.Mailbox, label string, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
-	return r.startAccountMaintenance(userID, account, mailboxes, label, false, fn)
+	return r.startAccountMaintenance(userID, account, mailboxes, label, false, false, fn)
 }
 
 // StartAccountMaintenanceToCompletion is the account-wide counterpart to
 // StartMailboxMaintenanceToCompletion for an explicit user-requested task.
 func (r *Runner) StartAccountMaintenanceToCompletion(userID int64, account store.MailAccount, mailboxes []store.Mailbox, label string, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
-	return r.startAccountMaintenance(userID, account, mailboxes, label, true, fn)
+	return r.startAccountMaintenance(userID, account, mailboxes, label, true, false, fn)
 }
 
-func (r *Runner) startAccountMaintenance(userID int64, account store.MailAccount, mailboxes []store.Mailbox, label string, runToCompletion bool, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
+// StartAccountSearchRebuildToCompletion is the account-wide counterpart to
+// StartMailboxSearchRebuildToCompletion: the rebuild is search-only, so
+// foreground operations proceed while it runs.
+func (r *Runner) StartAccountSearchRebuildToCompletion(userID int64, account store.MailAccount, mailboxes []store.Mailbox, label string, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
+	return r.startAccountMaintenance(userID, account, mailboxes, label, true, true, fn)
+}
+
+func (r *Runner) startAccountMaintenance(userID int64, account store.MailAccount, mailboxes []store.Mailbox, label string, runToCompletion, searchOnly bool, fn func(context.Context, int64, *store.SyncProgress) error) (store.SyncRun, bool, error) {
 	ctx := r.context()
 	if ctx.Err() != nil {
 		return store.SyncRun{}, false, nil
@@ -507,7 +523,7 @@ func (r *Runner) startAccountMaintenance(userID int64, account store.MailAccount
 	if len(names) == 0 {
 		names = []string{"__account__"}
 	}
-	keys, ok := r.reserveAccountMailboxesForMaintenance(userID, account.ID, names)
+	keys, ok := r.reserveAccountMailboxesForMaintenance(userID, account.ID, names, searchOnly)
 	if !ok {
 		return store.SyncRun{}, false, nil
 	}
@@ -777,7 +793,7 @@ func (r *Runner) reserveAccountMailboxes(userID, accountID int64, mailboxes []st
 	return keys, true
 }
 
-func (r *Runner) reserveAccountMailboxesForMaintenance(userID, accountID int64, mailboxes []string) ([]string, bool) {
+func (r *Runner) reserveAccountMailboxesForMaintenance(userID, accountID int64, mailboxes []string, searchOnly bool) ([]string, bool) {
 	keys := accountMailboxKeys(userID, accountID, mailboxes)
 	if !r.lockAfterExclusiveWriters(userID) {
 		return nil, false
@@ -794,7 +810,11 @@ func (r *Runner) reserveAccountMailboxesForMaintenance(userID, accountID int64, 
 	for _, key := range keys {
 		r.mailboxRunning[key] = true
 	}
-	r.startMailboxWorkActivitiesLocked(userID, accountID, mailboxes, keys, runnerWorkMailboxMaintenance)
+	kind := runnerWorkMailboxMaintenance
+	if searchOnly {
+		kind = runnerWorkMailboxSearchMaintenance
+	}
+	r.startMailboxWorkActivitiesLocked(userID, accountID, mailboxes, keys, kind)
 	r.pauseAttachmentIndexLocked(userID)
 	return keys, true
 }
@@ -1128,7 +1148,9 @@ const attachmentIndexBatchSize = 25
 // BeginForegroundOperation asks resumable background writers to checkpoint
 // while a direct user operation, such as send or move, changes remote and local
 // mail state. The returned function is idempotent and replays interrupted work
-// when the user is otherwise idle. Explicit maintenance is allowed to finish.
+// when the user is otherwise idle. Explicit maintenance is allowed to finish,
+// except search-only rebuilds, which converge with concurrent foreground work
+// and therefore do not block it.
 func (r *Runner) BeginForegroundOperation(ctx context.Context, userID int64) (func(), error) {
 	if r == nil || userID <= 0 {
 		return func() {}, nil
