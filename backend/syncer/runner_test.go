@@ -1822,6 +1822,53 @@ func TestOrdinaryMailboxSyncWaitsForCanceledAttachmentWorker(t *testing.T) {
 	}
 }
 
+func TestAccountSyncDoesNotWaitForeverForCanceledAttachmentWorker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, _, _ := createRunnerMailboxFixture(t, ctx, db, "auto-attachment-yield@example.test")
+	fetchRelease := make(chan struct{})
+	close(fetchRelease)
+	fetcher := &recoveryHealthyAccountFetcher{
+		moveTestFetcher: &moveTestFetcher{},
+		started:         make(chan struct{}),
+		release:         fetchRelease,
+	}
+	r := NewRunnerWithContext(ctx, &Service{Store: db, Fetcher: fetcher})
+	r.attachmentYieldTimeout = 20 * time.Millisecond
+	attachmentCanceled, releaseAttachment := installBlockedAttachmentWorker(r, user.ID)
+
+	if !r.Start(user.ID) {
+		t.Fatal("account-wide sync did not reserve")
+	}
+	select {
+	case <-attachmentCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("account-wide sync did not cancel attachment worker")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runs, err := db.ListSyncRunsForUser(ctx, user.ID, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("account-wide sync remained in planning after attachment yield timeout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	releaseAttachment()
+	waitForRunnerUserIdle(t, r, user.ID)
+}
+
 func TestLiveInboxSyncTimeoutReleasesReservation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

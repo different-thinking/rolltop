@@ -26,6 +26,12 @@ const liveInboxSyncTurnTimeout = 90 * time.Second
 const ordinaryMailboxSyncTurnTimeout = 3 * time.Minute
 const senderStatsRefreshTimeout = 2 * time.Minute
 
+// Attachment indexing is derived, replayable work. Most stages honor cancellation,
+// but MIME and external document parsing can be inside an uncancellable call when a
+// mail sync asks the worker to yield. Do not let that background work starve the
+// durable incremental sync indefinitely.
+const attachmentIndexYieldTimeout = 15 * time.Second
+
 type runnerMailboxCancellation struct {
 	userID int64
 	cancel context.CancelFunc
@@ -82,6 +88,7 @@ type Runner struct {
 	generationRecoveryTimeout  time.Duration
 	liveInboxSyncTimeout       time.Duration
 	senderStatsTimeout         time.Duration
+	attachmentYieldTimeout     time.Duration
 	rebuildRecoveryWake        chan struct{}
 	rebuildRecoveryBeforeStop  func()
 	queueRebuildMailbox        func(store.PendingMailboxGenerationRebuild)
@@ -145,6 +152,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		generationRecoveryAuto:     map[int64]bool{},
 		generationRecoveryBoxes:    map[int64]map[string]string{},
 		generationRecoveryAccts:    map[int64]map[string]deferredAccountMailbox{},
+		attachmentYieldTimeout:     attachmentIndexYieldTimeout,
 		rebuildRecoveryWake:        make(chan struct{}, 1),
 	}
 	runner.arrivalScheduler = newInboxArrivalScheduler(ctx, runner.finalizePendingInboxArrivals, runner.notifyInboxArrivals)
@@ -1378,11 +1386,23 @@ func (r *Runner) waitForAttachmentIndex(ctx context.Context, userID int64) error
 	if done == nil {
 		return ctx.Err()
 	}
+	timeout := r.attachmentYieldTimeout
+	if timeout <= 0 {
+		timeout = attachmentIndexYieldTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
 		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-timer.C:
+		// The worker has already received cancellation. Any later SQLite or
+		// search-index operation receives that canceled context, while any
+		// uncancellable parsing still in flight only computes derived data.
+		log.Printf("attachment index user_id=%d did not yield after %s; continuing foreground sync", userID, timeout)
+		return nil
 	}
 }
 
