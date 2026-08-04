@@ -182,6 +182,38 @@ func finishRun(ctx context.Context, db *sql.DB, userID, runID int64, status, mes
 	return err
 }
 
+// queueRoutineRun marks a routine whose run stopped before completion ready for
+// a fresh pass. A canceled run must not leave the routine displayed as syncing.
+func queueRoutineRun(ctx context.Context, db *sql.DB, item routine) error {
+	_, err := db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_routines SET
+		state = 'queued', updated_at = ?
+		WHERE user_id = ? AND id = ? AND enabled = 1`, time.Now().UTC().Unix(), item.UserID, item.ID)
+	return err
+}
+
+// recoverInterruptedRuns clears run and routine state left behind when the
+// server stopped or the plugin reloaded in the middle of a copy. Without this
+// a routine can display "syncing" indefinitely even though no worker is active.
+func recoverInterruptedRuns(ctx context.Context, db *sql.DB, userID int64) (int64, error) {
+	now := time.Now().UTC().Unix()
+	res, err := db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_runs
+		SET status = 'interrupted', error = '', completed_at = ?
+		WHERE user_id = ? AND status IN ('running', 'queued')`, now, userID)
+	if err != nil {
+		return 0, err
+	}
+	interrupted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_routines
+		SET state = CASE WHEN enabled = 1 THEN 'queued' ELSE 'paused' END, updated_at = ?
+		WHERE user_id = ? AND state = 'syncing'`, now, userID); err != nil {
+		return interrupted, err
+	}
+	return interrupted, nil
+}
+
 func latestRun(ctx context.Context, db *sql.DB, userID, routineID int64) (*runRecord, error) {
 	var out runRecord
 	err := db.QueryRowContext(ctx, `SELECT id, routine_id, trigger, status, scanned, transferred,

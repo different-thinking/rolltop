@@ -66,10 +66,38 @@ func (m *routineManager) Start() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		m.recoverInterruptedRuns()
 		m.reconcileLoop()
 	}()
 	if m.ctx.Err() == nil {
 		m.Wake()
+	}
+}
+
+func (m *routineManager) recoverInterruptedRuns() {
+	users, err := m.store.ListUsers(m.ctx)
+	if err != nil {
+		if m.ctx.Err() == nil {
+			log.Printf("remote imap sync startup recovery: %v", err)
+		}
+		return
+	}
+	for _, user := range users {
+		if m.ctx.Err() != nil {
+			return
+		}
+		db, err := m.store.UserDB(m.ctx, user.ID)
+		if err != nil {
+			continue
+		}
+		interrupted, err := recoverInterruptedRuns(m.ctx, db, user.ID)
+		if err != nil {
+			log.Printf("remote imap sync startup recovery user_id=%d: %v", user.ID, err)
+			continue
+		}
+		if interrupted > 0 {
+			log.Printf("remote imap sync startup recovery user_id=%d interrupted_runs=%d", user.ID, interrupted)
+		}
 	}
 }
 
@@ -416,6 +444,7 @@ func (w *routineWorker) runOnce(trigger string, failureAttempt int) error {
 		runStatus.Update(scanned, transferred, skipped, currentUID)
 		if errors.Is(runErr, context.Canceled) || w.ctx.Err() != nil {
 			_ = finishRun(context.Background(), db, item.UserID, runID, "canceled", "")
+			_ = queueRoutineRun(context.Background(), db, item)
 			runStatus.Finish("canceled", runErr)
 			return runErr
 		}
@@ -739,7 +768,20 @@ func (r *remoteSyncForegroundReservation) Yield(ctx context.Context, delay time.
 	if err := waitForRemoteSyncChunk(ctx, delay); err != nil {
 		return err
 	}
-	return r.Acquire(ctx)
+	// Re-acquiring must stay bounded like the initial acquire: an unavailable
+	// coordinator would otherwise freeze the copy run mid-flight and leave the
+	// routine displayed as syncing forever.
+	acquireCtx := ctx
+	cancel := func() {}
+	if timeout := r.worker.foregroundAcquireTimeout(); timeout > 0 {
+		acquireCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	err := r.Acquire(acquireCtx)
+	cancel()
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return fmt.Errorf("%w: %v", errRemoteSyncCoordinatorTimeout, err)
+	}
+	return err
 }
 
 func (w *routineWorker) searchMailboxUIDsSince(ctx context.Context, account store.MailAccount, mailbox string, afterUID uint32, since time.Time) (imapclient.MailboxUIDSearch, error) {

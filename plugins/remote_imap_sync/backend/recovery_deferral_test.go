@@ -738,3 +738,103 @@ func insertRemoteRecoveryMarker(t *testing.T, fixture backendFixture, targetUIDV
 		t.Fatal(err)
 	}
 }
+
+func TestRemoteSyncYieldTimesOutWhenForegroundUnavailable(t *testing.T) {
+	host := &blockingForegroundHost{attempts: make(chan struct{}, 1)}
+	worker := &routineWorker{host: host, foregroundTimeout: 20 * time.Millisecond}
+	reservation := remoteSyncForegroundReservation{worker: worker, userID: 7}
+
+	started := time.Now()
+	err := reservation.Yield(context.Background(), 0, nil)
+	if !errors.Is(err, errRemoteSyncCoordinatorTimeout) {
+		t.Fatalf("yield error = %v, want retryable coordinator timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("yield re-acquire took %s, want bounded return", elapsed)
+	}
+	select {
+	case <-host.attempts:
+	default:
+		t.Fatal("yield re-acquire did not consult the foreground coordinator")
+	}
+}
+
+func TestQueueRoutineRunClearsSyncingState(t *testing.T) {
+	fixture := newBackendFixture(t)
+	ctx := context.Background()
+	item := createRecoveryDeferredRoutine(t, fixture)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_routines
+		SET state = 'syncing' WHERE user_id = ? AND id = ?`, item.UserID, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := queueRoutineRun(ctx, fixture.db, item); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := getRoutine(ctx, fixture.db, item.UserID, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.State != "queued" {
+		t.Fatalf("routine state = %q, want queued after canceled run", saved.State)
+	}
+}
+
+func TestManagerStartRecoversInterruptedRuns(t *testing.T) {
+	fixture := newBackendFixture(t)
+	ctx := context.Background()
+	item := createRecoveryDeferredRoutine(t, fixture)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_routines
+		SET state = 'syncing' WHERE user_id = ? AND id = ?`, item.UserID, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := createRun(ctx, fixture.db, item.UserID, item.ID, "scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &remoteIMAPSyncBackend{}
+	input := fixture.inputForOwner("app-password")
+	input.Name = "Second source"
+	input.Source.Mailbox = "Archive"
+	disabled, err := backend.prepareRoutine(ctx, testAPIHost{}, fixture.store, fixture.db, fixture.owner.ID, 0, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err = persistRoutine(ctx, fixture.db, disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setRoutineEnabled(ctx, fixture.db, disabled.UserID, disabled.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE plugin_remote_imap_sync_routines
+		SET state = 'syncing' WHERE user_id = ? AND id = ?`, disabled.UserID, disabled.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newRoutineManager(nil, fixture.store, nil)
+	manager.recoverInterruptedRuns()
+
+	var status string
+	var completedAt int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status, completed_at FROM plugin_remote_imap_sync_runs
+		WHERE user_id = ? AND id = ?`, item.UserID, runID).Scan(&status, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "interrupted" || completedAt == 0 {
+		t.Fatalf("abandoned run = status %q completed_at %d, want interrupted with completion time", status, completedAt)
+	}
+	saved, err := getRoutine(ctx, fixture.db, item.UserID, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.State != "queued" {
+		t.Fatalf("enabled routine state = %q, want queued after recovery", saved.State)
+	}
+	savedDisabled, err := getRoutine(ctx, fixture.db, disabled.UserID, disabled.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedDisabled.State != "paused" {
+		t.Fatalf("disabled routine state = %q, want paused after recovery", savedDisabled.State)
+	}
+}
