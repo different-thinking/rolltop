@@ -225,29 +225,58 @@ func (s *Store) hasMeContact(ctx context.Context, userID int64) (bool, error) {
 	return n > 0, nil
 }
 
+// ContactListFilter narrows an address-book listing.
+//
+// Source belongs here rather than in the caller because the listing is capped:
+// filtering after the fact would drop contacts the cap already excluded, and an
+// account with more contacts than the cap would appear to hold far fewer than
+// the settings page reports for it.
+type ContactListFilter struct {
+	Query string
+	// Source restricts to ContactSourceLocal or ContactSourceGoogle. Empty
+	// means both.
+	Source string
+	// GoogleConnectionID restricts to contacts owned by one connected account.
+	// It is only meaningful together with a Google source.
+	GoogleConnectionID int64
+	Limit              int
+}
+
 // ListContactsForUser returns contacts matching the optional address-book query.
-func (s *Store) ListContactsForUser(ctx context.Context, userID int64, query string, limit int) ([]Contact, error) {
+func (s *Store) ListContactsForUser(ctx context.Context, userID int64, filter ContactListFilter) ([]Contact, error) {
+	limit := filter.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	query = strings.TrimSpace(query)
-	var rows *sql.Rows
-	var err error
-	if query == "" {
-		rows, err = s.mustDataDB(ctx, userID).QueryContext(ctx, contactSelectSQL()+`
-			WHERE user_id = ?
-			ORDER BY lower(CASE WHEN display_name <> '' THEN display_name ELSE family_name || ' ' || given_name END), id
-			LIMIT ?`, userID, limit)
-	} else {
+	where := []string{"user_id = ?"}
+	args := []any{userID}
+	if query := strings.TrimSpace(filter.Query); query != "" {
 		like := "%" + strings.ToLower(query) + "%"
-		rows, err = s.mustDataDB(ctx, userID).QueryContext(ctx, contactSelectSQL()+`
-			WHERE user_id = ? AND (
-				lower(display_name) LIKE ? OR lower(given_name) LIKE ? OR lower(family_name) LIKE ? OR lower(organization) LIKE ?
-				OR EXISTS (SELECT 1 FROM contact_emails WHERE contact_emails.user_id = contacts.user_id AND contact_emails.contact_id = contacts.id AND lower(email) LIKE ?)
-			)
-			ORDER BY lower(CASE WHEN display_name <> '' THEN display_name ELSE family_name || ' ' || given_name END), id
-			LIMIT ?`, userID, like, like, like, like, like, limit)
+		where = append(where, `(
+			lower(display_name) LIKE ? OR lower(given_name) LIKE ? OR lower(family_name) LIKE ? OR lower(organization) LIKE ?
+			OR EXISTS (SELECT 1 FROM contact_emails WHERE contact_emails.user_id = contacts.user_id AND contact_emails.contact_id = contacts.id AND lower(email) LIKE ?)
+		)`)
+		args = append(args, like, like, like, like, like)
 	}
+	switch strings.TrimSpace(filter.Source) {
+	case ContactSourceGoogle:
+		// A contact whose connection is gone is local again, which is what the
+		// zero connection id in the row means.
+		where = append(where, "source = ? AND google_connection_id > 0")
+		args = append(args, ContactSourceGoogle)
+		if filter.GoogleConnectionID > 0 {
+			where = append(where, "google_connection_id = ?")
+			args = append(args, filter.GoogleConnectionID)
+		}
+	case ContactSourceLocal:
+		where = append(where, "(source <> ? OR google_connection_id = 0)")
+		args = append(args, ContactSourceGoogle)
+	}
+	args = append(args, limit)
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, contactSelectSQL()+`
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY lower(CASE WHEN display_name <> '' THEN display_name ELSE family_name || ' ' || given_name END), id
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}

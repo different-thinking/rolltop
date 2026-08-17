@@ -392,21 +392,33 @@ func contactLabel(formatted, machine, fallback string) string {
 	return fallback
 }
 
-// googleType maps a Rolltop label back onto one of Google's known types.
-// Anything else is dropped rather than guessed: Google renders an unknown type
-// verbatim, and a label like "Email" would show up on every address.
+// genericLabels are the words contactLabel invents when Google supplied no type
+// at all. Sending one back would turn "no label" into a custom label reading
+// "Email" on every address the contact has.
+var genericLabels = map[string]bool{"email": true, "phone": true, "address": true, "website": true}
+
+// googleType maps a Rolltop label onto a People API type. Google's own values
+// are matched case-insensitively so a round trip does not rewrite them, and
+// anything else travels as-is: the type field accepts a custom string, and
+// dropping it would silently delete a label the user typed at Google -- an
+// "School" address would come back unlabelled after an unrelated edit.
 func googleType(label string) string {
-	switch strings.ToLower(strings.TrimSpace(label)) {
-	case "home":
+	trimmed := strings.TrimSpace(label)
+	switch lowered := strings.ToLower(trimmed); {
+	case lowered == "":
+		return ""
+	case genericLabels[lowered]:
+		return ""
+	case lowered == "home":
 		return "home"
-	case "work", "office":
+	case lowered == "work", lowered == "office":
 		return "work"
-	case "mobile", "cell":
+	case lowered == "mobile", lowered == "cell":
 		return "mobile"
-	case "other":
+	case lowered == "other":
 		return "other"
 	}
-	return ""
+	return trimmed
 }
 
 // birthdayString renders Google's birthday as the ISO-ish string the contact

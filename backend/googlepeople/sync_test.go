@@ -30,8 +30,10 @@ type fakePeople struct {
 	// listStatus lets a test force an error status on the nth list call.
 	listStatus []int
 	calls      int
-	// syncTokens records the syncToken query parameter of each list call.
-	syncTokens []string
+	// syncTokens records the syncToken query parameter of each list call, and
+	// requestedToken whether that call asked for a new cursor.
+	syncTokens     []string
+	requestedToken []bool
 	// people answers GetPerson and receives writes.
 	people map[string]Person
 	// updates counts accepted updateContact calls.
@@ -47,6 +49,10 @@ func (f *fakePeople) handler() http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.syncTokens = append(f.syncTokens, r.URL.Query().Get("syncToken"))
+		// Google returns a nextSyncToken only when the request asked for one.
+		// Answering with a cursor the real API would have withheld is exactly
+		// how a missing requestSyncToken stays invisible in tests.
+		f.requestedToken = append(f.requestedToken, r.URL.Query().Get("requestSyncToken") == "true")
 		index := f.calls
 		f.calls++
 		if index < len(f.listStatus) && f.listStatus[index] != 0 {
@@ -58,6 +64,9 @@ func (f *fakePeople) handler() http.Handler {
 			page = f.responses[index]
 		} else if len(f.responses) > 0 {
 			page = f.responses[len(f.responses)-1]
+		}
+		if r.URL.Query().Get("requestSyncToken") != "true" {
+			page.NextSyncToken = ""
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	})
@@ -280,6 +289,98 @@ func TestSyncFallsBackToAFullReadWhenTheCursorExpires(t *testing.T) {
 	}
 }
 
+// Every call asks Google for a cursor, including a delta. A request that
+// forgets to would be answered without a nextSyncToken, and the connection
+// would fall back to reading the whole address book on every second poll.
+func TestEveryReadAsksForACursor(t *testing.T) {
+	person := personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test")
+	fake := &fakePeople{responses: []ConnectionsPage{
+		{People: []Person{person}, NextSyncToken: "token-1"},
+		{NextSyncToken: "token-2"},
+	}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	requested := append([]bool(nil), fake.requestedToken...)
+	fake.mu.Unlock()
+	if len(requested) != 2 || !requested[0] || !requested[1] {
+		t.Fatalf("requestSyncToken per call = %v, want it on every read", requested)
+	}
+	state, err := db.GetGooglePeopleSync(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SyncToken != "token-2" {
+		t.Fatalf("stored cursor = %q, want the delta's own token", state.SyncToken)
+	}
+}
+
+// A run that comes back without a cursor must not wipe the stored one. Doing so
+// would silently downgrade the next poll to a full read of everything.
+func TestASyncWithoutANewCursorKeepsTheStoredOne(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{
+		{People: []Person{personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test")}, NextSyncToken: "token-1"},
+		{},
+	}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	state, err := db.GetGooglePeopleSync(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SyncToken != "token-1" {
+		t.Fatalf("stored cursor = %q, want the previous one kept", state.SyncToken)
+	}
+}
+
+// Removing a phone number at Google has to remove it here. Folding the stored
+// copy back in would resurrect it on every sync, and the next local edit would
+// push it back into the user's Google account.
+func TestSyncAppliesDeletionsWithinAnAlreadyMirroredContact(t *testing.T) {
+	full := personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test")
+	full.Phones = []PhoneNumber{{Value: "+1 555 0100", Type: "mobile"}}
+	full.Biographies = []Biography{{Value: "Analyst"}}
+	trimmed := personWithEmail("people/c1", "etag-2", "Ada", "ada@example.test")
+
+	fake := &fakePeople{responses: []ConnectionsPage{
+		{People: []Person{full}, NextSyncToken: "token-1"},
+		{People: []Person{trimmed}, NextSyncToken: "token-2"},
+	}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	contact, ok := contactByEmail(t, db, user.ID, "ada@example.test")
+	if !ok {
+		t.Fatal("the contact disappeared")
+	}
+	if len(contact.Phones) != 0 {
+		t.Fatalf("phones = %+v, want the number deleted at Google gone here too", contact.Phones)
+	}
+	if contact.Notes != "" {
+		t.Fatalf("notes = %q, want the biography cleared at Google cleared here too", contact.Notes)
+	}
+}
+
 // An address book that already knows someone must not gain a second copy of
 // them, and the identity flags that outgoing mail hangs off have to survive the
 // promotion.
@@ -306,7 +407,7 @@ func TestSyncPromotesAMatchingLocalContactInsteadOfDuplicating(t *testing.T) {
 	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
 		t.Fatal(err)
 	}
-	contacts, err := db.ListContactsForUser(ctx, user.ID, "", 100)
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

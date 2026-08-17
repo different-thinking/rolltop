@@ -463,9 +463,15 @@ export const api = {
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
     return postForm<{ ok: boolean; message_id: number }>("/api/compose/draft", csrf, body);
   },
-  contacts: (query = "") => {
-    const q = query.trim() ? `?${new URLSearchParams({ q: query.trim() })}` : "";
-    return getJSON<{ contacts: Contact[] }>(`/api/contacts${q}`);
+  // source is "", "all", "local", or "google:<connection id>". It is a server
+  // parameter rather than a filter over the answer because the listing is
+  // capped, and filtering afterwards would hide contacts the cap already cut.
+  contacts: (query = "", source = "") => {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("q", query.trim());
+    if (source && source !== "all") params.set("source", source);
+    const suffix = params.size > 0 ? `?${params}` : "";
+    return getJSON<{ contacts: Contact[] }>(`/api/contacts${suffix}`);
   },
   contactAutocomplete: (query: string) =>
     getJSON<{ contacts: ContactAutocomplete[] }>(`/api/contacts/autocomplete?${new URLSearchParams({ q: query })}`),

@@ -25,6 +25,12 @@ const writeTimeout = 30 * time.Second
 // instead of leaving the user with a copy that no longer exists anywhere.
 var ErrRemoteChanged = errors.New("this contact was changed in Google")
 
+// ErrRemoteDeleted reports that the contact was removed at Google while it was
+// being edited here. The local mirror is gone by the time this is returned;
+// there is no version left to show, which is what separates it from
+// ErrRemoteChanged.
+var ErrRemoteDeleted = errors.New("this contact was deleted in Google")
+
 // CreateRemoteContact adds a contact to a Google account and stores the result
 // locally. The local row is created from Google's response rather than from the
 // submitted values, so the id, etag and any normalization Google applied are
@@ -116,8 +122,16 @@ func (s *Syncer) UpdateRemoteContact(ctx context.Context, userID int64, existing
 		return callErr
 	})
 	if errors.Is(err, ErrConflict) {
-		if refreshErr := s.adoptRemote(ctx, userID, connectionID, existing); refreshErr != nil {
+		survived, refreshErr := s.adoptRemote(ctx, userID, connectionID, existing)
+		if refreshErr != nil {
 			return store.Contact{}, refreshErr
+		}
+		if !survived {
+			// The conflict was a deletion: somebody removed the contact at
+			// Google while it was being edited here. There is no version to
+			// hand back, and reading the row that adoptRemote just deleted
+			// would surface this as a plain "not found" instead.
+			return store.Contact{}, ErrRemoteDeleted
 		}
 		refreshed, getErr := s.Store.GetContactForUser(ctx, userID, existing.ID)
 		if getErr != nil {
@@ -181,9 +195,10 @@ func (s *Syncer) applyUpdatedPerson(ctx context.Context, userID, connectionID in
 }
 
 // adoptRemote replaces the local row with Google's current version of the
-// contact. A contact Google no longer has is deleted here too: it is gone, and
-// leaving a mirror of it behind would resurrect it on the next write.
-func (s *Syncer) adoptRemote(ctx context.Context, userID, connectionID int64, existing store.Contact) error {
+// contact and reports whether the contact still exists there. A contact Google
+// no longer has is deleted here too: it is gone, and leaving a mirror of it
+// behind would resurrect it on the next write.
+func (s *Syncer) adoptRemote(ctx context.Context, userID, connectionID int64, existing store.Contact) (bool, error) {
 	var person Person
 	err := s.withToken(ctx, userID, connectionID, func(token string) error {
 		var callErr error
@@ -191,14 +206,20 @@ func (s *Syncer) adoptRemote(ctx context.Context, userID, connectionID int64, ex
 		return callErr
 	})
 	if errors.Is(err, ErrNotFound) {
-		return s.Store.DeleteContactForUser(ctx, userID, existing.ID)
+		deleteErr := s.Store.DeleteContactForUser(ctx, userID, existing.ID)
+		if deleteErr != nil && !store.IsNotFound(deleteErr) {
+			return false, deleteErr
+		}
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	incoming := ToContact(person)
 	incoming.GoogleConnectionID = connectionID
-	return s.overwrite(ctx, userID, existing, incoming, person)
+	// Google's version is the whole answer here: the local row is exactly the
+	// copy its edit was just rejected against.
+	return true, s.overwrite(ctx, userID, existing, incoming, person, replaceLocal)
 }
 
 func firstNonEmptyString(primary, fallback string) string {

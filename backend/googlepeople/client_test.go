@@ -74,7 +74,7 @@ func TestRateLimitsAreRetriedAndRejectedTokensAreNot(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(ConnectionsPage{NextSyncToken: "token-1"})
 	})
-	page, err := client.ListConnections(context.Background(), "token", ConnectionsRequest{RequestSyncToken: true})
+	page, err := client.ListConnections(context.Background(), "token", ConnectionsRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +102,32 @@ func TestDeleteContactTreatsAMissingPersonAsDone(t *testing.T) {
 	})
 	if err := client.DeleteContact(context.Background(), "token", "people/c1"); err != nil {
 		t.Fatalf("error = %v, want a missing person treated as deleted", err)
+	}
+}
+
+// A photo past the limit has to be refused, not cut off. Storing the first two
+// megabytes of a larger image gives the contact a corrupt icon that looks like
+// a successful import.
+func TestFetchPhotoRejectsAnOversizedImageInsteadOfTruncatingIt(t *testing.T) {
+	// Photos are only fetched over https, so the fake host has to serve TLS.
+	photoHost := func(size int) *Client {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(make([]byte, size))
+		}))
+		t.Cleanup(server.Close)
+		client := NewClient()
+		client.HTTPClient = server.Client()
+		client.BaseURL = server.URL
+		return client
+	}
+	oversized := photoHost(maxPhotoBytes + 64)
+	if _, err := oversized.FetchPhoto(context.Background(), oversized.BaseURL+"/photo.jpg"); err == nil {
+		t.Fatal("an oversized photo was accepted")
+	}
+	within := photoHost(1024)
+	data, err := within.FetchPhoto(context.Background(), within.BaseURL+"/photo.jpg")
+	if err != nil || len(data) != 1024 {
+		t.Fatalf("photo of 1024 bytes = %d bytes, err = %v", len(data), err)
 	}
 }
 

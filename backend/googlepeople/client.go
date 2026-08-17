@@ -114,13 +114,11 @@ func (c *Client) retryDelay(attempt int) time.Duration {
 	return time.Duration(1<<attempt) * 500 * time.Millisecond
 }
 
-// ConnectionsRequest is one page of a contacts read. Exactly one of SyncToken
-// and RequestSyncToken is meaningful per sync: an incremental run sends the
-// token it stored, a full run asks for a new one.
+// ConnectionsRequest is one page of a contacts read. An empty SyncToken reads
+// everything; anything else asks for the changes since that cursor.
 type ConnectionsRequest struct {
-	SyncToken        string
-	PageToken        string
-	RequestSyncToken bool
+	SyncToken string
+	PageToken string
 }
 
 // ConnectionsPage is one response from people/me/connections.
@@ -128,8 +126,8 @@ type ConnectionsPage struct {
 	People []Person `json:"connections"`
 	// NextPageToken is empty on the last page.
 	NextPageToken string `json:"nextPageToken"`
-	// NextSyncToken arrives only on the last page and only when the request
-	// asked for it or carried one.
+	// NextSyncToken arrives on the last page, and only because every request
+	// this client makes asks for one.
 	NextSyncToken string `json:"nextSyncToken"`
 	TotalItems    int    `json:"totalItems"`
 }
@@ -139,12 +137,15 @@ func (c *Client) ListConnections(ctx context.Context, accessToken string, req Co
 	query := url.Values{}
 	query.Set("personFields", ReadPersonFields)
 	query.Set("pageSize", strconv.Itoa(pageSize))
+	// Always asked for, including on a delta. Google only returns a
+	// nextSyncToken when the request asks for one, so leaving it off an
+	// incremental read would answer without a cursor and turn every second poll
+	// into a full read of the whole address book.
+	query.Set("requestSyncToken", "true")
 	// A request carrying a sync token gets the delta, in which removed people
 	// arrive as entries flagged metadata.deleted rather than being omitted.
 	if token := strings.TrimSpace(req.SyncToken); token != "" {
 		query.Set("syncToken", token)
-	} else if req.RequestSyncToken {
-		query.Set("requestSyncToken", "true")
 	}
 	if token := strings.TrimSpace(req.PageToken); token != "" {
 		query.Set("pageToken", token)
@@ -260,7 +261,17 @@ func (c *Client) FetchPhoto(ctx context.Context, photoURL string) ([]byte, error
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: photo HTTP %d", ErrUpstream, resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes))
+	// One byte past the limit, so an oversized photo is recognizable as such.
+	// Reading exactly the limit would hand back a truncated image that looks
+	// like a complete one and gets stored as a corrupt icon.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUpstream, err)
+	}
+	if len(data) > maxPhotoBytes {
+		return nil, fmt.Errorf("%w: photo larger than %d bytes", ErrUpstream, maxPhotoBytes)
+	}
+	return data, nil
 }
 
 func (c *Client) writePerson(ctx context.Context, accessToken, method, target string, person Person) (Person, error) {

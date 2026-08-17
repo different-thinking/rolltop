@@ -157,6 +157,12 @@ func (s *Syncer) run(ctx context.Context, userID, connectionID int64) (Result, e
 	if err != nil {
 		return result, err
 	}
+	// Google is asked for a cursor on every call, so an empty one here means it
+	// answered without the field. Storing that would discard a cursor that is
+	// still usable and turn the next poll into a full read for nothing.
+	if nextToken == "" {
+		nextToken = state.SyncToken
+	}
 	if err := s.Store.SaveGooglePeopleSync(ctx, store.GooglePeopleSync{
 		UserID:        userID,
 		ConnectionID:  connectionID,
@@ -194,9 +200,8 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 		err := s.withToken(ctx, userID, connectionID, func(token string) error {
 			var callErr error
 			page, callErr = s.client().ListConnections(ctx, token, ConnectionsRequest{
-				SyncToken:        syncToken,
-				PageToken:        pageToken,
-				RequestSyncToken: full,
+				SyncToken: syncToken,
+				PageToken: pageToken,
 			})
 			return callErr
 		})
@@ -272,7 +277,12 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 		if existing.ETag != "" && existing.ETag == incoming.ETag {
 			return outcomeUnchanged, nil
 		}
-		return outcomeUpdated, s.overwrite(ctx, userID, existing, incoming, person)
+		// A row that is already this person's mirror is replaced outright.
+		// Folding the old copy back in would make a deletion at Google
+		// unrepresentable here: the address or phone number the user just
+		// removed there would come back on every sync, and the next local edit
+		// would push it into their Google account again.
+		return outcomeUpdated, s.overwrite(ctx, userID, existing, incoming, person, replaceLocal)
 	case store.IsNotFound(err):
 	default:
 		return outcomeUnchanged, err
@@ -284,7 +294,10 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 	if local, ok, err := s.findLocalMatch(ctx, userID, incoming); err != nil {
 		return outcomeUnchanged, err
 	} else if ok {
-		return outcomeUpdated, s.overwrite(ctx, userID, local, incoming, person)
+		// Promotion is the one merge that is right: this row was entered here
+		// and Google has never seen the details it carries, so dropping them
+		// would delete data Google never had a chance to keep.
+		return outcomeUpdated, s.overwrite(ctx, userID, local, incoming, person, keepLocalExtras)
 	}
 
 	created, err := s.Store.CreateContact(ctx, userID, incoming)
@@ -294,13 +307,27 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 	return outcomeCreated, s.importPhoto(ctx, userID, created.ID, person)
 }
 
-// overwrite makes an existing row match Google while keeping what only Rolltop
-// knows: detail rows Google does not have, and the Me flags that outgoing
-// identities hang off.
-func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming store.Contact, person Person) error {
-	merged := store.MergeContacts(incoming, existing)
-	// Deleting an identity's contact out from under it would break sending, so
-	// the local answer to "is this me" outranks Google's, which has no opinion.
+// mergePolicy says what happens to the version already stored locally.
+type mergePolicy int
+
+const (
+	// replaceLocal takes Google's copy as the whole truth. It is what an
+	// established mirror needs, so a field removed at Google is removed here.
+	replaceLocal mergePolicy = iota
+	// keepLocalExtras folds details Google does not carry back in. It applies
+	// only the first time a locally entered contact is linked to a Google
+	// person, when those details exist nowhere else.
+	keepLocalExtras
+)
+
+// overwrite makes an existing row match Google. The Me flags are always kept
+// from the local row: outgoing identities hang off them and Google has no
+// opinion about them at all.
+func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming store.Contact, person Person, policy mergePolicy) error {
+	merged := incoming
+	if policy == keepLocalExtras {
+		merged = store.MergeContacts(incoming, existing)
+	}
 	merged.IsMe = existing.IsMe
 	merged.IsPrimary = existing.IsPrimary
 	if _, err := s.Store.UpdateContact(ctx, userID, existing.ID, merged); err != nil {

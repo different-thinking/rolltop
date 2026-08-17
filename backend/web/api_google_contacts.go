@@ -101,6 +101,9 @@ func (s *Server) writeGoogleContactsError(w http.ResponseWriter, r *http.Request
 	case errors.Is(err, googlepeople.ErrRemoteChanged):
 		writeAPIError(w, http.StatusConflict,
 			"This contact was changed in Google while you were editing it. The Google version is now shown.")
+	case errors.Is(err, googlepeople.ErrRemoteDeleted):
+		writeAPIError(w, http.StatusConflict,
+			"This contact was deleted in Google while you were editing it, so the edit was not saved.")
 	case errors.Is(err, googlepeople.ErrUnauthorized):
 		writeAPIError(w, http.StatusConflict, "This Google account needs to be authorized again.")
 	case errors.Is(err, googlepeople.ErrNotFound):

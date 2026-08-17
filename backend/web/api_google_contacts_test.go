@@ -269,6 +269,55 @@ func TestContactResponsesCarryTheirSource(t *testing.T) {
 	}
 }
 
+// The source filter has to reach the query. Applied to the answer instead it
+// would only see the first page of every contact, so an account with more
+// contacts than the listing cap would appear to hold a fraction of them.
+func TestContactListFilterTravelsToTheStore(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	withContactSync(t, env, &fakePeopleAPI{}, true)
+	linkedContact(t, env, env.owner, connection.ID, "mirrored@example.test")
+	if _, err := env.db.CreateContact(context.Background(), env.owner.ID, store.Contact{
+		DisplayName: "Local Person",
+		Emails:      []store.ContactEmail{{Label: "Email", Email: "local@example.test", IsPrimary: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	names := func(query string) []string {
+		response := env.send(t, env.owner, http.MethodGet, "/api/contacts"+query, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		var payload struct {
+			Contacts []apiContact `json:"contacts"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(payload.Contacts))
+		for _, contact := range payload.Contacts {
+			out = append(out, contact.DisplayName)
+		}
+		return out
+	}
+
+	if got := names(""); len(got) != 2 {
+		t.Fatalf("unfiltered = %v, want both contacts", got)
+	}
+	if got := names("?source=local"); len(got) != 1 || got[0] != "Local Person" {
+		t.Fatalf("local = %v, want only the local contact", got)
+	}
+	if got := names("?source=google:" + strconv.FormatInt(connection.ID, 10)); len(got) != 1 || got[0] != "Mirrored Person" {
+		t.Fatalf("per-account = %v, want only that account's contact", got)
+	}
+	// A malformed source is a client bug, not a reason to silently answer with
+	// the whole address book.
+	if response := env.send(t, env.owner, http.MethodGet, "/api/contacts?source=nonsense", nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown source status=%d, want 400", response.Code)
+	}
+}
+
 // Disconnecting is not a request to lose the address book: the contacts stay
 // and simply stop being mirrors. Nothing else runs on disconnect, so the route
 // is the only place this can be verified end to end.

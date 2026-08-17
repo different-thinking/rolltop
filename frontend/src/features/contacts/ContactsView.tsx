@@ -40,7 +40,7 @@ export function ContactsView({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.contacts(query);
+      const data = await api.contacts(query, source);
       const nextContacts = data.contacts || [];
       setContacts(nextContacts);
       if (selectedID === null) {
@@ -63,7 +63,7 @@ export function ContactsView({
     } finally {
       setLoading(false);
     }
-  }, [query, selectedID]);
+  }, [query, source, selectedID]);
 
   useEffect(() => {
     void load().catch((err) => addToast(messageFromError(err), "error"));
@@ -92,12 +92,6 @@ export function ContactsView({
     (connectionID: number) => googleAccounts.find((item) => item.id === connectionID)?.email || "Google",
     [googleAccounts]
   );
-  const visibleContacts = useMemo(() => {
-    if (source === SOURCE_ALL) return contacts;
-    if (source === SOURCE_LOCAL) return contacts.filter((contact) => contact.source !== "google");
-    const connectionID = Number(source);
-    return contacts.filter((contact) => contact.google_connection_id === connectionID);
-  }, [contacts, source]);
 
   function choose(contact: Contact) {
     setSelectedID(contact.id);
@@ -124,11 +118,18 @@ export function ContactsView({
       await load();
     } catch (err) {
       // A rejected edit answers with the version that won at Google. Showing it
-      // beats leaving the form full of values that exist nowhere.
-      const adopted = conflictContact(err);
-      if (adopted) {
-        setSelectedID(adopted.id);
-        setDraft(cloneContact(adopted));
+      // beats leaving the form full of values that exist nowhere. A conflict
+      // that carries no contact means Google no longer has it at all, so the
+      // list still has to be reloaded, just with nothing to select.
+      if (err instanceof ApiError && err.status === 409) {
+        const adopted = conflictContact(err);
+        if (adopted) {
+          setSelectedID(adopted.id);
+          setDraft(cloneContact(adopted));
+        } else {
+          setSelectedID("new");
+          setDraft(blankContact());
+        }
         await load();
       }
       addToast(messageFromError(err), "error");
@@ -230,7 +231,7 @@ export function ContactsView({
                 <option value={SOURCE_ALL}>All contacts</option>
                 <option value={SOURCE_LOCAL}>Rolltop only</option>
                 {googleAccounts.map((account) => (
-                  <option key={account.id} value={String(account.id)}>
+                  <option key={account.id} value={`google:${account.id}`}>
                     {account.email}
                   </option>
                 ))}
@@ -239,7 +240,7 @@ export function ContactsView({
           ) : null}
           {loading ? <div className="muted">Loading contacts...</div> : null}
           <div className="contacts-list-items">
-            {visibleContacts.map((contact) => (
+            {contacts.map((contact) => (
               <button
                 type="button"
                 className={`contact-row ${contact.id === selectedID ? "active" : ""}`}
@@ -513,8 +514,7 @@ function cloneContact(contact: Contact): Contact {
 /** conflictContact pulls the winning version out of a rejected save. Google is
  * the leading system for its contacts, so a 409 carries the record as it now
  * stands there rather than just an error string. */
-function conflictContact(error: unknown): Contact | null {
-  if (!(error instanceof ApiError) || error.status !== 409) return null;
+function conflictContact(error: ApiError): Contact | null {
   const contact = error.payload.contact;
   if (!contact || typeof contact !== "object") return null;
   return contact as Contact;

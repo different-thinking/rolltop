@@ -112,6 +112,38 @@ func TestFromContactEmitsEveryWritableFieldEvenWhenEmpty(t *testing.T) {
 	}
 }
 
+// A label the user typed at Google is not one of its predefined types, and
+// dropping it on write-back would silently unlabel a "School" address the next
+// time an unrelated field of the contact was edited.
+func TestFromContactKeepsCustomLabels(t *testing.T) {
+	person := FromContact(store.Contact{
+		DisplayName: "Ada",
+		Emails: []store.ContactEmail{
+			{Label: "School", Email: "ada@school.example.test"},
+			{Label: "Work", Email: "ada@work.example.test"},
+			// contactLabel invents this word when Google supplied no type at
+			// all; sending it back would turn "unlabelled" into a label.
+			{Label: "Email", Email: "ada@example.test"},
+		},
+		Phones: []store.ContactPhone{{Label: "Weekend cabin", Number: "+1 555 0100"}},
+	})
+	if len(person.Emails) != 3 {
+		t.Fatalf("emails = %+v, want all three", person.Emails)
+	}
+	if person.Emails[0].Type != "School" {
+		t.Fatalf("custom label = %q, want it preserved verbatim", person.Emails[0].Type)
+	}
+	if person.Emails[1].Type != "work" {
+		t.Fatalf("known label = %q, want Google's own spelling", person.Emails[1].Type)
+	}
+	if person.Emails[2].Type != "" {
+		t.Fatalf("generic fallback label = %q, want it dropped", person.Emails[2].Type)
+	}
+	if len(person.Phones) != 1 || person.Phones[0].Type != "Weekend cabin" {
+		t.Fatalf("phones = %+v, want the custom label preserved", person.Phones)
+	}
+}
+
 // Google's monogram placeholder is not a picture the contact has. Importing it
 // would give every contact without a photo a meaningless icon.
 func TestPrimaryPhotoURLIgnoresGooglesPlaceholder(t *testing.T) {

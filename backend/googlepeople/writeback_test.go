@@ -130,6 +130,41 @@ func TestUpdateRemoteContactYieldsToGoogleOnConflict(t *testing.T) {
 	}
 }
 
+// A conflict can turn out to be a deletion: the contact was removed at Google
+// while it was being edited here. There is no winning version to hand back, and
+// reporting it as an ordinary "not found" would tell the user their contact
+// never existed rather than that somebody just deleted it.
+func TestUpdateRemoteContactReportsAContactDeletedAtGoogle(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People:        []Person{personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test")},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	existing, ok := contactByEmail(t, db, user.ID, "ada@example.test")
+	if !ok {
+		t.Fatal("the synced contact is missing")
+	}
+
+	// The write is rejected, and the follow-up read finds nothing: the fake
+	// never had this person registered for GetPerson.
+	fake.mu.Lock()
+	fake.updateConflict = true
+	fake.mu.Unlock()
+
+	edited := existing
+	edited.JobTitle = "Countess"
+	if _, err := syncer.UpdateRemoteContact(ctx, user.ID, existing, edited); !errors.Is(err, ErrRemoteDeleted) {
+		t.Fatalf("error = %v, want ErrRemoteDeleted", err)
+	}
+	if _, ok := contactByEmail(t, db, user.ID, "ada@example.test"); ok {
+		t.Fatal("the local mirror of a contact Google deleted survived")
+	}
+}
+
 // Deleting has to reach Google, or the next sync brings the contact back and
 // the confirmation the user gave meant nothing.
 func TestDeleteRemoteContactRemovesThePersonAtGoogle(t *testing.T) {

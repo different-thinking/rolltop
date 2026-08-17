@@ -57,13 +57,17 @@ function ContactsSyncLine({ connection }: { connection: GoogleConnection }) {
     return <small className="muted">Contacts are not synced. Reauthorize this account to include them.</small>;
   }
   const sync = connection.contacts_sync;
+  // A failure is reported before anything else. A connection whose syncs have
+  // only ever failed -- the People API not enabled for the project is the usual
+  // reason -- has never succeeded either, and "not synced yet" would hide the
+  // one line that says what to fix.
+  if (sync && sync.status === "error") {
+    return <small className="settings-status-error">{sync.status_detail || "The last contact sync failed."}</small>;
+  }
   if (!sync || !sync.ever_synced) {
     return <small className="muted">Contacts have not been synced yet.</small>;
   }
   const count = `${sync.contact_count.toLocaleString()} contact${sync.contact_count === 1 ? "" : "s"}`;
-  if (sync.status === "error") {
-    return <small className="settings-status-error">{sync.status_detail || "The last contact sync failed."}</small>;
-  }
   return <small className="muted">{count} synced from Google. Last sync {formatSyncTime(sync.last_success_at)}.</small>;
 }
 
@@ -283,7 +287,11 @@ export function GoogleAccountsSettings({
                           {busy[`contacts:${connection.id}`] ? "Syncing..." : "Sync contacts"}
                         </button>
                       ) : null}
-                      {connection.needs_reauth ? (
+                      {/* A healthy connection missing the contacts scope needs
+                          the same button: consent is the only way to add a
+                          scope, and telling the user to reauthorize without
+                          giving them the control would be a dead end. */}
+                      {connection.needs_reauth || !connection.has_contacts_scope ? (
                         <button
                           className="secondary"
                           type="button"
@@ -292,7 +300,8 @@ export function GoogleAccountsSettings({
                         >
                           Reauthorize
                         </button>
-                      ) : (
+                      ) : null}
+                      {connection.needs_reauth ? null : (
                         <button className="secondary" type="button" disabled={rowBusy} onClick={() => void testConnection(connection)}>
                           {busy[`test:${connection.id}`] ? "Testing..." : "Test connection"}
                         </button>

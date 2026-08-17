@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -37,7 +38,12 @@ func (s *Server) apiContacts(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		contacts, err := s.store.ListContactsForUser(r.Context(), cu.User.ID, r.URL.Query().Get("q"), 500)
+		filter, ok := contactListFilter(r.URL.Query())
+		if !ok {
+			writeAPIError(w, http.StatusBadRequest, "Unknown contact source.")
+			return
+		}
+		contacts, err := s.store.ListContactsForUser(r.Context(), cu.User.ID, filter)
 		if err != nil {
 			s.serverError(w, r, err)
 			return
@@ -233,6 +239,35 @@ func (s *Server) updateGoogleContact(w http.ResponseWriter, r *http.Request, cu 
 	}
 	s.clearComposeIdentityCache(cu.User.ID)
 	writeJSON(w, map[string]any{"contact": apiContactFromStore(contact)})
+}
+
+// contactListFilter reads the address-book filter off the query string.
+//
+// The source travels to the store rather than being applied to the answer,
+// because the listing is capped: filtering afterwards would show only the
+// matches that happened to fall inside the first page of every contact.
+func contactListFilter(query url.Values) (store.ContactListFilter, bool) {
+	filter := store.ContactListFilter{Query: query.Get("q"), Limit: 500}
+	source := strings.TrimSpace(query.Get("source"))
+	switch {
+	case source == "" || source == "all":
+		return filter, true
+	case source == store.ContactSourceLocal:
+		filter.Source = store.ContactSourceLocal
+		return filter, true
+	}
+	// Anything else names one connected account, as "google:<id>".
+	prefix, rest, found := strings.Cut(source, ":")
+	if !found || prefix != store.ContactSourceGoogle {
+		return store.ContactListFilter{}, false
+	}
+	connectionID, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || connectionID <= 0 {
+		return store.ContactListFilter{}, false
+	}
+	filter.Source = store.ContactSourceGoogle
+	filter.GoogleConnectionID = connectionID
+	return filter, true
 }
 
 // contactSource reports the source the API advertises. A contact whose
@@ -525,7 +560,7 @@ func (s *Server) apiExportContacts(w http.ResponseWriter, r *http.Request, cu cu
 		methodNotAllowed(w)
 		return
 	}
-	contacts, err := s.store.ListContactsForUser(r.Context(), cu.User.ID, "", 10000)
+	contacts, err := s.store.ListContactsForUser(r.Context(), cu.User.ID, store.ContactListFilter{Limit: 10000})
 	if err != nil {
 		s.serverError(w, r, err)
 		return
