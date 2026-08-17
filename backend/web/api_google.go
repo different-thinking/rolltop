@@ -31,6 +31,10 @@ type apiGoogleConnection struct {
 	// offer re-authorization rather than letting contact sync fail at Google.
 	HasContactsScope bool                   `json:"has_contacts_scope"`
 	ContactsSync     *apiGoogleContactsSync `json:"contacts_sync"`
+	// HasCalendarScope is false for the same reason HasContactsScope can be:
+	// the grant predates the feature.
+	HasCalendarScope bool                   `json:"has_calendar_scope"`
+	CalendarSync     *apiGoogleCalendarSync `json:"calendar_sync"`
 	ConnectedAt      string                 `json:"connected_at"`
 	LastUpdatedAt    string                 `json:"last_updated_at"`
 }
@@ -45,6 +49,7 @@ func apiGoogleConnectionFromStore(connection store.GoogleConnection) apiGoogleCo
 		NeedsReauth:      connection.NeedsReauth(),
 		HasMailScope:     connection.HasScope(googleauth.ScopeMail),
 		HasContactsScope: connection.HasScope(googleauth.ScopeContacts),
+		HasCalendarScope: connection.HasScope(googleauth.ScopeCalendar),
 		ConnectedAt:      timeString(connection.CreatedAt),
 		LastUpdatedAt:    timeString(connection.UpdatedAt),
 	}
@@ -76,6 +81,9 @@ func (s *Server) apiGoogleConnections(w http.ResponseWriter, r *http.Request) {
 		item := apiGoogleConnectionFromStore(connection)
 		if item.HasContactsScope {
 			item.ContactsSync = s.googleContactsSyncState(r.Context(), cu.User.ID, connection.ID)
+		}
+		if item.HasCalendarScope {
+			item.CalendarSync = s.googleCalendarSyncState(r.Context(), cu.User.ID, connection.ID)
 		}
 		out = append(out, item)
 	}
@@ -223,6 +231,8 @@ func (s *Server) apiGoogleConnectionByID(w http.ResponseWriter, r *http.Request,
 		s.googleConnectionTest(w, r, cu.User.ID, connectionID)
 	case action == "contacts/sync" && r.Method == http.MethodPost:
 		s.googleContactsSyncNow(w, r, cu.User.ID, connectionID)
+	case action == "calendar/sync" && r.Method == http.MethodPost:
+		s.googleCalendarSyncNow(w, r, cu.User.ID, connectionID)
 	case action == "" && r.Method == http.MethodDelete:
 		s.googleConnectionDisconnect(w, r, cu.User.ID, connectionID)
 	default:

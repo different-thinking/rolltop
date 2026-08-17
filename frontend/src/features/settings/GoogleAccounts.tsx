@@ -71,6 +71,27 @@ function ContactsSyncLine({ connection }: { connection: GoogleConnection }) {
   return <small className="muted">{count} synced from Google. Last sync {formatSyncTime(sync.last_success_at)}.</small>;
 }
 
+/** CalendarSyncLine is the same report for calendars. It is a separate line
+ * rather than one combined status because a grant can cover contacts and not
+ * calendars, and one line would have to hide half the truth. */
+function CalendarSyncLine({ connection }: { connection: GoogleConnection }) {
+  if (!connection.has_calendar_scope) {
+    return <small className="muted">Calendars are not synced. Reauthorize this account to include them.</small>;
+  }
+  const sync = connection.calendar_sync;
+  // A failure is reported before anything else, for the same reason it is on
+  // the contacts line: the Calendar API not being enabled for the project fails
+  // every sync, and "not synced yet" would hide the one line that says so.
+  if (sync && sync.status === "error") {
+    return <small className="settings-status-error">{sync.status_detail || "The last calendar sync failed."}</small>;
+  }
+  if (!sync || !sync.ever_synced) {
+    return <small className="muted">Calendars have not been synced yet.</small>;
+  }
+  const count = `${sync.calendar_count.toLocaleString()} calendar${sync.calendar_count === 1 ? "" : "s"}`;
+  return <small className="muted">{count} synced from Google. Last sync {formatSyncTime(sync.last_success_at)}.</small>;
+}
+
 function formatSyncTime(value: string): string {
   const parsed = new Date(value);
   if (!value || Number.isNaN(parsed.getTime())) return "at an unknown time";
@@ -194,6 +215,29 @@ export function GoogleAccountsSettings({
     }
   }
 
+  async function syncCalendars(connection: GoogleConnection) {
+    const key = `calendar:${connection.id}`;
+    setOperationBusy(key, true);
+    try {
+      const result = await postJSON<{ calendars: number; created: number; updated: number; deleted: number }>(
+        `/api/google/connections/${connection.id}/calendar/sync`,
+        csrf
+      );
+      addToast(
+        `${connection.email}: ${result.calendars} calendar${result.calendars === 1 ? "" : "s"}, ` +
+          `${result.created} events added, ${result.updated} updated, ${result.deleted} removed.`,
+        "success"
+      );
+    } catch (error) {
+      addToast(messageFromError(error), "error");
+    } finally {
+      setOperationBusy(key, false);
+      // Reload either way: a failed sync is recorded against the connection and
+      // that record is the thing the user needs to see.
+      await load();
+    }
+  }
+
   async function testConnection(connection: GoogleConnection) {
     const key = `test:${connection.id}`;
     setOperationBusy(key, true);
@@ -275,6 +319,7 @@ export function GoogleAccountsSettings({
                         </span>
                       ) : null}
                       {connection.needs_reauth ? null : <ContactsSyncLine connection={connection} />}
+                      {connection.needs_reauth ? null : <CalendarSyncLine connection={connection} />}
                     </span>
                     <span className="settings-connection-actions">
                       {!connection.needs_reauth && connection.has_contacts_scope ? (
@@ -287,11 +332,21 @@ export function GoogleAccountsSettings({
                           {busy[`contacts:${connection.id}`] ? "Syncing..." : "Sync contacts"}
                         </button>
                       ) : null}
+                      {!connection.needs_reauth && connection.has_calendar_scope ? (
+                        <button
+                          className="secondary"
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() => void syncCalendars(connection)}
+                        >
+                          {busy[`calendar:${connection.id}`] ? "Syncing..." : "Sync calendars"}
+                        </button>
+                      ) : null}
                       {/* A healthy connection missing the contacts scope needs
                           the same button: consent is the only way to add a
                           scope, and telling the user to reauthorize without
                           giving them the control would be a dead end. */}
-                      {connection.needs_reauth || !connection.has_contacts_scope ? (
+                      {connection.needs_reauth || !connection.has_contacts_scope || !connection.has_calendar_scope ? (
                         <button
                           className="secondary"
                           type="button"
