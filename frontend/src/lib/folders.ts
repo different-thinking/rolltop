@@ -94,6 +94,15 @@ export function nodeContainsMailbox(node: FolderNode, id: string | null): boolea
   return String(node.mailbox.id) === id || node.children.some((child) => nodeContainsMailbox(child, id));
 }
 
+/**
+ * isArchiveMailboxChoice reports whether a mailbox may serve as an account's
+ * Archive target. Settings offers exactly these folders and the swipe and row
+ * Archive actions accept exactly these, so a saved choice always stays usable.
+ */
+export function isArchiveMailboxChoice(mailbox: Mailbox): boolean {
+  return !["inbox", "sent", "drafts", "trash", "junk"].includes(mailbox.role);
+}
+
 /** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */
 export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
   return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");

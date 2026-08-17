@@ -124,6 +124,8 @@ export type MailListResponse = {
   page: number;
   has_prev: boolean;
   has_next: boolean;
+  /** sort echoes the date direction the server applied; older servers omit it. */
+  sort?: "newest" | "oldest";
 };
 
 /**

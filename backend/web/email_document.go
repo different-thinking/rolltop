@@ -44,6 +44,8 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	if allowRemoteImages {
 		bodyHTML = normalizeProtocolRelativeRemoteRefs(bodyHTML)
 		bodyHTML = removeBlockedRemoteImages(bodyHTML, blockedImagePatterns)
+	} else {
+		bodyHTML = neutralizeRemoteRefs(bodyHTML)
 	}
 	imgSrc := "'self' data: cid:"
 	styleSrc := "'unsafe-inline'"
@@ -136,6 +138,271 @@ var (
 	imageURLAttrRE  = regexp.MustCompile(`(?is)\b(?:src|srcset)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
 )
 
+var (
+	htmlTagRE        = regexp.MustCompile(`(?is)<[a-zA-Z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>`)
+	styleBlockRE     = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	tagNameRE        = regexp.MustCompile(`(?is)^<\s*([a-zA-Z][^\s/>]*)`)
+	tagAttrRE        = regexp.MustCompile(`(?is)^\s+([^\s/>=]+)(\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?`)
+	cssImportRuleRE  = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*("[^"]*"|'[^']*'|[^'")\s]*)\s*\)|("[^"]*"|'[^']*'))[^;]*;?`)
+	cssURLTokenRE    = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
+	remoteRefSchemes = []string{"http://", "https://", "//"}
+	// Attributes the browser fetches on its own, whatever the element is.
+	remoteFetchAttrs = map[string]bool{"src": true, "srcset": true, "lowsrc": true, "dynsrc": true, "poster": true, "background": true}
+	// Attributes that only load a resource on particular elements. href is not
+	// in the shared set because on an anchor it is a navigation, but SVG
+	// <image>, <use> and <feImage> fetch it (xlink:href on legacy documents),
+	// and <object> fetches data.
+	remoteFetchAttrsByTag = map[string]map[string]bool{
+		"image":   {"href": true, "xlink:href": true},
+		"use":     {"href": true, "xlink:href": true},
+		"feimage": {"href": true, "xlink:href": true},
+		"object":  {"data": true},
+	}
+)
+
+// neutralizeRemoteRefs rewrites remote references so a blocked message body
+// asks the network for nothing. The document CSP already refuses these loads,
+// but a document that keeps the live URLs still makes the browser start (and
+// log) one blocked request per reference, which buries real console output
+// under dozens of CSP violations for a single newsletter.
+func neutralizeRemoteRefs(bodyHTML string) string {
+	if !containsRemoteRef(bodyHTML) {
+		return bodyHTML
+	}
+	// url() is only rewritten where a browser reads it as CSS. Running it over
+	// the whole document would also rewrite url(...) inside ordinary sentences.
+	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, neutralizeRemoteCSS)
+	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, neutralizeTagRemoteRefs)
+}
+
+func neutralizeTagRemoteRefs(tag string) string {
+	name := strings.ToLower(tagName(tag))
+	if name == "link" && isRemoteRef(tagAttrValue(tag, "href")) {
+		return ""
+	}
+	elementAttrs := remoteFetchAttrsByTag[name]
+	return rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+		lower := strings.ToLower(attrName)
+		value, quote := splitAttrValue(rawValue)
+		switch {
+		case lower == "style":
+			neutralized := neutralizeRemoteCSS(value)
+			if neutralized == value {
+				return "", false
+			}
+			return "style=" + quoteAttrValue(neutralized, quote), true
+		case lower == "srcset":
+			kept, removed := withoutRemoteSrcsetCandidates(value)
+			if !removed {
+				return "", false
+			}
+			blocked := `data-rolltop-blocked-srcset="` + escapeBlockedRef(value) + `"`
+			if kept == "" {
+				return blocked, true
+			}
+			return "srcset=" + quoteAttrValue(kept, quote) + " " + blocked, true
+		case (remoteFetchAttrs[lower] || elementAttrs[lower]) && isRemoteRef(value):
+			// The reference is dropped rather than replaced with a placeholder
+			// image: an element without src makes no request and still shows
+			// its alt text at its own size.
+			return `data-rolltop-blocked-` + blockedAttrName(lower) + `="` + escapeBlockedRef(value) + `"`, true
+		}
+		return "", false
+	})
+}
+
+func neutralizeRemoteCSS(css string) string {
+	css = cssImportRuleRE.ReplaceAllStringFunc(css, func(rule string) string {
+		if isRemoteRef(attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)) {
+			return ""
+		}
+		return rule
+	})
+	return cssURLTokenRE.ReplaceAllStringFunc(css, func(token string) string {
+		if !isRemoteRef(attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)) {
+			return token
+		}
+		// "none" is the one replacement that stays inert in every context a
+		// url() token can appear in: it is a valid background or list image and
+		// it makes an @font-face src declaration invalid, so the rule is
+		// dropped instead of fetched.
+		return "none"
+	})
+}
+
+// rewriteTagAttrs walks a tag's attributes in order and lets rewrite replace
+// whole `name=value` tokens. Matching attribute patterns against the raw tag
+// instead would also match text that merely looks like an attribute inside
+// another attribute's quoted value, and rewriting that text would break the
+// quoting of the attribute it lives in.
+func rewriteTagAttrs(tag string, rewrite func(name, rawValue string) (string, bool)) string {
+	open := tagNameRE.FindString(tag)
+	if open == "" {
+		return tag
+	}
+	var b strings.Builder
+	b.WriteString(open)
+	rest := tag[len(open):]
+	for {
+		match := tagAttrRE.FindStringSubmatchIndex(rest)
+		if match == nil {
+			break
+		}
+		name := rest[match[2]:match[3]]
+		rawValue := ""
+		if match[6] >= 0 {
+			rawValue = rest[match[6]:match[7]]
+		}
+		if replacement, ok := rewrite(name, rawValue); ok {
+			b.WriteString(" " + replacement)
+		} else {
+			b.WriteString(rest[match[0]:match[1]])
+		}
+		rest = rest[match[1]:]
+	}
+	b.WriteString(rest)
+	return b.String()
+}
+
+func tagName(tag string) string {
+	match := tagNameRE.FindStringSubmatch(tag)
+	if len(match) < 2 {
+		return ""
+	}
+	return match[1]
+}
+
+func tagAttrValue(tag, name string) string {
+	found := ""
+	rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+		if strings.EqualFold(attrName, name) && found == "" {
+			found, _ = splitAttrValue(rawValue)
+		}
+		return "", false
+	})
+	return found
+}
+
+// splitAttrValue returns an attribute value without its quotes, plus the quote
+// character the source used so a rewritten value can keep it.
+func splitAttrValue(rawValue string) (string, string) {
+	value := strings.TrimSpace(rawValue)
+	value = strings.TrimSpace(strings.TrimPrefix(value, "="))
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+		return value[1 : len(value)-1], string(value[0])
+	}
+	return value, ""
+}
+
+func quoteAttrValue(value, quote string) string {
+	if quote == "'" && !strings.Contains(value, "'") {
+		return "'" + value + "'"
+	}
+	return `"` + strings.ReplaceAll(value, `"`, "&quot;") + `"`
+}
+
+// blockedAttrName keeps a namespaced attribute such as xlink:href usable as the
+// suffix of the data-* attribute the blocked reference is parked in.
+func blockedAttrName(name string) string {
+	return strings.ReplaceAll(name, ":", "-")
+}
+
+// withoutRemoteSrcsetCandidates drops only the remote candidates, so a srcset
+// that also lists an inline attachment keeps rendering that attachment.
+func withoutRemoteSrcsetCandidates(value string) (string, bool) {
+	candidates := parseSrcset(value)
+	kept := make([]string, 0, len(candidates))
+	removed := false
+	for _, candidate := range candidates {
+		if isRemoteRef(candidate.url) {
+			removed = true
+			continue
+		}
+		kept = append(kept, strings.TrimSpace(candidate.url+" "+candidate.descriptor))
+	}
+	return strings.Join(kept, ", "), removed
+}
+
+type srcsetCandidate struct {
+	url        string
+	descriptor string
+}
+
+// parseSrcset splits a srcset the way an HTML parser does: a candidate URL runs
+// to the next whitespace, and only a comma that ends it separates candidates.
+// Splitting on every comma instead would tear a local data: URL, whose payload
+// contains one, into invalid candidates.
+func parseSrcset(value string) []srcsetCandidate {
+	out := make([]srcsetCandidate, 0, 4)
+	for i := 0; i < len(value); {
+		for i < len(value) && (isSrcsetSpace(value[i]) || value[i] == ',') {
+			i++
+		}
+		if i >= len(value) {
+			break
+		}
+		start := i
+		for i < len(value) && !isSrcsetSpace(value[i]) {
+			i++
+		}
+		rawURL := value[start:i]
+		if trimmed := strings.TrimRight(rawURL, ","); len(trimmed) < len(rawURL) {
+			out = append(out, srcsetCandidate{url: trimmed})
+			continue
+		}
+		for i < len(value) && isSrcsetSpace(value[i]) {
+			i++
+		}
+		descriptorStart := i
+		for i < len(value) && value[i] != ',' {
+			i++
+		}
+		descriptor := strings.TrimSpace(value[descriptorStart:i])
+		if i < len(value) {
+			i++
+		}
+		out = append(out, srcsetCandidate{url: rawURL, descriptor: descriptor})
+	}
+	return out
+}
+
+func isSrcsetSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f'
+}
+
+func containsRemoteRef(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "http://") || strings.Contains(lower, "https://") || strings.Contains(lower, "//")
+}
+
+func isRemoteRef(value string) bool {
+	value = strings.ToLower(strings.Trim(strings.TrimSpace(html.UnescapeString(value)), `"' `))
+	for _, prefix := range remoteRefSchemes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// attrValueFromMatch reads the first non-empty alternative of a quoted or
+// unquoted capture group starting at start.
+func attrValueFromMatch(match []string, start int) string {
+	if len(match) <= start {
+		return ""
+	}
+	for _, candidate := range match[start:] {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return ""
+}
+
+func escapeBlockedRef(value string) string {
+	return html.EscapeString(html.UnescapeString(value))
+}
+
 func removeBlockedRemoteImages(bodyHTML string, patterns []string) string {
 	blockers := compileRemoteImageBlockPatterns(patterns)
 	if len(blockers) == 0 {
@@ -189,16 +456,10 @@ func imageURLCandidatesFromTag(tag string) []string {
 
 func srcsetURLCandidates(value string) []string {
 	var out []string
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	for _, candidate := range parseSrcset(value) {
+		if candidate.url != "" {
+			out = append(out, candidate.url)
 		}
-		fields := strings.Fields(part)
-		if len(fields) == 0 {
-			continue
-		}
-		out = append(out, strings.TrimSpace(fields[0]))
 	}
 	return out
 }

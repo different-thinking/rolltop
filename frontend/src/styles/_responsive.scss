@@ -269,6 +269,12 @@
     gap: 8px;
   }
 
+  // A narrow header has no room for both labels, and the arrows already carry
+  // the direction. The titles stay for screen readers via the button titles.
+  .mail-sort-toggle button span {
+    display: none;
+  }
+
   .range-pager {
     gap: 8px;
     font-size: 12px;
@@ -486,6 +492,11 @@
 
   .message-select {
     grid-column: 1;
+  }
+
+  // Narrow rows have no room for the hover toolbar; swipes cover the same actions.
+  .message-row-actions {
+    display: none;
   }
 
   .message-select.group-drag-source {

@@ -35,7 +35,8 @@ func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 		}
 		mailboxID = id
 	}
-	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page}
+	order := mailSortFromRequest(r)
+	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page, Sort: mailSortCacheKey(order)}
 	if mailboxID == 0 && page == 1 && s.writeMailListPageIfFresh(w, r, cacheKey) {
 		return
 	}
@@ -43,7 +44,7 @@ func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	generation := s.mailListGeneration(cu.User.ID)
-	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, page, timing)
+	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, page, order, timing)
 	if err != nil {
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -59,7 +60,28 @@ func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, page int, timing *searchTiming) (map[string]any, error) {
+// mailSortFromRequest reads the list's date direction from the URL. Only the
+// reversed order has to be spelled out; every other value keeps the newest-first
+// default that the warmed first page and stale clients rely on.
+func mailSortFromRequest(r *http.Request) store.ThreadListOrder {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))) {
+	case "oldest", "asc", "date_asc":
+		return store.ThreadListOldestFirst
+	default:
+		return store.ThreadListNewestFirst
+	}
+}
+
+// mailSortCacheKey keeps the default order on the empty cache key so warmed
+// first pages stay reachable, and only the reversed order gets its own entry.
+func mailSortCacheKey(order store.ThreadListOrder) string {
+	if order == store.ThreadListOldestFirst {
+		return string(store.ThreadListOldestFirst)
+	}
+	return ""
+}
+
+func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, page int, order store.ThreadListOrder, timing *searchTiming) (map[string]any, error) {
 	const pageSize = 50
 	offset := (page - 1) * pageSize
 	fetchLimit := pageSize*3 + 1
@@ -74,11 +96,11 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		active := apiMailboxFromStore(mb)
 		activeMailbox = &active
 		hydrateDone := timing.measure(&timing.hydrate)
-		messages, err = s.store.ListLatestThreadMessagesForMailbox(ctx, user.ID, mb.ID, fetchLimit, offset)
+		messages, err = s.store.ListLatestThreadMessagesForMailbox(ctx, user.ID, mb.ID, fetchLimit, offset, order)
 		hydrateDone()
 	} else {
 		hydrateDone := timing.measure(&timing.hydrate)
-		messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset)
+		messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		hydrateDone()
 	}
 	if err != nil {
@@ -101,6 +123,7 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		"page":           page,
 		"has_prev":       page > 1,
 		"has_next":       hasNext,
+		"sort":           string(order),
 		"active_mailbox": activeMailbox,
 	}, nil
 }
@@ -152,7 +175,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 	if searchQuery == "" && !mailboxFilter.enabled {
 		var messages []store.MessageRecord
 		hydrateDone := timing.measure(&timing.hydrate)
-		messages, err = s.store.ListLatestThreadMessagesForUser(r.Context(), cu.User.ID, pageSize*3+1, offset)
+		messages, err = s.store.ListLatestThreadMessagesForUser(r.Context(), cu.User.ID, pageSize*3+1, offset, store.ThreadListNewestFirst)
 		hydrateDone()
 		seeds = conversationSeedsFromMessages(messages)
 	} else {

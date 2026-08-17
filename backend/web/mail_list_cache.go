@@ -8,17 +8,21 @@ import (
 	"log"
 	"net/http"
 	"sync"
+
+	"rolltop/backend/store"
 )
 
 const mailListCacheMaxEntries = 512
 
 // mailListCacheKey identifies one cached conversation-list response. Mailbox
 // pages use MailboxID; search pages set Search plus normalized Query so a
-// browser ETag is only reused for the exact same result slice.
+// browser ETag is only reused for the exact same result slice. Sort stays empty
+// for the newest-first default and names any reversed order.
 type mailListCacheKey struct {
 	UserID    int64
 	MailboxID int64
 	Page      int
+	Sort      string
 	Search    bool
 	Query     string
 }
@@ -262,7 +266,7 @@ func (s *Server) warmAllMailFirstPage(ctx context.Context, userID int64) error {
 	if err != nil {
 		return err
 	}
-	response, err := s.mailPageResponse(ctx, user, 0, 1, newSearchTiming())
+	response, err := s.mailPageResponse(ctx, user, 0, 1, store.ThreadListNewestFirst, newSearchTiming())
 	if err != nil {
 		return err
 	}

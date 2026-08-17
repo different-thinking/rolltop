@@ -1,5 +1,44 @@
 @use "mixins/components" as *;
 
+.mail-sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    padding: 3px 9px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: none;
+
+    .icon {
+      width: 15px;
+      height: 15px;
+    }
+
+    &:hover {
+      color: var(--accent-strong);
+    }
+
+    &.active {
+      background: var(--active);
+      color: var(--text);
+    }
+  }
+}
+
 .mail-cache-warning {
   padding: 7px 14px;
   border-bottom: 1px solid var(--border);
@@ -837,6 +876,73 @@
   .icon {
     width: 17px;
     height: 17px;
+  }
+}
+
+// Pointer-only row actions. They ride above the date on hover or keyboard focus
+// the way Gmail's row toolbar does; touch devices keep row swipes instead.
+.message-row-actions {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 2;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-raised);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease-out;
+}
+
+.message-row:hover .message-row-actions,
+.message-row:focus-within .message-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-row.moving-out .message-row-actions,
+.message-swipe-shell.revealing-start .message-row-actions,
+.message-swipe-shell.revealing-end .message-row-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (hover: none) {
+  .message-row-actions {
+    display: none;
+  }
+}
+
+.message-row-action {
+  @include icon-button(28px, 999px);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+
+  .icon {
+    width: 17px;
+    height: 17px;
+  }
+
+  &:not(:disabled):hover {
+    background: var(--hover);
+    color: var(--text);
+    border-color: transparent;
+  }
+
+  &:disabled {
+    opacity: .45;
+    cursor: default;
+  }
+
+  &.row-action-delete:not(:disabled):hover {
+    color: var(--danger);
   }
 }
 
