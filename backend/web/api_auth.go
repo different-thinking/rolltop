@@ -66,32 +66,22 @@ func (s *Server) bootstrapPayload(w http.ResponseWriter, r *http.Request) (map[s
 		"available_themes":      s.availableThemes(r.Context()),
 		"frontend_plugins":      s.frontendPlugins(r.Context()),
 		"auth_providers":        s.authProviders(r.Context()),
+		"database_unavailable":  false,
 	}
 	if authenticated {
 		resp["user"] = safeUser(cu.User)
-		swipePreferences, err := s.store.GetSwipePreferences(r.Context(), cu.User.ID)
-		if err != nil {
+		err := s.addTenantBootstrap(r, cu.User.ID, resp)
+		switch {
+		case err == nil:
+		case store.IsCorrupt(err):
+			// The account itself lives in the system database, so a tenant
+			// whose mail data cannot be read must not cost the browser its
+			// session: failing here served a 500 for /login and /api/bootstrap
+			// alike, which locked the operator out of the admin database page
+			// that repairs the very tenant at fault.
+			applyUnavailableTenantBootstrap(cu.User.ID, resp)
+		default:
 			return nil, err
-		}
-		resp["swipe_preferences"] = apiSwipePreferencesFromStore(swipePreferences)
-		var chrome viewData
-		s.loadMailboxChrome(r.Context(), cu.User.ID, &chrome)
-		resp["mailboxes"] = apiMailboxes(chrome.Mailboxes)
-		resp["latest_sync_run"] = apiSyncRunPtr(chrome.LatestSyncRun)
-		resp["active_sync_runs"] = apiSyncRuns(chrome.ActiveSyncRuns)
-		resp["sync_running"] = chrome.SyncRunning
-		resp["mail_generation"] = s.mailListGeneration(cu.User.ID)
-		needsPassword, notice := s.accountCredentialNotice(r.Context(), cu.User.ID)
-		resp["account_needs_password"] = needsPassword
-		resp["account_notice"] = notice
-		if settings, err := s.store.ListPluginSettings(r.Context()); err == nil {
-			enabled := make([]string, 0, len(settings))
-			for _, setting := range settings {
-				if setting.Enabled {
-					enabled = append(enabled, setting.ID)
-				}
-			}
-			resp["enabled_plugins"] = enabled
 		}
 	} else {
 		resp["user"] = nil
@@ -102,6 +92,54 @@ func (s *Server) bootstrapPayload(w http.ResponseWriter, r *http.Request) (map[s
 		resp["enabled_plugins"] = []string{}
 	}
 	return resp, nil
+}
+
+// addTenantBootstrap fills the parts of the payload that live in the signed-in
+// user's own database. Its error is the caller's signal that the tenant cannot
+// be read right now.
+func (s *Server) addTenantBootstrap(r *http.Request, userID int64, resp map[string]any) error {
+	swipePreferences, err := s.store.GetSwipePreferences(r.Context(), userID)
+	if err != nil {
+		return err
+	}
+	resp["swipe_preferences"] = apiSwipePreferencesFromStore(swipePreferences)
+	var chrome viewData
+	s.loadMailboxChrome(r.Context(), userID, &chrome)
+	resp["mailboxes"] = apiMailboxes(chrome.Mailboxes)
+	resp["latest_sync_run"] = apiSyncRunPtr(chrome.LatestSyncRun)
+	resp["active_sync_runs"] = apiSyncRuns(chrome.ActiveSyncRuns)
+	resp["sync_running"] = chrome.SyncRunning
+	resp["mail_generation"] = s.mailListGeneration(userID)
+	needsPassword, notice := s.accountCredentialNotice(r.Context(), userID)
+	resp["account_needs_password"] = needsPassword
+	resp["account_notice"] = notice
+	if settings, err := s.store.ListPluginSettings(r.Context()); err == nil {
+		enabled := make([]string, 0, len(settings))
+		for _, setting := range settings {
+			if setting.Enabled {
+				enabled = append(enabled, setting.ID)
+			}
+		}
+		resp["enabled_plugins"] = enabled
+	}
+	return nil
+}
+
+// applyUnavailableTenantBootstrap serves the app shell to a signed-in user
+// whose mail database is unreadable: an empty mailbox list rather than an
+// error, plus the flag the frontend uses to explain the emptiness instead of
+// presenting it as an account with no mail.
+func applyUnavailableTenantBootstrap(userID int64, resp map[string]any) {
+	resp["database_unavailable"] = true
+	resp["swipe_preferences"] = apiSwipePreferencesFromStore(store.DefaultSwipePreferences(userID))
+	resp["mailboxes"] = []apiMailbox{}
+	resp["latest_sync_run"] = nil
+	resp["active_sync_runs"] = []apiSyncRun{}
+	resp["sync_running"] = false
+	resp["mail_generation"] = 0
+	resp["account_needs_password"] = false
+	resp["account_notice"] = ""
+	resp["enabled_plugins"] = []string{}
 }
 
 func (s *Server) apiSwipePreferences(w http.ResponseWriter, r *http.Request) {
