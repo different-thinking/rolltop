@@ -40,6 +40,17 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - Disconnecting a Google account demotes its contacts to local ones. Do not
   make it delete them: the user asked to stop syncing, and Rolltop's copy is
   often the only one they can still reach.
+- A cross-account duplicate copy is hidden behind a pointer to the row that stays
+  visible, and that pointer is only safe while it resolves. Deletes clear it in a
+  SQLite trigger rather than in Go, because reconciliation, folder purges, account
+  deletion, and generation rebuilds all delete message rows through different
+  paths and a stale pointer in any of them hides mail that has no visible twin.
+  Detection itself stays narrow on purpose: it hides a copy only when exactly one
+  account in the group was addressed in `To` or `Cc`, never hides Sent, Drafts, or
+  Trash copies, and only accepts a row that shows in All Mail as the original a
+  copy hides behind - a Spam-filed or otherwise All-Mail-excluded row standing in
+  as the original would take the message out of view entirely. Showing a message
+  twice is recoverable; hiding the only copy is not.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens SQLite, Bleve, or the blob store. A serving start waits

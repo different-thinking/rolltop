@@ -84,6 +84,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiMailIdentity(w, r)
 	case path == "account/sync":
 		s.apiAccountSync(w, r)
+	case path == "account/duplicates":
+		s.apiAccountDuplicates(w, r)
+	case path == "account/duplicates/rescan":
+		s.apiAccountDuplicatesRescan(w, r)
+	case path == "account/duplicates/trash":
+		s.apiAccountDuplicatesTrash(w, r)
 	case path == "account/folders/progress":
 		s.apiAccountFolderProgress(w, r)
 	case strings.HasPrefix(path, "account/folders/"):

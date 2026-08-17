@@ -277,15 +277,23 @@ func (s *Store) messageSnoozesForThreads(ctx context.Context, userID int64, thre
 }
 
 // ListUnsnoozedMessagesByIDsForUser hydrates search hits while excluding every
-// message in a conversation with an active future snooze.
+// message in a conversation with an active future snooze, and every copy hidden
+// behind the account that was actually addressed. Both exclusions exist for the
+// same reason: the list has already accounted for that message elsewhere.
 func (s *Store) ListUnsnoozedMessagesByIDsForUser(ctx context.Context, userID int64, ids []int64, now time.Time) ([]MessageRecord, error) {
 	messages, err := s.ListMessagesByIDsForUser(ctx, userID, ids)
 	if err != nil || len(messages) == 0 {
 		return messages, err
 	}
+	messageIDs := make([]int64, 0, len(messages))
 	keys := make([]string, 0, len(messages))
 	for _, msg := range messages {
+		messageIDs = append(messageIDs, msg.ID)
 		keys = append(keys, SnoozeThreadKey(msg))
+	}
+	duplicates, err := s.DuplicateCopyIDsForUser(ctx, userID, messageIDs)
+	if err != nil {
+		return nil, err
 	}
 	active, err := s.ActiveMessageSnoozesForThreads(ctx, userID, keys, now)
 	if err != nil {
@@ -293,9 +301,13 @@ func (s *Store) ListUnsnoozedMessagesByIDsForUser(ctx context.Context, userID in
 	}
 	out := messages[:0]
 	for _, msg := range messages {
-		if _, hidden := active[SnoozeThreadKey(msg)]; !hidden {
-			out = append(out, msg)
+		if _, hidden := active[SnoozeThreadKey(msg)]; hidden {
+			continue
 		}
+		if duplicates[msg.ID] {
+			continue
+		}
+		out = append(out, msg)
 	}
 	return out, nil
 }
