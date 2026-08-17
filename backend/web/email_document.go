@@ -146,10 +146,18 @@ var (
 	cssImportRuleRE  = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*("[^"]*"|'[^']*'|[^'")\s]*)\s*\)|("[^"]*"|'[^']*'))[^;]*;?`)
 	cssURLTokenRE    = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
 	remoteRefSchemes = []string{"http://", "https://", "//"}
-	// Attributes the browser fetches on its own. href is deliberately absent:
-	// on an anchor it is a navigation, and the only element that loads it is
-	// <link>, which is dropped whole below.
+	// Attributes the browser fetches on its own, whatever the element is.
 	remoteFetchAttrs = map[string]bool{"src": true, "srcset": true, "lowsrc": true, "dynsrc": true, "poster": true, "background": true}
+	// Attributes that only load a resource on particular elements. href is not
+	// in the shared set because on an anchor it is a navigation, but SVG
+	// <image>, <use> and <feImage> fetch it (xlink:href on legacy documents),
+	// and <object> fetches data.
+	remoteFetchAttrsByTag = map[string]map[string]bool{
+		"image":   {"href": true, "xlink:href": true},
+		"use":     {"href": true, "xlink:href": true},
+		"feimage": {"href": true, "xlink:href": true},
+		"object":  {"data": true},
+	}
 )
 
 // neutralizeRemoteRefs rewrites remote references so a blocked message body
@@ -168,11 +176,13 @@ func neutralizeRemoteRefs(bodyHTML string) string {
 }
 
 func neutralizeTagRemoteRefs(tag string) string {
-	if strings.EqualFold(tagName(tag), "link") && isRemoteRef(tagAttrValue(tag, "href")) {
+	name := strings.ToLower(tagName(tag))
+	if name == "link" && isRemoteRef(tagAttrValue(tag, "href")) {
 		return ""
 	}
-	return rewriteTagAttrs(tag, func(name, rawValue string) (string, bool) {
-		lower := strings.ToLower(name)
+	elementAttrs := remoteFetchAttrsByTag[name]
+	return rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+		lower := strings.ToLower(attrName)
 		value, quote := splitAttrValue(rawValue)
 		switch {
 		case lower == "style":
@@ -191,11 +201,11 @@ func neutralizeTagRemoteRefs(tag string) string {
 				return blocked, true
 			}
 			return "srcset=" + quoteAttrValue(kept, quote) + " " + blocked, true
-		case remoteFetchAttrs[lower] && isRemoteRef(value):
+		case (remoteFetchAttrs[lower] || elementAttrs[lower]) && isRemoteRef(value):
 			// The reference is dropped rather than replaced with a placeholder
 			// image: an element without src makes no request and still shows
 			// its alt text at its own size.
-			return `data-rolltop-blocked-` + lower + `="` + escapeBlockedRef(value) + `"`, true
+			return `data-rolltop-blocked-` + blockedAttrName(lower) + `="` + escapeBlockedRef(value) + `"`, true
 		}
 		return "", false
 	})
@@ -291,23 +301,73 @@ func quoteAttrValue(value, quote string) string {
 	return `"` + strings.ReplaceAll(value, `"`, "&quot;") + `"`
 }
 
+// blockedAttrName keeps a namespaced attribute such as xlink:href usable as the
+// suffix of the data-* attribute the blocked reference is parked in.
+func blockedAttrName(name string) string {
+	return strings.ReplaceAll(name, ":", "-")
+}
+
 // withoutRemoteSrcsetCandidates drops only the remote candidates, so a srcset
 // that also lists an inline attachment keeps rendering that attachment.
 func withoutRemoteSrcsetCandidates(value string) (string, bool) {
-	kept := make([]string, 0, 4)
+	candidates := parseSrcset(value)
+	kept := make([]string, 0, len(candidates))
 	removed := false
-	for _, part := range strings.Split(value, ",") {
-		fields := strings.Fields(strings.TrimSpace(part))
-		if len(fields) == 0 {
-			continue
-		}
-		if isRemoteRef(fields[0]) {
+	for _, candidate := range candidates {
+		if isRemoteRef(candidate.url) {
 			removed = true
 			continue
 		}
-		kept = append(kept, strings.Join(fields, " "))
+		kept = append(kept, strings.TrimSpace(candidate.url+" "+candidate.descriptor))
 	}
 	return strings.Join(kept, ", "), removed
+}
+
+type srcsetCandidate struct {
+	url        string
+	descriptor string
+}
+
+// parseSrcset splits a srcset the way an HTML parser does: a candidate URL runs
+// to the next whitespace, and only a comma that ends it separates candidates.
+// Splitting on every comma instead would tear a local data: URL, whose payload
+// contains one, into invalid candidates.
+func parseSrcset(value string) []srcsetCandidate {
+	out := make([]srcsetCandidate, 0, 4)
+	for i := 0; i < len(value); {
+		for i < len(value) && (isSrcsetSpace(value[i]) || value[i] == ',') {
+			i++
+		}
+		if i >= len(value) {
+			break
+		}
+		start := i
+		for i < len(value) && !isSrcsetSpace(value[i]) {
+			i++
+		}
+		rawURL := value[start:i]
+		if trimmed := strings.TrimRight(rawURL, ","); len(trimmed) < len(rawURL) {
+			out = append(out, srcsetCandidate{url: trimmed})
+			continue
+		}
+		for i < len(value) && isSrcsetSpace(value[i]) {
+			i++
+		}
+		descriptorStart := i
+		for i < len(value) && value[i] != ',' {
+			i++
+		}
+		descriptor := strings.TrimSpace(value[descriptorStart:i])
+		if i < len(value) {
+			i++
+		}
+		out = append(out, srcsetCandidate{url: rawURL, descriptor: descriptor})
+	}
+	return out
+}
+
+func isSrcsetSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f'
 }
 
 func containsRemoteRef(value string) bool {
@@ -396,16 +456,10 @@ func imageURLCandidatesFromTag(tag string) []string {
 
 func srcsetURLCandidates(value string) []string {
 	var out []string
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	for _, candidate := range parseSrcset(value) {
+		if candidate.url != "" {
+			out = append(out, candidate.url)
 		}
-		fields := strings.Fields(part)
-		if len(fields) == 0 {
-			continue
-		}
-		out = append(out, strings.TrimSpace(fields[0]))
 	}
 	return out
 }

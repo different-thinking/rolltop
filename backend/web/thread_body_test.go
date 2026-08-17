@@ -414,6 +414,53 @@ func TestEmailDocumentKeepsLocalRefsWhileImagesAreBlocked(t *testing.T) {
 	}
 }
 
+func TestEmailDocumentNeutralizesSVGAndObjectRemoteRefs(t *testing.T) {
+	body := `<svg><image href="https://cdn.example.test/a.svg" /><image xlink:href="https://cdn.example.test/b.svg" /><use href="https://cdn.example.test/sprite.svg#i" /></svg>` +
+		`<object data="https://cdn.example.test/c.svg"></object>` +
+		`<a href="https://cdn.example.test/click">Angebot</a>`
+	doc := emailDocument(body, "", false)
+	for _, live := range []string{
+		` href="https://cdn.example.test/a.svg"`,
+		` xlink:href="https://cdn.example.test/b.svg"`,
+		` href="https://cdn.example.test/sprite.svg#i"`,
+		` data="https://cdn.example.test/c.svg"`,
+	} {
+		if strings.Contains(doc, live) {
+			t.Fatalf("document kept a live remote reference %q: %s", live, doc)
+		}
+	}
+	for _, blocked := range []string{
+		`data-rolltop-blocked-href="https://cdn.example.test/a.svg"`,
+		`data-rolltop-blocked-xlink-href="https://cdn.example.test/b.svg"`,
+		`data-rolltop-blocked-href="https://cdn.example.test/sprite.svg#i"`,
+		`data-rolltop-blocked-data="https://cdn.example.test/c.svg"`,
+	} {
+		if !strings.Contains(doc, blocked) {
+			t.Fatalf("blocked reference %q was not preserved: %s", blocked, doc)
+		}
+	}
+	// An anchor href is a navigation the user starts, not a load the browser
+	// makes, so it has to survive untouched.
+	if !strings.Contains(doc, `<a href="https://cdn.example.test/click">Angebot</a>`) {
+		t.Fatalf("anchor link was rewritten: %s", doc)
+	}
+}
+
+func TestEmailDocumentKeepsDataURLCandidatesInMixedSrcset(t *testing.T) {
+	body := `<img srcset="data:image/png;base64,AAAA 1x, https://cdn.example.test/hero@2x.png 2x" src="data:image/png;base64,AAAA">`
+	doc := emailDocument(body, "", false)
+	if !strings.Contains(doc, `srcset="data:image/png;base64,AAAA 1x"`) {
+		t.Fatalf("data URL candidate was torn apart: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-blocked-srcset="data:image/png;base64,AAAA 1x, https://cdn.example.test/hero@2x.png 2x"`) {
+		t.Fatalf("removed remote candidate was not recorded: %s", doc)
+	}
+	// The remote candidate may only survive inside the blocked data attribute.
+	if strings.Count(doc, "cdn.example.test") != 1 {
+		t.Fatalf("remote candidate stayed live: %s", doc)
+	}
+}
+
 func TestEmailDocumentDoesNotRewriteAttributeLookalikeText(t *testing.T) {
 	body := `<img alt="see src=https://cdn.example.test/x.png here" title='background="//cdn.example.test/y.png"' src="/attachments/1/inline">`
 	doc := emailDocumentWithInlineAttachments(body, "", false, nil, nil)
