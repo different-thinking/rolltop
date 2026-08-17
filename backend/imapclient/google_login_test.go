@@ -27,6 +27,7 @@ type fakeIMAPServer struct {
 	acceptedTokens map[string]bool
 	authPayloads   []string
 	logins         []string
+	searches       []string
 	advertiseOAuth bool
 }
 
@@ -91,6 +92,13 @@ func (s *fakeIMAPServer) handle(conn net.Conn) {
 			fmt.Fprintf(conn, "%s OK logged in\r\n", tag)
 		case "AUTHENTICATE":
 			s.authenticate(conn, reader, tag, fields)
+		case "SELECT", "EXAMINE":
+			fmt.Fprintf(conn, "* 5 EXISTS\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 99]\r\n%s OK [READ-ONLY] selected\r\n", tag)
+		case "UID":
+			s.mu.Lock()
+			s.searches = append(s.searches, strings.TrimSpace(line))
+			s.mu.Unlock()
+			fmt.Fprintf(conn, "* SEARCH\r\n%s OK search complete\r\n", tag)
 		case "LOGOUT":
 			fmt.Fprintf(conn, "* BYE\r\n%s OK logout\r\n", tag)
 			return

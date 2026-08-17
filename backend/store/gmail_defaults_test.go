@@ -1,0 +1,35 @@
+package store
+
+import "testing"
+
+// Gmail's label views hold a copy of nearly every message. With one folder per
+// message in this data model, syncing them mirrors the whole mailbox twice, so
+// they have to start out excluded rather than merely "manual".
+func TestGmailLabelViewsDefaultToNeverSyncing(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		role string
+		want string
+	}{
+		{name: "INBOX", role: "inbox", want: "auto"},
+		{name: "[Gmail]/All Mail", role: "all", want: "never"},
+		{name: "[Gmail]/Important", want: "never"},
+		{name: "[Gmail]/Starred", want: "never"},
+		{name: "[Google Mail]/All Mail", want: "never"},
+		// Localized installs report the attribute even when the name differs,
+		// which is why the role is checked first.
+		{name: "[Gmail]/Alle Nachrichten", role: "all", want: "never"},
+		{name: "[Gmail]/Spam", role: "junk", want: "manual"},
+		{name: "[Gmail]/Trash", role: "trash", want: "manual"},
+		{name: "[Gmail]/Sent Mail", role: "sent", want: "manual"},
+		{name: "Projects/2024", want: "manual"},
+		// A user folder that merely looks like a label view must not be
+		// silently excluded.
+		{name: "Important", want: "manual"},
+	} {
+		if got := defaultMailboxSyncMode(testCase.name, testCase.role); got != testCase.want {
+			t.Errorf("default sync mode for %q (role %q) = %q, want %q",
+				testCase.name, testCase.role, got, testCase.want)
+		}
+	}
+}

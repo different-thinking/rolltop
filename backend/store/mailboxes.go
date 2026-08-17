@@ -236,11 +236,11 @@ func (s *Store) GetOrCreateMailboxWithRole(ctx context.Context, userID, accountI
 		name = "INBOX"
 	}
 	ts := nowUnix()
-	syncMode := defaultMailboxSyncMode(name)
 	role := normalizeMailboxRole(discoveredRole)
 	if role == "" {
 		role = defaultMailboxRole(name)
 	}
+	syncMode := defaultMailboxSyncMode(name, role)
 	db := s.mustDataDB(ctx, userID)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -636,11 +636,39 @@ func normalizeMailboxIcon(icon string, name string, role string) string {
 	return defaultMailboxIcon(name, role)
 }
 
-func defaultMailboxSyncMode(name string) string {
+func defaultMailboxSyncMode(name, role string) string {
+	if isLabelViewMailbox(name, role) {
+		return "never"
+	}
 	if strings.EqualFold(strings.TrimSpace(name), "INBOX") {
 		return "auto"
 	}
 	return "manual"
+}
+
+// isLabelViewMailbox reports Gmail's virtual folders, which are views over
+// messages that already live in a real folder. This data model stores one
+// folder per message, so syncing them would mirror most of the mailbox a second
+// time and double the database for nothing.
+//
+// The \All special-use attribute is checked first because it is language
+// independent; the name list only has to cover Important and Starred, which
+// Gmail exposes without a standard attribute.
+func isLabelViewMailbox(name, role string) bool {
+	if role == "all" {
+		return true
+	}
+	clean := strings.ToLower(strings.TrimSpace(name))
+	for _, prefix := range []string{"[gmail]/", "[google mail]/"} {
+		if !strings.HasPrefix(clean, prefix) {
+			continue
+		}
+		switch strings.TrimPrefix(clean, prefix) {
+		case "all mail", "important", "starred":
+			return true
+		}
+	}
+	return false
 }
 
 func defaultMailboxRole(name string) string {

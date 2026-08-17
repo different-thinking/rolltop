@@ -42,7 +42,7 @@ func (f *Fetcher) FetchMailboxWithUIDValidity(ctx context.Context, account store
 	criteria := imap.NewSearchCriteria()
 	criteria.Uid = new(imap.SeqSet)
 	criteria.Uid.AddRange(afterUID+1, 0)
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return fmt.Errorf("search new UIDs in mailbox %q after UID %d: %w", mailbox, afterUID, err)
 	}

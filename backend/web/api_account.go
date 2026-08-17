@@ -34,6 +34,9 @@ type accountSettingsInput struct {
 	SMTPSameAsIMAP      bool   `json:"smtp_same_as_imap"`
 	Mailbox             string `json:"mailbox"`
 	SyncIntervalMinutes int    `json:"sync_interval_minutes"`
+	AuthType            string `json:"auth_type"`
+	GoogleConnectionID  int64  `json:"google_connection_id"`
+	SyncStartAt         string `json:"sync_start_at"`
 }
 
 const slowSettingsRequestThreshold = 500 * time.Millisecond
@@ -140,7 +143,7 @@ func (s *Server) apiAccount(w http.ResponseWriter, r *http.Request) {
 	timer.mark("folders")
 	timer.writeServerTiming(w)
 	writeJSONCached(w, r, map[string]any{
-		"imap_accounts":          apiAccountsFromStore(accounts),
+		"imap_accounts":          s.apiAccountsWithGoogleIdentity(r.Context(), cu.User.ID, accounts),
 		"smtp_accounts":          apiSMTPAccountsFromStore(smtpAccounts),
 		"identities":             apiMailIdentitiesFromStore(identities),
 		"me_contacts":            apiContactsFromStore(meContacts),
@@ -533,6 +536,64 @@ func (s *Server) apiDeleteIMAPAccount(w http.ResponseWriter, r *http.Request, ac
 	writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "estimate": estimate})
 }
 
+// Gmail's IMAP and SMTP endpoints. Implicit TLS on 465 is used for submission
+// because that is the port the sender opens a TLS connection on directly.
+const (
+	gmailIMAPHost = "imap.gmail.com"
+	gmailIMAPPort = 993
+	gmailSMTPHost = "smtp.gmail.com"
+	gmailSMTPPort = 465
+)
+
+func applyGmailEndpoints(in *accountSettingsInput) {
+	in.Host = gmailIMAPHost
+	in.Port = gmailIMAPPort
+	in.UseTLS = true
+	in.SMTPHost = gmailSMTPHost
+	in.SMTPPort = gmailSMTPPort
+	in.SMTPUseTLS = true
+	in.SMTPSameAsIMAP = false
+	in.Password = ""
+	in.SMTPPassword = ""
+}
+
+// parseSyncStartDate accepts a calendar date or an empty value meaning "no
+// limit". A date in the future would silently mirror nothing at all, which
+// looks like a broken account rather than a setting, so it is refused.
+func parseSyncStartDate(value string) (time.Time, string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, "", nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, time.UTC)
+	if err != nil {
+		return time.Time{}, "Sync start date must be a date like 2024-01-31.", err
+	}
+	if parsed.After(time.Now().UTC()) {
+		return time.Time{}, "Sync start date cannot be in the future.", store.ErrNotFound
+	}
+	return parsed, "", nil
+}
+
+// googleConnectionForAccount resolves a connection the signed-in user actually
+// owns, and reports the reason in words the account form can show.
+func (s *Server) googleConnectionForAccount(ctx context.Context, userID, connectionID int64) (store.GoogleConnection, string, error) {
+	if connectionID <= 0 {
+		return store.GoogleConnection{}, "Choose which connected Google account this mailbox uses.", store.ErrNotFound
+	}
+	if s.googleAuth == nil {
+		return store.GoogleConnection{}, "Google sign-in is not configured on this server.", store.ErrNotFound
+	}
+	connection, err := s.googleAuth.Get(ctx, userID, connectionID)
+	if err != nil {
+		if store.IsNotFound(err) {
+			return store.GoogleConnection{}, "That Google account is not connected any more.", err
+		}
+		return store.GoogleConnection{}, "", err
+	}
+	return connection, "", nil
+}
+
 // saveMailAccountFromInput normalizes account form data, preserves encrypted
 // passwords when the user leaves password fields blank, and returns friendly
 // validation text when the current master key cannot decrypt a saved password.
@@ -550,6 +611,17 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 	}
 	if in.Mailbox == "" {
 		in.Mailbox = store.DefaultMailboxPattern
+	}
+	authType := accountAuthType(in.AuthType)
+	if authType == store.AuthTypeGoogleOAuth {
+		// Gmail's endpoints are fixed, and a wrong host is the one mistake that
+		// produces a confusing failure long after the form was submitted, so the
+		// form does not get to supply them.
+		applyGmailEndpoints(&in)
+	}
+	syncStartAt, message, err := parseSyncStartDate(in.SyncStartAt)
+	if err != nil {
+		return store.MailAccount{}, message, err
 	}
 	if in.SMTPSameAsIMAP && in.SMTPPort == 0 {
 		in.SMTPPort = 587
@@ -569,41 +641,64 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 		return store.MailAccount{}, "", existingErr
 	}
 	encrypted := ""
-	if in.Password == "" && existingErr == nil {
-		if _, err := mmcrypto.DecryptString(s.masterKey, existing.EncryptedPassword); err != nil {
-			return store.MailAccount{}, "Saved IMAP password cannot be decrypted with the current master key. Re-enter the IMAP password.", err
-		}
-		encrypted = existing.EncryptedPassword
-	} else if in.Password != "" {
-		var err error
-		encrypted, err = mmcrypto.EncryptString(s.masterKey, in.Password)
-		if err != nil {
-			return store.MailAccount{}, "", err
-		}
-	} else {
-		return store.MailAccount{}, "IMAP password is required for a new account.", store.ErrNotFound
-	}
 	encryptedSMTP := ""
-	if in.SMTPPassword == "" && existingErr == nil {
-		encryptedSMTP = existing.EncryptedSMTPPassword
-	}
-	if encryptedSMTP == "" && in.SMTPPassword == "" {
-		encryptedSMTP = encrypted
-	}
-	if in.SMTPPassword != "" {
-		var err error
-		encryptedSMTP, err = mmcrypto.EncryptString(s.masterKey, in.SMTPPassword)
+	if authType == store.AuthTypeGoogleOAuth {
+		// The connection is looked up rather than trusted: the identifier comes
+		// from the browser, and an account pointed at another tenant's
+		// connection would authenticate as that tenant's mailbox.
+		connection, message, err := s.googleConnectionForAccount(ctx, userID, in.GoogleConnectionID)
 		if err != nil {
-			return store.MailAccount{}, "", err
+			return store.MailAccount{}, message, err
 		}
-	}
-	if in.SMTPSameAsIMAP {
-		in.SMTPHost = in.Host
-		in.SMTPUsername = in.Username
-		in.SMTPUseTLS = in.UseTLS
-		encryptedSMTP = encrypted
-		if in.SMTPPort <= 0 {
-			in.SMTPPort = 587
+		if in.Email == "" {
+			in.Email = connection.GoogleEmail
+		}
+		if in.Label == "" {
+			in.Label = connection.GoogleEmail
+		}
+		in.Username = in.Email
+		in.SMTPUsername = in.Email
+	} else {
+		if in.Password == "" && existingErr == nil && existing.UsesGoogleOAuth() {
+			// Switching an OAuth account back to a password cannot silently
+			// reuse the empty password an OAuth row stores.
+			return store.MailAccount{}, "Enter an IMAP password to switch this account off Google sign-in.", store.ErrNotFound
+		}
+		if in.Password == "" && existingErr == nil {
+			if _, err := mmcrypto.DecryptString(s.masterKey, existing.EncryptedPassword); err != nil {
+				return store.MailAccount{}, "Saved IMAP password cannot be decrypted with the current master key. Re-enter the IMAP password.", err
+			}
+			encrypted = existing.EncryptedPassword
+		} else if in.Password != "" {
+			var err error
+			encrypted, err = mmcrypto.EncryptString(s.masterKey, in.Password)
+			if err != nil {
+				return store.MailAccount{}, "", err
+			}
+		} else {
+			return store.MailAccount{}, "IMAP password is required for a new account.", store.ErrNotFound
+		}
+		if in.SMTPPassword == "" && existingErr == nil {
+			encryptedSMTP = existing.EncryptedSMTPPassword
+		}
+		if encryptedSMTP == "" && in.SMTPPassword == "" {
+			encryptedSMTP = encrypted
+		}
+		if in.SMTPPassword != "" {
+			var err error
+			encryptedSMTP, err = mmcrypto.EncryptString(s.masterKey, in.SMTPPassword)
+			if err != nil {
+				return store.MailAccount{}, "", err
+			}
+		}
+		if in.SMTPSameAsIMAP {
+			in.SMTPHost = in.Host
+			in.SMTPUsername = in.Username
+			in.SMTPUseTLS = in.UseTLS
+			encryptedSMTP = encrypted
+			if in.SMTPPort <= 0 {
+				in.SMTPPort = 587
+			}
 		}
 	}
 	account := store.MailAccount{
@@ -623,6 +718,9 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 		SMTPUseTLS:            in.SMTPUseTLS,
 		Mailbox:               in.Mailbox,
 		SyncIntervalMinutes:   in.SyncIntervalMinutes,
+		AuthType:              authType,
+		GoogleConnectionID:    in.GoogleConnectionID,
+		SyncStartAt:           syncStartAt,
 	}
 	if in.ID == 0 {
 		saved, err := s.store.CreateMailAccount(ctx, account)
@@ -641,24 +739,34 @@ func (s *Server) ensureMailAccountOnboarding(ctx context.Context, user store.Use
 		return err
 	}
 	if len(smtpAccounts) == 0 {
-		password := account.EncryptedSMTPPassword
-		if strings.TrimSpace(password) == "" {
-			password = account.EncryptedPassword
+		outgoing := store.SMTPAccount{
+			UserID:   user.ID,
+			Label:    firstNonEmpty(account.Label, account.Email, account.Username),
+			Host:     inferredSMTPHost(account),
+			Port:     firstPositive(account.SMTPPort, 587),
+			Username: firstNonEmpty(account.SMTPUsername, account.Username, account.Email),
+			UseTLS:   account.SMTPUseTLS,
 		}
-		if strings.TrimSpace(password) != "" {
-			if _, err := s.store.CreateSMTPAccount(ctx, store.SMTPAccount{
-				UserID:            user.ID,
-				Label:             firstNonEmpty(account.Label, account.Email, account.Username),
-				Host:              inferredSMTPHost(account),
-				Port:              firstPositive(account.SMTPPort, 587),
-				Username:          firstNonEmpty(account.SMTPUsername, account.Username, account.Email),
-				EncryptedPassword: password,
-				UseTLS:            account.SMTPUseTLS,
-			}); err != nil {
-				return err
+		// An OAuth account has no password to copy, and requiring one here would
+		// leave a Google mailbox able to receive but not send.
+		if account.UsesGoogleOAuth() {
+			outgoing.AuthType = store.AuthTypeGoogleOAuth
+			outgoing.GoogleConnectionID = account.GoogleConnectionID
+		} else {
+			outgoing.EncryptedPassword = firstNonEmpty(
+				strings.TrimSpace(account.EncryptedSMTPPassword), strings.TrimSpace(account.EncryptedPassword))
+			if outgoing.EncryptedPassword == "" {
+				return s.finishMailAccountOnboarding(ctx, user, account)
 			}
 		}
+		if _, err := s.store.CreateSMTPAccount(ctx, outgoing); err != nil {
+			return err
+		}
 	}
+	return s.finishMailAccountOnboarding(ctx, user, account)
+}
+
+func (s *Server) finishMailAccountOnboarding(ctx context.Context, user store.User, account store.MailAccount) error {
 	if _, err := s.store.EnsureMeContactForEmail(ctx, user.ID, account.Email, firstNonEmpty(user.Name, account.Label, account.Email)); err != nil && !store.IsNotFound(err) {
 		return err
 	}

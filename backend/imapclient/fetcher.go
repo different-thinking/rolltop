@@ -514,11 +514,32 @@ func (f *Fetcher) UIDs(ctx context.Context, account store.MailAccount, mailbox s
 	criteria := imap.NewSearchCriteria()
 	criteria.Uid = new(imap.SeqSet)
 	criteria.Uid.AddRange(1, 0)
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return nil, fmt.Errorf("search UIDs in mailbox %q: %w", mailbox, err)
 	}
 	return uids, nil
+}
+
+// limitToSyncStart drops messages delivered before the account's configured
+// start date from a search. Applying it at the server means a mailbox with
+// twenty years of history never sends the bodies at all, which is the whole
+// point: the alternative is downloading everything and discarding it here.
+//
+// SINCE compares INTERNALDATE at day granularity, so the boundary day is
+// included whole. Erring towards one extra day beats silently dropping mail
+// that arrived on the chosen date.
+//
+// The cutoff is also applied to the reconcile and flag searches, not just to
+// body fetches. Those compare the server's UID set against what is stored
+// locally, and a mailbox that legitimately holds nothing before the cutoff
+// would otherwise look permanently incomplete and be repaired forever.
+func limitToSyncStart(criteria *imap.SearchCriteria, account store.MailAccount) *imap.SearchCriteria {
+	if account.SyncStartAt.IsZero() {
+		return criteria
+	}
+	criteria.Since = account.SyncStartAt
+	return criteria
 }
 
 // FetchMailbox is the incremental body fetch path. It selects read-only, searches
@@ -542,7 +563,7 @@ func (f *Fetcher) FetchMailbox(ctx context.Context, account store.MailAccount, m
 	criteria := imap.NewSearchCriteria()
 	criteria.Uid = new(imap.SeqSet)
 	criteria.Uid.AddRange(afterUID+1, 0)
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return fmt.Errorf("search new UIDs in mailbox %q after UID %d: %w", mailbox, afterUID, err)
 	}
@@ -1095,7 +1116,7 @@ func (f *Fetcher) SeenUIDs(ctx context.Context, account store.MailAccount, mailb
 	}
 	criteria := imap.NewSearchCriteria()
 	criteria.WithFlags = []string{imap.SeenFlag}
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return nil, fmt.Errorf("search seen UIDs in mailbox %q: %w", mailbox, err)
 	}
@@ -1148,7 +1169,7 @@ func (f *Fetcher) FlaggedUIDs(ctx context.Context, account store.MailAccount, ma
 	}
 	criteria := imap.NewSearchCriteria()
 	criteria.WithFlags = []string{imap.FlaggedFlag}
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return nil, fmt.Errorf("search flagged UIDs in mailbox %q: %w", mailbox, err)
 	}

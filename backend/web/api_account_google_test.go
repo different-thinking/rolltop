@@ -1,0 +1,201 @@
+// File overview: Tests for saving mail accounts that authenticate with Google,
+// including tenant isolation of the connection reference and the sync cutoff.
+
+package web
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"rolltop/backend/store"
+)
+
+func googleAccountInput(connectionID int64) accountSettingsInput {
+	return accountSettingsInput{
+		Email:              "user@gmail.example.test",
+		AuthType:           store.AuthTypeGoogleOAuth,
+		GoogleConnectionID: connectionID,
+	}
+}
+
+func TestSavingAGoogleAccountUsesGmailEndpointsAndStoresNoPassword(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	account, message, err := env.server.saveMailAccountFromInput(
+		context.Background(), env.owner.ID, googleAccountInput(connection.ID))
+	if err != nil {
+		t.Fatalf("save: %v (%s)", err, message)
+	}
+	if account.Host != gmailIMAPHost || account.Port != gmailIMAPPort || !account.UseTLS {
+		t.Fatalf("IMAP endpoint = %s:%d tls=%t", account.Host, account.Port, account.UseTLS)
+	}
+	if account.SMTPHost != gmailSMTPHost || account.SMTPPort != gmailSMTPPort || !account.SMTPUseTLS {
+		t.Fatalf("SMTP endpoint = %s:%d tls=%t", account.SMTPHost, account.SMTPPort, account.SMTPUseTLS)
+	}
+	// A password column that still holds something would keep working after the
+	// user believes they moved the account to Google sign-in.
+	if account.EncryptedPassword != "" || account.EncryptedSMTPPassword != "" {
+		t.Fatal("a Google account stored a password")
+	}
+	if !account.UsesGoogleOAuth() || account.GoogleConnectionID != connection.ID {
+		t.Fatalf("auth = %q connection = %d", account.AuthType, account.GoogleConnectionID)
+	}
+}
+
+// The connection identifier arrives from the browser. Accepting one that
+// belongs to another tenant would authenticate this account as that tenant's
+// mailbox, which is exactly the isolation rule the project is built on.
+func TestSavingAGoogleAccountRejectsAnotherTenantsConnection(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	foreign := env.connect(t, env.other)
+	_, message, err := env.server.saveMailAccountFromInput(
+		context.Background(), env.owner.ID, googleAccountInput(foreign.ID))
+	if err == nil {
+		t.Fatal("saved an account pointing at another tenant's Google connection")
+	}
+	if !strings.Contains(message, "not connected") {
+		t.Fatalf("message = %q, want it to report the connection as unavailable", message)
+	}
+	accounts, err := env.db.ListMailAccountsForUser(context.Background(), env.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("stored accounts = %d, want none", len(accounts))
+	}
+}
+
+func TestSavingAGoogleAccountRequiresAConnection(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	_, message, err := env.server.saveMailAccountFromInput(
+		context.Background(), env.owner.ID, googleAccountInput(0))
+	if err == nil {
+		t.Fatal("saved a Google account with no connection")
+	}
+	if !strings.Contains(message, "Choose which connected Google account") {
+		t.Fatalf("message = %q", message)
+	}
+}
+
+// Onboarding creates the outgoing server. Requiring a password there would have
+// left a Google mailbox able to receive but not send.
+func TestOnboardingGivesAGoogleAccountAnOAuthOutgoingServer(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	ctx := context.Background()
+	account, message, err := env.server.saveMailAccountFromInput(ctx, env.owner.ID, googleAccountInput(connection.ID))
+	if err != nil {
+		t.Fatalf("save: %v (%s)", err, message)
+	}
+	if err := env.server.ensureMailAccountOnboarding(ctx, env.owner, account); err != nil {
+		t.Fatalf("onboarding: %v", err)
+	}
+	outgoing, err := env.db.ListSMTPAccountsForUser(ctx, env.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outgoing) != 1 {
+		t.Fatalf("outgoing servers = %d, want 1", len(outgoing))
+	}
+	if !outgoing[0].UsesGoogleOAuth() || outgoing[0].GoogleConnectionID != connection.ID {
+		t.Fatalf("outgoing server auth = %q connection = %d", outgoing[0].AuthType, outgoing[0].GoogleConnectionID)
+	}
+	if outgoing[0].EncryptedPassword != "" {
+		t.Fatal("the outgoing server stored a password for an OAuth account")
+	}
+}
+
+// Switching back has to demand a password: the OAuth row stores an empty one,
+// and reusing it would produce an account that silently cannot authenticate.
+func TestSwitchingAGoogleAccountBackToPasswordRequiresOne(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	ctx := context.Background()
+	account, _, err := env.server.saveMailAccountFromInput(ctx, env.owner.ID, googleAccountInput(connection.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, message, err := env.server.saveMailAccountFromInput(ctx, env.owner.ID, accountSettingsInput{
+		ID:       account.ID,
+		Email:    account.Email,
+		Host:     "imap.example.test",
+		Port:     993,
+		Username: account.Email,
+		AuthType: store.AuthTypePassword,
+	})
+	if err == nil {
+		t.Fatal("switched to password authentication without a password")
+	}
+	if !strings.Contains(message, "Enter an IMAP password") {
+		t.Fatalf("message = %q", message)
+	}
+	saved, err := env.db.GetMailAccountForUser(ctx, env.owner.ID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.UsesGoogleOAuth() {
+		t.Fatal("the rejected switch still changed the stored account")
+	}
+}
+
+func TestSavingAGoogleAccountKeepsTheSyncStartDate(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	input := googleAccountInput(connection.ID)
+	input.SyncStartAt = "2024-03-01"
+	account, message, err := env.server.saveMailAccountFromInput(context.Background(), env.owner.ID, input)
+	if err != nil {
+		t.Fatalf("save: %v (%s)", err, message)
+	}
+	want := time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC)
+	if !account.SyncStartAt.Equal(want) {
+		t.Fatalf("sync start = %s, want %s", account.SyncStartAt, want)
+	}
+	if got := apiAccountFromStore(account).SyncStartAt; got != "2024-03-01" {
+		t.Fatalf("presented sync start = %q, want 2024-03-01", got)
+	}
+}
+
+// A cutoff in the future mirrors nothing at all, which reads as a broken
+// account rather than a setting.
+func TestSyncStartDateRejectsUnusableValues(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	for name, value := range map[string]string{
+		"not a date": "last tuesday",
+		"future":     time.Now().UTC().AddDate(0, 0, 2).Format("2006-01-02"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := googleAccountInput(connection.ID)
+			input.SyncStartAt = value
+			if _, message, err := env.server.saveMailAccountFromInput(
+				context.Background(), env.owner.ID, input); err == nil {
+				t.Fatalf("accepted %q with message %q", value, message)
+			}
+		})
+	}
+}
+
+// An account list that cannot name the Google identity leaves the user unable
+// to tell which of several connected accounts a mailbox signs in as.
+func TestAccountListNamesTheConnectedGoogleAddress(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	ctx := context.Background()
+	account, _, err := env.server.saveMailAccountFromInput(ctx, env.owner.ID, googleAccountInput(connection.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	presented := env.server.apiAccountsWithGoogleIdentity(ctx, env.owner.ID, []store.MailAccount{account})
+	if len(presented) != 1 {
+		t.Fatalf("presented accounts = %d", len(presented))
+	}
+	if presented[0].GoogleEmail != connection.GoogleEmail {
+		t.Fatalf("google email = %q, want %q", presented[0].GoogleEmail, connection.GoogleEmail)
+	}
+	if presented[0].AuthType != store.AuthTypeGoogleOAuth {
+		t.Fatalf("auth type = %q", presented[0].AuthType)
+	}
+}
