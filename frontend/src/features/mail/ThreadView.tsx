@@ -5,7 +5,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
-import type { DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
+import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
 import type { Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
@@ -57,11 +57,11 @@ type MessagePluginPanelState = {
   panelID: string;
 };
 
-/** HeaderActionKind names the header toolbar commands that run a request. */
-type HeaderActionKind = "archive" | "trash" | "spam" | "unread";
+/** HeaderMoveAction names the header toolbar commands that relocate a conversation. */
+type HeaderMoveAction = "archive" | "trash" | "spam";
 
 /** headerMoveFailureLabel names a failed header move the way the button did. */
-function headerMoveFailureLabel(action: "archive" | "trash" | "spam"): string {
+function headerMoveFailureLabel(action: HeaderMoveAction): string {
   if (action === "archive") return "Archive";
   if (action === "trash") return "Move to trash";
   return "Report spam";
@@ -853,6 +853,7 @@ export function ThreadView({
   navigate,
   mailboxes,
   swipePreferences,
+  setMessagesHidden,
   enabledPlugins,
   refreshChrome,
   openCompose,
@@ -868,13 +869,14 @@ export function ThreadView({
   navigate: (url: string) => void;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  setMessagesHidden: (messageIDs: number[], hidden: boolean) => void;
   enabledPlugins: string[];
   refreshChrome: () => Promise<Bootstrap | null>;
   openCompose: (query?: string) => void;
   messageSecurityPlugins?: RuntimePlugin[];
   securityUnlock: SecurityUnlockState;
   openSecurityUnlock: (identityID?: number, onUnlocked?: (state: SecurityUnlockState) => void, recipientKeyIDs?: string[], fallbackEmail?: string) => void;
-  addToast: (message: string, kind?: Toast["kind"]) => number;
+  addToast: AddToast;
 }) {
   const id = location.path.split("/").pop() || "";
   const currentMessageID = Number(id) || 0;
@@ -899,7 +901,7 @@ export function ThreadView({
   const [autocryptImports, setAutocryptImports] = useState<Record<number, AttachmentPGPImportState>>({});
   const [autocryptGossipImports, setAutocryptGossipImports] = useState<Record<number, Record<string, AttachmentPGPImportState>>>({});
   const [searchExplanations, setSearchExplanations] = useState<Record<number, SearchExplanationState>>({});
-  const [headerActionBusy, setHeaderActionBusy] = useState<HeaderActionKind | "">("");
+  const [markUnreadBusy, setMarkUnreadBusy] = useState(false);
   const [loadStatus, setLoadStatus] = useState<MessageLoadStatus | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1631,15 +1633,16 @@ export function ThreadView({
 
   // The header toolbar carries the commands the list offers on row hover. Reply,
   // reply all, and forward act on the message the URL points at — the same one
-  // the r/a/f shortcuts use. Archive, trash, spam, and mark unread act on the
-  // conversation, but only on the part of it that shares the open message's
-  // folder, so a thread's Sent or Trash copies stay where they are, exactly as a
-  // row action in that folder's list would have behaved.
+  // the r/a/f shortcuts use. The three moves act on the conversation, but only
+  // on the part of it that shares the open message's folder, so a thread's Sent
+  // or Trash copies stay where they are, exactly as a row action in that
+  // folder's list would have behaved. Mark unread is the exception and reaches
+  // the whole thread, because opening it is what marked the whole thread read.
   const headerActionItem = thread.find((item) => item.message.id === currentMessageID) || thread[thread.length - 1] || null;
   const headerActionMessageIDs = headerActionItem
     ? thread.filter((item) => item.message.mailbox_id === headerActionItem.message.mailbox_id).map((item) => item.message.id)
     : [];
-  const headerActionsBusy = loading || headerActionBusy !== "";
+  const headerActionsBusy = loading || markUnreadBusy;
   const headerArchiveMailbox = headerActionItem
     ? archiveMailboxForAccount(mailboxes, swipePreferences.archive_mailboxes, headerActionItem.message.account_id)
     : undefined;
@@ -1654,42 +1657,67 @@ export function ThreadView({
     return { disabled: headerActionsBusy, title: `${label} (${target.name})` };
   }
 
-  async function moveThreadMessages(action: "archive" | "trash" | "spam") {
-    if (!headerActionItem || headerActionBusy) return;
+  // A header move hides its rows and hands the request to the undo toast, the
+  // way a row action does, then returns to the list. The toast lives in the app
+  // shell, so the undo window survives leaving this view: nothing is sent until
+  // the toast settles, and undoing simply puts the rows back.
+  function moveThreadMessages(action: HeaderMoveAction) {
+    if (!headerActionItem) return;
     const target = action === "archive" ? headerArchiveMailbox : action === "trash" ? headerTrashMailbox : headerJunkMailbox;
     if (!target || headerActionItem.message.mailbox_id === target.id) return;
     const ids = headerActionMessageIDs;
-    setHeaderActionBusy(action);
-    try {
-      const result = await api.bulkMoveMessages(csrf, ids, target.id);
-      addToast(result.queued
-        ? `Move task started for ${messageCountLabel(ids.length)}.`
-        : `Moved ${messageCountLabel(result.moved ?? ids.length)} to ${target.name}.`);
-      await refreshChrome();
-      navigate(backURL);
-    } catch (err) {
-      addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}`, "error");
-    } finally {
-      setHeaderActionBusy("");
+    // Trash and spam end a conversation, so they dismiss its snooze reminder
+    // too; archive only files it away, and a reminder there still makes sense.
+    // The reminder belongs to the opened message, so it only goes when that
+    // message is one of the messages this move actually relocates.
+    const snoozed = Boolean(snoozedUntil) && Date.parse(snoozedUntil) > Date.now();
+    const snoozedMessageID = action !== "archive" && snoozed && ids.includes(currentMessageID) ? currentMessageID : 0;
+    setMessagesHidden(ids, true);
+    addToast(`Moved ${messageCountLabel(ids.length)} to ${target.name}.`, "success", {
+      onUndo: () => setMessagesHidden(ids, false),
+      onCommit: (reason) => void commitThreadMove(action, target, ids, snoozedMessageID, reason === "background")
+    });
+    navigate(backURL);
+  }
+
+  async function commitThreadMove(action: HeaderMoveAction, target: Mailbox, ids: number[], snoozedMessageID: number, keepalive: boolean) {
+    // On a background commit the reminder request has to leave before any await
+    // or the unload cancels it, so it is fired rather than awaited in order.
+    if (snoozedMessageID > 0 && keepalive) {
+      void api.unsnoozeMessage(csrf, snoozedMessageID, { keepalive: true }).catch(() => undefined);
     }
+    try {
+      await api.bulkMoveMessages(csrf, ids, target.id, { keepalive });
+    } catch (err) {
+      setMessagesHidden(ids, false);
+      addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}`, "error");
+      return;
+    }
+    if (snoozedMessageID > 0 && !keepalive) {
+      void api.unsnoozeMessage(csrf, snoozedMessageID).catch(() => undefined);
+    }
+    if (!keepalive) void refreshChrome().catch(() => undefined);
   }
 
   async function markThreadUnread() {
-    if (!headerActionItem || headerActionBusy) return;
-    const ids = headerActionMessageIDs;
-    setHeaderActionBusy("unread");
+    if (markUnreadBusy) return;
+    // Opening the conversation marked every message in it read, across folders
+    // and accounts, so marking unread has to reach exactly as far to undo that.
+    const ids = thread.map((item) => item.message.id);
+    if (ids.length === 0) return;
+    setMarkUnreadBusy(true);
     try {
       await api.bulkRead(csrf, ids, false);
-      addToast(`Marked ${messageCountLabel(ids.length)} unread.`);
-      await refreshChrome();
-      // Opening a conversation marks it read again, so returning to the list is
-      // part of the action rather than a convenience.
-      navigate(backURL);
     } catch (err) {
       addToast(`Mark unread failed: ${messageFromError(err)}`, "error");
-    } finally {
-      setHeaderActionBusy("");
+      setMarkUnreadBusy(false);
+      return;
     }
+    addToast(`Marked ${messageCountLabel(ids.length)} unread.`);
+    void refreshChrome().catch(() => undefined);
+    // Opening a conversation marks it read again, so returning to the list is
+    // part of the action rather than a convenience.
+    navigate(backURL);
   }
 
   const archiveState = headerMoveState(headerArchiveMailbox, "Archive", "Choose an Archive folder for this account in swipe settings");
@@ -1711,7 +1739,7 @@ export function ThreadView({
           {mailbox ? <span className="label-pill">{mailbox.name}</span> : null}
         </div>
         {headerActionItem ? (
-          <div className="thread-head-actions" role="group" aria-label="Conversation actions" aria-busy={headerActionBusy !== ""}>
+          <div className="thread-head-actions" role="group" aria-label="Conversation actions" aria-busy={markUnreadBusy}>
             <button
               className="thread-head-action"
               type="button"
@@ -1749,7 +1777,7 @@ export function ThreadView({
               className="thread-head-action"
               type="button"
               disabled={archiveState.disabled}
-              onClick={() => void moveThreadMessages("archive")}
+              onClick={() => moveThreadMessages("archive")}
               title={archiveState.title}
               aria-label="Archive"
             >
@@ -1759,7 +1787,7 @@ export function ThreadView({
               className="thread-head-action thread-head-action-delete"
               type="button"
               disabled={trashState.disabled}
-              onClick={() => void moveThreadMessages("trash")}
+              onClick={() => moveThreadMessages("trash")}
               title={trashState.title}
               aria-label="Move to trash"
             >
@@ -1779,7 +1807,7 @@ export function ThreadView({
               className="thread-head-action"
               type="button"
               disabled={spamState.disabled}
-              onClick={() => void moveThreadMessages("spam")}
+              onClick={() => moveThreadMessages("spam")}
               title={spamState.title}
               aria-label="Report spam"
             >
