@@ -30,6 +30,10 @@ func TestBulkReadMessagesIsUserScoped(t *testing.T) {
 	ownerMessage := createNotificationTestMessage(t, ctx, db, owner, 301, "Sender", "Owner message")
 	otherMessage := createNotificationTestMessage(t, ctx, db, other, 401, "Sender", "Other message")
 	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+	// Marking mail read notifies the tenant, which schedules a background web
+	// push worker. Left running, it outlives this test and reports the vanished
+	// test database into whatever the next test happens to be capturing.
+	t.Cleanup(func() { waitForWebPushWorker(t, server, owner.ID) })
 
 	payload, err := json.Marshal(map[string]any{
 		"ids":  []int64{ownerMessage.ID, ownerMessage.ID, otherMessage.ID},

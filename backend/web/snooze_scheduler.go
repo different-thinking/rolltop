@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	"rolltop/backend/store"
 )
 
 const (
@@ -43,6 +45,11 @@ func (s *Server) runSnoozeScheduler() {
 		now := time.Now().UTC()
 		next, err := s.processDueSnoozes(context.Background(), now)
 		delay := snoozeSchedulerIdleInterval
+		if store.IsClosed(err) {
+			// The store this loop reads from is gone; there are no reminders left
+			// to find and no backoff that would bring them back.
+			return
+		}
 		if err != nil {
 			log.Printf("snooze scheduler: %v", err)
 			delay = snoozeSchedulerErrorBackoff

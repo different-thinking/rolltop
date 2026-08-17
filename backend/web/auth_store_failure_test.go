@@ -43,6 +43,10 @@ func newStoreFailureTestServer(t *testing.T) (*store.Store, *Server, http.Handle
 		Store:      db,
 		MasterKey:  []byte("12345678901234567890123456789012"),
 		SessionTTL: time.Hour,
+		// Route and cookie behavior needs no background workers, and workers that
+		// outlive this test read its torn-down database, which logs a failure into
+		// an unrelated test's captured output.
+		DisableBackgroundWorkers: true,
 	})
 	if err != nil {
 		t.Fatal(err)

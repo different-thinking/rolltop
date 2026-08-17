@@ -94,6 +94,9 @@ func (s *Server) notifySnoozeReminderWebPush(ctx context.Context, userID int64) 
 	defer cancel()
 	subs, err := s.store.ListWebPushSubscriptions(ctx, userID)
 	if err != nil {
+		if store.IsClosed(err) {
+			return false
+		}
 		if ctx.Err() == nil {
 			log.Printf("snooze web push subscriptions user_id=%d: %v", userID, err)
 		}
