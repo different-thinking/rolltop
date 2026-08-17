@@ -56,9 +56,29 @@ export ROLLTOP_COOKIE_SECURE="false"
 export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
+export ROLLTOP_MEMORY_LIMIT="80%"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
+
+`ROLLTOP_MEMORY_LIMIT` is the soft ceiling the Go runtime is given for its heap.
+Without one the collector aims at roughly twice the live heap, so the first sync
+of a new account, which is the heaviest work this process does, can grow into the
+container's limit and be killed mid-write. The default takes 80% of the
+container's memory limit, or of the machine's memory when the container has no
+limit; the remainder covers what the heap accounting does not, such as goroutine
+stacks and the mapped search index. Set an absolute size (`768MiB`, `2GB`), a
+different share (`60%`), or `off` to leave the runtime unbounded. An explicit
+`GOMEMLIMIT` wins over this setting. The applied value is named on startup:
+
+```text
+rolltop memory limit 1.6GiB (80% of the 2.0GiB cgroup limit)
+```
+
+The limit is a ceiling, not a reservation: the process only uses what it needs,
+and going over it makes the collector work harder rather than failing an
+allocation. Give the container at least a gigabyte for a first sync of a large
+mailbox.
 
 `ROLLTOP_STARTUP_INTEGRITY_CHECK` decides when SQLite files are verified during
 startup. `auto` (the default) verifies them only after a run that did not shut
@@ -386,14 +406,15 @@ operator check.
 4. The user clicks `Sync now`, chooses per-folder `auto`, `manual`, or `never`, or scheduled sync runs on `ROLLTOP_SYNC_INTERVAL`.
 5. Sync runs are planned per mailbox, with INBOX prioritized before background folders. Each mailbox task estimates pending work from IMAP `STATUS`, streams messages in UID batches, and updates current folder, UID, seen, total, stored, and skipped counts.
 6. Every mailbox turn is time-bounded so one folder cannot hold the account-wide pass forever. A turn that runs out of time stops at a message boundary, commits what it mirrored, and is rescheduled immediately: a first mirror of a large folder therefore completes over many turns and is recorded as a series of normal runs rather than a failure. Each paused turn doubles the next one, up to ten minutes, so a backfill spends its time fetching instead of replanning the same folder; the folder returns to the short freshness budget as soon as a turn finishes cleanly. A turn that spends its whole budget without mirroring anything is still reported as an error.
-7. Message bodies, attachment names, and searchable text-like attachments are indexed with the current user's `user_id`.
-8. SQLite stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
-9. Raw `.eml` blobs are retained for `ROLLTOP_BLOB_RETENTION` only, defaulting to 14 days. Set it to `0` to keep all raw blobs.
-10. Attachment bytes are read from the raw `.eml` while indexing and are not stored as separate blobs for new syncs.
-11. `/mail`, folder views, `/search`, and `/messages/{id}` only return current-user records.
-12. Folder counts show unread messages.
-13. Dragging a message onto a folder immediately removes it from the current view, shows a moving toast, and then applies the IMAP move.
-14. Snooze is local and conversation-scoped: future snoozes are hidden from normal lists and search, then resurface at the top without moving or deleting remote mail. A genuinely new incremental reply clears the active snooze.
+7. A sync turn also has a memory budget. Fetch batches are planned from the sizes the server reports before the bodies are requested, so a batch is bounded in bytes and not only in messages, and a message larger than the budget is fetched on its own; search documents are trimmed to what Bleve can index before they are queued, and the queue commits when either its document count or its payload budget is reached. A folder holding a few very large mails therefore no longer decides how much memory the process needs.
+8. Message bodies, attachment names, and searchable text-like attachments are indexed with the current user's `user_id`.
+9. SQLite stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
+10. Raw `.eml` blobs are retained for `ROLLTOP_BLOB_RETENTION` only, defaulting to 14 days. Set it to `0` to keep all raw blobs.
+11. Attachment bytes are read from the raw `.eml` while indexing and are not stored as separate blobs for new syncs.
+12. `/mail`, folder views, `/search`, and `/messages/{id}` only return current-user records.
+13. Folder counts show unread messages.
+14. Dragging a message onto a folder immediately removes it from the current view, shows a moving toast, and then applies the IMAP move.
+15. Snooze is local and conversation-scoped: future snoozes are hidden from normal lists and search, then resurface at the top without moving or deleting remote mail. A genuinely new incremental reply clears the active snooze.
 
 In account settings, `Folder scope` can be:
 

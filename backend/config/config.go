@@ -16,6 +16,7 @@ import (
 
 	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
+	"rolltop/backend/memlimit"
 )
 
 // Config is the validated runtime configuration assembled from environment variables.
@@ -36,6 +37,10 @@ type Config struct {
 	WebhookToken      string
 	LogLevel          string
 	Google            GoogleConfig
+
+	// MemoryLimit is the soft ceiling the Go runtime is given at startup so a
+	// large sync collects instead of growing into the container's limit.
+	MemoryLimit memlimit.Request
 
 	// StartupIntegrityCheck selects when SQLite files are verified during
 	// startup: after an unclean shutdown, on every start, or never.
@@ -104,6 +109,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// The memlimit package owns what a ceiling means, so a typo is rejected here
+	// by the same parser the runtime setting applies.
+	memoryLimit, err := memlimit.ParseRequest(os.Getenv("ROLLTOP_MEMORY_LIMIT"))
+	if err != nil {
+		return Config{}, fmt.Errorf("ROLLTOP_MEMORY_LIMIT: %w", err)
+	}
 	// quick_check reads every page, so the default only pays that cost when the
 	// previous run did not shut down cleanly and the files may be damaged.
 	integrityCheck := strings.ToLower(env("ROLLTOP_STARTUP_INTEGRITY_CHECK", IntegrityCheckAuto))
@@ -129,6 +140,7 @@ func Load() (Config, error) {
 		WebhookToken:      os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
 		LogLevel:          logLevel,
 		Google:            google,
+		MemoryLimit:       memoryLimit,
 
 		StartupIntegrityCheck: integrityCheck,
 	}, nil

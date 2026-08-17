@@ -31,6 +31,7 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
+	"rolltop/backend/memlimit"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
@@ -408,6 +409,11 @@ func run() (runErr error) {
 		return err
 	}
 	logging.SetLevel(cfg.LogLevel)
+	// Install the heap ceiling before any service allocates. A first-time
+	// account sync is the heaviest thing this process does, and without a limit
+	// the collector lets the heap double past whatever the container allows,
+	// which ends the process mid-write instead of ending an allocation.
+	log.Printf("rolltop %s", memlimit.Apply(cfg.MemoryLimit).Description())
 	// Name the resolved storage paths before anything opens them, so a
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.

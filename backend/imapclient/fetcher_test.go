@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -899,4 +900,192 @@ func TestSyncDestinationSessionHonorsCancelledContext(t *testing.T) {
 	if _, _, err := session.FindMessageBySyncMarker(ctx, "v1.task.0000000001.0000000002"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("FindMessageBySyncMarker() error = %v, want context.Canceled", err)
 	}
+}
+
+func TestPlanUIDFetchBatchesRespectsBothBudgets(t *testing.T) {
+	uids := []uint32{1, 2, 3, 4, 5, 6}
+	sizes := map[uint32]int64{1: 1000, 2: 1000, 3: 1000, 4: 1000, 5: 1000, 6: 1000}
+
+	got := planUIDFetchBatches(uids, sizes, 2, 1<<20)
+	if want := [][]uint32{{1, 2}, {3, 4}, {5, 6}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("count-bounded batches = %v, want %v", got, want)
+	}
+
+	got = planUIDFetchBatches(uids, sizes, 10, 2500)
+	if want := [][]uint32{{1, 2}, {3, 4}, {5, 6}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("byte-bounded batches = %v, want %v", got, want)
+	}
+
+	// A message larger than the whole budget still has to be fetched. It gets a
+	// batch of its own so nothing else is downloaded next to it.
+	sizes[3] = 64 << 20
+	got = planUIDFetchBatches(uids, sizes, 10, 4000)
+	if want := [][]uint32{{1, 2}, {3}, {4, 5, 6}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("oversized message batches = %v, want %v", got, want)
+	}
+}
+
+func TestPlanUIDFetchBatchesFallsBackToCountWithoutServerSizes(t *testing.T) {
+	uids := make([]uint32, 25)
+	for i := range uids {
+		uids[i] = uint32(i + 1)
+	}
+	got := planUIDFetchBatches(uids, nil, defaultFetchBatchSize, defaultFetchBatchBytes)
+	if len(got) != 3 {
+		t.Fatalf("unsized batches = %d, want 3", len(got))
+	}
+	for i, batch := range got {
+		if i < 2 && len(batch) != defaultFetchBatchSize {
+			t.Fatalf("unsized batch %d holds %d UIDs, want %d", i, len(batch), defaultFetchBatchSize)
+		}
+	}
+	if got := planUIDFetchBatches(nil, nil, 10, 1<<20); got != nil {
+		t.Fatalf("empty batch plan = %v, want nil", got)
+	}
+}
+
+// A fetcher that downloads one message at a time has no batch to plan, so it
+// must not pay for a size probe either.
+func TestUIDProbeWindowsSkipPlanningForSingleMessageFetches(t *testing.T) {
+	uids := make([]uint32, uidSizeProbeWindow+5)
+	for i := range uids {
+		uids[i] = uint32(i + 1)
+	}
+	if got := uidProbeWindows(uids, 1); len(got) != 1 || len(got[0]) != len(uids) {
+		t.Fatalf("single-message windows = %d", len(got))
+	}
+	windows := uidProbeWindows(uids, 10)
+	if len(windows) != 2 || len(windows[0]) != uidSizeProbeWindow || len(windows[1]) != 5 {
+		t.Fatalf("probe windows = %d, %v", len(windows), windows)
+	}
+	if sizes, err := probeUIDSizes(context.Background(), nil, "INBOX", uids, 1); sizes != nil || err != nil {
+		t.Fatalf("skipped probe returned %v, %v", sizes, err)
+	}
+}
+
+// The whole point of the probe: a folder holding a few large messages must not
+// put them in one batch, because the batch stays resident until its last
+// message has been stored.
+func TestFetchUIDsPlansBodyBatchesFromProbedSizes(t *testing.T) {
+	const largeBody = 6 << 20
+	sizes := map[uint32]int{1: 1024, 2: largeBody, 3: largeBody, 4: 1024}
+	clientConn, serverConn := net.Pipe()
+	serverDone := make(chan error, 1)
+	commands := make(chan string, 8)
+	go func() {
+		defer serverConn.Close()
+		if _, err := io.WriteString(serverConn, "* OK [CAPABILITY IMAP4rev1] test server ready\r\n"); err != nil {
+			serverDone <- err
+			return
+		}
+		reader := bufio.NewReader(serverConn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				serverDone <- nil
+				return
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 4 || !strings.EqualFold(fields[1], "UID") || !strings.EqualFold(fields[2], "FETCH") {
+				serverDone <- fmt.Errorf("unexpected command %q", strings.TrimSpace(line))
+				return
+			}
+			requested, err := parseTestUIDSet(fields[3])
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			commands <- fmt.Sprintf("%s %s", strings.ToUpper(strings.Join(fields[4:], " ")), fields[3])
+			sizesOnly := strings.Contains(strings.ToUpper(line), "RFC822.SIZE)")
+			for i, uid := range requested {
+				if sizesOnly {
+					if _, err := fmt.Fprintf(serverConn, "* %d FETCH (UID %d RFC822.SIZE %d)\r\n", i+1, uid, sizes[uid]); err != nil {
+						serverDone <- err
+						return
+					}
+					continue
+				}
+				raw := append([]byte(fmt.Sprintf("Subject: UID %d\r\n\r\n", uid)), bytes.Repeat([]byte("x"), sizes[uid])...)
+				if _, err := fmt.Fprintf(serverConn,
+					"* %d FETCH (UID %d INTERNALDATE \"16-Jul-2026 00:00:00 +0000\" RFC822.SIZE %d FLAGS () BODY[] {%d}\r\n",
+					i+1, uid, len(raw), len(raw)); err != nil {
+					serverDone <- err
+					return
+				}
+				if _, err := serverConn.Write(raw); err != nil {
+					serverDone <- err
+					return
+				}
+				if _, err := io.WriteString(serverConn, ")\r\n"); err != nil {
+					serverDone <- err
+					return
+				}
+			}
+			if _, err := fmt.Fprintf(serverConn, "%s OK UID FETCH complete\r\n", fields[0]); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+	}()
+
+	c, err := client.New(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ErrorLog = log.New(io.Discard, "", 0)
+	defer c.Terminate()
+	c.SetState(imap.SelectedState, &imap.MailboxStatus{Name: "INBOX", Messages: 4, UidNext: 5, UidValidity: 1})
+
+	var fetched []uint32
+	fetcher := &Fetcher{BatchSize: 10, BatchBytes: 8 << 20}
+	err = fetcher.fetchUIDs(context.Background(), c, "INBOX", []uint32{1, 2, 3, 4}, func(message syncer.FetchedMessage) error {
+		fetched = append(fetched, message.UID)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("fetchUIDs() error = %v", err)
+	}
+	if want := []uint32{1, 2, 3, 4}; !reflect.DeepEqual(fetched, want) {
+		t.Fatalf("fetched UIDs = %v, want %v", fetched, want)
+	}
+	close(commands)
+	issued := make([]string, 0, 4)
+	for command := range commands {
+		issued = append(issued, command)
+	}
+	want := []string{
+		"(UID RFC822.SIZE) 1:4",
+		"(UID INTERNALDATE RFC822.SIZE FLAGS BODY.PEEK[]) 1:2",
+		"(UID INTERNALDATE RFC822.SIZE FLAGS BODY.PEEK[]) 3:4",
+	}
+	if !reflect.DeepEqual(issued, want) {
+		t.Fatalf("issued commands = %#v, want %#v", issued, want)
+	}
+	// The scripted server reads until the connection closes, so close it before
+	// collecting its result.
+	c.Terminate()
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func parseTestUIDSet(value string) ([]uint32, error) {
+	uids := make([]uint32, 0, 4)
+	for _, part := range strings.Split(value, ",") {
+		bounds := strings.SplitN(part, ":", 2)
+		first, err := strconv.ParseUint(bounds[0], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse UID set %q: %w", value, err)
+		}
+		last := first
+		if len(bounds) == 2 {
+			if last, err = strconv.ParseUint(bounds[1], 10, 32); err != nil {
+				return nil, fmt.Errorf("parse UID set %q: %w", value, err)
+			}
+		}
+		for uid := first; uid <= last; uid++ {
+			uids = append(uids, uint32(uid))
+		}
+	}
+	return uids, nil
 }

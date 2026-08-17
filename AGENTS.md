@@ -30,6 +30,15 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- Keep sync bounded in memory as well as in time. Anything that accumulates
+  message content between commits - IMAP fetch batches, the search-index batch -
+  must be bounded in **bytes**, not only in message count: mail sizes span four
+  orders of magnitude, so a count-only limit lets one folder decide how much
+  memory the process needs. Trim indexable text to the `backend/search` limits
+  when a document is queued rather than when it is committed, and release raw
+  bodies as soon as they are stored. The process also installs a soft heap
+  ceiling at startup (`ROLLTOP_MEMORY_LIMIT`, `backend/memlimit`); it is a
+  backstop for the unbounded case, not a licence to add one.
 
 ## Checks
 
