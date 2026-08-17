@@ -732,3 +732,10 @@ export type DatabaseOverview = {
   job?: DatabaseMaintenanceJob | null;
   restart_supported: boolean;
 };
+
+/** ServerLogLine is one captured line of the process log tail. */
+export type ServerLogLine = {
+  time: string;
+  message: string;
+  error: boolean;
+};

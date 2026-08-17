@@ -361,6 +361,11 @@ func run() (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Keep the newest log lines in memory from the first one onwards. A hosted
+	// operator reaches the admin database page but not the container log, so
+	// this is the only route by which the line behind a 500 reaches them.
+	log.SetOutput(io.MultiWriter(os.Stderr, logging.Recorder()))
+
 	// Arm crash reporting before anything can fail. A port conflict or an
 	// unusable configuration is exactly the kind of fatal that crash-loops a
 	// container, and the container log may not survive the next restart.
