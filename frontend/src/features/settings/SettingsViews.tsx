@@ -11,7 +11,7 @@ import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm } from "../../lib/accountForm";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
-import { folderParentNames, folderTree, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
+import { folderParentNames, folderTree, isArchiveMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
 import { systemThemeID } from "../../lib/theme";
@@ -532,10 +532,6 @@ function cloneSwipePreferences(preferences: SwipePreferences): SwipePreferences 
     ...preferences,
     archive_mailboxes: preferences.archive_mailboxes.map((mailbox) => ({ ...mailbox }))
   };
-}
-
-function isSwipeArchiveChoice(mailbox: Mailbox): boolean {
-  return !["inbox", "sent", "drafts", "trash", "junk"].includes(mailbox.role);
 }
 
 function folderCanInherit(mailbox: Mailbox) {
@@ -1266,7 +1262,7 @@ export function SettingsView({
     const missingAccount = archiveRequired
       ? imapAccounts.find((account) => {
           const mailboxID = archiveByAccount.get(account.id);
-          return !mailboxes.some((mailbox) => mailbox.id === mailboxID && mailbox.account_id === account.id && isSwipeArchiveChoice(mailbox));
+          return !mailboxes.some((mailbox) => mailbox.id === mailboxID && mailbox.account_id === account.id && isArchiveMailboxChoice(mailbox));
         })
       : undefined;
     if (missingAccount) {
@@ -1278,7 +1274,7 @@ export function SettingsView({
       ...swipeDraft,
       archive_mailboxes: swipeDraft.archive_mailboxes.filter((item) =>
         accountIDs.has(item.account_id) && mailboxes.some((mailbox) =>
-          mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isSwipeArchiveChoice(mailbox)
+          mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isArchiveMailboxChoice(mailbox)
         )
       )
     };
@@ -1913,14 +1909,16 @@ export function SettingsView({
       : [];
     const archiveByAccount = new Map(swipeDraft.archive_mailboxes.map((item) => [item.account_id, item.mailbox_id]));
     const archiveChoices = (accountID: number) => mailboxes
-      .filter((mailbox) => mailbox.account_id === accountID && isSwipeArchiveChoice(mailbox))
+      .filter((mailbox) => mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
       .sort((left, right) => left.name.localeCompare(right.name));
-    const missingArchiveAccounts = archiveRequired
-      ? imapAccounts.filter((account) => {
-          const selectedID = archiveByAccount.get(account.id);
-          return !selectedID || !archiveChoices(account.id).some((mailbox) => mailbox.id === selectedID);
-        })
-      : [];
+    // Archive folders back both the swipe action and the pointer row action, so
+    // they stay configurable even when neither swipe is set to Archive. Only the
+    // swipe setting makes a missing folder a save-blocking error.
+    const accountsMissingArchive = imapAccounts.filter((account) => {
+      const selectedID = archiveByAccount.get(account.id);
+      return !selectedID || !archiveChoices(account.id).some((mailbox) => mailbox.id === selectedID);
+    });
+    const missingArchiveAccounts = archiveRequired ? accountsMissingArchive : [];
 
     function updateArchiveMailbox(accountID: number, mailboxID: number) {
       swipeDraftDirty.current = true;
@@ -1983,9 +1981,13 @@ export function SettingsView({
         {trashUnavailable || missingTrashAccounts.length > 0 ? (
           <small className="swipe-validation">{trashUnavailable ? "Add an IMAP server before using Move to trash." : "Assign a Trash role folder for every IMAP account before using Move to trash."}</small>
         ) : null}
-        {archiveRequired ? (
+        {archiveUnavailable ? (
+          <small className="swipe-validation">Add an IMAP server before using Archive.</small>
+        ) : null}
+        {imapAccounts.length > 0 ? (
           <section className="swipe-archive-settings">
             <h3>Archive folders</h3>
+            <p className="swipe-archive-hint">Used by the Archive swipe action and by the Archive button on message rows.</p>
             <div className="swipe-archive-grid">
               {imapAccounts.map((account) => {
                 const choices = archiveChoices(account.id);
@@ -2004,8 +2006,12 @@ export function SettingsView({
                 );
               })}
             </div>
-            {archiveUnavailable || missingArchiveAccounts.length > 0 ? (
-              <small className="swipe-validation">{archiveUnavailable ? "Add an IMAP server before using Archive." : "Choose an archive folder for every IMAP account."}</small>
+            {accountsMissingArchive.length > 0 ? (
+              <small className="swipe-validation">
+                {archiveRequired
+                  ? "Choose an archive folder for every IMAP account."
+                  : "Accounts without an archive folder cannot use the Archive action."}
+              </small>
             ) : null}
           </section>
         ) : null}
@@ -2529,7 +2535,7 @@ export function SettingsView({
   } else if (route.kind === "about") {
     page = <SettingsPage title="About Rolltop" description="Software license and source terms." backPath="/settings/account/general" navigate={navigate}>{renderLicenseSettings()}</SettingsPage>;
   } else if (route.kind === "swipes") {
-    page = <SettingsPage title="Swipe actions" description="Choose what left and right swipes do on touch devices." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSwipeSettings()}</SettingsPage>;
+    page = <SettingsPage title="Swipe actions" description="Choose what left and right swipes do on touch devices, and which folder the Archive action uses." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSwipeSettings()}</SettingsPage>;
   } else if (route.kind === "search") {
     page = <SettingsPage title="Search tuning" description="Control typo tolerance, ranking, and attachment matching." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSearchSettings()}</SettingsPage>;
   } else if (route.kind === "mail") {

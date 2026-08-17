@@ -12,7 +12,7 @@ import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { trashMailboxForAccount } from "../../lib/folders";
+import { isArchiveMailboxChoice, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -1709,7 +1709,10 @@ function MessageList({
     return !snoozedView;
   }
 
-  function moveConversationBySwipe(conversation: Conversation, action: "trash" | "archive", direction: "start" | "end"): boolean {
+  // Shared single-row move for swipes and the pointer row actions. `direction`
+  // picks the dismissal: a swipe slides the row out toward the finger, while a
+  // row action (direction null) collapses it the way bulk delete does.
+  function moveConversation(conversation: Conversation, action: "trash" | "archive", direction: "start" | "end" | null): boolean {
     const accountIDs = conversationTransferAccountIDs(conversation);
     if (accountIDs.length !== 1) {
       addToast(`Cannot ${action} a conversation containing messages from multiple accounts.`, "error");
@@ -1721,13 +1724,13 @@ function MessageList({
       : (() => {
           const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
           return preference
-            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && mailbox.role === "")
+            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
             : undefined;
         })();
     if (!target) {
       addToast(
         action === "trash"
-          ? "Choose a Trash folder for this account before using the trash swipe action."
+          ? "Choose a Trash folder for this account before moving messages to Trash."
           : "Choose an Archive folder for this account in swipe settings.",
         "error"
       );
@@ -1748,8 +1751,18 @@ function MessageList({
         restoreDismissed(dismissedIDs);
       },
       async (keepalive) => {
+        // Deleting a snoozed row dismisses its reminder too. On a background
+        // commit the request has to leave before any await, or unload cancels
+        // it — but only once the move itself fits the keepalive chunk budget,
+        // so a truncated move never drops the reminder of a message that stays.
+        const unsnooze = snoozedView && action === "trash";
+        const keepaliveMoveComplete = messageIDs.length <= bulkMessageIDLimit * keepaliveMoveChunkBudget;
+        if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
         removePendingSwipeMoveIDs(dismissedIDs);
+        // The reminder belongs to this row's own message, so a partial move that
+        // relocated only sibling thread messages must leave it in place.
+        if (unsnooze && !keepalive && movedIDs.includes(conversation.message.id)) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
         if (error === undefined) {
           onMessagesMoved(messageIDs);
           return;
@@ -1765,7 +1778,8 @@ function MessageList({
     );
     if (!registered) return false;
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissedIDs]));
-    beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
+    if (direction) beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
+    else optimisticallyDismiss(dismissedIDs);
     return true;
   }
 
@@ -1789,7 +1803,7 @@ function MessageList({
         return snoozeConversationBySwipe(conversation, swipeSnoozeUntil(snoozePreset), direction);
       case "trash":
       case "archive":
-        return moveConversationBySwipe(conversation, action, direction);
+        return moveConversation(conversation, action, direction);
       }
     } finally {
       setSwipeActionBusy(false);
@@ -1905,6 +1919,29 @@ function MessageList({
     }
   }
 
+  // Pointer row actions reuse the swipe and selection mutation paths, so undo
+  // toasts, optimistic dismissal, and busy gating behave identically. A row that
+  // is already committing another action ignores them until it settles.
+  function rowActionBlocked(conversation: Conversation): boolean {
+    return selectionBusy
+      || pendingSwipeActionIDs.current.has(conversation.message.id)
+      || hiddenMessageIDs.has(conversation.message.id);
+  }
+
+  function replyToConversation(conversation: Conversation) {
+    navigate(`/compose?reply=${conversation.message.id}`);
+  }
+
+  function moveConversationByRowAction(conversation: Conversation, action: "trash" | "archive") {
+    if (rowActionBlocked(conversation)) return;
+    moveConversation(conversation, action, null);
+  }
+
+  function toggleConversationRead(conversation: Conversation) {
+    if (rowActionBlocked(conversation)) return;
+    markConversationRead(conversation, !conversation.is_read);
+  }
+
   function openRow(event: MouseEvent<HTMLDivElement>, href: string) {
     if (Date.now() < suppressRowClickUntil.current) return;
     if ((event.target as HTMLElement).closest("button,input,label")) return;
@@ -1993,6 +2030,7 @@ function MessageList({
         const touchMessageIDs = selected && selectedDragMessageIDs.length > 0 ? selectedDragMessageIDs : conversationTransferMessageIDs(conversation);
         const touchAccountIDs = selected && selectedDragAccountIDs.length > 0 ? selectedDragAccountIDs : conversationTransferAccountIDs(conversation);
         const movingOut = hiddenMessageIDs.has(msg.id);
+        const rowActionsDisabled = selectionBusy || movingOut || pendingSwipeActionIDs.current.has(msg.id);
         const activeSwipe = swipeState?.id === msg.id ? swipeState : null;
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));
@@ -2105,6 +2143,48 @@ function MessageList({
         ) : null}
         <span>{displayTime(snoozedView && conversation.snoozed_until ? conversation.snoozed_until : msg.date, datePrefs)}</span>
       </span>
+      <div className="message-row-actions" role="group" aria-label={`Actions for ${msg.subject || "message"}`}>
+        {openAsDraft ? null : (
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => replyToConversation(conversation)} title="Reply" aria-label="Reply">
+            <Icon name="reply" />
+          </button>
+        )}
+        {openAsDraft || snoozedView ? null : (
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "archive")} title="Archive" aria-label="Archive">
+            <Icon name="archive" />
+          </button>
+        )}
+        <button className="message-row-action row-action-delete" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "trash")} title="Move to trash" aria-label="Move to trash">
+          <Icon name="delete" />
+        </button>
+        {openAsDraft ? null : (
+          <button
+            className="message-row-action"
+            type="button"
+            disabled={rowActionsDisabled}
+            onClick={() => toggleConversationRead(conversation)}
+            title={conversation.is_read ? "Mark unread" : "Mark read"}
+            aria-label={conversation.is_read ? "Mark unread" : "Mark read"}
+          >
+            <Icon name={conversation.is_read ? "mail" : "mail_open"} />
+          </button>
+        )}
+        {openAsDraft ? null : snoozedView ? (
+          // The toolbar covers the date cell's unsnooze button, so it carries
+          // the same action while a pointer is over the row.
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => void unsnoozeConversations([conversation])} title="Unsnooze" aria-label="Unsnooze">
+            <Icon name="clock" />
+          </button>
+        ) : (
+          <SnoozeControl
+            className="message-row-action"
+            iconOnly
+            datePrefs={datePrefs}
+            disabled={rowActionsDisabled}
+            onSnooze={(until) => snoozeConversations([conversation], until)}
+          />
+        )}
+      </div>
       </div>
           </div>
         );

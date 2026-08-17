@@ -901,6 +901,12 @@
   }
 }
 
+.swipe-archive-hint {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .swipe-archive-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

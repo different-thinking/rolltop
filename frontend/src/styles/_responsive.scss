@@ -488,6 +488,11 @@
     grid-column: 1;
   }
 
+  // Narrow rows have no room for the hover toolbar; swipes cover the same actions.
+  .message-row-actions {
+    display: none;
+  }
+
   .message-select.group-drag-source {
     cursor: grab;
   }
