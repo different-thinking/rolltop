@@ -99,6 +99,54 @@ docker run -d --name rolltop --restart unless-stopped -p 8080:8080 \
 
 Keep `.env.rolltop` with the same care as the Docker volume. Changing or losing `ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable.
 
+### Corrupt SQLite Databases
+
+`database disk image is malformed` is SQLite reporting that the file itself is
+damaged, so every operation for that tenant fails until the file is repaired.
+Rolltop names the damaged file and the repair command in its logs, for example:
+
+```
+sync user_id=1 mailboxes=INBOX: store message mailbox "INBOX" UID 48882: user 1
+database /data/users/1/rolltop.db is corrupt: database disk image is malformed;
+stop rolltop and run "rolltop recover-db --user-id 1 --confirm-offline"
+```
+
+Repair is always an explicit offline step, and it never modifies the damaged
+file. Stop every Rolltop process that mounts the data volume, then check which
+files SQLite considers damaged:
+
+```sh
+ROLLTOP_SERVICE=<your-service-name>
+docker compose stop "$ROLLTOP_SERVICE"
+docker compose run --rm --no-deps "$ROLLTOP_SERVICE" check-db --confirm-offline
+```
+
+`check-db` runs SQLite's `quick_check` against the installation database and
+every `/data/users/<id>/rolltop.db`, changes nothing, and exits non-zero when a
+file is damaged. Repair a damaged tenant database with:
+
+```sh
+docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
+  recover-db --user-id 1 --confirm-offline
+```
+
+`recover-db` copies every readable row into a freshly migrated database, steps
+over the damaged pages, repairs foreign key references the lost rows leave
+behind, moves the damaged file aside as
+`/data/users/<id>/rolltop.db.corrupt-<stamp>`, and installs the recovered file.
+It prints what survived per table. Mail that the IMAP server still holds is
+re-downloaded by the next sync; locally created state on lost pages (contacts,
+snoozes, identities, pending flag changes) is not recoverable. Because the row
+set changed, the command prints the matching `reset-search` invocation when
+anything was lost. The quarantined file is kept, so nothing is deleted.
+
+Corruption comes from the storage under the data volume, not from a Rolltop
+write path: Rolltop opens SQLite in WAL mode with one writer per tenant and an
+exclusive lock on the data directory. Recurring corruption on the same
+installation usually means the volume is on a network or overlay filesystem
+that does not honor SQLite's locking, or that the data directory was copied
+while the server was running. Snapshot the volume with Rolltop stopped.
+
 ### Automatic Search Index Recovery
 
 Bleve writes pass through a shared priority- and byte-aware coordinator. It

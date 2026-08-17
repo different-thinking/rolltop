@@ -31,6 +31,7 @@ const (
 // Store is the SQLite access layer; in production the root store opens the system DB and caches per-user stores.
 type Store struct {
 	db                *sql.DB
+	path              string
 	dataDir           string
 	schema            schemaKind
 	split             bool
@@ -38,6 +39,8 @@ type Store struct {
 	pluginMigrations  []plugins.Migration
 	mu                sync.Mutex
 	userStores        map[int64]*Store
+	healthMu          sync.Mutex
+	health            map[int64]DatabaseHealth
 }
 
 // Open creates a combined store in one SQLite file. It is mostly used by tests
@@ -90,6 +93,7 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 	db.SetMaxIdleConns(4)
 	s := &Store{
 		db:                db,
+		path:              path,
 		dataDir:           dataDir,
 		schema:            schema,
 		split:             split,
@@ -101,9 +105,22 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 	}
 	if err := s.migrate(context.Background(), schema, progress); err != nil {
 		_ = db.Close()
+		// A corrupt file reports SQLITE_CORRUPT from the first migration
+		// statement onward. Name the file and the offline repair command here
+		// so startup never fails with a bare "database disk image is malformed".
+		if IsCorrupt(err) {
+			return nil, newCorruptionError(0, path, err)
+		}
 		return nil, err
 	}
 	return s, nil
+}
+
+// DatabasePath returns the SQLite file backing the receiver. On the root
+// production store this is the system database; per-user stores return their
+// own tenant file.
+func (s *Store) DatabasePath() string {
+	return s.path
 }
 
 // Close shuts down the root store and any cached per-user stores opened through
@@ -191,7 +208,7 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 		migrations:  s.pluginMigrations,
 	})
 	if err != nil {
-		return nil, err
+		return nil, s.NoteError(userID, err)
 	}
 	if err := us.mirrorUser(ctx, user); err != nil {
 		_ = us.Close()
