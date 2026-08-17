@@ -109,7 +109,7 @@ func (s *Service) DrainPendingBlobCleanups(ctx context.Context, limitPerUser int
 	if s == nil || s.Store == nil {
 		return 0, 0, errors.New("sync store is not configured")
 	}
-	users, err := s.Store.ListUsers(ctx)
+	users, err := s.Store.ServiceableUsers(ctx)
 	if err != nil {
 		return 0, 0, err
 	}

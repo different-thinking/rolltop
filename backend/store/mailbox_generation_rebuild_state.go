@@ -588,7 +588,7 @@ type PendingMailboxGenerationRebuild struct {
 // broadening a resume to same-named mailboxes on another account or tenant.
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}

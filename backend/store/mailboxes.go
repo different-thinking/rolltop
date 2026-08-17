@@ -129,7 +129,7 @@ func (s *Store) ListMailAccountsForUser(ctx context.Context, userID int64) ([]Ma
 // ListAccounts returns all IMAP accounts across users for startup/background scheduling only.
 func (s *Store) ListAccounts(ctx context.Context) ([]MailAccount, error) {
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}

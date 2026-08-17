@@ -333,17 +333,30 @@ func New(opts Options) (*Server, error) {
 		opts.Syncer.NotifyRestoredState = srv.notifySnoozeStateChanged
 	}
 	if opts.SyncRunner != nil {
-		if err := opts.SyncRunner.RecoverPendingBlobCleanups(); err != nil {
+		// These sweeps visit every tenant, so a database that breaks between
+		// the startup scan and this point still surfaces here, before it has
+		// been latched and filtered out. Serving the healthy tenants is worth
+		// more than the deferred work these two recover, so corruption is
+		// reported and the server comes up; anything else is still fatal.
+		for _, recovery := range []struct {
+			label string
+			run   func() error
+		}{
+			{"recover pending blob cleanups", opts.SyncRunner.RecoverPendingBlobCleanups},
+			{"recover pending Inbox arrivals", opts.SyncRunner.RecoverPendingInboxArrivals},
+		} {
+			err := recovery.run()
+			if err == nil {
+				continue
+			}
+			if store.IsCorrupt(err) {
+				log.Printf("%s: %v", recovery.label, err)
+				continue
+			}
 			if ownedSyncRunnerCancel != nil {
 				ownedSyncRunnerCancel()
 			}
-			return nil, fmt.Errorf("recover pending blob cleanups: %w", err)
-		}
-		if err := opts.SyncRunner.RecoverPendingInboxArrivals(); err != nil {
-			if ownedSyncRunnerCancel != nil {
-				ownedSyncRunnerCancel()
-			}
-			return nil, fmt.Errorf("recover pending Inbox arrivals: %w", err)
+			return nil, fmt.Errorf("%s: %w", recovery.label, err)
 		}
 	}
 	srv.startAutoStartBackendPlugins(context.Background())

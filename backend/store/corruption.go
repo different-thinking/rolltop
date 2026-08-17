@@ -205,6 +205,35 @@ func (s *Store) CorruptDatabases() []DatabaseHealth {
 	return records
 }
 
+// ServiceableUsers lists the tenants whose databases can still answer queries.
+//
+// Background sweeps run "for every user, open the tenant store" and return the
+// first failure. A latched tenant fails that open by design, so without this
+// filter one damaged database aborts the whole sweep — and the sweeps that run
+// during startup took the installation down with it, which is exactly what
+// skipping the tenant in PrepareUserStores was meant to prevent.
+//
+// Maintenance callers that must see the damaged tenants — the admin database
+// page, the integrity check, the offline repair commands — keep using
+// ListUsers.
+func (s *Store) ServiceableUsers(ctx context.Context) ([]User, error) {
+	users, err := s.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return users, nil
+	}
+	serviceable := users[:0:0]
+	for _, user := range users {
+		if s.DatabaseCorrupt(user.ID) {
+			continue
+		}
+		serviceable = append(serviceable, user)
+	}
+	return serviceable, nil
+}
+
 // DatabaseFileForUser returns the SQLite file that holds one tenant's mail
 // data. Combined (test) stores keep everything in the receiver's own file.
 func (s *Store) DatabaseFileForUser(userID int64) string {
