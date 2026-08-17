@@ -92,7 +92,9 @@ whitespace, so one deployment can serve both a production host and
 `http` or `https` URL ending in `/api/google/callback`, must be registered
 byte for byte in the Google Cloud console, and with more than one configured
 the request origin decides which is used. `ROLLTOP_GOOGLE_SCOPES` is optional
-and replaces the default `openid email https://mail.google.com/` entirely.
+and replaces the default
+`openid email https://mail.google.com/ https://www.googleapis.com/auth/contacts`
+entirely.
 
 These are validated during startup: half a credential, an unusable redirect
 URL, or credentials without any redirect URL stop the process rather than
@@ -101,8 +103,8 @@ surfacing as a failed consent much later. Connecting also needs a usable
 
 In the Google Cloud console, create a **Web application** OAuth client and
 register the same redirect URLs. Signing in over IMAP and SMTP needs the scope
-granted but no API enabled; the People and Calendar APIs become relevant only
-when those integrations land. Google requires `https` for redirect URLs, except
+granted but no API enabled; contact sync additionally needs the **People API**
+enabled for the project. Google requires `https` for redirect URLs, except
 for `http://localhost` and `http://127.0.0.1` — an instance reachable only over
 plain HTTP on a LAN address cannot complete a consent round trip.
 `redirect_uri_mismatch` on a first attempt is almost always a character
@@ -145,6 +147,27 @@ Two Gmail-specific defaults matter for how much gets mirrored:
   everything, which on a long-lived mailbox can run for hours and produce a
   much larger database. The value can be changed later; moving it further back
   backfills through the normal folder repair rather than immediately.
+
+### Google contacts
+
+A connected account whose grant includes contacts is polled every 15 minutes,
+and **Sync contacts** under Settings → Google runs it immediately. Google is the
+leading system for the contacts it owns:
+
+- Changes made in Google win. A contact edited in both places keeps Google's
+  version; Rolltop reports the conflict and shows what Google now holds.
+- Edits, new contacts and deletions made in Rolltop are written back. Deleting a
+  synced contact **deletes it in Google too**, which the confirmation says.
+- A contact already in the address book with the same address is linked to its
+  Google counterpart rather than duplicated, keeping its Me identity and any
+  detail Google does not have.
+- Disconnecting an account keeps its contacts and turns them back into local
+  ones. Nothing is deleted.
+
+New contacts default to Rolltop only; **Save to** in the contact editor puts one
+in a Google account instead. Accounts connected before this existed still lack
+the contacts scope and show `Reauthorize this account to include them` — mail
+keeps working until they do.
 
 ## Run Locally
 

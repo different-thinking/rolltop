@@ -40,9 +40,15 @@ import { clearOtherCollapsedAccounts } from "./lib/sidebarLocal";
 export class ApiError extends Error {
   status: number;
 
-  constructor(status: number, message: string) {
+  /** payload is the decoded response body. A few failures carry data the caller
+   * needs -- a rejected contact edit answers with the version that won -- and
+   * without this the only way to get it would be to re-fetch. */
+  payload: Record<string, unknown>;
+
+  constructor(status: number, message: string, payload: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -62,7 +68,7 @@ async function parse<T>(res: Response): Promise<T> {
     }
   }
   if (!res.ok) {
-    throw new ApiError(res.status, typeof data.error === "string" ? data.error : res.statusText);
+    throw new ApiError(res.status, typeof data.error === "string" ? data.error : res.statusText, data);
   }
   return data as T;
 }

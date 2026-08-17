@@ -219,13 +219,14 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 				}
 				continue
 			}
-			created, err := s.applyPerson(ctx, userID, connectionID, person)
+			outcome, err := s.applyPerson(ctx, userID, connectionID, person)
 			if err != nil {
 				return result, "", err
 			}
-			if created {
+			switch outcome {
+			case outcomeCreated:
 				result.Created++
-			} else {
+			case outcomeUpdated:
 				result.Updated++
 			}
 		}
@@ -248,9 +249,20 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 	return result, nextSyncToken, nil
 }
 
-// applyPerson creates or overwrites the local mirror of one Google contact and
-// reports whether it was new here.
-func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, person Person) (bool, error) {
+// applyOutcome is what one person did to the local address book. "Unchanged"
+// is a distinct answer rather than a quiet update: a full read re-reports every
+// person, so counting those as updates would report an untouched address book
+// as fully rewritten.
+type applyOutcome int
+
+const (
+	outcomeUnchanged applyOutcome = iota
+	outcomeCreated
+	outcomeUpdated
+)
+
+// applyPerson creates or overwrites the local mirror of one Google contact.
+func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, person Person) (applyOutcome, error) {
 	incoming := ToContact(person)
 	incoming.GoogleConnectionID = connectionID
 
@@ -258,30 +270,28 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 	switch {
 	case err == nil:
 		if existing.ETag != "" && existing.ETag == incoming.ETag {
-			// Unchanged since the last run. A full sync re-reads every person,
-			// so without this every contact would be rewritten each time.
-			return false, nil
+			return outcomeUnchanged, nil
 		}
-		return false, s.overwrite(ctx, userID, existing, incoming, person)
+		return outcomeUpdated, s.overwrite(ctx, userID, existing, incoming, person)
 	case store.IsNotFound(err):
 	default:
-		return false, err
+		return outcomeUnchanged, err
 	}
 
 	// No mirror yet. A contact already in the address book with the same
 	// address is the same person, and creating a second row for them is the
 	// duplicate this lookup exists to prevent.
 	if local, ok, err := s.findLocalMatch(ctx, userID, incoming); err != nil {
-		return false, err
+		return outcomeUnchanged, err
 	} else if ok {
-		return false, s.overwrite(ctx, userID, local, incoming, person)
+		return outcomeUpdated, s.overwrite(ctx, userID, local, incoming, person)
 	}
 
 	created, err := s.Store.CreateContact(ctx, userID, incoming)
 	if err != nil {
-		return false, err
+		return outcomeUnchanged, err
 	}
-	return true, s.importPhoto(ctx, userID, created.ID, person)
+	return outcomeCreated, s.importPhoto(ctx, userID, created.ID, person)
 }
 
 // overwrite makes an existing row match Google while keeping what only Rolltop
