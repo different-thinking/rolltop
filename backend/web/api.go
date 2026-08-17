@@ -61,6 +61,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiContactPath(w, r, strings.TrimPrefix(path, "contacts/"))
 	case path == "brand-icons":
 		s.apiBrandIcons(w, r)
+	case path == "google/connect":
+		s.apiGoogleConnect(w, r)
+	case path == "google/callback":
+		s.apiGoogleCallback(w, r)
+	case path == "google/connections":
+		s.apiGoogleConnections(w, r)
+	case strings.HasPrefix(path, "google/connections/"):
+		s.apiGoogleConnectionByID(w, r)
 	case path == "account":
 		s.apiAccount(w, r)
 	case path == "account/imap":

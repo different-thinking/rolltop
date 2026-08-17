@@ -24,6 +24,7 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/buildinfo"
 	mmcrypto "rolltop/backend/crypto"
+	"rolltop/backend/googleauth"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
@@ -58,6 +59,9 @@ type Options struct {
 	SessionTTL   time.Duration
 	CookieSecure bool
 	WebhookToken string
+	// GoogleAuth overrides the manager built from the environment. Tests set it
+	// to point the OAuth flow at a fake Google.
+	GoogleAuth *googleauth.Manager
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -87,6 +91,7 @@ type Server struct {
 	sessionTTL                time.Duration
 	cookieSecure              bool
 	webhookToken              string
+	googleAuth                *googleauth.Manager
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -259,6 +264,9 @@ func New(opts Options) (*Server, error) {
 	if strings.TrimSpace(opts.PluginDir) == "" {
 		opts.PluginDir = "plugins"
 	}
+	if opts.GoogleAuth == nil && opts.Store != nil {
+		opts.GoogleAuth = googleauth.NewManager(googleauth.ConfigFromEnv(), opts.Store, opts.MasterKey)
+	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
 		return nil, err
@@ -299,6 +307,7 @@ func New(opts Options) (*Server, error) {
 		sessionTTL:            opts.SessionTTL,
 		cookieSecure:          opts.CookieSecure,
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
+		googleAuth:            opts.GoogleAuth,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},

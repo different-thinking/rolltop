@@ -321,6 +321,19 @@
     padding: 11px 10px;
   }
 
+  // Two buttons do not fit beside the copy on a phone, so actions wrap onto
+  // their own row under the account details.
+  .settings-connection-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+    padding: 11px 10px;
+  }
+
+  .settings-connection-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
   .settings-index-icon {
     grid-column: 1;
     grid-row: 1 / 3;
