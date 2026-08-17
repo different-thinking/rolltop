@@ -605,7 +605,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 			_ = searchSvc.Close()
 		}
 	}()
-	users, err := db.ListUsers(ctx)
+	users, err := db.ServiceableUsers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list users for stalled search recovery: %w", err)
 	}

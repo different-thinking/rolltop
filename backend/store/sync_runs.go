@@ -31,7 +31,7 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 		return 0, fmt.Errorf("stale sync run age must be positive")
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -64,7 +64,7 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 // MarkRunningSyncRunsInterrupted marks stale running jobs interrupted during startup recovery.
 func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context) (int64, error) {
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -295,7 +295,7 @@ func syncRunNoopFolderKey(run SyncRun) string {
 // ListUserIDsWithAccounts returns user IDs that have IMAP accounts for background scheduling.
 func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}

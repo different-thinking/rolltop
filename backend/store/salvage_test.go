@@ -551,3 +551,58 @@ func writeTenantMessages(t *testing.T, us *Store, userID int64, messageCount int
 		t.Fatal(err)
 	}
 }
+
+// TestBackgroundSweepsSkipALatchedTenant covers the failure that took an
+// installation down even though the damaged tenant had been skipped correctly.
+// Startup runs several "for every user, open the tenant store" sweeps, and a
+// latched tenant fails that open by design, so the first of them aborted and
+// carried the whole start with it. Skipping the tenant is only worth anything
+// if the sweeps skip it too.
+func TestBackgroundSweepsSkipALatchedTenant(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	damaged, err := db.CreateUser(ctx, "damaged@example.test", "Damaged", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := db.CreateUser(ctx, "healthy@example.test", "Healthy", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UserStore(ctx, healthy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkCorrupt(damaged.ID, "database disk image is malformed"); err == nil {
+		t.Fatal("MarkCorrupt did not report the tenant as corrupt")
+	}
+
+	users, err := db.ServiceableUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].ID != healthy.ID {
+		t.Fatalf("serviceable users = %+v, want only user %d", users, healthy.ID)
+	}
+	// ListUsers still has to report both, or the admin database page and the
+	// offline repair commands would lose sight of the tenant that needs them.
+	all, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("ListUsers hid a damaged tenant: %+v", all)
+	}
+
+	// A sweep that opens every tenant store must now come back clean.
+	if _, err := db.ListPendingInboxArrivalSchedules(ctx); err != nil {
+		t.Fatalf("startup sweep failed because one tenant is damaged: %v", err)
+	}
+	if _, err := db.MarkRunningSyncRunsInterrupted(ctx); err != nil {
+		t.Fatalf("interrupted sync sweep failed because one tenant is damaged: %v", err)
+	}
+}

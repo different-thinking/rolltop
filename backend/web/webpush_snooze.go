@@ -41,7 +41,7 @@ func (s *Server) resumeSnoozeReminderWebPushAsync() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		users, err := s.store.ListUsers(ctx)
+		users, err := s.store.ServiceableUsers(ctx)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("snooze web push resume users: %v", err)

@@ -80,7 +80,7 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -164,7 +164,7 @@ func (s *Store) ListMessagesWithPrunableBlobs(ctx context.Context, cutoff time.T
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +201,7 @@ func (s *Store) ListMessagesWithExpiredCachedBlobs(ctx context.Context, cutoff t
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}
