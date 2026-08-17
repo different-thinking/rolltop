@@ -46,7 +46,7 @@
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
 }
 .experimental-spam-stats > div {
-  background: var(--surface-soft);
+  background: var(--surface-subtle);
   border-radius: .75rem;
   display: grid;
   gap: .2rem;

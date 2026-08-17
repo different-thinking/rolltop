@@ -1,5 +1,5 @@
-const STATIC_CACHE = "rolltop-static-v9";
-const STATIC_ASSETS = ["/offline.html", "/manifest.webmanifest", "/icon.svg", "/icon.svg?v=transparent-logo-v2"];
+const STATIC_CACHE = "rolltop-static-v10";
+const STATIC_ASSETS = ["/offline.html", "/icon.svg", "/icon.svg?v=transparent-logo-v2"];
 let securityUnlockUserID = 0;
 let securityUnlockState = { unlockedUntil: 0, keys: [] };
 let securityUnlockTimer = 0;

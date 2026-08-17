@@ -283,7 +283,7 @@ function profileFormForUser(user: User, availableThemes: ThemeDefinition[] = fal
     backup_email: user.backup_email || "",
     date_locale: user.date_locale || "",
     date_format: user.date_format || "mdy",
-    theme: themeIDs.has(user.theme) ? user.theme : "classic",
+    theme: themeIDs.has(user.theme) ? user.theme : systemThemeID,
     search_preset: ["strict", "balanced", "forgiving"].includes(user.search_preset) ? user.search_preset : defaults.search_preset,
     search_recency_bias: ["none", "light", "normal", "strong"].includes(user.search_recency_bias) ? user.search_recency_bias : defaults.search_recency_bias,
     search_fuzzy: ["off", "balanced", "forgiving"].includes(user.search_fuzzy) ? user.search_fuzzy : defaults.search_fuzzy,

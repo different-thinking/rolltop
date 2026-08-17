@@ -16,7 +16,7 @@ import { messageCountLabel } from "./lib/format";
 import { currentLocation, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
-import { applyDocumentTheme, systemThemeID, watchSystemThemePreference } from "./lib/theme";
+import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
 import { embeddedBootstrap } from "./lib/startup";
 import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
@@ -71,6 +71,10 @@ function loadPluginThemeCSS(theme: ThemeDefinition | undefined) {
     document.head.appendChild(link);
   }
   if (link.href !== new URL(href, window.location.href).href) {
+    // A plugin theme brings its own --chrome, so the browser chrome can only be
+    // right once this stylesheet has actually applied. Reading the token before
+    // then yields the previous theme's colour and never corrects itself.
+    link.onload = () => syncBrowserChromeColor();
     link.href = href;
   }
 }
@@ -333,9 +337,12 @@ export default function App() {
   useEffect(() => {
     const savedTheme = bootstrap?.user?.theme;
     const choices = themeChoices(bootstrap?.available_themes);
-    const selected = choices.find((choice) => choice.id === savedTheme) || choices.find((choice) => choice.id === "classic");
+    // Falling back to Classic here would override the unmarked shell the server
+    // sends for the System theme, which is a flip to light on a dark desktop —
+    // and on the signed-out shells there is no stored theme at all.
+    const selected = choices.find((choice) => choice.id === savedTheme) || choices.find((choice) => choice.id === systemThemeID);
     loadPluginThemeCSS(selected);
-    applyDocumentTheme(selected?.id || "classic");
+    applyDocumentTheme(selected?.id || systemThemeID);
   }, [bootstrap?.user?.theme, bootstrap?.available_themes]);
 
   useEffect(() => watchSystemThemePreference(), []);

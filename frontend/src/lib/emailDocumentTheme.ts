@@ -46,11 +46,13 @@ export function currentEmailDocumentTheme(): EmailDocumentTheme | null {
  * the iframe never paints an unthemed frame first.
  */
 export function themedEmailDocument(srcDoc: string): string {
-  let doc = srcDoc.replace(/<\/head>/i, `${themeStyleTag}</head>`);
-  if (doc === srcDoc) doc = srcDoc.replace(/<html([\s>])/i, `<html$1${themeStyleTag}`);
   const theme = currentEmailDocumentTheme();
-  if (!theme) return doc;
-  return doc.replace(/<html(\s|>)/i, `<html ${themeMarkerAttribute}="${theme}"$1`);
+  const doc = theme ? srcDoc.replace(/<html\b/i, `<html ${themeMarkerAttribute}="${theme}"`) : srcDoc;
+  if (/<\/head>/i.test(doc)) return doc.replace(/<\/head>/i, `${themeStyleTag}</head>`);
+  // No head element: the stylesheet goes after the complete start tag, never
+  // inside it, because the html element carries attributes of its own.
+  if (/<html\b[^>]*>/i.test(doc)) return doc.replace(/<html\b[^>]*>/i, (tag) => `${tag}${themeStyleTag}`);
+  return themeStyleTag + doc;
 }
 
 /**

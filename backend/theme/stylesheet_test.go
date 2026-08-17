@@ -50,6 +50,61 @@ func componentStylesheets(t *testing.T) []string {
 	return out
 }
 
+// Custom properties the app sets from TypeScript rather than in a stylesheet.
+// They are still definitions, so a reference to them is not dangling.
+var scriptDefinedProperties = []string{
+	"--compose-viewport-height",
+	"--compose-viewport-top",
+	"--pull-distance",
+	"--swipe-action-content-opacity",
+	"--swipe-action-end-shift",
+	"--swipe-action-icon-scale",
+	"--swipe-action-label-opacity",
+	"--swipe-action-start-shift",
+	"--swipe-row-height",
+}
+
+var (
+	definitionRE = regexp.MustCompile(`(--[a-z0-9-]+)\s*:`)
+	referenceRE  = regexp.MustCompile(`var\(\s*(--[a-z0-9-]+)\s*\)`)
+)
+
+// TestStylesheetsReferenceOnlyDefinedTokens catches the failure the literal scan
+// cannot see: var(--something) where nothing defines --something. It resolves to
+// nothing, so the property is dropped and the element inherits or goes
+// transparent — silently, and only in whichever theme forgot the token.
+func TestStylesheetsReferenceOnlyDefinedTokens(t *testing.T) {
+	sheets := componentStylesheets(t)
+
+	defined := map[string]bool{}
+	for _, name := range scriptDefinedProperties {
+		defined[name] = true
+	}
+	contents := map[string]string{}
+	for _, path := range sheets {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		contents[path] = string(raw)
+		for _, match := range definitionRE.FindAllStringSubmatch(contents[path], -1) {
+			defined[match[1]] = true
+		}
+	}
+
+	for _, path := range sheets {
+		for number, line := range strings.Split(contents[path], "\n") {
+			for _, match := range referenceRE.FindAllStringSubmatch(line, -1) {
+				if defined[match[1]] {
+					continue
+				}
+				t.Errorf("%s:%d references %s, which no stylesheet defines: %s",
+					filepath.ToSlash(path), number+1, match[1], strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
 func TestComponentStylesheetsOnlyUseTokens(t *testing.T) {
 	sheets := componentStylesheets(t)
 	scannedComponents := 0
