@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"rolltop/backend/googlepeople"
 	"rolltop/backend/store"
 )
 
@@ -47,6 +49,27 @@ func (s *Server) apiContacts(w http.ResponseWriter, r *http.Request) {
 		}
 		var in apiContact
 		if !decodeJSON(w, r, &in) {
+			return
+		}
+		// A contact saved to a Google account is created there first, so its
+		// resource name and etag come from Google rather than being invented
+		// here and reconciled later.
+		if in.GoogleConnectionID > 0 {
+			if s.googleContacts == nil {
+				writeAPIError(w, http.StatusServiceUnavailable, "Contact sync is not available on this server.")
+				return
+			}
+			contact, err := s.googleContacts.CreateRemoteContact(r.Context(), cu.User.ID, in.GoogleConnectionID, contactFromAPI(in))
+			if store.IsNotFound(err) {
+				writeAPIError(w, http.StatusBadRequest, "That Google account is not connected.")
+				return
+			}
+			if err != nil {
+				s.writeGoogleContactsError(w, r, err)
+				return
+			}
+			s.clearComposeIdentityCache(cu.User.ID)
+			writeJSON(w, map[string]any{"contact": apiContactFromStore(contact)})
 			return
 		}
 		contact, err := s.store.CreateContact(r.Context(), cu.User.ID, contactFromAPI(in))
@@ -116,6 +139,19 @@ func (s *Server) apiContact(w http.ResponseWriter, r *http.Request, cu currentUs
 		if !decodeJSON(w, r, &in) {
 			return
 		}
+		existing, err := s.store.GetContactForUser(r.Context(), cu.User.ID, id)
+		if store.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if existing.IsGoogleContact() {
+			s.updateGoogleContact(w, r, cu, existing, contactFromAPI(in))
+			return
+		}
 		contact, err := s.store.UpdateContact(r.Context(), cu.User.ID, id, contactFromAPI(in))
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -131,6 +167,28 @@ func (s *Server) apiContact(w http.ResponseWriter, r *http.Request, cu currentUs
 		if !s.verifyCSRF(w, r) {
 			return
 		}
+		existing, err := s.store.GetContactForUser(r.Context(), cu.User.ID, id)
+		if store.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		// Google goes first for a mirrored contact. A delete that only
+		// succeeded locally would be undone by the next sync, and the user who
+		// confirmed it would watch the contact come back.
+		if existing.IsGoogleContact() {
+			if s.googleContacts == nil {
+				writeAPIError(w, http.StatusServiceUnavailable, "Contact sync is not available on this server.")
+				return
+			}
+			if err := s.googleContacts.DeleteRemoteContact(r.Context(), cu.User.ID, existing); err != nil {
+				s.writeGoogleContactsError(w, r, err)
+				return
+			}
+		}
 		if err := s.store.DeleteContactForUser(r.Context(), cu.User.ID, id); err != nil {
 			if store.IsNotFound(err) {
 				http.NotFound(w, r)
@@ -144,6 +202,47 @@ func (s *Server) apiContact(w http.ResponseWriter, r *http.Request, cu currentUs
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+// updateGoogleContact saves an edit of a mirrored contact through Google.
+//
+// A conflict is answered with 409 and the contact as Google now has it: the
+// submitted edit lost, and showing the user the version that won beats leaving
+// them with a form full of values that exist nowhere.
+func (s *Server) updateGoogleContact(w http.ResponseWriter, r *http.Request, cu currentUser, existing, edited store.Contact) {
+	if s.googleContacts == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "Contact sync is not available on this server.")
+		return
+	}
+	contact, err := s.googleContacts.UpdateRemoteContact(r.Context(), cu.User.ID, existing, edited)
+	if errors.Is(err, googlepeople.ErrRemoteChanged) {
+		s.clearComposeIdentityCache(cu.User.ID)
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error":   "This contact was changed in Google while you were editing it. The Google version is shown now.",
+			"contact": apiContactFromStore(contact),
+		})
+		return
+	}
+	if store.IsNotFound(err) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.writeGoogleContactsError(w, r, err)
+		return
+	}
+	s.clearComposeIdentityCache(cu.User.ID)
+	writeJSON(w, map[string]any{"contact": apiContactFromStore(contact)})
+}
+
+// contactSource reports the source the API advertises. A contact whose
+// connection was disconnected is local again, and IsGoogleContact is the single
+// place that decides that.
+func contactSource(c store.Contact) string {
+	if c.IsGoogleContact() {
+		return store.ContactSourceGoogle
+	}
+	return store.ContactSourceLocal
 }
 
 func (s *Server) apiContactAutocomplete(w http.ResponseWriter, r *http.Request, cu currentUser) {
@@ -391,7 +490,17 @@ func (s *Server) apiImportContacts(w http.ResponseWriter, r *http.Request, cu cu
 			return
 		}
 		if ok {
-			merged := mergeImportedContact(existing, contact)
+			merged := store.MergeContacts(existing, contact)
+			// Merging into a mirrored contact has to travel to Google, or the
+			// next sync would quietly undo the import.
+			if existing.IsGoogleContact() && s.googleContacts != nil {
+				if _, err := s.googleContacts.UpdateRemoteContact(r.Context(), cu.User.ID, existing, merged); err != nil {
+					s.writeGoogleContactsError(w, r, err)
+					return
+				}
+				updated++
+				continue
+			}
 			if _, err := s.store.UpdateContact(r.Context(), cu.User.ID, existing.ID, merged); err != nil {
 				writeAPIError(w, http.StatusBadRequest, "could not import contacts")
 				return
@@ -506,132 +615,6 @@ func detectContactIconType(data []byte, declared string) string {
 		return "image/webp"
 	}
 	return ""
-}
-
-func mergeImportedContact(existing, incoming store.Contact) store.Contact {
-	merged := existing
-	if strings.TrimSpace(merged.NamePrefix) == "" {
-		merged.NamePrefix = incoming.NamePrefix
-	}
-	if strings.TrimSpace(merged.GivenName) == "" {
-		merged.GivenName = incoming.GivenName
-	}
-	if strings.TrimSpace(merged.AdditionalName) == "" {
-		merged.AdditionalName = incoming.AdditionalName
-	}
-	if strings.TrimSpace(merged.FamilyName) == "" {
-		merged.FamilyName = incoming.FamilyName
-	}
-	if strings.TrimSpace(merged.NameSuffix) == "" {
-		merged.NameSuffix = incoming.NameSuffix
-	}
-	if strings.TrimSpace(merged.DisplayName) == "" {
-		merged.DisplayName = incoming.DisplayName
-	}
-	if strings.TrimSpace(merged.Nickname) == "" {
-		merged.Nickname = incoming.Nickname
-	}
-	if strings.TrimSpace(merged.Organization) == "" {
-		merged.Organization = incoming.Organization
-	}
-	if strings.TrimSpace(merged.Department) == "" {
-		merged.Department = incoming.Department
-	}
-	if strings.TrimSpace(merged.JobTitle) == "" {
-		merged.JobTitle = incoming.JobTitle
-	}
-	if strings.TrimSpace(merged.Birthday) == "" {
-		merged.Birthday = incoming.Birthday
-	}
-	if strings.TrimSpace(merged.Notes) == "" {
-		merged.Notes = incoming.Notes
-	}
-	if strings.TrimSpace(merged.Categories) == "" {
-		merged.Categories = incoming.Categories
-	}
-	merged.Emails = mergeContactEmails(merged.Emails, incoming.Emails)
-	merged.Phones = mergeContactPhones(merged.Phones, incoming.Phones)
-	merged.Addresses = mergeContactAddresses(merged.Addresses, incoming.Addresses)
-	merged.URLs = mergeContactURLs(merged.URLs, incoming.URLs)
-	return merged
-}
-
-func mergeContactEmails(existing, incoming []store.ContactEmail) []store.ContactEmail {
-	seen := map[string]bool{}
-	out := append([]store.ContactEmail{}, existing...)
-	for _, email := range existing {
-		seen[store.NormalizeContactEmail(email.Email)] = true
-	}
-	for _, email := range incoming {
-		key := store.NormalizeContactEmail(email.Email)
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, email)
-	}
-	return out
-}
-
-func mergeContactPhones(existing, incoming []store.ContactPhone) []store.ContactPhone {
-	seen := map[string]bool{}
-	out := append([]store.ContactPhone{}, existing...)
-	for _, phone := range existing {
-		seen[strings.ToLower(strings.TrimSpace(phone.Number))] = true
-	}
-	for _, phone := range incoming {
-		key := strings.ToLower(strings.TrimSpace(phone.Number))
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, phone)
-	}
-	return out
-}
-
-func mergeContactAddresses(existing, incoming []store.ContactAddress) []store.ContactAddress {
-	seen := map[string]bool{}
-	out := append([]store.ContactAddress{}, existing...)
-	for _, addr := range existing {
-		seen[addressKey(addr)] = true
-	}
-	for _, addr := range incoming {
-		key := addressKey(addr)
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, addr)
-	}
-	return out
-}
-
-func mergeContactURLs(existing, incoming []store.ContactURL) []store.ContactURL {
-	seen := map[string]bool{}
-	out := append([]store.ContactURL{}, existing...)
-	for _, u := range existing {
-		seen[strings.ToLower(strings.TrimSpace(u.URL))] = true
-	}
-	for _, u := range incoming {
-		key := strings.ToLower(strings.TrimSpace(u.URL))
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, u)
-	}
-	return out
-}
-
-func addressKey(addr store.ContactAddress) string {
-	return strings.ToLower(strings.Join([]string{
-		strings.TrimSpace(addr.Street),
-		strings.TrimSpace(addr.Locality),
-		strings.TrimSpace(addr.Region),
-		strings.TrimSpace(addr.PostalCode),
-		strings.TrimSpace(addr.Country),
-	}, "|"))
 }
 
 func decodeContactJSON(data []byte) (apiContact, error) {

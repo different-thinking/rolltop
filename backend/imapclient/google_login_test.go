@@ -13,8 +13,8 @@ import (
 	"testing"
 
 	mmcrypto "rolltop/backend/crypto"
+	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
-	"rolltop/backend/xoauth2"
 )
 
 // fakeIMAPServer speaks just enough IMAP to exercise authentication: a greeting
@@ -220,7 +220,7 @@ func encryptForTest(t *testing.T, secret string) string {
 
 func TestLoginAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	client, err := fetcher.login(server.account(t))
 	if err != nil {
 		t.Fatalf("login: %v", err)
@@ -241,7 +241,7 @@ func TestLoginAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 // cached token happens to expire.
 func TestLoginRetriesOnceWithARefreshedToken(t *testing.T) {
 	server := startFakeIMAPServer(t, "fresh-token")
-	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
+	tokens := &googletoken.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
 	fetcher := &Fetcher{Tokens: tokens}
 	client, err := fetcher.login(server.account(t))
 	if err != nil {
@@ -264,7 +264,7 @@ func TestLoginRetriesOnceWithARefreshedToken(t *testing.T) {
 // login for nothing.
 func TestLoginDoesNotRetryWhenTheRefreshReturnsTheSameToken(t *testing.T) {
 	server := startFakeIMAPServer(t, "other-token")
-	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token"}}
+	tokens := &googletoken.StubTokenSource{Tokens: []string{"stale-token"}}
 	fetcher := &Fetcher{Tokens: tokens}
 	if _, err := fetcher.login(server.account(t)); err == nil {
 		t.Fatal("login with a rejected token succeeded")
@@ -276,7 +276,7 @@ func TestLoginDoesNotRetryWhenTheRefreshReturnsTheSameToken(t *testing.T) {
 
 func TestLoginReportsAFetcherThatCannotMintTokens(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
-	if _, err := (&Fetcher{}).login(server.account(t)); !errors.Is(err, xoauth2.ErrNoTokenSource) {
+	if _, err := (&Fetcher{}).login(server.account(t)); !errors.Is(err, googletoken.ErrNoTokenSource) {
 		t.Fatalf("login without a token source = %v, want ErrNoTokenSource", err)
 	}
 }
@@ -291,7 +291,7 @@ func TestLoginDoesNotRefreshTheTokenWhenTheServerLacksXOAUTH2(t *testing.T) {
 	server.mu.Lock()
 	server.advertiseOAuth = false
 	server.mu.Unlock()
-	tokens := &xoauth2.StubTokenSource{Tokens: []string{"first-token", "second-token"}}
+	tokens := &googletoken.StubTokenSource{Tokens: []string{"first-token", "second-token"}}
 	_, err := (&Fetcher{Tokens: tokens}).login(server.account(t))
 	if err == nil {
 		t.Fatal("login against a server without XOAUTH2 succeeded")
@@ -315,7 +315,7 @@ func TestLoginStillUsesPasswordAuthenticationForOrdinaryAccounts(t *testing.T) {
 	account.AuthType = store.AuthTypePassword
 	account.GoogleConnectionID = 0
 	account.EncryptedPassword = encryptForTest(t, "hunter2")
-	fetcher := &Fetcher{MasterKey: testMasterKey(), Tokens: &xoauth2.StubTokenSource{Tokens: []string{"unused"}}}
+	fetcher := &Fetcher{MasterKey: testMasterKey(), Tokens: &googletoken.StubTokenSource{Tokens: []string{"unused"}}}
 	client, err := fetcher.login(account)
 	if err != nil {
 		t.Fatalf("password login: %v", err)

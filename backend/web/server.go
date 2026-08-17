@@ -26,6 +26,7 @@ import (
 	"rolltop/backend/config"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/googleauth"
+	"rolltop/backend/googlepeople"
 	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
@@ -66,6 +67,9 @@ type Options struct {
 	// GoogleAuth overrides the manager built from Google. Tests set it to point
 	// the OAuth flow at a fake Google.
 	GoogleAuth *googleauth.Manager
+	// GoogleContacts syncs Google contacts. It is built here when the manager
+	// is available so a server assembled by a test gets the same wiring main does.
+	GoogleContacts *googlepeople.Syncer
 	// RequestRestart asks the process supervisor for a controlled restart. The
 	// admin database repair needs one, because a tenant database can only be
 	// replaced while nothing holds a handle on it. Nil disables the action.
@@ -100,6 +104,7 @@ type Server struct {
 	cookieSecure              bool
 	webhookToken              string
 	googleAuth                *googleauth.Manager
+	googleContacts            *googlepeople.Syncer
 	requestRestart            func(userID int64, reason string)
 	maintenance               maintenanceState
 	backupSizeMu              sync.Mutex
@@ -287,6 +292,18 @@ func New(opts Options) (*Server, error) {
 	if opts.Sender == nil && len(opts.MasterKey) == 32 {
 		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey, Tokens: opts.GoogleAuth}
 	}
+	if opts.GoogleContacts == nil && opts.GoogleAuth != nil && opts.Store != nil {
+		opts.GoogleContacts = &googlepeople.Syncer{
+			Store:       opts.Store,
+			Blobs:       opts.Blobs,
+			Client:      googlepeople.NewClient(),
+			Tokens:      opts.GoogleAuth,
+			Connections: opts.GoogleAuth,
+			ScopeGranted: func(connection store.GoogleConnection) bool {
+				return connection.HasScope(googleauth.ScopeContacts)
+			},
+		}
+	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
 		return nil, err
@@ -328,6 +345,7 @@ func New(opts Options) (*Server, error) {
 		cookieSecure:          opts.CookieSecure,
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
 		googleAuth:            opts.GoogleAuth,
+		googleContacts:        opts.GoogleContacts,
 		requestRestart:        opts.RequestRestart,
 		events:                events,
 

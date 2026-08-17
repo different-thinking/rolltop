@@ -29,6 +29,7 @@ import (
 	"rolltop/backend/buildinfo"
 	"rolltop/backend/config"
 	"rolltop/backend/googleauth"
+	"rolltop/backend/googlepeople"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
@@ -634,6 +635,18 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	googleAuth := googleauth.NewManager(
 		googleauth.New(cfg.Google.ClientID, cfg.Google.ClientSecret, cfg.Google.RedirectURLs, cfg.Google.Scopes),
 		db, cfg.MasterKey)
+	// The People API offers no push, so contacts are polled. It shares the one
+	// manager with mail so a refresh is deduplicated across both.
+	googleContacts := &googlepeople.Syncer{
+		Store:       db,
+		Blobs:       blobStore,
+		Client:      googlepeople.NewClient(),
+		Tokens:      googleAuth,
+		Connections: googleAuth,
+		ScopeGranted: func(connection store.GoogleConnection) bool {
+			return connection.HasScope(googleauth.ScopeContacts)
+		},
+	}
 	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
 	syncSvc := &syncer.Service{
 		Store:         db,
@@ -662,6 +675,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		WebhookToken:   cfg.WebhookToken,
 		Google:         cfg.Google,
 		GoogleAuth:     googleAuth,
+		GoogleContacts: googleContacts,
 		RequestRestart: requestRestart,
 	})
 	if err != nil {
@@ -692,6 +706,9 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	}
 	if cfg.BlobRetention > 0 {
 		go storageRetention(ctx, db, syncSvc, cfg.BlobRetention)
+	}
+	if googleAuth.Configured() {
+		go googleContactPoll(ctx, db, googleContacts, googleContactPollInterval)
 	}
 
 	cleanup = false
@@ -966,6 +983,47 @@ func inboxMailbox(ctx context.Context, db *store.Store, userID int64, account st
 		}
 	}
 	return db.GetOrCreateMailbox(ctx, userID, account.ID, "INBOX")
+}
+
+// googleContactPollInterval is how often Google contacts are re-read. The
+// People API has no push channel, so this is the only thing that notices a
+// change made in Google's own UI. Fifteen minutes matches what the integration
+// plan settled on: fast enough that an edit is not stale for long, slow enough
+// that a delta call per connection is negligible against Google's quota.
+const googleContactPollInterval = 15 * time.Minute
+
+// googleContactPoll syncs every user's Google contacts on a timer. It runs
+// sequentially: contact syncs are short, and a burst of parallel People API
+// calls across all users would be the one thing capable of hitting the quota.
+func googleContactPoll(ctx context.Context, db *store.Store, syncer *googlepeople.Syncer, interval time.Duration) {
+	if db == nil || syncer == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			users, err := db.ServiceableUsers(ctx)
+			if err != nil {
+				log.Printf("google contact poll list users: %v", err)
+				continue
+			}
+			for _, user := range users {
+				if ctx.Err() != nil {
+					return
+				}
+				// SyncUser already skips connections that cannot sync and
+				// records each failure against its own connection, so one
+				// broken account does not stop the others.
+				if _, err := syncer.SyncUser(ctx, user.ID); err != nil {
+					log.Printf("google contact poll user_id=%d: %v", user.ID, err)
+				}
+			}
+		}
+	}
 }
 
 func scheduledSync(ctx context.Context, db *store.Store, runner *syncer.Runner, interval time.Duration) {

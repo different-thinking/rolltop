@@ -229,7 +229,17 @@ func (s *Store) DeleteGoogleConnection(ctx context.Context, userID, connectionID
 	if err != nil {
 		return err
 	}
-	return requireGoogleConnectionRow(result)
+	if err := requireGoogleConnectionRow(result); err != nil {
+		return err
+	}
+	// Everything hanging off the connection has to stop pointing at it here,
+	// because nothing else runs on disconnect. Contacts keep their data and
+	// become local; the sync cursor is meaningless without the grant it was
+	// issued under and would otherwise be reused by a later reconnect.
+	if _, err := s.DemoteGoogleContactsForConnection(ctx, userID, connectionID); err != nil {
+		return err
+	}
+	return s.DeleteGooglePeopleSync(ctx, userID, connectionID)
 }
 
 // requireGoogleConnectionRow turns a no-op write into the shared not-found

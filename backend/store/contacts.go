@@ -8,6 +8,7 @@ import (
 	"net/mail"
 	"sort"
 	"strings"
+	"time"
 )
 
 type contactAutocompleteCandidate struct {
@@ -38,9 +39,9 @@ func (s *Store) CreateContact(ctx context.Context, userID int64, c Contact) (Con
 		return Contact{}, err
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO contacts
-			(user_id, name_prefix, given_name, additional_name, family_name, name_suffix, display_name, nickname, organization, department, job_title, birthday, notes, categories, is_me, is_primary, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, c.NamePrefix, c.GivenName, c.AdditionalName, c.FamilyName, c.NameSuffix, c.DisplayName, c.Nickname, c.Organization, c.Department, c.JobTitle, c.Birthday, c.Notes, c.Categories, boolInt(c.IsMe), boolInt(c.IsPrimary), ts, ts)
+			(user_id, name_prefix, given_name, additional_name, family_name, name_suffix, display_name, nickname, organization, department, job_title, birthday, notes, categories, is_me, is_primary, source, google_connection_id, external_id, etag, remote_updated_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, c.NamePrefix, c.GivenName, c.AdditionalName, c.FamilyName, c.NameSuffix, c.DisplayName, c.Nickname, c.Organization, c.Department, c.JobTitle, c.Birthday, c.Notes, c.Categories, boolInt(c.IsMe), boolInt(c.IsPrimary), c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag, timeUnix(c.RemoteUpdatedAt), ts, ts)
 	if err != nil {
 		_ = tx.Rollback()
 		return Contact{}, err
@@ -664,7 +665,7 @@ func (s *Store) DeleteContactIconForUser(ctx context.Context, userID, contactID 
 }
 
 func contactSelectSQL() string {
-	return `SELECT id, user_id, name_prefix, given_name, additional_name, family_name, name_suffix, display_name, nickname, organization, department, job_title, birthday, notes, categories, is_me, is_primary, created_at, updated_at FROM contacts`
+	return `SELECT id, user_id, name_prefix, given_name, additional_name, family_name, name_suffix, display_name, nickname, organization, department, job_title, birthday, notes, categories, is_me, is_primary, source, google_connection_id, external_id, etag, remote_updated_at, created_at, updated_at FROM contacts`
 }
 
 type rowScanner interface {
@@ -673,11 +674,12 @@ type rowScanner interface {
 
 func scanContact(row rowScanner) (Contact, error) {
 	var c Contact
-	var created, updated int64
+	var created, updated, remoteUpdated int64
 	var isMe, isPrimary int
-	err := row.Scan(&c.ID, &c.UserID, &c.NamePrefix, &c.GivenName, &c.AdditionalName, &c.FamilyName, &c.NameSuffix, &c.DisplayName, &c.Nickname, &c.Organization, &c.Department, &c.JobTitle, &c.Birthday, &c.Notes, &c.Categories, &isMe, &isPrimary, &created, &updated)
+	err := row.Scan(&c.ID, &c.UserID, &c.NamePrefix, &c.GivenName, &c.AdditionalName, &c.FamilyName, &c.NameSuffix, &c.DisplayName, &c.Nickname, &c.Organization, &c.Department, &c.JobTitle, &c.Birthday, &c.Notes, &c.Categories, &isMe, &isPrimary, &c.Source, &c.GoogleConnectionID, &c.ExternalID, &c.ETag, &remoteUpdated, &created, &updated)
 	c.IsMe = isMe != 0
 	c.IsPrimary = isPrimary != 0
+	c.RemoteUpdatedAt = unixTime(remoteUpdated)
 	c.CreatedAt = unixTime(created)
 	c.UpdatedAt = unixTime(updated)
 	return c, err
@@ -888,6 +890,11 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 	}
 	if c.DisplayName == "" {
 		c.DisplayName = strings.TrimSpace(c.Organization)
+	}
+	c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag = normalizeContactProvenance(
+		c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag)
+	if c.Source == ContactSourceLocal {
+		c.RemoteUpdatedAt = time.Time{}
 	}
 	return c
 }

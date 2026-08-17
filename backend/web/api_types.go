@@ -203,27 +203,33 @@ type apiSenderVisual struct {
 }
 
 type apiContact struct {
-	ID             int64               `json:"id"`
-	NamePrefix     string              `json:"name_prefix"`
-	GivenName      string              `json:"given_name"`
-	AdditionalName string              `json:"additional_name"`
-	FamilyName     string              `json:"family_name"`
-	NameSuffix     string              `json:"name_suffix"`
-	DisplayName    string              `json:"display_name"`
-	Nickname       string              `json:"nickname"`
-	Organization   string              `json:"organization"`
-	Department     string              `json:"department"`
-	JobTitle       string              `json:"job_title"`
-	Birthday       string              `json:"birthday"`
-	Notes          string              `json:"notes"`
-	Categories     string              `json:"categories"`
-	IsMe           bool                `json:"is_me"`
-	IsPrimary      bool                `json:"is_primary"`
-	Emails         []apiContactEmail   `json:"emails"`
-	Phones         []apiContactPhone   `json:"phones"`
-	Addresses      []apiContactAddress `json:"addresses"`
-	URLs           []apiContactURL     `json:"urls"`
-	IconURL        string              `json:"icon_url"`
+	ID             int64  `json:"id"`
+	NamePrefix     string `json:"name_prefix"`
+	GivenName      string `json:"given_name"`
+	AdditionalName string `json:"additional_name"`
+	FamilyName     string `json:"family_name"`
+	NameSuffix     string `json:"name_suffix"`
+	DisplayName    string `json:"display_name"`
+	Nickname       string `json:"nickname"`
+	Organization   string `json:"organization"`
+	Department     string `json:"department"`
+	JobTitle       string `json:"job_title"`
+	Birthday       string `json:"birthday"`
+	Notes          string `json:"notes"`
+	Categories     string `json:"categories"`
+	IsMe           bool   `json:"is_me"`
+	IsPrimary      bool   `json:"is_primary"`
+	// Source and GoogleConnectionID describe where the contact lives. On the
+	// way in they are a request: creating a contact with a connection id saves
+	// it to that Google account. On an update they are read-only -- an edit
+	// cannot move a contact between accounts.
+	Source             string              `json:"source"`
+	GoogleConnectionID int64               `json:"google_connection_id"`
+	Emails             []apiContactEmail   `json:"emails"`
+	Phones             []apiContactPhone   `json:"phones"`
+	Addresses          []apiContactAddress `json:"addresses"`
+	URLs               []apiContactURL     `json:"urls"`
+	IconURL            string              `json:"icon_url"`
 }
 
 type apiContactEmail struct {
