@@ -163,3 +163,83 @@ func TestBoundIndexDocumentSpendsOneAttachmentBudgetForAllParts(t *testing.T) {
 		t.Fatal("bounded multi-attachment document projects differently")
 	}
 }
+
+// Attachment text is extracted from arbitrary files, so it is not always valid
+// UTF-8. The projection drops the invalid bytes while it joins, which means the
+// budget an attachment spends is not its own length. Accounting per attachment
+// got that wrong and silently stopped indexing the tail of the next one.
+func TestBoundIndexDocumentKeepsIndexableTextAfterInvalidUTF8(t *testing.T) {
+	invalid := strings.Repeat("\xff\xfe", 300*1024)
+	document := MessageIndexDocument{
+		Message: store.MessageRecord{UserID: 3, ID: 4, Subject: "Scans"},
+		Attachments: []AttachmentDoc{
+			{Filename: "latin1.txt", ContentType: "text/plain", Text: "lesbar " + invalid},
+			{Filename: "report.pdf", ContentType: "application/pdf", Text: strings.Repeat("indexierbarer text ", 45*1024)},
+		},
+	}
+	want := buildMessageDocument(document.Message, document.Attachments)
+	bounded, _ := BoundIndexDocument(document)
+	got := buildMessageDocument(bounded.Message, bounded.Attachments)
+
+	wantText, _ := want["attachments"].(string)
+	gotText, _ := got["attachments"].(string)
+	if gotText != wantText {
+		t.Fatalf("bounded attachment text = %d bytes, want the %d bytes the unbounded document indexes",
+			len(gotText), len(wantText))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("bounded document with undecodable attachment text projects differently")
+	}
+}
+
+// Many small attachments are joined into the fields the projection indexes, and
+// the joined form is what the batch has to carry.
+func TestBoundIndexDocumentCollapsesAttachmentsToTheirIndexedForm(t *testing.T) {
+	document := MessageIndexDocument{Message: store.MessageRecord{UserID: 1, ID: 2}}
+	for i := range 5 {
+		document.Attachments = append(document.Attachments, AttachmentDoc{
+			Filename:    fmt.Sprintf("part-%d.pdf", i),
+			ContentType: "application/pdf",
+			Text:        fmt.Sprintf("text of part %d", i),
+		})
+	}
+	bounded, _ := BoundIndexDocument(document)
+	if len(bounded.Attachments) != 1 {
+		t.Fatalf("bounded attachments = %d, want the single joined value", len(bounded.Attachments))
+	}
+	if want := "part-0.pdf part-1.pdf part-2.pdf part-3.pdf part-4.pdf"; bounded.Attachments[0].Filename != want {
+		t.Fatalf("joined filenames = %q, want %q", bounded.Attachments[0].Filename, want)
+	}
+	want := buildMessageDocument(document.Message, document.Attachments)
+	if got := buildMessageDocument(bounded.Message, bounded.Attachments); !reflect.DeepEqual(got, want) {
+		t.Fatal("collapsed attachments project differently")
+	}
+	// A message with attachments still reports that it has them.
+	if want["has_attachment"] != "true" {
+		t.Fatalf("has_attachment = %v, want true", want["has_attachment"])
+	}
+}
+
+// Whitespace-only extractions are not part of the joined text, so they must not
+// take a separator with them either.
+func TestBoundIndexDocumentSkipsAttachmentsWithoutReadableText(t *testing.T) {
+	document := MessageIndexDocument{
+		Message: store.MessageRecord{UserID: 1, ID: 2, HasAttachments: true},
+		Attachments: []AttachmentDoc{
+			{Filename: "blank.pdf", ContentType: "application/pdf", Text: "   \n\t "},
+			{Filename: "signed.pdf", ContentType: "application/pdf", Text: "Vertrag"},
+			{Filename: "image.png", ContentType: "image/png"},
+		},
+	}
+	bounded, bytes := BoundIndexDocument(document)
+	if got := bounded.Attachments[0].Text; got != "Vertrag" {
+		t.Fatalf("joined attachment text = %q, want %q", got, "Vertrag")
+	}
+	if bytes == 0 {
+		t.Fatal("reported payload = 0 bytes")
+	}
+	want := buildMessageDocument(document.Message, document.Attachments)
+	if got := buildMessageDocument(bounded.Message, bounded.Attachments); !reflect.DeepEqual(got, want) {
+		t.Fatal("bounded document with blank extractions projects differently")
+	}
+}

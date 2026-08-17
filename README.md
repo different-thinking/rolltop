@@ -339,9 +339,10 @@ refuse a directory another process still owns, which is what earlier versions
 always did. A wait that runs out is reported with the process that holds the
 lock and how long it was given.
 
-Offline maintenance (`repair-db`, `recover-db`, `reset-search`, `backup-db`)
-keeps failing immediately instead of waiting, because the answer there is to
-stop the server rather than to wait for it.
+The maintenance commands that need the directory to themselves — `check-db`,
+`recover-db`, and `reset-search` — keep failing immediately instead of waiting,
+because the answer there is to stop the server rather than to wait for it.
+`backup-db` takes no lock at all and is meant to run while Rolltop serves.
 
 Two notes on what this does and does not protect:
 

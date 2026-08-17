@@ -19,6 +19,7 @@ import (
 	"github.com/emersion/go-imap/client"
 
 	"rolltop/backend/syncer"
+	"rolltop/internal/testlog"
 )
 
 func TestRawBodySectionUsesPeek(t *testing.T) {
@@ -1088,4 +1089,145 @@ func parseTestUIDSet(value string) ([]uint32, error) {
 		}
 	}
 	return uids, nil
+}
+
+// RFC 2683 asks for short command lines, and a sparse repair set of high UIDs
+// is what makes one long. Ranges are what the server receives, so the window is
+// measured as encoded rather than counted in UIDs.
+func TestUIDProbeWindowsBoundTheEncodedCommand(t *testing.T) {
+	contiguous := make([]uint32, uidSizeProbeWindow)
+	for i := range contiguous {
+		contiguous[i] = uint32(i + 1)
+	}
+	if windows := uidProbeWindows(contiguous, 10); len(windows) != 1 || len(windows[0]) != uidSizeProbeWindow {
+		t.Fatalf("contiguous windows = %d, want one full window", len(windows))
+	}
+
+	sparse := make([]uint32, uidSizeProbeWindow)
+	for i := range sparse {
+		sparse[i] = uint32(1_000_001 + i*3)
+	}
+	windows := uidProbeWindows(sparse, 10)
+	if len(windows) < 2 {
+		t.Fatalf("sparse windows = %d, want the encoded command to split it", len(windows))
+	}
+	covered := 0
+	for _, window := range windows {
+		if got := encodedUIDSetBytes(window); got > maxUIDProbeCommandBytes {
+			t.Fatalf("window encodes to %d bytes, want at most %d", got, maxUIDProbeCommandBytes)
+		}
+		for i, uid := range window {
+			if uid != sparse[covered+i] {
+				t.Fatalf("window UID %d = %d, want %d", covered+i, uid, sparse[covered+i])
+			}
+		}
+		covered += len(window)
+	}
+	if covered != len(sparse) {
+		t.Fatalf("windows covered %d of %d UIDs", covered, len(sparse))
+	}
+}
+
+// The probe only exists to size batches. A server that refuses it must still
+// deliver the folder, with the message-count batching used before probing.
+func TestFetchUIDsFallsBackToCountBatchingWhenTheProbeFails(t *testing.T) {
+	logs := testlog.Capture(t)
+	clientConn, serverConn := net.Pipe()
+	serverDone := make(chan error, 1)
+	commands := make(chan string, 8)
+	go func() {
+		defer serverConn.Close()
+		if _, err := io.WriteString(serverConn, "* OK [CAPABILITY IMAP4rev1] test server ready\r\n"); err != nil {
+			serverDone <- err
+			return
+		}
+		reader := bufio.NewReader(serverConn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				serverDone <- nil
+				return
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				serverDone <- fmt.Errorf("unexpected command %q", strings.TrimSpace(line))
+				return
+			}
+			commands <- fmt.Sprintf("%s %s", strings.ToUpper(strings.Join(fields[4:], " ")), fields[3])
+			if strings.Contains(strings.ToUpper(line), "RFC822.SIZE)") {
+				if _, err := fmt.Fprintf(serverConn, "%s NO command not supported\r\n", fields[0]); err != nil {
+					serverDone <- err
+					return
+				}
+				continue
+			}
+			requested, err := parseTestUIDSet(fields[3])
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			for i, uid := range requested {
+				raw := []byte(fmt.Sprintf("Subject: UID %d\r\n\r\nbody", uid))
+				if _, err := fmt.Fprintf(serverConn,
+					"* %d FETCH (UID %d INTERNALDATE \"16-Jul-2026 00:00:00 +0000\" RFC822.SIZE %d FLAGS () BODY[] {%d}\r\n",
+					i+1, uid, len(raw), len(raw)); err != nil {
+					serverDone <- err
+					return
+				}
+				if _, err := serverConn.Write(raw); err != nil {
+					serverDone <- err
+					return
+				}
+				if _, err := io.WriteString(serverConn, ")\r\n"); err != nil {
+					serverDone <- err
+					return
+				}
+			}
+			if _, err := fmt.Fprintf(serverConn, "%s OK UID FETCH complete\r\n", fields[0]); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+	}()
+
+	c, err := client.New(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ErrorLog = log.New(io.Discard, "", 0)
+	defer c.Terminate()
+	c.SetState(imap.SelectedState, &imap.MailboxStatus{Name: "INBOX", Messages: 3, UidNext: 4, UidValidity: 1})
+
+	var fetched []uint32
+	err = (&Fetcher{BatchSize: 2}).fetchUIDs(context.Background(), c, "INBOX", []uint32{1, 2, 3},
+		func(message syncer.FetchedMessage) error {
+			fetched = append(fetched, message.UID)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("fetchUIDs() error = %v", err)
+	}
+	if want := []uint32{1, 2, 3}; !reflect.DeepEqual(fetched, want) {
+		t.Fatalf("fetched UIDs = %v, want %v", fetched, want)
+	}
+	close(commands)
+	issued := make([]string, 0, 4)
+	for command := range commands {
+		issued = append(issued, command)
+	}
+	want := []string{
+		"(UID RFC822.SIZE) 1:3",
+		"(UID INTERNALDATE RFC822.SIZE FLAGS BODY.PEEK[]) 1:2",
+		"(UID INTERNALDATE RFC822.SIZE FLAGS BODY.PEEK[]) 3",
+	}
+	if !reflect.DeepEqual(issued, want) {
+		t.Fatalf("issued commands = %#v, want %#v", issued, want)
+	}
+	if !strings.Contains(logs.String(), "plans batches by message count") {
+		t.Fatalf("the fallback was not reported: %s", logs.String())
+	}
+	c.Terminate()
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
 }

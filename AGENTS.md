@@ -33,9 +33,11 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens SQLite, Bleve, or the blob store. A serving start waits
   for the lock (`ROLLTOP_STARTUP_LOCK_WAIT`) because deployments overlap the old
-  and new container; offline maintenance commands keep failing immediately. Do
-  not move any open ahead of the lock, and do not make the maintenance commands
-  wait.
+  and new container. The maintenance commands that take the lock - `check-db`,
+  `recover-db`, `reset-search` - keep failing immediately instead, and
+  `backup-db` deliberately takes no lock because it runs against a serving
+  instance. Do not move any open ahead of the lock, and do not make the
+  maintenance commands wait.
 - Keep sync bounded in memory as well as in time. Anything that accumulates
   message content between commits - IMAP fetch batches, the search-index batch -
   must be bounded in **bytes**, not only in message count: mail sizes span four

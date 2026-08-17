@@ -3,6 +3,8 @@
 
 package search
 
+import "strings"
+
 // BoundIndexDocument trims the text a pending document carries to the byte
 // limits the Bleve projection applies anyway, and reports the payload the
 // document still holds.
@@ -14,9 +16,11 @@ package search
 // twenty-five document batch cost hundreds of megabytes. Trimming on the way in
 // keeps a batch proportional to its count.
 //
-// The projection is unchanged by this. Every field is cut to a prefix that
-// buildMessageDocument would have cut to itself, so a bounded document indexes
-// byte for byte like the unbounded one it replaces.
+// The projection is unchanged by this. Each header and the body are cut with the
+// same bounding function buildMessageDocument applies to them, which is
+// idempotent, and the attachments are reduced to the joined values it derives
+// from them, so a bounded document indexes byte for byte like the unbounded one
+// it replaces.
 func BoundIndexDocument(document MessageIndexDocument) (MessageIndexDocument, uint64) {
 	message := document.Message
 	message.Subject = boundedIndexText(message.Subject, maxIndexedHeaderBytes)
@@ -39,42 +43,39 @@ func BoundIndexDocument(document MessageIndexDocument) (MessageIndexDocument, ui
 	return bounded, indexDocumentPayloadBytes(bounded)
 }
 
-// boundIndexAttachments spends one shared budget per joined field, in the order
-// buildMessageDocument joins them. Once a budget is gone the remaining values
-// cannot reach the index, because the join stops at the first value it has to
-// truncate, so dropping them here changes nothing that gets indexed.
+// boundIndexAttachments replaces the attachment list with the single value the
+// projection derives from it. Each of the three attachment fields is indexed as
+// one joined string, and the join is what decides how much of each attachment
+// survives - not the attachment's own size - so the joined form is the smallest
+// payload that still indexes identically. Reproducing that split across the
+// original entries would mean reimplementing the join's budget accounting, and
+// an accounting that differs by a byte silently stops indexing text.
+//
+// The result is a projection input, not an attachment list: nothing between here
+// and the Bleve commit reads per-attachment fields. Whether the message has
+// attachments is preserved, because buildMessageDocument only tests the slice
+// for emptiness and sync carries the visible-attachment flag separately.
 func boundIndexAttachments(attachments []AttachmentDoc) []AttachmentDoc {
 	if len(attachments) == 0 {
 		return attachments
 	}
-	bounded := make([]AttachmentDoc, len(attachments))
-	copy(bounded, attachments)
-	names := maxIndexedNamesBytes
-	types := maxIndexedNamesBytes
-	texts := maxIndexedAttachmentsBytes
-	for i := range bounded {
-		bounded[i].Filename, names = spendJoinBudget(bounded[i].Filename, names)
-		bounded[i].ContentType, types = spendJoinBudget(bounded[i].ContentType, types)
-		bounded[i].Text, texts = spendJoinBudget(bounded[i].Text, texts)
+	names := make([]string, 0, len(attachments))
+	contentTypes := make([]string, 0, len(attachments))
+	texts := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		names = append(names, attachment.Filename)
+		contentTypes = append(contentTypes, attachment.ContentType)
+		// The same filter buildMessageDocument applies: an attachment with no
+		// readable text is not part of the joined text at all.
+		if strings.TrimSpace(attachment.Text) != "" {
+			texts = append(texts, attachment.Text)
+		}
 	}
-	return bounded
-}
-
-// spendJoinBudget keeps at least as much of value as boundedIndexJoin can still
-// use and reports the budget left. The join also pays for separators, so its own
-// budget runs out no later than this one: keeping a slightly longer prefix is
-// safe, keeping a shorter one would silently drop indexed text.
-func spendJoinBudget(value string, remaining int) (string, int) {
-	if value == "" {
-		return value, remaining
-	}
-	if remaining <= 0 {
-		return "", 0
-	}
-	if len(value) > remaining {
-		return boundedIndexText(value, remaining), 0
-	}
-	return value, remaining - len(value)
+	return []AttachmentDoc{{
+		Filename:    boundedIndexJoin(names, maxIndexedNamesBytes),
+		ContentType: boundedIndexJoin(contentTypes, maxIndexedNamesBytes),
+		Text:        boundedIndexJoin(texts, maxIndexedAttachmentsBytes),
+	}}
 }
 
 func indexDocumentPayloadBytes(document MessageIndexDocument) uint64 {

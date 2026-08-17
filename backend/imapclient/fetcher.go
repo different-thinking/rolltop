@@ -40,11 +40,15 @@ const (
 	defaultFetchBatchBytes = 16 * 1024 * 1024
 	// uidSizeProbeWindow bounds one metadata probe. It covers many more UIDs than
 	// a body batch can hold, because the probe transfers a few dozen bytes per
-	// message and one extra command per two hundred is not worth saving. It stays
-	// this side of a thousand so that even a fully sparse set, which cannot be
-	// written as UID ranges, keeps the command line short enough for servers that
-	// take RFC 2683's advice about long commands literally.
+	// message and one extra command per two hundred is not worth saving. The
+	// window also bounds the size map the probe returns, which is why a
+	// contiguous run that would encode as a single short range is split anyway.
 	uidSizeProbeWindow = 200
+	// maxUIDProbeCommandBytes bounds the encoded UID set instead of counting
+	// UIDs, because that is what RFC 2683 advises keeping short. A contiguous
+	// window collapses into one range and never approaches it; a sparse repair
+	// set of seven-digit UIDs would, so it is split until it fits.
+	maxUIDProbeCommandBytes = 800
 	// assumedMessageBytes stands in for a size the server did not report. It is
 	// the batch budget divided by the default batch size, so an unhelpful server
 	// simply gets the count-based batching this fetcher has always used.
@@ -620,15 +624,30 @@ func (f *Fetcher) fetchUIDs(ctx context.Context, c *client.Client, mailbox strin
 	batchSize := f.batchSize()
 	section := rawBodySection()
 	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchFlags, section.FetchItem()}
+	probeUnavailable := false
 	for _, window := range uidProbeWindows(uids, batchSize) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		sizes, err := probeUIDSizes(ctx, c, mailbox, window, batchSize)
-		if err != nil {
-			return err
+		var sizes map[uint32]int64
+		if !probeUnavailable {
+			probed, err := probeUIDSizes(ctx, c, mailbox, window, batchSize)
+			switch {
+			case err == nil:
+				sizes = probed
+			case ctx.Err() != nil:
+				return err
+			default:
+				// A server that will not answer a metadata probe still gets its
+				// bodies. Planning by message count is what this fetcher did
+				// before it planned by bytes, so the fetch continues rather than
+				// failing the whole folder over a command the sync only wanted in
+				// order to size its batches.
+				probeUnavailable = true
+				log.Printf("fetch mailbox %q plans batches by message count: %v", mailbox, err)
+			}
 		}
 		for _, requested := range planUIDFetchBatches(window, sizes, batchSize, f.batchBytes()) {
 			if err := f.fetchUIDBatch(ctx, c, mailbox, requested, section, items, handle); err != nil {
@@ -653,19 +672,32 @@ func (f *Fetcher) batchBytes() int64 {
 	return defaultFetchBatchBytes
 }
 
-// uidProbeWindows splits a UID list into the spans one size probe covers. A
-// fetcher that already downloads one message at a time has nothing to plan, so
-// it keeps the whole list as a single window and skips the probe entirely.
+// uidProbeWindows splits a UID list into the spans one size probe covers, by UID
+// count and by the length of the command that carries them. A fetcher that
+// already downloads one message at a time has nothing to plan, so it keeps the
+// whole list as a single window and skips the probe entirely.
 func uidProbeWindows(uids []uint32, batchSize int) [][]uint32 {
 	if batchSize <= 1 || len(uids) <= 1 {
 		return [][]uint32{uids}
 	}
 	windows := make([][]uint32, 0, (len(uids)+uidSizeProbeWindow-1)/uidSizeProbeWindow)
-	for start := 0; start < len(uids); start += uidSizeProbeWindow {
+	for start := 0; start < len(uids); {
 		end := min(start+uidSizeProbeWindow, len(uids))
+		for end-start > 1 && encodedUIDSetBytes(uids[start:end]) > maxUIDProbeCommandBytes {
+			end = start + (end-start)/2
+		}
 		windows = append(windows, uids[start:end])
+		start = end
 	}
 	return windows
+}
+
+// encodedUIDSetBytes measures the set as the server will receive it, so ranges
+// are counted as ranges rather than as the UIDs they stand for.
+func encodedUIDSetBytes(uids []uint32) int {
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uids...)
+	return len(seqset.String())
 }
 
 // probeUIDSizes reads RFC822.SIZE for one window. The size of a message arrives
