@@ -447,3 +447,107 @@ func TestForeignKeyRepairAcceptsADatabaseCleanedByTheLastPass(t *testing.T) {
 		t.Fatalf("dropped = %d, want 1", dropped)
 	}
 }
+
+// TestPrepareUserStoresSkipsAPageDamagedTenant covers the corruption an
+// operator actually meets. The sibling test above replaces the whole file, so
+// SQLite refuses it at open with SQLITE_NOTADB; here the header and schema stay
+// valid and the damage sits in the table pages, so the failure surfaces from a
+// migration's seed step instead. That failure has to be classified and latched
+// exactly like the wholesale one, or a single damaged tenant takes the
+// installation down with a bare "database disk image is malformed".
+func TestPrepareUserStoresSkipsAPageDamagedTenant(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged, err := db.CreateUser(ctx, "damaged@example.test", "Damaged", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := db.CreateUser(ctx, "healthy@example.test", "Healthy", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	us, err := db.UserStore(ctx, damaged.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTenantMessages(t, us, damaged.ID, 4000)
+	tenantPath := UserDatabaseFilePath(dataDir, damaged.ID)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corruptDatabasePages(t, tenantPath)
+
+	reopened, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.PrepareUserStores(ctx, nil); err != nil {
+		t.Fatalf("one page-damaged tenant kept the installation down: %v", err)
+	}
+	if !reopened.DatabaseCorrupt(damaged.ID) {
+		t.Fatal("the page-damaged tenant was not latched")
+	}
+	if reopened.DatabaseCorrupt(healthy.ID) {
+		t.Fatal("the healthy tenant was latched")
+	}
+	if _, err := reopened.UserStore(ctx, healthy.ID); err != nil {
+		t.Fatalf("healthy tenant is unusable: %v", err)
+	}
+	// The raw driver message names neither the file nor a way out of it, and an
+	// operator seeing it unadorned is looking at a build without this handling.
+	_, err = reopened.UserStore(ctx, damaged.ID)
+	if err == nil {
+		t.Fatal("the damaged tenant was served")
+	}
+	for _, want := range []string{tenantPath, "is corrupt", "recover-db"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err.Error(), want)
+		}
+	}
+}
+
+// writeTenantMessages fills an already-migrated tenant store with messages
+// whose bodies spread the table across many SQLite pages, so page damage lands
+// in real rows rather than free space.
+func writeTenantMessages(t *testing.T, us *Store, userID int64, messageCount int) {
+	t.Helper()
+	ctx := context.Background()
+	now := nowUnix()
+	if _, err := us.db.ExecContext(ctx, `INSERT INTO mail_accounts (id, user_id, email, host, port, username, encrypted_password, created_at, updated_at)
+		VALUES (1, ?, 'owner@example.test', 'imap.example.test', 993, 'owner', 'secret', ?, ?)`, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := us.db.ExecContext(ctx, `INSERT INTO mailboxes (id, user_id, account_id, name, created_at, updated_at)
+		VALUES (1, ?, 1, 'INBOX', ?, ?)`, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := us.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, 2048)
+	for i := range body {
+		body[i] = byte('a' + i%26)
+	}
+	for i := 1; i <= messageCount; i++ {
+		blobPath := fmt.Sprintf("users/%d/blobs/%d.eml", userID, i)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO blobs (id, user_id, kind, path, sha256, size, created_at)
+			VALUES (?, ?, 'raw', ?, ?, ?, ?)`, i, userID, blobPath, fmt.Sprintf("%064d", i), len(body), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO messages
+				(id, user_id, account_id, mailbox_id, blob_id, subject, from_addr, uid, blob_path, body_text, created_at, updated_at)
+			VALUES (?, ?, 1, 1, ?, ?, 'sender@example.test', ?, ?, ?, ?, ?)`,
+			i, userID, i, fmt.Sprintf("subject %d", i), i, blobPath, string(body), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}

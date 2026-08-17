@@ -571,6 +571,9 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	if err := db.PrepareUserStores(ctx, reporter); err != nil {
 		return nil, err
 	}
+	for _, warning := range damagedDatabaseWarnings(db.CorruptDatabases()) {
+		log.Print(warning)
+	}
 
 	startup.update("Sync state", "marking interrupted sync runs", 0, 1)
 	if n, err := db.MarkRunningSyncRunsInterrupted(context.Background()); err != nil {
