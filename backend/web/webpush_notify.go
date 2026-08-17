@@ -124,6 +124,12 @@ func (s *Server) notifyNewMailWebPush(ctx context.Context, userID int64) bool {
 	defer cancel()
 	subs, err := s.store.ListWebPushSubscriptions(ctx, userID)
 	if err != nil {
+		// A closed store means this goroutine outlived the database it reads
+		// from. There is nothing to deliver and no later attempt that could
+		// succeed, so it stops without reporting an operational failure.
+		if store.IsClosed(err) {
+			return false
+		}
 		if ctx.Err() == nil {
 			log.Printf("web push subscriptions user_id=%d: %v", userID, err)
 		}

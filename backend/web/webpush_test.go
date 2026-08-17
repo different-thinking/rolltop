@@ -236,3 +236,24 @@ type webPushRoundTripFunc func(*http.Request) (*http.Response, error)
 func (fn webPushRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
 }
+
+// waitForWebPushWorker blocks until the scheduled web push worker for one tenant
+// has finished. Tests whose request path notifies a tenant use this so no
+// goroutine reads their database after they tear it down: such a read logs a
+// failure that lands in an unrelated test's captured output.
+func waitForWebPushWorker(t *testing.T, server *Server, userID int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		server.webPushScheduleMu.Lock()
+		running := server.webPushRunning[userID]
+		server.webPushScheduleMu.Unlock()
+		if !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("web push worker for user %d did not finish", userID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

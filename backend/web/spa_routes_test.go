@@ -37,9 +37,10 @@ func TestEverySPARouteIsActuallyServed(t *testing.T) {
 	}
 	defer db.Close()
 	server, err := New(Options{
-		Store:      db,
-		MasterKey:  []byte("12345678901234567890123456789012"),
-		SessionTTL: time.Hour,
+		Store:                    db,
+		MasterKey:                []byte("12345678901234567890123456789012"),
+		SessionTTL:               time.Hour,
+		DisableBackgroundWorkers: true,
 	})
 	if err != nil {
 		t.Fatal(err)
