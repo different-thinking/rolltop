@@ -38,7 +38,9 @@ func TestServerStartupRecoversOverdueInboxArrival(t *testing.T) {
 
 	service := &syncer.Service{Store: db}
 	runner := syncer.NewRunnerWithContext(ctx, service)
-	server, err := New(Options{Store: db, Syncer: service, SyncRunner: runner, PluginDir: t.TempDir()})
+	// Arrival recovery runs before the background workers start, so this test
+	// keeps the recovery and leaves no worker behind to outlive its database.
+	server, err := New(Options{Store: db, Syncer: service, SyncRunner: runner, PluginDir: t.TempDir(), DisableBackgroundWorkers: true})
 	if err != nil {
 		t.Fatal(err)
 	}

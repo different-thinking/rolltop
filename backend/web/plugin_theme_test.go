@@ -64,7 +64,7 @@ func TestPluginAssetRouteServesEnabledThemeAsset(t *testing.T) {
 	defer db.Close()
 	pluginRoot := t.TempDir()
 	writeMatrixThemePlugin(t, pluginRoot)
-	server, err := New(Options{Store: db, PluginDir: pluginRoot})
+	server, err := New(Options{Store: db, PluginDir: pluginRoot, DisableBackgroundWorkers: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPluginAssetRouteServesEnabledFrontendPluginAssets(t *testing.T) {
 	defer db.Close()
 	pluginRoot := t.TempDir()
 	writeFrontendPlugin(t, pluginRoot)
-	server, err := New(Options{Store: db, PluginDir: pluginRoot})
+	server, err := New(Options{Store: db, PluginDir: pluginRoot, DisableBackgroundWorkers: true})
 	if err != nil {
 		t.Fatal(err)
 	}
