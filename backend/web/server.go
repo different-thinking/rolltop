@@ -270,9 +270,6 @@ func New(opts Options) (*Server, error) {
 		runnerContext, ownedSyncRunnerCancel = context.WithCancel(context.Background())
 		opts.SyncRunner = syncer.NewRunnerWithContext(runnerContext, opts.Syncer)
 	}
-	if opts.Sender == nil && len(opts.MasterKey) == 32 {
-		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey}
-	}
 	if strings.TrimSpace(opts.PluginDir) == "" {
 		opts.PluginDir = "plugins"
 	}
@@ -283,6 +280,12 @@ func New(opts Options) (*Server, error) {
 		opts.GoogleAuth = googleauth.NewManager(
 			googleauth.New(opts.Google.ClientID, opts.Google.ClientSecret, opts.Google.RedirectURLs, opts.Google.Scopes),
 			opts.Store, opts.MasterKey)
+	}
+	// The sender is built after the manager so a server that owns both shares
+	// one instance; an OAuth account sending through a tokenless sender would
+	// fail with nothing to point the user at.
+	if opts.Sender == nil && len(opts.MasterKey) == 32 {
+		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey, Tokens: opts.GoogleAuth}
 	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {

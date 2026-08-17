@@ -16,6 +16,19 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - Keep IMAP credentials and OAuth tokens encrypted with `ROLLTOP_MASTER_KEY`.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
+- An account's `auth_type` decides how it authenticates. A `google_oauth`
+  account stores no password at all; do not add a fallback that reads one.
+- Gmail's label views (All Mail, Important, Starred) must stay excluded from
+  sync by default. The data model stores one folder per message, so mirroring
+  them duplicates most of the mailbox.
+- A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
+  the fetch. Apply it only to searches that decide what to **download** — the
+  body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
+  missing UIDs. Never apply it to the searches that decide what to **delete or
+  flag**: reconciliation deletes local messages absent from the server's UID
+  list, and read/star sync marks every local message outside the returned set as
+  unread or unstarred, so a cutoff-limited list there destroys mail that was
+  mirrored before the cutoff existed.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 
 ## Checks
