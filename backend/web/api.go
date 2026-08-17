@@ -112,6 +112,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiBulkCopyMessages(w, r)
 	case path == "messages/bulk-read":
 		s.apiBulkReadMessages(w, r)
+	case path == "messages/scope-trash":
+		s.apiScopeTrashMessages(w, r)
 	case strings.HasPrefix(path, "messages/"):
 		s.apiMessagePath(w, r, strings.TrimPrefix(path, "messages/"))
 	case strings.HasPrefix(path, "sync-runs/"):

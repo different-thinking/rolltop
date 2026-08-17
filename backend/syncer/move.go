@@ -104,6 +104,14 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 		}
 		msg, err := s.Store.GetMessageForUser(ctx, userID, id)
 		if err != nil {
+			if store.IsNotFound(err) {
+				// A caller can resolve IDs long before this run reaches them: a
+				// whole-filter delete snapshots thousands. A row that has since
+				// been moved or dropped by a resync has nothing left to move, so
+				// it is counted as handled instead of failing the whole run.
+				progress.MessagesSeen++
+				continue
+			}
 			status = "failed"
 			errText = err.Error()
 			return
@@ -122,7 +130,10 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 			errText = err.Error()
 			return
 		}
-		s.notify(userID)
+		// Per-message progress uses the lightweight event path, like the sync
+		// loop does: the completed move already invalidated the cached mail
+		// pages, so this only has to move the progress indicators.
+		s.notifyProgress(userID)
 	}
 }
 

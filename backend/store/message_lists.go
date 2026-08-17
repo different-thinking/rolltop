@@ -218,6 +218,85 @@ func (s *Store) ListRecentSearchEnabledMessagesForUser(ctx context.Context, user
 	return scanMessages(rows)
 }
 
+// ScopeMessage is one message a whole-view selection ("act on everything this
+// filter matches") resolves to. Only routing fields are carried: the account
+// decides which Trash folder applies, and the source mailbox decides which
+// folders a move has to refresh afterwards.
+type ScopeMessage struct {
+	ID        int64
+	AccountID int64
+	MailboxID int64
+}
+
+// maxScopeMessages bounds one resolved selection so a filter over a very large
+// mailbox cannot pin an unbounded ID set in memory. Callers pass their own
+// smaller limit and report to the user when a pass was cut short.
+const maxScopeMessages = 50000
+
+func scopeMessageLimit(limit int) int {
+	if limit <= 0 || limit > maxScopeMessages {
+		return maxScopeMessages
+	}
+	return limit
+}
+
+// ListAllMailScopeMessagesForUser lists the messages an All Mail selection
+// covers: every unsnoozed message in a folder All Mail shows. Rows the list
+// hides (Trash, Junk, Drafts, snoozed threads) stay out of the selection.
+func (s *Store) ListAllMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
+		FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
+			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
+		WHERE m.user_id = ? AND mb.show_in_all_mail = 1 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		ORDER BY m.date_unix DESC, m.id DESC
+		LIMIT ?`, userID, nowUnix(), scopeMessageLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScopeMessages(rows)
+}
+
+// ListMailboxScopeMessagesForUser lists the messages a single-folder selection
+// covers. Unlike All Mail this includes folders hidden from All Mail, because
+// the user is looking at that folder's own list.
+func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mailboxID int64, limit int) ([]ScopeMessage, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
+		FROM messages m
+		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
+			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
+		WHERE m.user_id = ? AND m.mailbox_id = ? AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		ORDER BY m.date_unix DESC, m.id DESC
+		LIMIT ?`, userID, mailboxID, nowUnix(), scopeMessageLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScopeMessages(rows)
+}
+
+func scanScopeMessages(rows *sql.Rows) ([]ScopeMessage, error) {
+	out := make([]ScopeMessage, 0, 64)
+	for rows.Next() {
+		var item ScopeMessage
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.MailboxID); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // ListLatestThreadMessagesForUser returns one latest message per thread for all-mail list rendering.
 func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int) ([]MessageRecord, error) {
 	db, err := s.dataDB(ctx, userID)

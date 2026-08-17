@@ -97,6 +97,8 @@ export function MailView({
   const [loading, setLoading] = useState(true);
   const [syncBusy, setSyncBusy] = useState(false);
   const [pullRefreshing, setPullRefreshing] = useState(false);
+  // Bumped by pull-to-refresh and by list mutations that need the page reloaded
+  // rather than only patched, so emptied pages pull the next rows forward.
   const [manualRefreshGeneration, setManualRefreshGeneration] = useState(0);
   const loaded = useRef(false);
   const manualViewSyncKey = useRef("");
@@ -138,6 +140,10 @@ export function MailView({
   );
   const syncAlreadyRunning = syncBusy || (mailbox ? Boolean(activeRun) : activeSyncRuns.length > 0);
 
+  function refreshList() {
+    setManualRefreshGeneration((current) => current + 1);
+  }
+
   async function refreshByPull() {
     const startedAt = performance.now();
     setPullRefreshing(true);
@@ -154,7 +160,7 @@ export function MailView({
           addToast(`Refresh failed: ${messageFromError(err)}`, "error");
         }
       }
-      setManualRefreshGeneration((current) => current + 1);
+      refreshList();
       await refreshChrome();
     } finally {
       const remaining = 450 - (performance.now() - startedAt);
@@ -246,6 +252,10 @@ export function MailView({
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
         setShowingSavedPage(false);
+        // Deleting a full page can leave a later page with nothing on it. The
+        // rows did not vanish, they moved forward, so follow them back instead
+        // of parking the user on an empty page.
+        if (data.conversations.length === 0 && page > 1) navigate(mailURL(mailboxID, page - 1));
         if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1);
         if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1);
       })
@@ -393,6 +403,8 @@ export function MailView({
                 onStarredChange={updateStarred}
                 onReadStatesChange={updateReadStates}
                 onMessagesMoved={removeMovedConversations}
+                onListChanged={refreshList}
+                listScope={{ mailboxID: mailbox?.id || 0, query: "", label: mailbox?.name || "All Mail", total: totalCount }}
                 emptyState={showRecoveryEmptyState && mailbox ? (
                   <MailboxRecoveryEmptyState mailbox={mailbox} activeRun={accountActiveRun} />
                 ) : undefined}
@@ -523,6 +535,7 @@ export function SnoozedView({
               onStarredChange={updateStarred}
               onReadStatesChange={updateReadStates}
               onMessagesMoved={removeMovedConversations}
+              onListChanged={() => setRefreshGeneration((current) => current + 1)}
               snoozedView
             />
       )}
@@ -679,6 +692,7 @@ export function SearchView({
   swipePreferences,
   datePrefs,
   activeSyncRuns,
+  mailGeneration,
   messageSecurityPlugins = [],
   searchActionPlugins = [],
   addToast
@@ -691,6 +705,7 @@ export function SearchView({
   swipePreferences: SwipePreferences;
   datePrefs: DatePrefs;
   activeSyncRuns: SyncRun[];
+  mailGeneration: number;
   messageSecurityPlugins?: RuntimePlugin[];
   searchActionPlugins?: RuntimePlugin[];
   addToast: AddToast;
@@ -700,6 +715,7 @@ export function SearchView({
   const [error, setError] = useState("");
   const [hasPrev, setHasPrev] = useState(false);
   const [hasNext, setHasNext] = useState(false);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const loadedKey = useRef("");
   const route = searchRoute(location.path);
   const query = route.query;
@@ -707,13 +723,22 @@ export function SearchView({
   const searchKey = query + ":best:" + page;
   const slideDirection = useListSlideDirection("search:" + query, page);
   const listPending = loading || loadedKey.current !== searchKey;
+  // A search is far more expensive than a mailbox page, and a bulk move emits a
+  // mail-list change per moved message. Coalescing those bursts keeps one delete
+  // from turning into hundreds of searches while still following the mailbox.
+  const settledGeneration = useSettledValue(mailGeneration, 1500, 8000);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setConversations([]);
-    setHasPrev(false);
-    setHasNext(false);
+    // A refresh of the same result page keeps its rows on screen: only a new
+    // query or page clears them, so a background reload does not flash a
+    // loading state over a list the user is working in.
+    if (loadedKey.current !== searchKey) {
+      setLoading(true);
+      setConversations([]);
+      setHasPrev(false);
+      setHasNext(false);
+    }
     setError("");
     api
       .search(query, page)
@@ -723,6 +748,7 @@ export function SearchView({
         setConversations(data.conversations);
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
+        if (data.conversations.length === 0 && page > 1) navigate(searchURL(query, page - 1));
         if (data.has_next) api.prefetchSearch(query, page + 1);
       })
       .catch((err) => {
@@ -740,7 +766,7 @@ export function SearchView({
     return () => {
       cancelled = true;
     };
-  }, [query, page, searchKey]);
+  }, [query, page, searchKey, settledGeneration, refreshGeneration]);
 
   const pageURL = (nextPage: number) => searchURL(query, nextPage);
   const returnURL = routeWithSearch(location.path, location.search);
@@ -818,6 +844,8 @@ export function SearchView({
               onStarredChange={updateStarred}
               onReadStatesChange={updateReadStates}
               onMessagesMoved={removeMovedConversations}
+              onListChanged={() => setRefreshGeneration((current) => current + 1)}
+              listScope={{ mailboxID: 0, query, label: query ? `“${query}”` : "All Mail" }}
             />
           )}
         </SlidingMessageListStage>
@@ -834,6 +862,30 @@ type OutgoingListPane = {
   child: ReactNode;
   direction: Exclude<SlideDirection, "none">;
 };
+
+/**
+ * useSettledValue follows `value` but waits for a quiet period before adopting a
+ * new one, and never lags further behind than maxWaitMS. Sync runs report every
+ * moved message, so views whose reload is expensive follow the settled value.
+ */
+function useSettledValue<T>(value: T, quietMS: number, maxWaitMS: number): T {
+  const [settled, setSettled] = useState(value);
+  const firstChangeAt = useRef(0);
+
+  useEffect(() => {
+    if (settled === value) {
+      firstChangeAt.current = 0;
+      return;
+    }
+    if (firstChangeAt.current === 0) firstChangeAt.current = Date.now();
+    const waited = Date.now() - firstChangeAt.current;
+    const delay = Math.max(0, Math.min(quietMS, maxWaitMS - waited));
+    const timer = window.setTimeout(() => setSettled(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, settled, quietMS, maxWaitMS]);
+
+  return settled;
+}
 
 function useListSlideDirection(scopeKey: string, page: number): SlideDirection {
   const previous = useRef({ scopeKey, page });
@@ -977,6 +1029,19 @@ type ConversationReadState = {
   read: boolean;
 };
 
+/**
+ * MessageListScope describes the filter a list is showing so a selection can
+ * mean "everything this filter matches" instead of only the loaded page. The
+ * server resolves it again on delete; `total` is only for the button label and
+ * is absent for searches, whose match count is not counted up front.
+ */
+type MessageListScope = {
+  mailboxID: number;
+  query: string;
+  label: string;
+  total?: number;
+};
+
 /** TrashMoveGroup collects the selected rows headed for one Trash mailbox. */
 type TrashMoveGroup = {
   target: Mailbox;
@@ -1050,6 +1115,8 @@ function MessageList({
   onStarredChange,
   onReadStatesChange,
   onMessagesMoved,
+  onListChanged,
+  listScope,
   snoozedView = false,
   currentMailboxID = 0,
   emptyState
@@ -1071,6 +1138,10 @@ function MessageList({
   onStarredChange: (messageID: number, starredMessageID: number, starred: boolean) => void;
   onReadStatesChange: (states: ConversationReadState[]) => void;
   onMessagesMoved: (messageIDs: number[]) => void;
+  /** Reload the current page: rows removed here are replaced by the next ones. */
+  onListChanged?: () => void;
+  /** The filter this list shows, which enables whole-filter selection. */
+  listScope?: MessageListScope;
   snoozedView?: boolean;
   /** The mailbox this list is showing, so Delete can skip rows already in it. */
   currentMailboxID?: number;
@@ -1089,6 +1160,12 @@ function MessageList({
   const [pendingSwipeReadStates, setPendingSwipeReadStates] = useState<Map<number, boolean>>(() => new Map());
   const [swipeState, setSwipeState] = useState<MessageSwipeState | null>(null);
   const [keyboardIndex, setKeyboardIndex] = useState<number | null>(null);
+  // scopeSelected means the selection is the filter itself, not a set of rows.
+  // Any per-row selection change drops back to the concrete row selection, so
+  // the two modes never disagree about what is selected.
+  const [scopeSelected, setScopeSelected] = useState(false);
+  const [scopeDeletePending, setScopeDeletePending] = useState(false);
+  const [scopeDeleteBusy, setScopeDeleteBusy] = useState(false);
   const selectionAnchorID = useRef<number | null>(null);
   const moveOutTimers = useRef<Map<number, number>>(new Map());
   const swipeCompletionTimer = useRef<number | null>(null);
@@ -1100,7 +1177,7 @@ function MessageList({
   const suppressRowClickUntil = useRef(0);
   // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
   // so concurrent moves cannot race each other on the same rows.
-  const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || trashOps > 0;
+  const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || scopeDeleteBusy || trashOps > 0;
   const visible = conversations
     .filter((conversation) => !dismissedIDs.has(conversation.message.id))
     .map((conversation) => {
@@ -1174,6 +1251,13 @@ function MessageList({
     });
   }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs, pendingSwipeMoveIDs, pendingSwipeSnoozeIDs]);
 
+  // A different folder or query is a different selection: whole-filter mode must
+  // not survive the move, or Delete would act on a filter the user left.
+  useEffect(() => {
+    setScopeSelected(false);
+    setScopeDeletePending(false);
+  }, [listScope?.mailboxID, listScope?.query]);
+
   useEffect(() => {
     const ids = new Set(visible.map((conversation) => conversation.message.id));
     setSelectedIDs((current) => {
@@ -1214,6 +1298,8 @@ function MessageList({
         row?.scrollIntoView({ block: "nearest" });
       });
       if (key === "x" && !event.repeat) {
+        setScopeSelected(false);
+        setScopeDeletePending(false);
         setSelectedIDs((current) => {
           const next = new Set(current);
           if (next.has(messageID)) next.delete(messageID);
@@ -1255,6 +1341,7 @@ function MessageList({
     const anchorIndex = event.shiftKey && selectionAnchorID.current !== null
       ? visible.findIndex((conversation) => conversation.message.id === selectionAnchorID.current)
       : -1;
+    exitScopeSelection();
     setSelectedIDs((current) => {
       const next = new Set(current);
       if (anchorIndex >= 0) {
@@ -1277,11 +1364,59 @@ function MessageList({
   function clearSelection() {
     setSelectedIDs(new Set());
     selectionAnchorID.current = null;
+    exitScopeSelection();
   }
 
   function selectAllOnPage() {
     setSelectedIDs(new Set(visible.map((conversation) => conversation.message.id)));
     selectionAnchorID.current = null;
+  }
+
+  // Leaving whole-filter mode also drops a pending confirmation: the selection it
+  // was asking about no longer exists.
+  function exitScopeSelection() {
+    setScopeSelected(false);
+    setScopeDeletePending(false);
+  }
+
+  function selectWholeScope() {
+    if (!listScope || selectionBusy) return;
+    setSelectedIDs(new Set(visible.map((conversation) => conversation.message.id)));
+    selectionAnchorID.current = null;
+    setScopeSelected(true);
+  }
+
+  // The whole-filter delete hands the server the filter instead of message IDs.
+  // It cannot be deferred behind an undo toast: the resolved set is far larger
+  // than a page, so the confirmation happens before anything moves.
+  async function deleteWholeScope() {
+    if (!listScope || scopeDeleteBusy) return;
+    setScopeDeletePending(false);
+    setScopeDeleteBusy(true);
+    try {
+      const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query });
+      const queuedMessages = result.queued_messages || 0;
+      if (queuedMessages > 0) {
+        addToast(`Moving ${messageCountLabel(queuedMessages)} to Trash. This continues in the background.`);
+      } else if (result.skipped > 0) {
+        addToast("Every matching message is already in Trash.");
+      } else {
+        addToast("This filter has no messages left to delete.");
+      }
+      if (queuedMessages > 0 && result.skipped > 0) {
+        addToast(`Skipped ${messageCountLabel(result.skipped)} already in Trash.`);
+      }
+      if (result.truncated) {
+        addToast(`This pass covers ${messageCountLabel(result.matched)}. Repeat the delete to continue with the rest.`);
+      }
+      if (result.partial_error) addToast(result.partial_error, "error");
+      clearSelection();
+      onListChanged?.();
+    } catch (err) {
+      addToast(`Delete failed: ${messageFromError(err)}`, "error");
+    } finally {
+      setScopeDeleteBusy(false);
+    }
   }
 
   async function markSelectedRead(read: boolean) {
@@ -1381,6 +1516,7 @@ function MessageList({
         entry.items.map((item) => api.unsnoozeMessage(csrf, item.rowID, { keepalive: true }))));
     }
     const movedMessageIDs: number[] = [];
+    const stillQueuedIDs = new Set<number>();
     const movedRowIDs: number[] = [];
     const restoreIDs: number[] = [];
     const reselectRowIDs: number[] = [];
@@ -1389,8 +1525,9 @@ function MessageList({
     setTrashOps((count) => count + 1);
     try {
       await Promise.all(entries.map(async (entry) => {
-        const { movedIDs, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive);
+        const { movedIDs, queuedIDs, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive);
         if (error !== undefined && firstError === undefined) firstError = error;
+        queuedIDs.forEach((id) => stillQueuedIDs.add(id));
         queuedMessages += queuedCount;
         movedMessageIDs.push(...movedIDs);
         const movedSet = new Set(movedIDs);
@@ -1410,19 +1547,25 @@ function MessageList({
       void Promise.allSettled(movedRowIDs.map((rowID) => api.unsnoozeMessage(csrf, rowID)));
     }
     if (movedMessageIDs.length > 0) onMessagesMoved(movedMessageIDs);
-    removePendingSwipeMoveIDs(dismissIDs);
+    // A queued move is only accepted, not done: its messages still sit in the
+    // source folder until the background run reaches them. They stay pending so
+    // a reload of this page does not show them again on their way out.
+    removePendingSwipeMoveIDs(dismissIDs.filter((id) => !stillQueuedIDs.has(id)));
     if (restoreIDs.length > 0) {
       restoreDismissed(uniquePositiveIDs(restoreIDs));
       setSelectedIDs((current) => new Set([...current, ...reselectRowIDs]));
     }
     if (queuedMessages > 0) addToast(`Move to ${destLabel} started for ${messageCountLabel(queuedMessages)}.`);
     if (firstError !== undefined) addToast(`Delete failed: ${messageFromError(firstError)}`, "error");
+    // The rows are gone from this page; reload it so the following messages move
+    // up instead of leaving the page short, or empty after a full-page delete.
+    if (movedMessageIDs.length > 0) onListChanged?.();
   }
 
   // executeMailboxMove pushes messageIDs into the target mailbox and reports
   // which messages moved (or were queued as a background run) so callers can
   // reconcile rows without guessing. Shared by swipe moves and bulk delete.
-  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedCount: number; error?: unknown }> {
+  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedIDs: number[]; queuedCount: number; error?: unknown }> {
     if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
       // Chunk here (within the backend's batch cap) so each chunk's outcome is
       // tracked independently: one failed chunk must not discard the moved IDs
@@ -1435,17 +1578,21 @@ function MessageList({
       const results = await Promise.allSettled(dispatched.map((chunk) =>
         api.bulkMoveMessages(csrf, chunk, target.id, keepalive ? { keepalive: true } : undefined)));
       const movedIDs: number[] = [];
+      const queuedIDs: number[] = [];
       let queuedCount = 0;
       let error: unknown;
       results.forEach((result, index) => {
         if (result.status === "fulfilled") {
           movedIDs.push(...dispatched[index]);
-          if (result.value.queued) queuedCount += dispatched[index].length;
+          if (result.value.queued) {
+            queuedIDs.push(...dispatched[index]);
+            queuedCount += dispatched[index].length;
+          }
         } else if (error === undefined) {
           error = result.reason;
         }
       });
-      return { movedIDs, queuedCount, error };
+      return { movedIDs, queuedIDs, queuedCount, error };
     }
     const movedIDs: number[] = [];
     let error: unknown;
@@ -1457,7 +1604,7 @@ function MessageList({
         if (error === undefined) error = err;
       }
     }
-    return { movedIDs, queuedCount: 0, error };
+    return { movedIDs, queuedIDs: [], queuedCount: 0, error };
   }
 
   function optimisticallyDismiss(ids: number[]) {
@@ -1598,7 +1745,10 @@ function MessageList({
       const failed = ids.filter((_, index) => results[index].status === "rejected");
       if (!snoozedView && failed.length > 0) restoreDismissed(failed);
       const succeeded = ids.length - failed.length;
-      if (succeeded > 0) addToast(`${succeeded === 1 ? "Message" : `${succeeded.toLocaleString()} messages`} snoozed until ${displaySnoozeUntil(until, datePrefs)}.`);
+      if (succeeded > 0) {
+        addToast(`${succeeded === 1 ? "Message" : `${succeeded.toLocaleString()} messages`} snoozed until ${displaySnoozeUntil(until, datePrefs)}.`);
+        onListChanged?.();
+      }
       if (failed.length > 0) {
         const first = results.find((result) => result.status === "rejected");
         const reason = first?.status === "rejected" ? messageFromError(first.reason) : "Request failed";
@@ -1625,7 +1775,10 @@ function MessageList({
       const failed = ids.filter((_, index) => results[index].status === "rejected");
       if (failed.length > 0) restoreDismissed(failed);
       const succeeded = ids.length - failed.length;
-      if (succeeded > 0) addToast(`${succeeded === 1 ? "Message" : `${succeeded.toLocaleString()} messages`} returned to mail.`);
+      if (succeeded > 0) {
+        addToast(`${succeeded === 1 ? "Message" : `${succeeded.toLocaleString()} messages`} returned to mail.`);
+        onListChanged?.();
+      }
       if (failed.length > 0) {
         const first = results.find((result) => result.status === "rejected");
         const reason = first?.status === "rejected" ? messageFromError(first.reason) : "Request failed";
@@ -1689,6 +1842,7 @@ function MessageList({
           if (!snoozedView) {
             onMessagesMoved(ids);
             removePendingSwipeSnoozeIDs(ids);
+            onListChanged?.();
           }
         } catch (err) {
           cancelSwipeDismiss(rowID);
@@ -1748,10 +1902,12 @@ function MessageList({
         restoreDismissed(dismissedIDs);
       },
       async (keepalive) => {
-        const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
-        removePendingSwipeMoveIDs(dismissedIDs);
+        const { movedIDs, queuedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
+        const queued = new Set(queuedIDs);
+        removePendingSwipeMoveIDs(dismissedIDs.filter((id) => !queued.has(id)));
         if (error === undefined) {
           onMessagesMoved(messageIDs);
+          onListChanged?.();
           return;
         }
         if (movedIDs.length > 0) onMessagesMoved(movedIDs);
@@ -1927,20 +2083,65 @@ function MessageList({
   const allOnPageSelected = selectedConversations.length === visible.length;
   const canMarkRead = selectedConversations.some((conversation) => !conversation.is_read);
   const canMarkUnread = selectedConversations.some((conversation) => conversation.is_read);
+  // Whole-filter selection is only offered once the page itself is fully
+  // selected and the filter is known to reach past it. A folder that fits on one
+  // page has nothing more to offer, so the row selection already covers it.
+  const scopeReachesPastPage = Boolean(listScope) && (listScope?.total === undefined || listScope.total > visible.length);
+  const canSelectWholeScope = Boolean(listScope) && !snoozedView && allOnPageSelected && scopeReachesPastPage;
+  const scopeButtonLabel = !listScope
+    ? ""
+    : listScope.query
+      ? `Select all messages matching ${listScope.label}`
+      : listScope.total === undefined
+        ? `Select all messages in ${listScope.label}`
+        : `Select all ${listScope.total.toLocaleString()} messages in ${listScope.label}`;
+  const scopeSelectedLabel = !listScope
+    ? ""
+    : listScope.query
+      ? `All messages matching ${listScope.label} are selected`
+      : `All messages in ${listScope.label} are selected`;
+  const pageOnlyHint = "Only Delete covers the whole filter. Clear the selection to act on single messages.";
   return (
     <div className={`message-table ${arrivalActive ? "mail-arrival-shift" : ""}`}>
-      {selectedConversations.length > 0 ? (
+      {selectedConversations.length > 0 || scopeSelected ? (
         <div className="selection-action-bar" role="toolbar" aria-label="Selected message actions" aria-busy={selectionBusy}>
           <div className="selection-action-summary">
             <button className="selection-clear" type="button" onClick={clearSelection} title="Clear selection" aria-label="Clear selection">
               <Icon name="close" />
             </button>
-            <span className="selection-count" aria-live="polite">
-              <strong>{selectedConversations.length.toLocaleString()}</strong>
-              <span>selected</span>
-            </span>
-            {allOnPageSelected ? (
-              <span className="selection-page-status">All {visible.length.toLocaleString()} on this page</span>
+            {scopeSelected ? (
+              <span className="selection-count selection-scope-count" aria-live="polite">
+                <Icon name="select_all" />
+                <strong>{listScope?.total !== undefined && !listScope.query ? listScope.total.toLocaleString() : "All"}</strong>
+                <span>selected</span>
+              </span>
+            ) : (
+              <span className="selection-count" aria-live="polite">
+                <strong>{selectedConversations.length.toLocaleString()}</strong>
+                <span>selected</span>
+              </span>
+            )}
+            {scopeSelected ? (
+              <span className="selection-page-status">{scopeSelectedLabel}</span>
+            ) : allOnPageSelected ? (
+              <>
+                <span className="selection-page-status">All {visible.length.toLocaleString()} on this page</span>
+                {canSelectWholeScope ? (
+                  <button
+                    className="selection-page-button selection-scope-button"
+                    type="button"
+                    onClick={selectWholeScope}
+                    disabled={selectionBusy}
+                    title={scopeButtonLabel}
+                    aria-label={scopeButtonLabel}
+                  >
+                    <Icon name="select_all" />
+                    <span>{listScope?.query || listScope?.total === undefined
+                      ? "Select all matching"
+                      : `Select all ${listScope.total.toLocaleString()}`}</span>
+                  </button>
+                ) : null}
+              </>
             ) : (
               <button
                 className="selection-page-button"
@@ -1956,11 +2157,21 @@ function MessageList({
             )}
           </div>
           <div className="selection-actions">
-            <button type="button" disabled={selectionBusy || !canMarkRead} onClick={() => void markSelectedRead(true)} title="Mark selected messages read">
+            <button
+              type="button"
+              disabled={selectionBusy || scopeSelected || !canMarkRead}
+              onClick={() => void markSelectedRead(true)}
+              title={scopeSelected ? pageOnlyHint : "Mark selected messages read"}
+            >
               <Icon name="mail_open" />
               <span>Mark read</span>
             </button>
-            <button type="button" disabled={selectionBusy || !canMarkUnread} onClick={() => void markSelectedRead(false)} title="Mark selected messages unread">
+            <button
+              type="button"
+              disabled={selectionBusy || scopeSelected || !canMarkUnread}
+              onClick={() => void markSelectedRead(false)}
+              title={scopeSelected ? pageOnlyHint : "Mark selected messages unread"}
+            >
               <Icon name="mail" />
               <span>Mark unread</span>
             </button>
@@ -1970,13 +2181,41 @@ function MessageList({
           <span>Unsnooze</span>
         </button>
       ) : (
-        <SnoozeControl datePrefs={datePrefs} disabled={selectionBusy} onSnooze={(until) => snoozeConversations(selectedConversations, until)} />
+        <SnoozeControl datePrefs={datePrefs} disabled={selectionBusy || scopeSelected} onSnooze={(until) => snoozeConversations(selectedConversations, until)} />
       )}
-            <button type="button" className="selection-delete" disabled={selectionBusy} onClick={() => void deleteSelected()} title="Move selected messages to Trash">
+            <button
+              type="button"
+              className="selection-delete"
+              disabled={selectionBusy}
+              onClick={() => scopeSelected ? setScopeDeletePending(true) : void deleteSelected()}
+              title={scopeSelected ? "Move every message matching this filter to Trash" : "Move selected messages to Trash"}
+            >
               <Icon name="delete" />
-              <span>Delete</span>
+              <span>{scopeDeleteBusy ? "Deleting" : "Delete"}</span>
             </button>
           </div>
+        </div>
+      ) : null}
+      {scopeDeletePending && listScope ? (
+        <div className="confirm-backdrop" role="presentation" onClick={() => setScopeDeletePending(false)}>
+          <section
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scope-delete-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="scope-delete-title">Delete everything this filter matches?</h2>
+            <p>
+              Every message {listScope.query ? `matching ${listScope.label}` : `in ${listScope.label}`} moves into its
+              account's Trash folder{listScope.total !== undefined && !listScope.query ? ` — about ${listScope.total.toLocaleString()} messages` : ""}.
+              This is not limited to the page you can see, it runs in the background, and it cannot be undone.
+            </p>
+            <div className="actions">
+              <button className="secondary" type="button" onClick={() => setScopeDeletePending(false)}>Cancel</button>
+              <button type="button" onClick={() => void deleteWholeScope()}>Move all to Trash</button>
+            </div>
+          </section>
         </div>
       ) : null}
       {visible.map((conversation, index) => {
@@ -1989,7 +2228,9 @@ function MessageList({
         const securitySnippetClass = messageSecuritySnippetClassName(messageSecurityPlugins, msg);
         const securityIndicators = messageSecurityIndicators(messageSecurityPlugins, { location: "message-list", message: msg, state: msg });
         const annotationNodes = messageAnnotationNodes(messageSecurityPlugins, msg);
-        const selected = selectedIDs.has(msg.id);
+        // Whole-filter mode covers rows this page has not even loaded, so every
+        // visible row reads as selected until the mode is left again.
+        const selected = scopeSelected || selectedIDs.has(msg.id);
         const touchMessageIDs = selected && selectedDragMessageIDs.length > 0 ? selectedDragMessageIDs : conversationTransferMessageIDs(conversation);
         const touchAccountIDs = selected && selectedDragAccountIDs.length > 0 ? selectedDragAccountIDs : conversationTransferAccountIDs(conversation);
         const movingOut = hiddenMessageIDs.has(msg.id);

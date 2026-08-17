@@ -126,6 +126,23 @@ export type MailListResponse = {
   has_next: boolean;
 };
 
+/**
+ * ScopeTrashResponse reports what a whole-filter delete resolved server-side.
+ * `matched` counts the messages the filter selected, `skipped` those already in
+ * their account's Trash, and `truncated` says the filter has more matches than
+ * one pass moves, so another pass is needed to finish it.
+ */
+export type ScopeTrashResponse = {
+  ok: boolean;
+  queued: boolean;
+  matched: number;
+  skipped: number;
+  queued_messages?: number;
+  truncated: boolean;
+  runs: { run_id: number; account_id: number; mailbox: string; messages: number }[];
+  partial_error?: string;
+};
+
 export type MessageSnooze = {
   id: number;
   message_id: number;
