@@ -21,5 +21,17 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 Run before handing off:
 
 ```sh
+npm run build:themes
 go test ./...
 ```
+
+`npm run build:themes` is a prerequisite, not a convenience: manifest validation
+stats the theme CSS a plugin manifest declares, so the Go suite fails on a clean
+checkout without it.
+
+Pull request CI (`.github/workflows/pr.yml`) only runs the checks the changed
+paths require: Go (`gofmt`, `go vet`, `go test`), frontend (`typecheck`, Vite
+builds), Android (unit tests and lint), and a Docker build when the image
+definition changes. Keep the path filters in that workflow's `changes` job in
+sync when adding a new top-level area. The full packaging and publishing
+pipeline lives in `.github/workflows/ci.yml` and runs on `main` and tags only.
