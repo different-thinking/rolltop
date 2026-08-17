@@ -60,7 +60,9 @@ Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
-include them.
+include them. Failures are written as `error ...` lines and are never hidden,
+whatever the level is set to; each names the request that produced it, for
+example `error server error GET /api/mail: database is locked`.
 
 ## Run Locally
 
@@ -107,13 +109,24 @@ anything that pipes or redirects only stdout (`docker logs rolltop | grep …`,
 `docker logs rolltop 2>&1 | grep …` instead.
 
 Crashes are additionally persisted in the data volume so they survive
-container recreation: an unhandled panic or fatal error is written to
-`/data/crash.log`, and the next startup preserves it as `/data/crash.log.prev`
-and logs that it found it. If the process is killed without any chance to
-report (kernel OOM kill, SIGKILL), no crash report can exist; the next startup
-detects the unclean shutdown and says so — then check
+container recreation. Unhandled panics and fatal errors are **appended** to
+`/data/crash.log`, which Rolltop never truncates — each start adds a
+`=== rolltop <version> started at <time> pid=<n> ===` line, so every report is
+attributable to a run. The next start reports in the container log that it
+found one. Only when the file grows past 1 MiB is it rotated to
+`/data/crash.log.prev`; if that rename fails, Rolltop keeps appending rather
+than lose what is already there.
+
+If the process is killed without any chance to report (kernel OOM kill,
+SIGKILL), no crash report can exist. The next start detects the unclean
+shutdown and says so — then check
 `docker inspect rolltop --format '{{.State.ExitCode}} {{.State.OOMKilled}}'`
 and the kernel log (`dmesg | grep -i oom`).
+
+Crash reporting is armed before the listener binds and before the
+configuration is read, so a port conflict or an unusable `ROLLTOP_MASTER_KEY`
+also lands in `/data/crash.log`. The deliberate restart for search index
+recovery (below) is not a crash and is not recorded as one.
 
 ### Automatic Search Index Recovery
 

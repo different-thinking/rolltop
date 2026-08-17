@@ -88,7 +88,7 @@ func (s *Server) handleRemoteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	file, err := s.blobs.OpenUserBlob(cu.User.ID, cache.BlobPath)
