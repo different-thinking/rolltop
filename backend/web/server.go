@@ -430,10 +430,9 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 				r = r.WithContext(context.WithValue(r.Context(), userContextKey, cu))
 			case store.IsNotFound(err):
 				// Missing or expired session row: genuinely signed out.
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				// The client abandoned the request mid-lookup; stay anonymous
-				// without logging so ordinary tab closes do not read like
-				// store failures.
+			case clientAbandonedRequest(r.Context()):
+				// Stay anonymous without logging so ordinary tab closes do not
+				// read like store failures.
 			default:
 				// A store failure (busy database under heavy sync, disk
 				// pressure) must not demote a valid session to anonymous:
@@ -446,6 +445,19 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clientAbandonedRequest reports whether the browser gave up on this request.
+//
+// The request context is the only trustworthy signal. Classifying by the error
+// the store returned would be wrong: a deadline the store or SQLite driver
+// applies internally under lock contention also surfaces as
+// context.DeadlineExceeded while the browser is still waiting for an answer,
+// and treating that as an abandoned request demotes a valid session to
+// anonymous, which is the spurious logout the caller's default branch exists
+// to prevent.
+func clientAbandonedRequest(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 func current(r *http.Request) (currentUser, bool) {
@@ -994,6 +1006,23 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request, userID int64)
 	})
 	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
 	return nil
+}
+
+// requireResourceAuth resolves the user for asset routes that hide their
+// existence from anonymous callers by answering 404. A session the store could
+// not check answers 503 instead: a 404 there reads to the browser as "this
+// icon does not exist" and gets cached for the rest of the session, long after
+// the store recovered.
+func (s *Server) requireResourceAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
+	if cu, ok := current(r); ok {
+		return cu, true
+	}
+	if sessionLookupFailed(r) {
+		sessionUnavailable(w)
+		return currentUser{}, false
+	}
+	http.NotFound(w, r)
+	return currentUser{}, false
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
