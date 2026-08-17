@@ -2,19 +2,19 @@ package store
 
 import "testing"
 
-// Registering a migration in migrate() but forgetting the upgrade test's list
-// leaves the upgrade path untested precisely for the newest schema, which is the
-// one most likely to be wrong.
-func TestUser031IsLatestRegisteredUserMigration(t *testing.T) {
+// The newest migration owns the whole-list invariants: it is the one that would
+// break them, and asserting them from every migration's test would mean fixing
+// the same thing in a dozen places the next time one is added.
+func TestUser033IsLatestRegisteredUserMigration(t *testing.T) {
 	sets := currentUserMigrationSetsForUpgradeTest()
 	if len(sets) < 2 {
 		t.Fatalf("registered user migrations=%d, want at least 2", len(sets))
 	}
-	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion031 {
-		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion031)
+	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion033 {
+		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion033)
 	}
-	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion030 {
-		t.Fatalf("user-031 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion030)
+	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion032 {
+		t.Fatalf("user-033 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion032)
 	}
 	// Application order is not numeric — user-011 has always run before
 	// user-004 — so only duplicates are worth asserting here. A version applied

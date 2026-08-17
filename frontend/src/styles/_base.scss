@@ -73,10 +73,13 @@ select {
   font: inherit;
 }
 
-input[type="text"],
-input[type="email"],
-input[type="password"],
-input[type="number"],
+// Every text-like control carries the app's field styling. The list used to name
+// the types it covered, which silently excluded the many inputs written without
+// a `type` at all: such an input behaves as text but `input[type="text"]` does
+// not match it, so recipient, contact, and search fields fell back to the
+// browser's own light-on-white box — the one thing that cannot work on a dark
+// theme. Naming what stays native instead keeps new fields covered by default.
+input:not([type="checkbox"], [type="radio"], [type="file"], [type="range"], [type="color"], [type="image"], [type="submit"], [type="button"], [type="reset"]),
 textarea,
 select {
   width: 100%;
@@ -84,6 +87,15 @@ select {
   border-radius: 7px;
   padding: 10px 12px;
   background: var(--field);
+  color: var(--text);
+}
+
+// A native select popup is painted by the browser, not by the app. Left to
+// itself on a dark theme it inherits the system's own light highlight, which is
+// what made the identity menu grey-on-grey; naming both colours puts every
+// option back on the theme's surface.
+option {
+  background: var(--surface);
   color: var(--text);
 }
 

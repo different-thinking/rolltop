@@ -224,12 +224,39 @@ func (s *Store) DeleteGoogleConnection(ctx context.Context, userID, connectionID
 	if userID <= 0 || connectionID <= 0 {
 		return ErrInvalidGoogleConnection
 	}
-	result, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+	// Everything hanging off the connection stops pointing at it in the same
+	// transaction that removes it, because nothing else runs on disconnect. A
+	// contact left with source 'google' and a connection id that resolves to
+	// nothing is worse than either end state: it is filtered out of the local
+	// listing and only reachable through a filter for an account that is gone.
+	// Contacts keep their data and become local; the sync cursor is meaningless
+	// without the grant it was issued under and would otherwise be picked up by
+	// a later reconnect that reuses the id.
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx,
 		`DELETE FROM google_connections WHERE user_id = ? AND id = ?`, userID, connectionID)
 	if err != nil {
 		return err
 	}
-	return requireGoogleConnectionRow(result)
+	if err := requireGoogleConnectionRow(result); err != nil {
+		return err
+	}
+	if _, err := demoteGoogleContacts(ctx, tx, userID, connectionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM google_people_sync WHERE user_id = ? AND connection_id = ?`, userID, connectionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // requireGoogleConnectionRow turns a no-op write into the shared not-found

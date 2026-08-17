@@ -113,7 +113,9 @@ whitespace, so one deployment can serve both a production host and
 `http` or `https` URL ending in `/api/google/callback`, must be registered
 byte for byte in the Google Cloud console, and with more than one configured
 the request origin decides which is used. `ROLLTOP_GOOGLE_SCOPES` is optional
-and replaces the default `openid email https://mail.google.com/` entirely.
+and replaces the default
+`openid email https://mail.google.com/ https://www.googleapis.com/auth/contacts`
+entirely.
 
 These are validated during startup: half a credential, an unusable redirect
 URL, or credentials without any redirect URL stop the process rather than
@@ -122,8 +124,8 @@ surfacing as a failed consent much later. Connecting also needs a usable
 
 In the Google Cloud console, create a **Web application** OAuth client and
 register the same redirect URLs. Signing in over IMAP and SMTP needs the scope
-granted but no API enabled; the People and Calendar APIs become relevant only
-when those integrations land. Google requires `https` for redirect URLs, except
+granted but no API enabled; contact sync additionally needs the **People API**
+enabled for the project. Google requires `https` for redirect URLs, except
 for `http://localhost` and `http://127.0.0.1` — an instance reachable only over
 plain HTTP on a LAN address cannot complete a consent round trip.
 `redirect_uri_mismatch` on a first attempt is almost always a character
@@ -166,6 +168,27 @@ Two Gmail-specific defaults matter for how much gets mirrored:
   everything, which on a long-lived mailbox can run for hours and produce a
   much larger database. The value can be changed later; moving it further back
   backfills through the normal folder repair rather than immediately.
+
+### Google contacts
+
+A connected account whose grant includes contacts is polled every 15 minutes,
+and **Sync contacts** under Settings → Google runs it immediately. Google is the
+leading system for the contacts it owns:
+
+- Changes made in Google win. A contact edited in both places keeps Google's
+  version; Rolltop reports the conflict and shows what Google now holds.
+- Edits, new contacts and deletions made in Rolltop are written back. Deleting a
+  synced contact **deletes it in Google too**, which the confirmation says.
+- A contact already in the address book with the same address is linked to its
+  Google counterpart rather than duplicated, keeping its Me identity and any
+  detail Google does not have.
+- Disconnecting an account keeps its contacts and turns them back into local
+  ones. Nothing is deleted.
+
+New contacts default to Rolltop only; **Save to** in the contact editor puts one
+in a Google account instead. Accounts connected before this existed still lack
+the contacts scope and show `Reauthorize this account to include them` — mail
+keeps working until they do.
 
 ## Run Locally
 
@@ -457,6 +480,7 @@ operator check.
 13. Folder counts show unread messages.
 14. Dragging a message onto a folder immediately removes it from the current view, shows a moving toast, and then applies the IMAP move.
 15. Snooze is local and conversation-scoped: future snoozes are hidden from normal lists and search, then resurface at the top without moving or deleting remote mail. A genuinely new incremental reply clears the active snooze.
+16. Cross-account duplicate copies are detected and hidden. An account that collects mail from the other accounts - Gmail fetching POP3 mail, or a provider-side forward - hands the mirror a second row for a delivery the addressed account already holds. A copy is hidden only when exactly one account in the group was actually addressed, meaning its own address appears in `To` or `Cc`; that account's row stays visible and the copies point at it. Mail addressed to several of the accounts, or to none of them because it arrived by Bcc or through a mailing list, keeps every copy visible, because the mirror cannot tell which delivery is the original. Sent, Drafts, and Trash copies are never hidden, and only a row that shows in All Mail can be the original a copy hides behind, so a Spam-filed message never explains away the copy that is still in an inbox. Hidden copies drop out of lists, thread views, folder counts, search results, and new-mail notifications, and deleting the visible original brings its copy straight back.
 
 In account settings, `Folder scope` can be:
 
@@ -474,6 +498,8 @@ Search supports Gmail-style operators:
 The web app is installable as a limited offline PWA. It caches the shell and a bounded, user-scoped snapshot of the first All Mail page so the most recent mail list can paint immediately while it refreshes. Browser notifications can be enabled from the top bar and use user-scoped VAPID Web Push subscriptions. The Android app uses the same server sender through UnifiedPush, with an embedded Play Services distributor and a 15-minute authenticated poll as fallbacks. Notifications are driven only by durable recent INBOX arrival events after the mailbox has completed its initial sync, so archive/backfill syncs do not create popups.
 
 All Mail and every folder list can be sorted by date in either direction from the list header. The choice is stored per user in the browser and follows the reader from folder to folder; flipping it returns to the first page because the paging window is rebuilt from the other end. Mail lists support selection with batch read/unread and snooze actions plus `j`, `k`, and `x` keyboard navigation; `/` focuses search and thread shortcuts cover reply, reply-all, forward, and return-to-list. Hovering or keyboard-focusing a row on a pointer device reveals per-row Reply, Archive, Move to trash, Mark read/unread, and Snooze buttons that run the same undoable mutations as the selection toolbar. The conversation header repeats those commands as a small toolbar — Reply, Reply all, Forward, Archive, Move to trash, Mark unread, and Report spam. The three moves are held behind the same undo toast as the row actions and cover the messages of the open conversation that share its folder, so a thread's Sent or Trash copies stay put; Mark unread instead reaches the whole thread, because opening it is what marked the whole thread read. Report spam moves the conversation into the account's Junk folder, which is also what teaches the optional spam filter. Android left/right row swipes are independently configurable for Trash, account-specific Archive folders, recurring snooze times, Mark read, or Mark unread. Compose keeps a bounded, per-user browser recovery copy, supports reusable local templates, and merges saved contacts with recent tenant-scoped correspondents. Recovery never serializes attachment bodies. Thread views show explicitly source-labeled authentication results and conservative sender/link cautions.
+
+Settings shows the hidden copies per account under `Incoming mail`, with `Scan for duplicates` to re-run detection over mail that was mirrored before detection existed, and `Move copies to Trash` to move every hidden copy into the Trash folder of the account holding it. The cleanup never deletes remotely and never touches the addressed account's mail: the copies land in the aggregating account's own Trash, so anything moved by mistake can be moved back. Stopping the copies at the source is still worth doing - a Gmail filter that skips the inbox puts the fetched mail in a label folder instead, and a folder set to `never` is not mirrored at all.
 
 The sidebar leads with `Inbox`: All Mail minus each account's chosen Archive
 folder, so it is everything that has not been filed away yet, across every

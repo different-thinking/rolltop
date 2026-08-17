@@ -36,6 +36,15 @@ func (s *Store) RecordNewMailEvent(ctx context.Context, userID int64, msg Messag
 	if err != nil {
 		return NewMailEvent{}, false, err
 	}
+	if !suppressed {
+		// The same message reaching a second account is one delivery, not two.
+		// The copy the aggregating account fetched carries a duplicate pointer,
+		// and the row it points at has already been announced.
+		suppressed, err = messageIsDuplicateCopyTx(ctx, tx, userID, msg.ID)
+		if err != nil {
+			return NewMailEvent{}, false, err
+		}
+	}
 	if suppressed {
 		if err := tx.Commit(); err != nil {
 			return NewMailEvent{}, false, err

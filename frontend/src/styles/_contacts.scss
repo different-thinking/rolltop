@@ -95,6 +95,46 @@
     font-weight: 700;
     font-size: 12px;
   }
+
+  // A contact can be both a Me identity and a Google mirror, so the badges sit
+  // in one trailing cell instead of each claiming a grid column.
+  .contact-row-badges {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .contact-source-badge {
+    color: var(--muted);
+    font-weight: 650;
+  }
+}
+
+// The source filter only appears once a Google account can actually hold
+// contacts, so it is laid out beside the search rather than always reserved.
+.contacts-source-filter {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.contact-storage {
+  padding: 2px 0;
+
+  label {
+    display: grid;
+    gap: 4px;
+    max-width: 320px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
+    font-size: 13px;
+  }
 }
 
 .contact-avatar {

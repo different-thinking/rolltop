@@ -7,6 +7,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -35,13 +36,14 @@ const (
 // scopeSelection mirrors the list view the user is looking at. A query wins over
 // a mailbox because search results are their own list; without either, View
 // decides which whole-account list is meant, so a delete from a named view
-// reaches exactly the rows that view shows and no others. Filter narrows that
-// list further, which is how "everything older than a date" is expressed.
+// reaches exactly the rows that view shows and no others.
 type scopeSelection struct {
 	MailboxID int64
 	Query     string
 	View      mailView
-	Filter    store.ScopeFilter
+	// Filter narrows that list further, which is how "everything older than a
+	// date" is expressed.
+	Filter store.ScopeFilter
 }
 
 // scopeMoveGroup is one account's share of a whole-filter move: both Trash and
@@ -102,7 +104,7 @@ func article(folder string) string {
 
 // scopeTrashDestination resolves each account's Trash folder, which is a
 // mailbox role rather than a saved preference.
-func (s *Server) scopeTrashDestination(mailboxes []store.MailboxSummary) scopeMoveDestination {
+func scopeTrashDestination(mailboxes []store.MailboxSummary) scopeMoveDestination {
 	targets := map[int64]store.MailboxSummary{}
 	for _, mailbox := range mailboxes {
 		if mailbox.Role == "trash" {
@@ -164,7 +166,10 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeScopePlanError(w, r, err)
 		return
 	}
-	s.startScopeMove(w, r, cu, plan, "delete")
+	if s.writeEmptyScopePlan(w, plan) {
+		return
+	}
+	s.respondMovePlan(w, r, cu.User.ID, plan, "delete")
 }
 
 // apiScopeArchiveMessages moves every message the given filter matches into each
@@ -200,7 +205,10 @@ func (s *Server) apiScopeArchiveMessages(w http.ResponseWriter, r *http.Request)
 		s.writeScopePlanError(w, r, err)
 		return
 	}
-	s.startScopeMove(w, r, cu, plan, "archive")
+	if s.writeEmptyScopePlan(w, plan) {
+		return
+	}
+	s.respondMovePlan(w, r, cu.User.ID, plan, "archive")
 }
 
 // scopeSelectionFromRequest reads the browser's current filter, plus the
@@ -265,24 +273,61 @@ func (s *Server) writeScopePlanError(w http.ResponseWriter, r *http.Request, err
 	}
 }
 
-// startScopeMove queues one background move per account and reports what the
-// pass covered. action names the operation in the errors it may have to write.
-func (s *Server) startScopeMove(w http.ResponseWriter, r *http.Request, cu currentUser, plan scopeMovePlan, action string) {
-	if len(plan.Groups) == 0 {
-		writeJSON(w, map[string]any{
-			"ok": true, "queued": false, "matched": plan.Matched, "skipped": plan.Skipped,
-			"truncated": plan.Truncated, "runs": []any{},
-		})
+// writeEmptyScopePlan answers a filter that resolved to nothing to move, and
+// reports whether it did so.
+func (s *Server) writeEmptyScopePlan(w http.ResponseWriter, plan scopeMovePlan) bool {
+	if len(plan.Groups) > 0 {
+		return false
+	}
+	writeJSON(w, map[string]any{
+		"ok": true, "queued": false, "matched": plan.Matched, "skipped": plan.Skipped,
+		"truncated": plan.Truncated, "runs": []any{},
+	})
+	return true
+}
+
+// respondMovePlan starts a plan and writes the shared whole-filter response, so
+// every caller reports queued runs, partial starts, and truncation the same way
+// and a change to that contract cannot land in one handler and miss the other.
+// action names the operation in the two error messages.
+func (s *Server) respondMovePlan(w http.ResponseWriter, r *http.Request, userID int64, plan scopeMovePlan, action string) {
+	runs, queued, startErr := s.startMovePlan(r.Context(), userID, plan)
+	if len(runs) == 0 {
+		switch {
+		case errors.Is(startErr, errForegroundBusy):
+			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the "+action, startErr)
+		case store.IsNotFound(startErr):
+			http.NotFound(w, r)
+		default:
+			s.apiError(w, r, http.StatusBadGateway, "could not start the "+action, startErr)
+		}
 		return
 	}
+	response := map[string]any{
+		"ok": true, "queued": true, "matched": plan.Matched, "skipped": plan.Skipped,
+		"queued_messages": queued, "truncated": plan.Truncated, "runs": runs,
+	}
+	if startErr != nil {
+		response["partial_error"] = "Some accounts could not be started."
+	}
+	writeJSON(w, response)
+}
+
+// errForegroundBusy separates "another writer holds the tenant" from a failure
+// inside a move, because only the former is worth retrying unchanged.
+var errForegroundBusy = errors.New("foreground operation unavailable")
+
+// startMovePlan runs one move per account under a single foreground
+// reservation. It reports the runs it managed to start plus the first failure,
+// so a partly started multi-account move is still visible to the caller.
+func (s *Server) startMovePlan(ctx context.Context, userID int64, plan scopeMovePlan) ([]map[string]any, int, error) {
 	finishForeground := func() {}
 	if s.syncRunner != nil {
-		finish, err := s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
+		reserved, err := s.syncRunner.BeginForegroundOperation(ctx, userID)
 		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the "+action, err)
-			return
+			return nil, 0, fmt.Errorf("%w: %w", errForegroundBusy, err)
 		}
-		finishForeground = finish
+		finishForeground = reserved
 	}
 	// One reservation covers every account's run: release it when the last one
 	// reports back, so a second foreground writer cannot interleave with a
@@ -298,8 +343,8 @@ func (s *Server) startScopeMove(w http.ResponseWriter, r *http.Request, cu curre
 	var startErr error
 	for _, group := range plan.Groups {
 		group := group
-		run, err := s.syncer.StartMoveMessages(r.Context(), cu.User.ID, group.MessageIDs, group.Target.ID, func() {
-			s.startMoveRefresh(cu.User.ID, group.Target.AccountID, group.RefreshMailboxes)
+		run, err := s.syncer.StartMoveMessages(ctx, userID, group.MessageIDs, group.Target.ID, func() {
+			s.startMoveRefresh(userID, group.Target.AccountID, group.RefreshMailboxes)
 			release()
 		})
 		if err != nil {
@@ -315,29 +360,14 @@ func (s *Server) startScopeMove(w http.ResponseWriter, r *http.Request, cu curre
 			"mailbox": group.Target.Name, "messages": len(group.MessageIDs),
 		})
 	}
-	if len(runs) == 0 {
-		if store.IsNotFound(startErr) {
-			http.NotFound(w, r)
-			return
-		}
-		s.apiError(w, r, http.StatusBadGateway, "could not start the "+action, startErr)
-		return
-	}
-	response := map[string]any{
-		"ok": true, "queued": true, "matched": plan.Matched, "skipped": plan.Skipped,
-		"queued_messages": queued, "truncated": plan.Truncated, "runs": runs,
-	}
-	if startErr != nil {
-		response["partial_error"] = "Some accounts could not be started."
-	}
-	writeJSON(w, response)
+	return runs, queued, startErr
 }
 
 // scopeTrashPlan resolves a scope into one move per account, skipping messages
 // that already sit in the Trash folder they would be moved to.
 func (s *Server) scopeTrashPlan(ctx context.Context, user store.User, scope scopeSelection) (scopeMovePlan, error) {
 	return s.scopeMovePlan(ctx, user, scope, func(_ context.Context, mailboxes []store.MailboxSummary) (scopeMoveDestination, error) {
-		return s.scopeTrashDestination(mailboxes), nil
+		return scopeTrashDestination(mailboxes), nil
 	})
 }
 
@@ -349,16 +379,36 @@ func (s *Server) scopeArchivePlan(ctx context.Context, user store.User, scope sc
 	})
 }
 
-// scopeMovePlan resolves a scope into one move per account, skipping messages
-// that already sit in the folder they would be moved to.
+// scopeMovePlan resolves a scope into one move per account towards whichever
+// folder the action sends mail to.
 func (s *Server) scopeMovePlan(ctx context.Context, user store.User, scope scopeSelection,
 	resolveDestination func(context.Context, []store.MailboxSummary) (scopeMoveDestination, error)) (scopeMovePlan, error) {
-	var plan scopeMovePlan
 	messages, truncated, err := s.resolveScopeMessages(ctx, user, scope)
 	if err != nil {
-		return plan, err
+		return scopeMovePlan{}, err
+	}
+	plan, err := s.movePlanForMessages(ctx, user, messages, resolveDestination)
+	if err != nil {
+		return scopeMovePlan{}, err
 	}
 	plan.Truncated = truncated
+	return plan, nil
+}
+
+// trashPlanForMessages groups an already resolved selection into one move per
+// account's Trash folder. Every caller that deletes more than a page of mail
+// shares it, because Trash belongs to an account and a selection rarely does.
+func (s *Server) trashPlanForMessages(ctx context.Context, user store.User, messages []store.ScopeMessage) (scopeMovePlan, error) {
+	return s.movePlanForMessages(ctx, user, messages, func(_ context.Context, mailboxes []store.MailboxSummary) (scopeMoveDestination, error) {
+		return scopeTrashDestination(mailboxes), nil
+	})
+}
+
+// movePlanForMessages groups an already resolved selection into one move per
+// account, skipping messages that already sit in the folder they would move to.
+func (s *Server) movePlanForMessages(ctx context.Context, user store.User, messages []store.ScopeMessage,
+	resolveDestination func(context.Context, []store.MailboxSummary) (scopeMoveDestination, error)) (scopeMovePlan, error) {
+	var plan scopeMovePlan
 	plan.Matched = len(messages)
 	if len(messages) == 0 {
 		return plan, nil

@@ -32,9 +32,16 @@ const (
 // later Gmail phase does not have to send every user back through consent.
 const ScopeMail = "https://mail.google.com/"
 
-// DefaultScopes covers identifying the account plus IMAP/SMTP access. Contacts
-// and calendar scopes are added incrementally by their own phases.
-var DefaultScopes = []string{"openid", "email", ScopeMail}
+// ScopeContacts is the read/write People API scope. Contact sync writes back --
+// edits, new contacts and deletions all travel to Google -- so the read-only
+// variant would only work for half the feature.
+const ScopeContacts = "https://www.googleapis.com/auth/contacts"
+
+// DefaultScopes covers identifying the account, IMAP/SMTP access and contacts.
+// Accounts connected before a scope was added keep the grant they consented to;
+// GoogleConnection.HasScope is what decides whether a feature may run, so the
+// settings page can offer re-authorization instead of failing at the API.
+var DefaultScopes = []string{"openid", "email", ScopeMail, ScopeContacts}
 
 // Config describes the single OAuth client shared by all Rolltop users. Each
 // user still authorizes their own Google accounts against it.

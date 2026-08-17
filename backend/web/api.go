@@ -84,6 +84,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiMailIdentity(w, r)
 	case path == "account/sync":
 		s.apiAccountSync(w, r)
+	case path == "account/duplicates":
+		s.apiAccountDuplicates(w, r)
+	case path == "account/duplicates/rescan":
+		s.apiAccountDuplicatesRescan(w, r)
+	case path == "account/duplicates/trash":
+		s.apiAccountDuplicatesTrash(w, r)
 	case path == "account/folders/progress":
 		s.apiAccountFolderProgress(w, r)
 	case strings.HasPrefix(path, "account/folders/"):
@@ -170,6 +176,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {
 
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+// writeJSONStatus answers with a body and a non-200 status. It exists for the
+// few failures that carry data the client needs -- a rejected edit that has to
+// show what the record looks like now -- which writeAPIError cannot express.
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
 
