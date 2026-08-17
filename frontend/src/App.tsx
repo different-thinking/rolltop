@@ -687,6 +687,7 @@ export default function App() {
           sync_running: chrome.sync_running,
           latest_sync_run: chrome.latest_sync_run,
           active_sync_runs: chrome.active_sync_runs || [],
+          unfinished_move_run: chrome.unfinished_move_run ?? null,
           server_started_at: chrome.server_started_at || current.server_started_at,
           server_uptime_seconds: chrome.server_uptime_seconds ?? current.server_uptime_seconds,
           build_version: chrome.build_version || current.build_version,
@@ -834,6 +835,7 @@ export default function App() {
         mailboxes={bootstrap.mailboxes || []}
         latestSyncRun={bootstrap.latest_sync_run || null}
         activeSyncRuns={bootstrap.active_sync_runs || []}
+        unfinishedMoveRun={bootstrap.unfinished_move_run || null}
         syncRunning={Boolean(bootstrap.sync_running)}
         accountNeedsPassword={Boolean(bootstrap.account_needs_password)}
         accountNotice={bootstrap.account_notice || ""}

@@ -134,9 +134,13 @@ func TestMoveFromSpamToInboxDoesNotCreateNewMailEvent(t *testing.T) {
 	if len(spamMessages) != 1 {
 		t.Fatalf("spam messages after failed candidate sync = %d, want 1", len(spamMessages))
 	}
-	failingService := *service
-	failingService.Fetcher = &failingNotificationMoveFetcher{fakeFetcher: fetcher}
-	if err := failingService.MoveMessage(ctx, user.ID, spamMessages[0].ID, inbox.ID); err == nil {
+	// Swap the fetcher on the service rather than copying it: a Service carries a
+	// sync.Once, and copying one duplicates the guard it exists to be.
+	workingFetcher := service.Fetcher
+	service.Fetcher = &failingNotificationMoveFetcher{fakeFetcher: fetcher}
+	err = service.MoveMessage(ctx, user.ID, spamMessages[0].ID, inbox.ID)
+	service.Fetcher = workingFetcher
+	if err == nil {
 		t.Fatal("remote move unexpectedly succeeded")
 	}
 	var pending int
