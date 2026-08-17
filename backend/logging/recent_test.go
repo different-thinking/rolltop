@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestRecentReturnsTheNewestLinesOldestFirst(t *testing.T) {
@@ -85,6 +86,33 @@ func TestRecorderTruncatesAnOversizedLine(t *testing.T) {
 	}
 	if !strings.HasSuffix(got[0].Message, "...") {
 		t.Fatal("truncated message does not say it was cut")
+	}
+}
+
+// Cutting at the raw byte offset would split the multi-byte rune that straddles
+// the limit, and the broken tail encodes to a replacement character instead of
+// an honest cut.
+func TestRecorderTruncatesWithoutSplittingARune(t *testing.T) {
+	var r recorder
+	// One byte of ASCII padding puts the limit inside the following 3-byte rune.
+	line := "x" + strings.Repeat("€", maxRecentLineBytes)
+	r.add(time.Now().UTC(), line)
+	got := r.snapshot(1)
+	if len(got) != 1 {
+		t.Fatalf("records = %d", len(got))
+	}
+	message := got[0].Message
+	if !utf8.ValidString(message) {
+		t.Fatalf("truncated message is not valid UTF-8: %q", message)
+	}
+	if !strings.HasSuffix(message, "...") {
+		t.Fatal("truncated message does not say it was cut")
+	}
+	if len(message) > maxRecentLineBytes+3 {
+		t.Fatalf("message length = %d, want at most %d", len(message), maxRecentLineBytes+3)
+	}
+	if !strings.HasPrefix(line, strings.TrimSuffix(message, "...")) {
+		t.Fatal("truncated message is not a prefix of the original line")
 	}
 }
 

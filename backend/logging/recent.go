@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // recentCapacity bounds the tail. It is a diagnostic aid, not an audit trail:
@@ -54,9 +55,7 @@ func (r *recorder) add(at time.Time, line string) {
 	if strings.TrimSpace(message) == "" {
 		return
 	}
-	if len(message) > maxRecentLineBytes {
-		message = message[:maxRecentLineBytes] + "..."
-	}
+	message = truncateAtRuneBoundary(message)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.records[r.next] = Record{Time: at, Message: message}
@@ -94,6 +93,21 @@ func (r *recorder) snapshot(limit int) []Record {
 		out = append(out, r.records[index])
 	}
 	return out
+}
+
+// truncateAtRuneBoundary cuts an oversized line back to a whole rune. Cutting
+// at the raw byte offset splits a multi-byte character, and the broken tail
+// JSON-encodes to a replacement character — so a subject or a remote server
+// reply with any non-ASCII text would end in mojibake instead of an honest cut.
+func truncateAtRuneBoundary(message string) string {
+	if len(message) <= maxRecentLineBytes {
+		return message
+	}
+	cut := maxRecentLineBytes
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return message[:cut] + "..."
 }
 
 // trimStandardPrefix drops the date and time the standard logger already wrote,

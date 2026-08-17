@@ -1884,7 +1884,7 @@
     display: grid;
     // The timestamp column is fixed so the messages line up into a readable
     // block instead of stepping in and out with each line's clock width.
-    grid-template-columns: minmax(0, 9em) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 11em) minmax(0, 1fr);
     gap: 10px;
     padding: 2px 0;
   }
