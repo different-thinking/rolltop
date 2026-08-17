@@ -100,13 +100,32 @@ func TestRedirectURLUsesSoleConfiguredEntry(t *testing.T) {
 	}
 }
 
-func TestRedirectURLFallsBackToRequestOriginWhenUnconfigured(t *testing.T) {
+func TestRedirectURLNeverInventsOneFromRequestHeaders(t *testing.T) {
+	// X-Forwarded-Host is attacker-controllable when no proxy strips it, so an
+	// empty allowlist must fail rather than build a redirect URI from it.
 	cfg := Config{}
-	got := cfg.RedirectURL(requestTo(t, "http://localhost:8080/api/google/connect", ""))
-	if got != "http://localhost:8080"+CallbackPath {
-		t.Fatalf("unconfigured redirect = %q, want the request origin", got)
+	request := requestTo(t, "http://localhost:8080/api/google/connect", "")
+	request.Header.Set("X-Forwarded-Host", "attacker.example.test")
+	if got := cfg.RedirectURL(request); got != "" {
+		t.Fatalf("unconfigured redirect = %q, want no guess", got)
 	}
 	if cfg.RedirectURL(nil) != "" {
 		t.Fatal("nil request produced a redirect URI")
+	}
+}
+
+func TestRedirectURLHonoursForwardedHost(t *testing.T) {
+	// Behind a proxy that forwards to an internal upstream, r.Host is the
+	// upstream address and only X-Forwarded-Host names what the browser used.
+	cfg := Config{
+		RedirectURLs: []string{
+			"https://rolltop.example.test" + CallbackPath,
+			"http://localhost:8080" + CallbackPath,
+		},
+	}
+	request := requestTo(t, "http://10.0.0.5:8080/api/google/connect", "https")
+	request.Header.Set("X-Forwarded-Host", "rolltop.example.test, internal.example.test")
+	if got := cfg.RedirectURL(request); got != "https://rolltop.example.test"+CallbackPath {
+		t.Fatalf("forwarded-host redirect = %q", got)
 	}
 }

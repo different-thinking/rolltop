@@ -36,6 +36,10 @@ const maxTokenResponseBytes = 1 << 20
 
 const defaultMaxAttempts = 4
 
+// totalAttemptBudget caps a retried call end to end, so a slow upstream cannot
+// hold an interactive request open for the sum of every attempt.
+const totalAttemptBudget = 45 * time.Second
+
 // Token is the subset of an OAuth token response Rolltop stores or uses.
 type Token struct {
 	AccessToken  string
@@ -91,7 +95,10 @@ func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifi
 	form.Set("code_verifier", codeVerifier)
 	form.Set("client_id", c.Config.ClientID)
 	form.Set("client_secret", c.Config.ClientSecret)
-	token, err := c.postToken(ctx, form)
+	// One attempt only: the code is single-use, so if Google consumes it and
+	// then fails the response, a retry comes back invalid_grant and would be
+	// reported as "needs re-authorization" for what was a transient fault.
+	token, err := c.token(ctx, form, c.doOnce)
 	if err != nil {
 		return Token{}, err
 	}
@@ -113,7 +120,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (Token, 
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", c.Config.ClientID)
 	form.Set("client_secret", c.Config.ClientSecret)
-	return c.postToken(ctx, form)
+	return c.token(ctx, form, c.do)
 }
 
 // revokeTimeout bounds the whole revocation. Callers delete their local copy
@@ -164,8 +171,12 @@ func (c *Client) Userinfo(ctx context.Context, accessToken string) (Userinfo, er
 	return info, nil
 }
 
-func (c *Client) postToken(ctx context.Context, form url.Values) (Token, error) {
-	body, err := c.postForm(ctx, c.Config.TokenEndpoint, form)
+// token posts to the token endpoint through the supplied attempt policy.
+func (c *Client) token(ctx context.Context, form url.Values,
+	send func(context.Context, func() (*http.Request, error)) ([]byte, error)) (Token, error) {
+	body, err := send(ctx, func() (*http.Request, error) {
+		return formRequest(ctx, c.Config.TokenEndpoint, form)
+	})
 	if err != nil {
 		return Token{}, err
 	}
@@ -193,12 +204,6 @@ func (c *Client) postToken(ctx context.Context, form url.Values) (Token, error) 
 	return token, nil
 }
 
-func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values) ([]byte, error) {
-	return c.do(ctx, func() (*http.Request, error) {
-		return formRequest(ctx, endpoint, form)
-	})
-}
-
 func formRequest(ctx context.Context, endpoint string, form url.Values) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -212,6 +217,14 @@ func formRequest(ctx context.Context, endpoint string, form url.Values) (*http.R
 // do runs a request with backoff on rate limits and transient server errors.
 // The request is rebuilt per attempt because its body is consumed each time.
 func (c *Client) do(ctx context.Context, build func() (*http.Request, error)) ([]byte, error) {
+	// Four attempts at a 30s client timeout plus backoff is about two minutes,
+	// and ExchangeCode and Userinfo run inside a request the browser is waiting
+	// on. Bound the whole budget unless the caller already set a deadline.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, totalAttemptBudget)
+		defer cancel()
+	}
 	var lastErr error
 	for attempt := 0; attempt < defaultMaxAttempts; attempt++ {
 		if attempt > 0 {

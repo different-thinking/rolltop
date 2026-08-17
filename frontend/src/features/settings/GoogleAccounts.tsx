@@ -22,18 +22,25 @@ type GoogleConnectionsResponse = {
 };
 
 // Scope URLs are unreadable in a badge, so they are shown as capabilities.
-const scopeLabels: ReadonlyArray<{ match: string; label: string }> = [
-  { match: "https://mail.google.com/", label: "Gmail" },
-  { match: "/auth/contacts", label: "Contacts" },
-  { match: "/auth/calendar", label: "Calendar" },
-  { match: "email", label: "Email address" },
-  { match: "openid", label: "Sign-in" }
+// Google offers narrower variants of each scope (".readonly", ".other" and so
+// on), so capability scopes match on prefix; the bare identity scopes are exact
+// values and match exactly.
+const scopeLabels: ReadonlyArray<{ prefixes?: string[]; exact?: string[]; label: string }> = [
+  { prefixes: ["https://mail.google.com/", "https://www.googleapis.com/auth/gmail"], label: "Gmail" },
+  { prefixes: ["https://www.googleapis.com/auth/contacts"], label: "Contacts" },
+  { prefixes: ["https://www.googleapis.com/auth/calendar"], label: "Calendar" },
+  { exact: ["email", "https://www.googleapis.com/auth/userinfo.email"], label: "Email address" },
+  { exact: ["openid"], label: "Sign-in" }
 ];
 
 function scopeBadges(scopes: string[]): string[] {
   const badges: string[] = [];
-  for (const { match, label } of scopeLabels) {
-    if (scopes.some((scope) => scope === match || scope.endsWith(match))) badges.push(label);
+  for (const { prefixes, exact, label } of scopeLabels) {
+    const matched = scopes.some(
+      (scope) =>
+        (exact?.includes(scope) ?? false) || (prefixes?.some((prefix) => scope.startsWith(prefix)) ?? false)
+    );
+    if (matched) badges.push(label);
   }
   return badges;
 }
@@ -48,6 +55,7 @@ function messageFromCallback(search: string): { text: string; kind: Toast["kind"
   if (error === "access_denied") return { text: "Google sign-in was cancelled.", kind: "error" };
   if (error === "expired") return { text: "That Google sign-in took too long. Try connecting again.", kind: "error" };
   if (error === "invalid_response") return { text: "Google returned an incomplete response. Try connecting again.", kind: "error" };
+  if (error === "unavailable") return { text: "Google is not available on this server right now.", kind: "error" };
   return { text: "Connecting the Google account failed. Try again.", kind: "error" };
 }
 

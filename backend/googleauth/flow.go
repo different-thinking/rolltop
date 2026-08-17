@@ -81,11 +81,14 @@ func (s *flowStore) take(state string, userID int64) (pendingFlow, error) {
 	if !ok {
 		return pendingFlow{}, ErrUnknownFlow
 	}
-	delete(s.flows, state)
 	if flow.userID != userID {
-		// A flow started by one signed-in user may not be finished by another.
+		// A flow started by one signed-in user may not be finished by another,
+		// and it must survive the attempt: deleting first would let a foreign
+		// callback destroy the owner's pending consent and force them to start
+		// over.
 		return pendingFlow{}, ErrUnknownFlow
 	}
+	delete(s.flows, state)
 	return flow, nil
 }
 

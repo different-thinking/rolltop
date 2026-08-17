@@ -101,21 +101,18 @@ func (c Config) ScopeString() string {
 // a scheme mismatch the operator can see and fix.
 //
 // When nothing matches, this returns the empty string rather than an arbitrary
-// entry: an unresolvable origin is a configuration problem, and failing at the
-// connect button with a clear message beats bouncing the user off Google with
-// redirect_uri_mismatch.
+// entry or one derived from request headers: an unresolvable origin is a
+// configuration problem, and failing at the connect button with a clear message
+// beats bouncing the user off Google with redirect_uri_mismatch.
 func (c Config) RedirectURL(r *http.Request) string {
 	if len(c.RedirectURLs) == 1 {
 		return c.RedirectURLs[0]
 	}
+	// No fallback to an origin derived from the request: X-Forwarded-Host is
+	// attacker-controllable when no proxy strips it, and a redirect URI is
+	// exactly the wrong place to trust a header. Configuration guarantees the
+	// list is non-empty whenever credentials are set.
 	origin := requestOrigin(r)
-	if len(c.RedirectURLs) == 0 {
-		// Nothing configured: development against the origin the browser used.
-		if origin == "" {
-			return ""
-		}
-		return origin + CallbackPath
-	}
 	for _, candidate := range c.RedirectURLs {
 		if sameOrigin(candidate, origin) {
 			return candidate

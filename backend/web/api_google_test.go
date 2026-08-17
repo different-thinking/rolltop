@@ -476,8 +476,9 @@ func TestGoogleCallbackReleasesTheFlowWhenConsentIsDenied(t *testing.T) {
 	}
 }
 
-// unauthorizedUserinfoStore serves a Google whose userinfo rejects the first
-// access token, the way a grant revoked from the Google account settings does.
+// The fake Google in this test rejects the stored access token from userinfo and
+// then reports invalid_grant on refresh, the way a grant revoked from the Google
+// account settings does.
 func TestGoogleConnectionTestRefreshesWhenTheStoredTokenIsRejected(t *testing.T) {
 	env := newGoogleTestEnv(t)
 	connection := env.connect(t, env.owner)

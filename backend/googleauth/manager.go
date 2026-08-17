@@ -22,6 +22,10 @@ import (
 // a long-running sync does not fail mid-request on an edge-of-expiry token.
 const refreshSkew = 5 * time.Minute
 
+// refreshTimeout bounds a shared refresh. It replaces the claimant's own
+// deadline, which other waiters have no reason to inherit.
+const refreshTimeout = time.Minute
+
 // ConnectionStore is the persistence surface the manager needs. It is an
 // interface so tests can drive refresh behavior without a SQLite file.
 type ConnectionStore interface {
@@ -109,6 +113,12 @@ func (m *Manager) ready() error {
 	}
 	if !m.config.Configured() {
 		return ErrNotConfigured
+	}
+	if len(m.config.RedirectURLs) == 0 {
+		// config.Load enforces this for the normal startup path; repeating it
+		// here means a manager built directly cannot start a flow whose
+		// redirect URI would have to be invented.
+		return ErrNoRedirectURI
 	}
 	return nil
 }
@@ -219,7 +229,7 @@ func (m *Manager) AccessTokenAndConnection(ctx context.Context, userID, connecti
 	if token, ok := m.usableStoredToken(connection); ok {
 		return token, connection, nil
 	}
-	return m.refresh(ctx, userID, connectionID, false, &connection)
+	return m.refresh(ctx, userID, connectionID, false)
 }
 
 // ForceRefresh discards the stored access token and fetches a new one. The IMAP
@@ -233,7 +243,7 @@ func (m *Manager) ForceRefresh(ctx context.Context, userID, connectionID int64) 
 	if err := m.ready(); err != nil {
 		return "", err
 	}
-	token, _, err := m.refresh(ctx, userID, connectionID, true, nil)
+	token, _, err := m.refresh(ctx, userID, connectionID, true)
 	return token, err
 }
 
@@ -273,10 +283,7 @@ func (m *Manager) usableStoredToken(connection store.GoogleConnection) (string, 
 // A forced refresh waits for any running refresh to finish and then performs
 // its own, because its caller has already established that the token in flight
 // is not good enough.
-// loaded carries a connection row the caller already read, so the claimant of
-// the refresh slot does not query it a second time. Waiters and forced
-// refreshes pass nil because the row may have changed since.
-func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force bool, loaded *store.GoogleConnection) (string, store.GoogleConnection, error) {
+func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force bool) (string, store.GoogleConnection, error) {
 	key := refreshKey{userID: userID, connectionID: connectionID}
 	for {
 		m.refreshMu.Lock()
@@ -286,12 +293,22 @@ func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force
 			m.refreshes[key] = call
 			m.refreshMu.Unlock()
 
-			call.token, call.connection, call.err = m.doRefresh(ctx, userID, connectionID, loaded)
+			// Waiters adopt this result, so it must not inherit the
+			// claimant's deadline: a sync worker with a short per-request
+			// context would otherwise cancel a refresh other callers are
+			// waiting on. Waiter-side cancellation still works through the
+			// select below.
+			refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+			call.token, call.connection, call.err = m.doRefresh(refreshCtx, userID, connectionID, force)
+			cancel()
 
+			// Clearing the slot and publishing the result happen together.
+			// Doing them separately leaves a window in which an arriving
+			// caller finds no refresh in flight and starts a second one.
 			m.refreshMu.Lock()
 			delete(m.refreshes, key)
-			m.refreshMu.Unlock()
 			close(call.done)
+			m.refreshMu.Unlock()
 			return call.token, call.connection, call.err
 		}
 		m.refreshMu.Unlock()
@@ -303,27 +320,33 @@ func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force
 		if !force {
 			return inflight.token, inflight.connection, inflight.err
 		}
-		// Claim the slot for a refresh of our own. The row this caller was
-		// handed is stale now, so the next attempt re-reads it.
-		loaded = nil
+		// Claim the slot for a refresh of our own.
 	}
 }
 
-func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64, loaded *store.GoogleConnection) (string, store.GoogleConnection, error) {
-	var connection store.GoogleConnection
-	if loaded != nil {
-		connection = *loaded
-	} else {
-		var err error
-		if connection, err = m.store.GoogleConnection(ctx, userID, connectionID); err != nil {
-			return "", store.GoogleConnection{}, err
+// doRefresh runs with the refresh slot held. It re-reads the connection rather
+// than trusting the row its caller saw: several callers can each read a stale
+// row and only then queue up here, so without a re-check under the slot the
+// second one would refresh a token the first already replaced. force skips the
+// re-check because its caller has established the stored token is unusable
+// whatever the row says.
+func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64, force bool) (string, store.GoogleConnection, error) {
+	connection, err := m.store.GoogleConnection(ctx, userID, connectionID)
+	if err != nil {
+		return "", store.GoogleConnection{}, err
+	}
+	if !force {
+		if token, ok := m.usableStoredToken(connection); ok {
+			return token, connection, nil
 		}
 	}
 	refreshToken, err := crypto.DecryptString(m.masterKey, connection.EncryptedRefreshToken)
 	if err != nil {
 		// The master key no longer matches this ciphertext, so no amount of
 		// retrying helps; the user has to reconnect.
-		_ = m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "stored token could not be decrypted")
+		if markErr := m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "stored token could not be decrypted"); markErr != nil {
+			log.Printf("google connection user_id=%d connection_id=%d could not be flagged for reauthorization: %v", userID, connectionID, markErr)
+		}
 		return "", connection, fmt.Errorf("%w: stored token could not be decrypted", ErrReauthRequired)
 	}
 	token, err := m.client.RefreshToken(ctx, refreshToken)

@@ -154,7 +154,9 @@ func (s *Server) apiGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.googleAuth == nil || !s.googleAuth.Configured() {
-		writeAPIError(w, http.StatusServiceUnavailable, "Google is not configured on this server.")
+		// Configuration can change while a consent is in flight; this exit has
+		// to be a page like every other one out of this handler.
+		s.redirectToGoogleSettings(w, r, "error", "unavailable")
 		return
 	}
 	query := r.URL.Query()

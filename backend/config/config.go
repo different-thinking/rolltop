@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
 )
 
@@ -135,6 +136,12 @@ func loadGoogleConfig() (GoogleConfig, error) {
 		}
 		if parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return GoogleConfig{}, fmt.Errorf("ROLLTOP_GOOGLE_REDIRECT_URLS: %q must be an absolute http or https URL", raw)
+		}
+		// A URI Google accepts but this server does not serve fails only at the
+		// end of a consent round trip, which is a miserable way to learn about
+		// a typo.
+		if parsed.Path != googleauth.CallbackPath {
+			return GoogleConfig{}, fmt.Errorf("ROLLTOP_GOOGLE_REDIRECT_URLS: %q must end in %s", raw, googleauth.CallbackPath)
 		}
 	}
 	if google.Configured() && len(google.RedirectURLs) == 0 {

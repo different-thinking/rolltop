@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,7 +85,7 @@ func (g *fakeGoogle) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.accessCounter++
-	access := "access-token-" + itoa(g.accessCounter)
+	access := "access-token-" + strconv.Itoa(g.accessCounter)
 	scope := g.scope
 	omitRefresh := g.omitRefresh
 	g.mu.Unlock()
@@ -143,18 +144,6 @@ func (g *fakeGoogle) config() Config {
 		RevokeEndpoint:        g.server.URL + "/revoke",
 		UserinfoEndpoint:      g.server.URL + "/userinfo",
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := ""
-	for n > 0 {
-		digits = string(rune('0'+n%10)) + digits
-		n /= 10
-	}
-	return digits
 }
 
 type testEnv struct {
@@ -300,16 +289,35 @@ func TestCompleteConnectRejectsReplayedAndForeignState(t *testing.T) {
 	parsed, _ := url.Parse(authURL)
 	state := parsed.Query().Get("state")
 
-	// A different signed-in user may not complete this flow.
-	if _, err := env.manager.CompleteConnect(context.Background(), env.otherID, state, "auth-code"); !errors.Is(err, ErrUnknownFlow) {
-		t.Fatalf("foreign-user callback error = %v, want ErrUnknownFlow", err)
+	// Completing consumes the flow, so a replay cannot mint a second connection.
+	if _, err := env.manager.CompleteConnect(context.Background(), env.userID, state, "auth-code"); err != nil {
+		t.Fatal(err)
 	}
-	// Taking the flow consumed it, so even the rightful owner cannot reuse it.
 	if _, err := env.manager.CompleteConnect(context.Background(), env.userID, state, "auth-code"); !errors.Is(err, ErrUnknownFlow) {
 		t.Fatalf("replayed callback error = %v, want ErrUnknownFlow", err)
 	}
 	if _, err := env.manager.CompleteConnect(context.Background(), env.userID, "made-up-state", "auth-code"); !errors.Is(err, ErrUnknownFlow) {
 		t.Fatalf("unknown-state callback error = %v, want ErrUnknownFlow", err)
+	}
+}
+
+func TestForeignCallbackLeavesTheOwnersFlowIntact(t *testing.T) {
+	env := newTestEnv(t)
+	authURL, err := env.manager.StartConnect(env.userID, "https://rolltop.example.test"+CallbackPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(authURL)
+	state := parsed.Query().Get("state")
+
+	// A different signed-in user may not complete this flow...
+	if _, err := env.manager.CompleteConnect(context.Background(), env.otherID, state, "auth-code"); !errors.Is(err, ErrUnknownFlow) {
+		t.Fatalf("foreign-user callback error = %v, want ErrUnknownFlow", err)
+	}
+	// ...and rejecting them must not consume the flow, or a foreign callback
+	// becomes a way to cancel somebody else's consent.
+	if _, err := env.manager.CompleteConnect(context.Background(), env.userID, state, "auth-code"); err != nil {
+		t.Fatalf("owner could not finish their own flow after a foreign callback: %v", err)
 	}
 }
 
@@ -586,8 +594,9 @@ func TestManagerRefusesWeakMasterKey(t *testing.T) {
 	}
 }
 
-// atomicCounterRoundTrip guards the assumption that concurrent AccessToken calls
-// are the only writers to the refresh map.
+// TestRefreshMapIsEmptyAfterUse guards the assumption that concurrent
+// AccessToken calls are the only writers to the refresh map, and that every
+// claimed slot is released again.
 func TestRefreshMapIsEmptyAfterUse(t *testing.T) {
 	env := newTestEnv(t)
 	connection := env.connect(t, env.userID)
@@ -753,4 +762,49 @@ func waitForInflightRefresh(t *testing.T, manager *Manager) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("no refresh became in flight")
+}
+
+func TestSharedRefreshSurvivesTheClaimantsCancelledContext(t *testing.T) {
+	env := newTestEnv(t)
+	connection := env.connect(t, env.userID)
+	env.now = env.now.Add(2 * time.Hour)
+
+	// Hold the token endpoint so the claimant is provably mid-refresh when its
+	// own context is cancelled.
+	release := make(chan struct{})
+	env.google.mu.Lock()
+	env.google.beforeToken = func() { <-release }
+	env.google.mu.Unlock()
+
+	claimantCtx, cancelClaimant := context.WithCancel(context.Background())
+	type refreshResult struct {
+		token string
+		err   error
+	}
+	waiter := make(chan refreshResult, 1)
+	go func() {
+		_, _ = env.manager.AccessToken(claimantCtx, env.userID, connection.ID)
+	}()
+	waitForInflightRefresh(t, env.manager)
+	go func() {
+		token, err := env.manager.AccessToken(context.Background(), env.userID, connection.ID)
+		waiter <- refreshResult{token, err}
+	}()
+
+	// The claimant walks away; a sync worker with a short per-request deadline
+	// looks exactly like this. The waiter's own context is still live, so it
+	// must still get a token.
+	cancelClaimant()
+	env.google.mu.Lock()
+	env.google.beforeToken = nil
+	env.google.mu.Unlock()
+	close(release)
+
+	got := <-waiter
+	if got.err != nil {
+		t.Fatalf("waiter inherited the claimant's cancellation: %v", got.err)
+	}
+	if got.token == "" {
+		t.Fatal("waiter received an empty token")
+	}
 }

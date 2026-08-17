@@ -327,10 +327,18 @@
     grid-template-columns: 34px minmax(0, 1fr);
     gap: 10px;
     padding: 11px 10px;
+
+    // The icon spans two rows in the index layout above. Left on auto
+    // placement here it would push the actions down to row 3 and open a second
+    // grid gap, so both are pinned.
+    .settings-index-icon {
+      grid-row: 1;
+    }
   }
 
   .settings-connection-actions {
     grid-column: 1 / -1;
+    grid-row: 2;
     justify-content: flex-start;
   }
 

@@ -80,6 +80,22 @@ func TestGoogleConnectionMigrationScopesConnectionsPerTenant(t *testing.T) {
 	if !strings.Contains(normalized, "on delete cascade") {
 		t.Fatalf("google_connections is not cascade-deleted with its user: %s", definition)
 	}
+	// The DDL text alone proves nothing without enforcement, so delete a user
+	// and check the tokens really go with them.
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM google_connections WHERE user_id = 2`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("connections left after deleting their user = %d, want 0", remaining)
+	}
 }
 
 func TestUser029IsLatestRegisteredUserMigration(t *testing.T) {

@@ -82,7 +82,22 @@ func TestLoadValidatesLogLevel(t *testing.T) {
 	}
 }
 
+// clearGoogleEnv keeps these tests independent of a developer or CI environment
+// that already exports Google settings.
+func clearGoogleEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"ROLLTOP_GOOGLE_CLIENT_ID",
+		"ROLLTOP_GOOGLE_CLIENT_SECRET",
+		"ROLLTOP_GOOGLE_REDIRECT_URLS",
+		"ROLLTOP_GOOGLE_SCOPES",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestLoadReadsGoogleSettings(t *testing.T) {
+	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", " client-id ")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
@@ -112,6 +127,7 @@ func TestLoadRejectsHalfAGoogleCredential(t *testing.T) {
 }
 
 func TestLoadRequiresRedirectURLsWhenGoogleIsConfigured(t *testing.T) {
+	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
@@ -122,10 +138,18 @@ func TestLoadRequiresRedirectURLsWhenGoogleIsConfigured(t *testing.T) {
 }
 
 func TestLoadRejectsUnusableRedirectURLs(t *testing.T) {
+	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
-	for _, value := range []string{"/api/google/callback", "ftp://rolltop.example.test/cb", "://nonsense"} {
+	for _, value := range []string{
+		"/api/google/callback",
+		"ftp://rolltop.example.test/cb",
+		"://nonsense",
+		// Right host, wrong path: Google would accept the registration and the
+		// flow would then land on a route this server does not serve.
+		"https://rolltop.example.test/callback",
+	} {
 		t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS", value)
 		if _, err := Load(); err == nil {
 			t.Fatalf("redirect URL %q was accepted", value)
@@ -134,6 +158,7 @@ func TestLoadRejectsUnusableRedirectURLs(t *testing.T) {
 }
 
 func TestLoadLeavesGoogleUnconfiguredByDefault(t *testing.T) {
+	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
 	cfg, err := Load()
 	if err != nil {

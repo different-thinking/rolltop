@@ -267,7 +267,10 @@ func New(opts Options) (*Server, error) {
 	if strings.TrimSpace(opts.PluginDir) == "" {
 		opts.PluginDir = "plugins"
 	}
-	if opts.GoogleAuth == nil && opts.Store != nil {
+	// Without a usable master key the tokens could not be encrypted, so no
+	// manager is built and the Google routes report the server as unconfigured
+	// rather than failing at the first click with an internal error.
+	if opts.GoogleAuth == nil && opts.Store != nil && len(opts.MasterKey) == 32 {
 		opts.GoogleAuth = googleauth.NewManager(
 			googleauth.New(opts.Google.ClientID, opts.Google.ClientSecret, opts.Google.RedirectURLs, opts.Google.Scopes),
 			opts.Store, opts.MasterKey)

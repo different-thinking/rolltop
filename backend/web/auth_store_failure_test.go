@@ -211,7 +211,10 @@ func TestIconRoutesAnswerUnavailableRatherThanNotFoundDuringStoreFailure(t *test
 }
 
 func TestIconRoutesStillHideThemselvesFromAnonymousCallers(t *testing.T) {
-	_, _, handler, _ := newStoreFailureTestServer(t)
+	db, _, handler, _ := newStoreFailureTestServer(t)
+	// The server's background workers keep writing into the temp directory, so
+	// the store has to be closed before the test's cleanup removes it.
+	defer db.Close()
 	for _, target := range []string{"/contacts/1/icon", "/brand-icons/example.test"} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
