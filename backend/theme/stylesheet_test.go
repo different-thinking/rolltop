@@ -147,6 +147,35 @@ func TestComponentStylesheetsOnlyUseTokens(t *testing.T) {
 	}
 }
 
+// TestMessageBodyThemeOnlyPaintsPlainTextDocuments holds the rule that keeps
+// HTML mail readable. An HTML message carries the sender's colours on the
+// sender's own background; forcing our foreground onto it produced light text on
+// the mail's own white tables, which measured 1.33:1. Only bodies Rolltop
+// rendered from plain text may be repainted.
+func TestMessageBodyThemeOnlyPaintsPlainTextDocuments(t *testing.T) {
+	const path = "../../frontend/src/lib/emailDocumentTheme.ts"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(raw), `plainTextDocumentClass = "plaintext-doc"`) {
+		t.Fatalf("%s no longer defines the plain-text document marker", path)
+	}
+
+	markers := []string{`[${themeMarkerAttribute}="classic_dark"]`, `[${themeMarkerAttribute}="matrix"]`, `:not([${themeMarkerAttribute}])`}
+	for number, line := range strings.Split(string(raw), "\n") {
+		for _, marker := range markers {
+			if !strings.Contains(line, marker) {
+				continue
+			}
+			if !strings.Contains(line, "plainText") {
+				t.Errorf("%s:%d themes a message document without scoping it to plain text: %s",
+					path, number+1, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
 // TestMessageBodyThemeHasOneSource keeps the message-body iframe CSS from being
 // copied again: it lived in both the Go renderer and the PGP plugin, and the two
 // copies had already drifted to different colours.
