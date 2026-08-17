@@ -83,13 +83,21 @@ func (s *Service) StartMoveMessages(ctx context.Context, userID int64, messageID
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
-	go s.runMoveMessages(context.Background(), userID, ids, destMailboxID, dest.Name, run.ID, progress, onDone)
+	// A batch reuses one login when the fetcher can hold a connection open. The
+	// executor is nil otherwise, which moves the run back to connecting per
+	// message rather than failing it.
+	var executor *moveSessionExecutor
+	if _, ok := s.Fetcher.(MoveSessionFetcher); ok {
+		executor = &moveSessionExecutor{service: s, userID: userID, accountID: dest.AccountID}
+	}
+	go s.runMoveMessages(context.Background(), userID, ids, destMailboxID, dest.Name, run.ID, progress, executor, onDone)
 	return run, nil
 }
 
-func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, onDone func()) {
+func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, executor *moveSessionExecutor, onDone func()) {
 	status := "ok"
 	errText := ""
+	defer executor.close()
 	defer func() {
 		if ctx.Err() != nil && status == "ok" {
 			status = "interrupted"
@@ -117,6 +125,12 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	failures := 0
 	consecutiveFailures := 0
 	firstFailure := ""
+	// A typed nil would read as a usable executor once boxed, so the fallback
+	// stays an untyped nil interface.
+	var dispatcher MoveReceiptFetcher
+	if executor != nil {
+		dispatcher = executor
+	}
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
@@ -129,7 +143,7 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 		case err == nil:
 			progress.CurrentMailbox = "Moving to " + destName
 			progress.CurrentUID = msg.UID
-			if moveErr := s.MoveMessage(ctx, userID, id, destMailboxID); moveErr != nil {
+			if moveErr := s.moveMessageVia(ctx, userID, id, destMailboxID, s.observeMessageMove, dispatcher); moveErr != nil {
 				failure = moveErr
 			} else {
 				progress.MessagesStored++
@@ -204,12 +218,69 @@ func moveRunFailureSummary(moved, total, failures, notAttempted int, firstFailur
 	return summary
 }
 
+// moveSessionExecutor dispatches a run's moves over one held connection,
+// opening it on first use. Every message in a run belongs to the destination's
+// account, because a move across accounts is rejected before dispatch.
+type moveSessionExecutor struct {
+	service   *Service
+	userID    int64
+	accountID int64
+	session   MoveSession
+}
+
+// MoveMessageWithReceipt satisfies MoveReceiptFetcher. The account is already
+// fixed by the session, so the one named per message is ignored.
+func (e *moveSessionExecutor) MoveMessageWithReceipt(ctx context.Context, _ store.MailAccount,
+	sourceMailbox, destMailbox string, uid uint32, expectedSourceUIDValidity uint32) (*MoveReceipt, error) {
+	if e.session == nil {
+		opener, ok := e.service.Fetcher.(MoveSessionFetcher)
+		if !ok {
+			return nil, errors.New("IMAP fetcher cannot hold a connection open for a batch of moves")
+		}
+		account, err := e.service.Store.GetMailAccountForUser(ctx, e.userID, e.accountID)
+		if err != nil {
+			return nil, err
+		}
+		session, err := opener.OpenMoveSession(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		e.session = session
+	}
+	receipt, err := e.session.MoveMessageWithReceipt(ctx, sourceMailbox, destMailbox, uid, expectedSourceUIDValidity)
+	if err != nil {
+		// The held connection may itself be why this failed, and one dead socket
+		// must not take the rest of the batch down with it. Drop it so the next
+		// message starts from a fresh login.
+		e.close()
+	}
+	return receipt, err
+}
+
+func (e *moveSessionExecutor) close() {
+	if e == nil || e.session == nil {
+		return
+	}
+	session := e.session
+	e.session = nil
+	if err := session.Close(); err != nil {
+		log.Printf("close move session user_id=%d account_id=%d: %v", e.userID, e.accountID, err)
+	}
+}
+
 // MoveMessage moves one message through IMAP using its account, source mailbox, destination mailbox, and UID.
 func (s *Service) MoveMessage(ctx context.Context, userID, messageID, destMailboxID int64) error {
 	return s.moveMessage(ctx, userID, messageID, destMailboxID, s.observeMessageMove)
 }
 
 func (s *Service) moveMessage(ctx context.Context, userID, messageID, destMailboxID int64, notifyMove messageMoveNotifier) error {
+	return s.moveMessageVia(ctx, userID, messageID, destMailboxID, notifyMove, nil)
+}
+
+// moveMessageVia moves one message, optionally dispatching the remote command
+// through a caller-owned executor. A batch passes one that holds a single
+// connection open; a lone move passes nothing and connects for itself.
+func (s *Service) moveMessageVia(ctx context.Context, userID, messageID, destMailboxID int64, notifyMove messageMoveNotifier, executor MoveReceiptFetcher) error {
 	if s.Fetcher == nil {
 		return errors.New("sync fetcher is not configured")
 	}
@@ -242,9 +313,13 @@ func (s *Service) moveMessage(ctx context.Context, userID, messageID, destMailbo
 	if messageUIDValidity <= 0 || messageUIDValidity > int64(^uint32(0)) || source.UIDValidity <= 0 || messageUIDValidity != source.UIDValidity {
 		return errors.New("message source mailbox generation changed; refresh before moving")
 	}
-	receiptFetcher, ok := s.Fetcher.(MoveReceiptFetcher)
-	if !ok {
-		return errors.New("IMAP fetcher cannot prove the source mailbox generation for move")
+	receiptFetcher := executor
+	if receiptFetcher == nil {
+		capable, ok := s.Fetcher.(MoveReceiptFetcher)
+		if !ok {
+			return errors.New("IMAP fetcher cannot prove the source mailbox generation for move")
+		}
+		receiptFetcher = capable
 	}
 	transfer, err := s.Store.StageMessageTransfer(ctx, userID, msg.ID, dest.ID, "move", "")
 	if err != nil {

@@ -32,6 +32,44 @@ func (f *selectiveMoveFetcher) MoveMessageWithReceipt(ctx context.Context, accou
 	return f.moveTestFetcher.MoveMessageWithReceipt(ctx, account, source, destination, uid, validity)
 }
 
+// sessionMoveFetcher can hold a connection open, and counts how often a run
+// actually logs in rather than reusing what it already has.
+type sessionMoveFetcher struct {
+	*moveTestFetcher
+	opens    int
+	closes   int
+	moves    int
+	failUIDs map[uint32]error
+}
+
+func (f *sessionMoveFetcher) OpenMoveSession(_ context.Context, account store.MailAccount) (MoveSession, error) {
+	f.opens++
+	return &fakeMoveSession{fetcher: f, account: account}, nil
+}
+
+type fakeMoveSession struct {
+	fetcher *sessionMoveFetcher
+	account store.MailAccount
+	closed  bool
+}
+
+func (s *fakeMoveSession) MoveMessageWithReceipt(ctx context.Context, source, destination string, uid uint32, validity uint32) (*MoveReceipt, error) {
+	if s.closed {
+		return nil, errors.New("move session is closed")
+	}
+	s.fetcher.moves++
+	if err := s.fetcher.failUIDs[uid]; err != nil {
+		return nil, err
+	}
+	return s.fetcher.moveTestFetcher.MoveMessageWithReceipt(ctx, s.account, source, destination, uid, validity)
+}
+
+func (s *fakeMoveSession) Close() error {
+	s.closed = true
+	s.fetcher.closes++
+	return nil
+}
+
 func addMoveTestMessage(t *testing.T, fixture moveTestFixture, uid uint32) store.MessageRecord {
 	t.Helper()
 	ctx := context.Background()
@@ -206,5 +244,86 @@ func TestRunMoveMessagesReportsACleanBatchAsSucceeded(t *testing.T) {
 	if finished.MessagesStored != 4 || finished.MessagesSkipped != 0 || finished.MailboxesDone != 1 {
 		t.Fatalf("run progress stored=%d skipped=%d mailboxes_done=%d, want 4/0/1",
 			finished.MessagesStored, finished.MessagesSkipped, finished.MailboxesDone)
+	}
+}
+
+// A whole-filter delete moves thousands of messages. Reconnecting for each one
+// dominates the run and is what mail hosts throttle, so a batch has to log in
+// once and reuse that connection.
+func TestRunMoveMessagesReusesOneConnectionForTheBatch(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	fetcher := &sessionMoveFetcher{moveTestFetcher: fixture.fetcher}
+	fixture.service.Fetcher = fetcher
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 47; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if finished.Status != "ok" || finished.MessagesStored != 6 {
+		t.Fatalf("run status=%q stored=%d, want all 6 moved cleanly", finished.Status, finished.MessagesStored)
+	}
+	if fetcher.opens != 1 {
+		t.Fatalf("logins = %d, want the whole batch to share one", fetcher.opens)
+	}
+	if fetcher.moves != 6 {
+		t.Fatalf("session moves = %d, want 6", fetcher.moves)
+	}
+	// The run owns the connection and has to give it back when it ends.
+	if fetcher.closes != 1 {
+		t.Fatalf("session closes = %d, want the held connection released once", fetcher.closes)
+	}
+}
+
+// One dead connection must not take the rest of the batch with it: the run
+// drops the session it was holding and logs in again for the next message.
+func TestRunMoveMessagesReopensTheConnectionAfterAFailedMove(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	fetcher := &sessionMoveFetcher{
+		moveTestFetcher: fixture.fetcher,
+		failUIDs:        map[uint32]error{fixture.message.UID: errors.New("connection reset")},
+	}
+	fixture.service.Fetcher = fetcher
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 45; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if fetcher.opens != 2 {
+		t.Fatalf("logins = %d, want a second one after the failure dropped the first", fetcher.opens)
+	}
+	if finished.MessagesStored != 3 || finished.MessagesSkipped != 1 {
+		t.Fatalf("run stored=%d skipped=%d, want the 3 messages after the failure still moved",
+			finished.MessagesStored, finished.MessagesSkipped)
+	}
+	for _, id := range ids[1:] {
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, id); !store.IsNotFound(err) {
+			t.Fatalf("message %d after the failed one was left behind: %v", id, err)
+		}
+	}
+}
+
+// A fetcher that cannot hold a connection open still runs the batch, one
+// connection per message, rather than failing it.
+func TestRunMoveMessagesFallsBackWithoutSessionSupport(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	if _, ok := fixture.service.Fetcher.(MoveSessionFetcher); ok {
+		t.Fatal("fixture fetcher unexpectedly supports move sessions")
+	}
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 45; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if finished.Status != "ok" || finished.MessagesStored != 4 {
+		t.Fatalf("run status=%q stored=%d, want the fallback to move all 4", finished.Status, finished.MessagesStored)
+	}
+	if len(fixture.fetcher.moveCalls) != 4 {
+		t.Fatalf("remote move calls = %d, want one per message", len(fixture.fetcher.moveCalls))
 	}
 }
