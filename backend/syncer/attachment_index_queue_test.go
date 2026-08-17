@@ -1,11 +1,9 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +13,8 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+
+	"rolltop/internal/testlog"
 )
 
 type attachmentIndexQueueFetcher struct {
@@ -196,16 +196,7 @@ func TestAttachmentIndexFailureDoesNotPinHigherMessageIDs(t *testing.T) {
 		messages = append(messages, createPendingAttachmentIndexMessage(t, ctx, fixture, uid))
 	}
 
-	var logs bytes.Buffer
-	previousWriter, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
-	})
+	logs := testlog.Capture(t)
 
 	if n, err := fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 2); err != nil || n != 2 {
 		t.Fatalf("first attachment index batch processed=%d err=%v, want 2, nil", n, err)
@@ -277,16 +268,7 @@ func TestRepairMailboxSearchIndexFailureDoesNotPinHigherMessageIDs(t *testing.T)
 		t.Fatal(err)
 	}
 
-	var logs bytes.Buffer
-	previousWriter, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
-	})
+	logs := testlog.Capture(t)
 
 	indexed, err := fixture.service.RepairMailboxSearchIndex(ctx, fixture.userID, fixture.source, 0, nil)
 	if err != nil {

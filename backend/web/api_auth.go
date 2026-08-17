@@ -30,7 +30,7 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -113,7 +113,7 @@ func (s *Server) apiSwipePreferences(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		preferences, err := s.store.GetSwipePreferences(r.Context(), cu.User.ID)
 		if err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		writeJSON(w, map[string]any{"swipe_preferences": apiSwipePreferencesFromStore(preferences)})
@@ -142,7 +142,7 @@ func (s *Server) apiSwipePreferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		if s.events != nil {
@@ -161,7 +161,7 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	usersExist, err := s.usersExist(r.Context())
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if usersExist {
@@ -185,7 +185,7 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := auth.HashPassword(in.Password)
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	user, err := s.store.CreateUser(r.Context(), in.Email, in.Name, hash, true)
@@ -195,11 +195,11 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.EnsureMeContactForEmail(r.Context(), user.ID, user.Email, firstNonEmpty(user.Name, user.Email)); err != nil && !store.IsNotFound(err) {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if err := s.loginUser(w, r, user.ID); err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -212,7 +212,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	usersExist, err := s.usersExist(r.Context())
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if !usersExist {
@@ -233,7 +233,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !store.IsNotFound(err) {
 		// A store failure is not a credential verdict; reporting it as
 		// "invalid password" sends users into password resets during outages.
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if err != nil {
@@ -246,7 +246,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.loginUser(w, r, user.ID); err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -314,7 +314,7 @@ func (s *Server) apiProfile(w http.ResponseWriter, r *http.Request) {
 			user, err = s.store.UpdateUserBackupEmail(r.Context(), cu.User.ID, in.BackupEmail)
 		}
 		if err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		s.notifyUserChanged(cu.User.ID)
