@@ -44,6 +44,8 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	if allowRemoteImages {
 		bodyHTML = normalizeProtocolRelativeRemoteRefs(bodyHTML)
 		bodyHTML = removeBlockedRemoteImages(bodyHTML, blockedImagePatterns)
+	} else {
+		bodyHTML = neutralizeRemoteRefs(bodyHTML)
 	}
 	imgSrc := "'self' data: cid:"
 	styleSrc := "'unsafe-inline'"
@@ -135,6 +137,117 @@ var (
 	emailImageTagRE = regexp.MustCompile(`(?is)<img\b[^>]*>`)
 	imageURLAttrRE  = regexp.MustCompile(`(?is)\b(?:src|srcset)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
 )
+
+// A transparent 1x1 GIF keeps blocked images in the layout without a request.
+const blockedRemoteImagePixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+var (
+	namedImageURLAttrRE = regexp.MustCompile(`(?is)\b(src|srcset)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+	backgroundURLAttrRE = regexp.MustCompile(`(?is)\bbackground\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+	stylesheetLinkTagRE = regexp.MustCompile(`(?is)<link\b[^>]*>`)
+	linkHrefAttrRE      = regexp.MustCompile(`(?is)\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+	cssRemoteURLTokenRE = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
+	remoteRefSchemes    = []string{"http://", "https://", "//"}
+)
+
+// neutralizeRemoteRefs rewrites remote references so a blocked message body
+// asks the network for nothing. The document CSP already refuses these loads,
+// but a document that keeps the live URLs still makes the browser start (and
+// log) one blocked request per reference, which buries real console output
+// under dozens of CSP violations for a single newsletter.
+func neutralizeRemoteRefs(bodyHTML string) string {
+	if !containsRemoteRef(bodyHTML) {
+		return bodyHTML
+	}
+	bodyHTML = emailImageTagRE.ReplaceAllStringFunc(bodyHTML, neutralizeImageTagRefs)
+	bodyHTML = stylesheetLinkTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
+		if isRemoteRef(attrValue(linkHrefAttrRE, tag)) {
+			return ""
+		}
+		return tag
+	})
+	bodyHTML = backgroundURLAttrRE.ReplaceAllStringFunc(bodyHTML, func(attr string) string {
+		value := attrValueFromMatch(backgroundURLAttrRE.FindStringSubmatch(attr), 2)
+		if !isRemoteRef(value) {
+			return attr
+		}
+		return `data-rolltop-blocked-background="` + escapeBlockedRef(value) + `"`
+	})
+	return cssRemoteURLTokenRE.ReplaceAllStringFunc(bodyHTML, func(token string) string {
+		value := attrValueFromMatch(cssRemoteURLTokenRE.FindStringSubmatch(token), 2)
+		if !isRemoteRef(value) {
+			return token
+		}
+		// "none" is the one replacement that stays inert in every context a
+		// url() token can appear in: it is a valid background or list image and
+		// it makes an @font-face src declaration invalid, so the rule is
+		// dropped instead of fetched.
+		return "none"
+	})
+}
+
+func neutralizeImageTagRefs(tag string) string {
+	return namedImageURLAttrRE.ReplaceAllStringFunc(tag, func(attr string) string {
+		match := namedImageURLAttrRE.FindStringSubmatch(attr)
+		value := attrValueFromMatch(match, 3)
+		if strings.EqualFold(match[1], "srcset") {
+			if !hasRemoteSrcsetCandidate(value) {
+				return attr
+			}
+			return `data-rolltop-blocked-srcset="` + escapeBlockedRef(value) + `"`
+		}
+		if !isRemoteRef(value) {
+			return attr
+		}
+		return `src="` + blockedRemoteImagePixel + `" data-rolltop-blocked-src="` + escapeBlockedRef(value) + `"`
+	})
+}
+
+func hasRemoteSrcsetCandidate(value string) bool {
+	for _, candidate := range srcsetURLCandidates(value) {
+		if isRemoteRef(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRemoteRef(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "http://") || strings.Contains(lower, "https://") || strings.Contains(lower, "//")
+}
+
+func isRemoteRef(value string) bool {
+	value = strings.ToLower(strings.Trim(strings.TrimSpace(html.UnescapeString(value)), `"' `))
+	for _, prefix := range remoteRefSchemes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func attrValue(re *regexp.Regexp, tag string) string {
+	return attrValueFromMatch(re.FindStringSubmatch(tag), 2)
+}
+
+// attrValueFromMatch reads the first non-empty alternative of a quoted or
+// unquoted attribute capture group starting at start.
+func attrValueFromMatch(match []string, start int) string {
+	if len(match) <= start {
+		return ""
+	}
+	for _, candidate := range match[start:] {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return ""
+}
+
+func escapeBlockedRef(value string) string {
+	return html.EscapeString(html.UnescapeString(value))
+}
 
 func removeBlockedRemoteImages(bodyHTML string, patterns []string) string {
 	blockers := compileRemoteImageBlockPatterns(patterns)

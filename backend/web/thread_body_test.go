@@ -346,6 +346,67 @@ func TestEmailDocumentAllowsRemoteStylesAndFontsWithImages(t *testing.T) {
 	}
 }
 
+func TestEmailDocumentNeutralizesRemoteRefsWhileImagesAreBlocked(t *testing.T) {
+	body := `<link rel="stylesheet" href="https://cdn.example.test/mail.css">` +
+		`<img src="https://cdn.example.test/logo.png" srcset="https://cdn.example.test/logo@2x.png 2x">` +
+		`<td background="//cdn.example.test/tile.png"><div style="background-image:url('https://cdn.example.test/hero.jpg')">Hero</div></td>`
+	doc := emailDocument(body, "", false)
+	// The CSP still refuses remote loads, but the document must not ask for
+	// them: every live reference here would cost one console violation.
+	if strings.Contains(doc, ` src="https://cdn.example.test/logo.png"`) {
+		t.Fatalf("blocked image kept a live src: %s", doc)
+	}
+	if !strings.Contains(doc, `src="`+blockedRemoteImagePixel+`"`) {
+		t.Fatalf("blocked image did not fall back to the inert pixel: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-blocked-src="https://cdn.example.test/logo.png"`) {
+		t.Fatalf("blocked image URL was not preserved: %s", doc)
+	}
+	if strings.Contains(doc, ` srcset=`) {
+		t.Fatalf("blocked image kept a live srcset: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-blocked-srcset="https://cdn.example.test/logo@2x.png 2x"`) {
+		t.Fatalf("blocked srcset was not preserved: %s", doc)
+	}
+	if strings.Contains(doc, ` background="//cdn.example.test/tile.png"`) {
+		t.Fatalf("blocked background attribute kept a live URL: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-blocked-background="//cdn.example.test/tile.png"`) {
+		t.Fatalf("blocked background URL was not preserved: %s", doc)
+	}
+	if strings.Contains(doc, "url(") {
+		t.Fatalf("blocked CSS background kept a url() reference: %s", doc)
+	}
+	if strings.Contains(doc, "mail.css") {
+		t.Fatalf("remote stylesheet was not dropped: %s", doc)
+	}
+	if !strings.Contains(doc, "Hero") {
+		t.Fatalf("message content was lost: %s", doc)
+	}
+}
+
+func TestEmailDocumentKeepsLocalRefsWhileImagesAreBlocked(t *testing.T) {
+	attachments := []store.Attachment{{ID: 7, ContentID: "hero@example.test", IsInline: true, ContentType: "image/png"}}
+	body := `<img src="cid:hero@example.test"><img src="data:image/png;base64,AAAA"><img src="/attachments/7/download">` +
+		`<div style="background-image:url(data:image/gif;base64,AAAA)">Local</div>`
+	doc := emailDocumentWithInlineAttachments(body, "", false, nil, attachments)
+	if !strings.Contains(doc, `src="/attachments/7/inline"`) {
+		t.Fatalf("inline attachment image was neutralized: %s", doc)
+	}
+	if !strings.Contains(doc, `src="data:image/png;base64,AAAA"`) {
+		t.Fatalf("data image was neutralized: %s", doc)
+	}
+	if !strings.Contains(doc, `src="/attachments/7/download"`) {
+		t.Fatalf("same-origin image was neutralized: %s", doc)
+	}
+	if !strings.Contains(doc, `url(data:image/gif;base64,AAAA)`) {
+		t.Fatalf("data CSS background was neutralized: %s", doc)
+	}
+	if strings.Contains(doc, "data-rolltop-blocked-") {
+		t.Fatalf("local references were treated as remote: %s", doc)
+	}
+}
+
 func TestEmailDocumentRemovesBlockedRemoteImages(t *testing.T) {
 	body := `<p>Brand mail</p><img src="https://track.example.test/open.php?id=1"><img src="https://cdn.example.test/logo.png">`
 	doc := emailDocumentWithBlocklist(body, "", true, []string{`(?i)/open\.php`})
