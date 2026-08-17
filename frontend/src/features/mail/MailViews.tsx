@@ -12,7 +12,7 @@ import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { trashMailboxForAccount } from "../../lib/folders";
+import { isArchiveMailboxChoice, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -1724,7 +1724,7 @@ function MessageList({
       : (() => {
           const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
           return preference
-            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && mailbox.role === "")
+            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
             : undefined;
         })();
     if (!target) {
@@ -1752,9 +1752,12 @@ function MessageList({
       },
       async (keepalive) => {
         // Deleting a snoozed row dismisses its reminder too. On a background
-        // commit the request has to leave before any await, or unload cancels it.
+        // commit the request has to leave before any await, or unload cancels
+        // it — but only once the move itself fits the keepalive chunk budget,
+        // so a truncated move never drops the reminder of a message that stays.
         const unsnooze = snoozedView && action === "trash";
-        if (unsnooze && keepalive) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
+        const keepaliveMoveComplete = messageIDs.length <= bulkMessageIDLimit * keepaliveMoveChunkBudget;
+        if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
         removePendingSwipeMoveIDs(dismissedIDs);
         if (unsnooze && !keepalive && movedIDs.length > 0) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
@@ -2164,7 +2167,13 @@ function MessageList({
             <Icon name={conversation.is_read ? "mail" : "mail_open"} />
           </button>
         )}
-        {openAsDraft || snoozedView ? null : (
+        {openAsDraft ? null : snoozedView ? (
+          // The toolbar covers the date cell's unsnooze button, so it carries
+          // the same action while a pointer is over the row.
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => void unsnoozeConversations([conversation])} title="Unsnooze" aria-label="Unsnooze">
+            <Icon name="clock" />
+          </button>
+        ) : (
           <SnoozeControl
             className="message-row-action"
             iconOnly

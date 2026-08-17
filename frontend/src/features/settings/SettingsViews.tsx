@@ -11,7 +11,7 @@ import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm } from "../../lib/accountForm";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
-import { folderParentNames, folderTree, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
+import { folderParentNames, folderTree, isArchiveMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
 import { systemThemeID } from "../../lib/theme";
@@ -530,10 +530,6 @@ function cloneSwipePreferences(preferences: SwipePreferences): SwipePreferences 
     ...preferences,
     archive_mailboxes: preferences.archive_mailboxes.map((mailbox) => ({ ...mailbox }))
   };
-}
-
-function isSwipeArchiveChoice(mailbox: Mailbox): boolean {
-  return !["inbox", "sent", "drafts", "trash", "junk"].includes(mailbox.role);
 }
 
 function folderCanInherit(mailbox: Mailbox) {
@@ -1262,7 +1258,7 @@ export function SettingsView({
     const missingAccount = archiveRequired
       ? imapAccounts.find((account) => {
           const mailboxID = archiveByAccount.get(account.id);
-          return !mailboxes.some((mailbox) => mailbox.id === mailboxID && mailbox.account_id === account.id && isSwipeArchiveChoice(mailbox));
+          return !mailboxes.some((mailbox) => mailbox.id === mailboxID && mailbox.account_id === account.id && isArchiveMailboxChoice(mailbox));
         })
       : undefined;
     if (missingAccount) {
@@ -1274,7 +1270,7 @@ export function SettingsView({
       ...swipeDraft,
       archive_mailboxes: swipeDraft.archive_mailboxes.filter((item) =>
         accountIDs.has(item.account_id) && mailboxes.some((mailbox) =>
-          mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isSwipeArchiveChoice(mailbox)
+          mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isArchiveMailboxChoice(mailbox)
         )
       )
     };
@@ -1909,7 +1905,7 @@ export function SettingsView({
       : [];
     const archiveByAccount = new Map(swipeDraft.archive_mailboxes.map((item) => [item.account_id, item.mailbox_id]));
     const archiveChoices = (accountID: number) => mailboxes
-      .filter((mailbox) => mailbox.account_id === accountID && isSwipeArchiveChoice(mailbox))
+      .filter((mailbox) => mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
       .sort((left, right) => left.name.localeCompare(right.name));
     // Archive folders back both the swipe action and the pointer row action, so
     // they stay configurable even when neither swipe is set to Archive. Only the
@@ -1981,37 +1977,40 @@ export function SettingsView({
         {trashUnavailable || missingTrashAccounts.length > 0 ? (
           <small className="swipe-validation">{trashUnavailable ? "Add an IMAP server before using Move to trash." : "Assign a Trash role folder for every IMAP account before using Move to trash."}</small>
         ) : null}
-        <section className="swipe-archive-settings">
-          <h3>Archive folders</h3>
-          <p className="swipe-archive-hint">Used by the Archive swipe action and by the Archive button on message rows.</p>
-          <div className="swipe-archive-grid">
-            {imapAccounts.map((account) => {
-              const choices = archiveChoices(account.id);
-              return (
-                <label key={account.id}>
-                  <span>{imapAccountLabel(account)}</span>
-                  <select
-                    value={archiveByAccount.get(account.id) || 0}
-                    disabled={choices.length === 0}
-                    onChange={(event) => updateArchiveMailbox(account.id, Number(event.target.value))}
-                  >
-                    <option value={0}>{choices.length === 0 ? "No eligible folders" : "Choose a folder"}</option>
-                    {choices.map((mailbox) => <option value={mailbox.id} key={mailbox.id}>{mailbox.name}</option>)}
-                  </select>
-                </label>
-              );
-            })}
-          </div>
-          {imapAccounts.length === 0 || accountsMissingArchive.length > 0 ? (
-            <small className="swipe-validation">
-              {imapAccounts.length === 0
-                ? "Add an IMAP server before using Archive."
-                : archiveRequired
+        {archiveUnavailable ? (
+          <small className="swipe-validation">Add an IMAP server before using Archive.</small>
+        ) : null}
+        {imapAccounts.length > 0 ? (
+          <section className="swipe-archive-settings">
+            <h3>Archive folders</h3>
+            <p className="swipe-archive-hint">Used by the Archive swipe action and by the Archive button on message rows.</p>
+            <div className="swipe-archive-grid">
+              {imapAccounts.map((account) => {
+                const choices = archiveChoices(account.id);
+                return (
+                  <label key={account.id}>
+                    <span>{imapAccountLabel(account)}</span>
+                    <select
+                      value={archiveByAccount.get(account.id) || 0}
+                      disabled={choices.length === 0}
+                      onChange={(event) => updateArchiveMailbox(account.id, Number(event.target.value))}
+                    >
+                      <option value={0}>{choices.length === 0 ? "No eligible folders" : "Choose a folder"}</option>
+                      {choices.map((mailbox) => <option value={mailbox.id} key={mailbox.id}>{mailbox.name}</option>)}
+                    </select>
+                  </label>
+                );
+              })}
+            </div>
+            {accountsMissingArchive.length > 0 ? (
+              <small className="swipe-validation">
+                {archiveRequired
                   ? "Choose an archive folder for every IMAP account."
                   : "Accounts without an archive folder cannot use the Archive action."}
-            </small>
-          ) : null}
-        </section>
+              </small>
+            ) : null}
+          </section>
+        ) : null}
         <div className="actions">
           <button disabled={loading || savingSwipePreferences || archiveUnavailable || trashUnavailable || missingArchiveAccounts.length > 0 || missingTrashAccounts.length > 0}>
             {savingSwipePreferences ? "Saving..." : "Save swipe actions"}
