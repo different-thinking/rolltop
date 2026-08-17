@@ -1,7 +1,7 @@
 // File overview: Folder tree helpers. They turn flat mailbox rows into nested sidebar/settings
 // nodes without changing the backend mailbox identifiers.
 
-import type { Mailbox } from "../types";
+import type { Mailbox, SwipeArchiveMailbox } from "../types";
 
 /** FolderNode is one mailbox plus nested child folders for sidebar/settings tree rendering. */
 export type FolderNode = {
@@ -115,6 +115,23 @@ export function roleMailboxIDs(mailboxes: Mailbox[], role: string): Set<number> 
 /** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */
 export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
   return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");
+}
+
+/**
+ * archiveMailboxForAccount resolves the Archive folder saved for an account. A
+ * stored choice that no longer qualifies (renamed role, deleted folder) is
+ * treated as unset so callers fall back to their "pick a folder" message.
+ */
+export function archiveMailboxForAccount(mailboxes: Mailbox[], choices: SwipeArchiveMailbox[], accountID: number): Mailbox | undefined {
+  const preference = choices.find((item) => item.account_id === accountID);
+  if (!preference) return undefined;
+  return mailboxes.find((mailbox) =>
+    mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox));
+}
+
+/** junkMailboxForAccount returns the account's Junk-role mailbox, if one exists. */
+export function junkMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
+  return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "junk");
 }
 
 /** trashMailboxesByAccount indexes each account's Trash-role mailbox by account ID. */

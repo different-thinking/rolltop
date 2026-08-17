@@ -1,5 +1,59 @@
 @use "mixins/components" as *;
 
+// The detail header carries the same commands the list offers on row hover, so
+// the toolbar is built from the same small icon buttons rather than a second
+// visual language. It never collapses on touch: a thread has no row to swipe.
+.thread-head {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.thread-head-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.thread-head-action-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 3px;
+  background: var(--separator);
+}
+
+.thread-head-action {
+  @include icon-button(30px, 999px);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+
+  .icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  &:not(:disabled):hover {
+    background: var(--hover);
+    color: var(--text);
+    border-color: transparent;
+  }
+
+  &:disabled {
+    opacity: .45;
+    cursor: default;
+  }
+
+  &.thread-head-action-delete:not(:disabled):hover {
+    color: var(--danger);
+  }
+}
+
 .thread-shell {
   display: flex;
   flex-direction: column;

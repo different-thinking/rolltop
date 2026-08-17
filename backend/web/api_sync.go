@@ -103,6 +103,7 @@ func (s *Server) syncEventPayload(ctx context.Context, userID int64) (map[string
 		"mailboxes":             apiMailboxes(data.Mailboxes),
 		"latest_sync_run":       apiSyncRunPtr(data.LatestSyncRun),
 		"active_sync_runs":      apiSyncRuns(data.ActiveSyncRuns),
+		"unfinished_move_run":   apiSyncRunPtr(data.UnfinishedMoveRun),
 		"sync_running":          data.SyncRunning,
 		"mail_generation":       s.mailListGeneration(userID),
 		"swipe_preferences":     apiSwipePreferencesFromStore(swipePreferences),

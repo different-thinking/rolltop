@@ -33,6 +33,7 @@ export function RouteView({
   navigate,
   replaceRoute,
   hiddenMessageIDs,
+  setMessagesHidden,
   openCompose,
   refreshChrome,
   runtimePlugins,
@@ -56,6 +57,7 @@ export function RouteView({
   navigate: (url: string) => void;
   replaceRoute: (url: string) => void;
   hiddenMessageIDs: Set<number>;
+  setMessagesHidden: (messageIDs: number[], hidden: boolean) => void;
   openCompose: (query?: string) => void;
   refreshChrome: () => Promise<Bootstrap | null>;
   runtimePlugins: RuntimePlugins;
@@ -80,6 +82,9 @@ export function RouteView({
         location={location}
         navigate={navigate}
         mailboxes={mailboxes}
+        swipePreferences={swipePreferences}
+        archiveMailboxes={archiveMailboxes}
+        setMessagesHidden={setMessagesHidden}
         enabledPlugins={enabledPlugins}
         refreshChrome={refreshChrome}
         openCompose={openCompose}

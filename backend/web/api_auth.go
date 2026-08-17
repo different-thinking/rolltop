@@ -116,6 +116,7 @@ func (s *Server) addTenantBootstrap(r *http.Request, userID int64, resp map[stri
 	resp["mailboxes"] = apiMailboxes(chrome.Mailboxes)
 	resp["latest_sync_run"] = apiSyncRunPtr(chrome.LatestSyncRun)
 	resp["active_sync_runs"] = apiSyncRuns(chrome.ActiveSyncRuns)
+	resp["unfinished_move_run"] = apiSyncRunPtr(chrome.UnfinishedMoveRun)
 	resp["sync_running"] = chrome.SyncRunning
 	resp["mail_generation"] = s.mailListGeneration(userID)
 	needsPassword, notice := s.accountCredentialNotice(r.Context(), userID)
@@ -144,6 +145,7 @@ func applyUnavailableTenantBootstrap(userID int64, resp map[string]any) {
 	resp["mailboxes"] = []apiMailbox{}
 	resp["latest_sync_run"] = nil
 	resp["active_sync_runs"] = []apiSyncRun{}
+	resp["unfinished_move_run"] = nil
 	resp["sync_running"] = false
 	resp["mail_generation"] = 0
 	resp["account_needs_password"] = false

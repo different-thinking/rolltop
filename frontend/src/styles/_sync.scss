@@ -128,6 +128,13 @@
     }
   }
 
+  // A move that could not finish stays on screen the way a running sync does,
+  // because it is reporting work the user asked for that did not happen.
+  &.attention {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+    box-shadow: inset 3px 0 0 var(--danger), var(--shadow);
+  }
+
   &.idle {
     transform: translateX(calc(-100% - 16px));
     transition: transform .18s ease, opacity .18s ease;
@@ -224,6 +231,24 @@
 .sync-run-mini {
   min-width: 0;
   display: grid;
+}
+
+.sync-run-problem {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.3;
+
+  strong {
+    font-size: 12px;
+  }
+
+  span {
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
 }
 
 .sidebar-uptime,

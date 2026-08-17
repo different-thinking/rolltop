@@ -27,6 +27,7 @@ export function AppShell({
   mailboxes,
   latestSyncRun,
   activeSyncRuns,
+  unfinishedMoveRun,
   syncRunning,
   serverStartedAt,
   serverUptimeSeconds,
@@ -416,6 +417,7 @@ export function AppShell({
           csrf={csrf}
           latestSyncRun={latestSyncRun}
           activeSyncRuns={activeSyncRuns}
+          unfinishedMoveRun={unfinishedMoveRun}
           syncRunning={syncRunning}
           serverStartedAt={serverStartedAt}
           serverUptimeSeconds={serverUptimeSeconds}
@@ -795,6 +797,7 @@ function Sidebar({
   csrf,
   latestSyncRun,
   activeSyncRuns,
+  unfinishedMoveRun,
   syncRunning,
   serverStartedAt,
   serverUptimeSeconds,
@@ -818,6 +821,7 @@ function Sidebar({
   csrf: string;
   latestSyncRun: SyncRun | null;
   activeSyncRuns: SyncRun[];
+  unfinishedMoveRun: SyncRun | null;
   syncRunning: boolean;
   serverStartedAt: string;
   serverUptimeSeconds: number;
@@ -1136,7 +1140,7 @@ function Sidebar({
           </>
         ) : null}
       </div>
-      <SidebarSync mailboxes={mailboxes} csrf={csrf} latest={latestSyncRun} activeRuns={activeSyncRuns} running={syncRunning} refreshChrome={refreshChrome} />
+      <SidebarSync mailboxes={mailboxes} csrf={csrf} latest={latestSyncRun} activeRuns={activeSyncRuns} unfinishedMove={unfinishedMoveRun} running={syncRunning} refreshChrome={refreshChrome} />
       {uptimeParts.length > 0 ? (
         <div className="sidebar-uptime" title={uptimeTitle}>
           {uptimeParts.join(" · ")}
@@ -1197,6 +1201,7 @@ function SidebarSync({
   csrf,
   latest,
   activeRuns,
+  unfinishedMove,
   running,
   refreshChrome
 }: {
@@ -1204,6 +1209,7 @@ function SidebarSync({
   csrf: string;
   latest: SyncRun | null;
   activeRuns: SyncRun[];
+  unfinishedMove: SyncRun | null;
   running: boolean;
   refreshChrome: () => Promise<Bootstrap | null>;
 }) {
@@ -1219,6 +1225,12 @@ function SidebarSync({
   const isActive = visibleRuns.length > 0 || (running && activeRuns.length === 0);
   const controlsBusy = busy || running || activeRuns.length > 0;
   const latestVisible = visibleRuns[visibleRuns.length - 1] || null;
+  // A whole-filter delete is a background move, and a move that could not finish
+  // has to be reported here: the messages the user asked to delete are still
+  // sitting in their folders. The server picks that run, because it cannot be
+  // recognised from the latest run alone — a finished move immediately queues
+  // the mailbox refresh whose own run supersedes it.
+  const reportMove = !isActive ? unfinishedMove : null;
 
   async function startSync() {
     setBusy(true);
@@ -1231,10 +1243,12 @@ function SidebarSync({
   }
 
   return (
-    <section className={`sidebar-sync ${isActive ? "running" : "idle"}`}>
+    <section className={`sidebar-sync ${isActive ? "running" : reportMove ? "attention" : "idle"}`}>
       <div className="sync-meta">
         <strong>{isActive ? `Syncing${visibleRuns.length > 1 ? ` (${visibleRuns.length})` : ""}` : "Sync"}</strong>
-        <span>{isActive ? (latestVisible ? `${latestVisible.status}${latestVisible.current_mailbox ? ` - ${latestVisible.current_mailbox}` : ""}` : "starting") : "Up to date"}</span>
+        <span>{isActive
+          ? latestVisible ? `${latestVisible.status}${latestVisible.current_mailbox ? ` - ${latestVisible.current_mailbox}` : ""}` : "starting"
+          : reportMove ? "Move incomplete" : "Up to date"}</span>
         <button className="secondary" type="button" disabled={controlsBusy} onClick={startSync}>
           <Icon name="sync" />
 			{controlsBusy ? "Syncing" : "Sync now"}
@@ -1245,6 +1259,12 @@ function SidebarSync({
           <SyncRunMini key={run.id} run={run} mailbox={syncRunMailbox(run, mailboxes)} />
         ))}
       </div>
+      {reportMove ? (
+        <div className="sync-run-problem" role="status">
+          <strong>Move did not finish</strong>
+          <span>{reportMove.error}</span>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1254,7 +1274,13 @@ function SidebarSync({
 // INBOX look permanently busy, especially with two IMAP accounts.
 function isSyncRunChecking(run: SyncRun): boolean {
 	return run.status === "running" && run.messages_total === 0 && run.messages_stored === 0 &&
-		run.latest_new_from !== "rolltop:maintenance" && run.latest_new_from !== "rolltop:move";
+		run.latest_new_from !== "rolltop:maintenance" && !isMoveRun(run);
+}
+
+// Moves are the runs a user starts by deleting or dragging mail, rather than
+// background mirroring, so they are labelled and surfaced on their own terms.
+function isMoveRun(run: SyncRun): boolean {
+	return run.latest_new_from === "rolltop:move";
 }
 
 
@@ -1307,7 +1333,7 @@ export function SyncRunMini({ run, mailbox }: { run: SyncRun; mailbox?: Mailbox 
         ? Math.min(100, Math.round((run.mailboxes_done / totalFolders) * 100))
         : run.status === "running" ? 100 : 0;
   const isPurge = run.latest_new_from === "rolltop:maintenance" && run.latest_new_subject.trim().toLowerCase().startsWith("purging");
-  const isMove = run.latest_new_from === "rolltop:move";
+  const isMove = isMoveRun(run);
   const isMaintenance = run.latest_new_from === "rolltop:maintenance";
 	const resume = run.status === "running" && !isChecking && !isPurge && !isMove && !isMaintenance ? mirrorResumeEstimate(mailbox) : null;
   const resumePercent = resume && resume.total > 0 ? Math.round((resume.completed * 100) / resume.total) : 0;
@@ -1318,8 +1344,11 @@ export function SyncRunMini({ run, mailbox }: { run: SyncRun; mailbox?: Mailbox 
       ? `about ${resume.completed.toLocaleString()} of ${resume.total.toLocaleString()} already mirrored`
       : `${resume.completed.toLocaleString()} of ${resume.total.toLocaleString()} already mirrored`
     : "";
+  // The bar tracks how far through the batch the run is, but the count says how
+  // many messages actually arrived: a move that steps over unmovable messages
+  // reaches the end of its batch without having moved all of them.
   const movedLabel = totalMessages > 0
-    ? `${run.messages_seen.toLocaleString()} of ${totalMessages.toLocaleString()} moved`
+    ? `${run.messages_stored.toLocaleString()} of ${totalMessages.toLocaleString()} moved`
     : "Moving...";
   const purgeLabel = totalMessages > 0
     ? `${run.messages_seen.toLocaleString()} of ${totalMessages.toLocaleString()} purged`
