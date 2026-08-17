@@ -108,12 +108,20 @@ export function MailView({
   const [hasNext, setHasNext] = useState(false);
   const [newMessageIDs, setNewMessageIDs] = useState<Set<number>>(() => new Set());
   const [sortOrder, setSortOrder] = useState<MailSortOrder>(() => loadMailSortOrder(userID));
+  const [sortOrderUserID, setSortOrderUserID] = useState(userID);
   const previousPageIDs = useRef<Set<number>>(new Set());
   const previousListKey = useRef("");
   const newMessageTimer = useRef<number | null>(null);
   const route = mailRoute(location.path);
   const mailboxID = route.mailboxID;
   const page = route.page;
+  // A different signed-in user brings their own stored direction along. This is
+  // adjusted during render rather than in an effect so the fetch below already
+  // closes over the new user's order instead of requesting the old one first.
+  if (sortOrderUserID !== userID) {
+    setSortOrderUserID(userID);
+    setSortOrder(loadMailSortOrder(userID));
+  }
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
   const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
@@ -177,11 +185,6 @@ export function MailView({
       if (newMessageTimer.current !== null) window.clearTimeout(newMessageTimer.current);
     };
   }, []);
-
-  // A different signed-in user brings their own stored direction along.
-  useEffect(() => {
-    setSortOrder(loadMailSortOrder(userID));
-  }, [userID]);
 
   // A manual folder is refreshed when the user enters its view. The ref
   // coalesces chrome/SSE rerenders, while a new component mount (browser

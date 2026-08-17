@@ -79,8 +79,8 @@ export function saveMailSnapshot(userID: number, mailboxID: string | null, pageN
     const serialized = JSON.stringify(snapshot);
     if (new TextEncoder().encode(serialized).byteLength > maxSnapshotBytes) return false;
     const key = mailSnapshotStorageKey(userID, mailboxID, pageNumber, order);
-    if (!storeWithQuotaRecovery(key, serialized, userID)) return false;
-    pruneMailSnapshots(userID);
+    if (!storeWithQuotaRecovery(key, serialized, userID, order)) return false;
+    pruneMailSnapshots(userID, order);
     return true;
   } catch {
     return false;
@@ -127,12 +127,15 @@ function validMailPage(value: unknown): value is MailListResponse {
   return value.conversations.every(validConversation);
 }
 
-function storeWithQuotaRecovery(key: string, serialized: string, userID: number): boolean {
+// Every write comes from the list the reader is looking at, so its order names
+// the All Mail page 1 that will paint on the next start. That is the one page
+// worth keeping; the same page in the direction they turned off is not.
+function storeWithQuotaRecovery(key: string, serialized: string, userID: number, order: MailSortOrder): boolean {
   try {
     localStorage.setItem(key, serialized);
     return true;
   } catch {
-    const pinned = mailSnapshotStorageKey(userID, null, 1);
+    const pinned = mailSnapshotStorageKey(userID, null, 1, order);
     const candidates = snapshotEntries(userID).filter((entry) => entry.key !== key).sort((left, right) => {
       if (left.key === pinned) return 1;
       if (right.key === pinned) return -1;
@@ -151,8 +154,8 @@ function storeWithQuotaRecovery(key: string, serialized: string, userID: number)
   }
 }
 
-function pruneMailSnapshots(userID: number) {
-  const pinned = mailSnapshotStorageKey(userID, null, 1);
+function pruneMailSnapshots(userID: number, order: MailSortOrder) {
+  const pinned = mailSnapshotStorageKey(userID, null, 1, order);
   const entries = snapshotEntries(userID).sort((left, right) => {
     if (left.key === pinned) return -1;
     if (right.key === pinned) return 1;
