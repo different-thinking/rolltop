@@ -59,7 +59,7 @@ func (s *Server) runSnoozeScheduler() {
 // processDueSnoozes recovers durable pending state for every local user. It
 // returns the earliest remaining due time so the caller can sleep precisely.
 func (s *Server) processDueSnoozes(ctx context.Context, now time.Time) (time.Time, error) {
-	users, err := s.store.ListUsers(ctx)
+	users, err := s.store.ServiceableUsers(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}

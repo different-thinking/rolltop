@@ -1,147 +1,80 @@
+// Classic Dark mirrors the light palette token for token. Nothing here patches a
+// component: if a component needs a colour, it needs a token, in both themes.
 @mixin theme {
   color-scheme: dark;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Fraunces", Georgia, "Times New Roman", serif;
   --font-brand: var(--font-display);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --bg: radial-gradient(circle at 16% -10%, rgba(196, 107, 68, .20), transparent 34rem), linear-gradient(180deg, #151f2e 0%, #0e1521 100%);
-  --surface: #182331;
-  --surface-subtle: #202d3b;
-  --surface-ink: #151f2e;
-  --text: #f1eee9;
-  --muted: #b2aaa2;
-  --border: rgba(183, 179, 170, .24);
-  --border-strong: rgba(183, 179, 170, .44);
-  --hover: rgba(196, 107, 68, .18);
-  --active: rgba(196, 107, 68, .25);
-  --active-strong: rgba(196, 107, 68, .64);
-  --accent: #c46b44;
-  --accent-strong: #f0b89d;
-  --accent-soft: rgba(196, 107, 68, .22);
-  --accent-warm: #c46b44;
-  --accent-warm-strong: #f0b89d;
+
+  // Elevation is carried by lightness, not by shadows: black shadows are
+  // invisible on a dark ground, so each step up is a lighter surface.
+  --chrome: #10161f;
+  --bg: #10161f;
+  --surface-sunken: #0d131b;
+  --surface: #1a2230;
+  --surface-subtle: #202a39;
+  --surface-raised: #232d3d;
+  --field: #141c27;
+
+  --surface-ink: #304256;
+  --on-ink: #e9e6e0;
+
+  // The compose button sat on --surface-ink in both themes, which in the dark
+  // theme was the sidebar's own colour. The primary action carries the accent.
+  --action: #e28c60;
+  --action-hover: #ef9d72;
+  --on-action: #1a1208;
+
+  // #e2dfd9 rather than near-white: 12:1 stays comfortable without the halation
+  // that near-white text produces on a dark ground.
+  --text: #e2dfd9;
+  --muted: #a49d94;
+  --text-soft: #cdc9c2;
+
+  --border: #525f73;
+  --border-strong: #6a7789;
+  --separator: #2a3646;
+
+  --row-read: var(--surface-sunken);
+  --row-unread: color-mix(in srgb, var(--accent) 10%, var(--surface));
+
+  --hover: rgba(226, 140, 96, .16);
+  --active: rgba(226, 140, 96, .24);
+  --active-strong: rgba(226, 140, 96, .62);
+  --selected: rgba(226, 140, 96, .20);
+
+  --accent: #e28c60;
+  --accent-strong: #f3b997;
+  --accent-soft: rgba(226, 140, 96, .20);
+  --accent-warm: #e28c60;
+  --accent-warm-strong: #f3b997;
   --accent-sun: #b7b3aa;
-  --danger: #e18773;
+  --on-accent: #1a1208;
+  --button-text: var(--on-accent);
+  --focus: #f0a87e;
+  --button-hover-border: rgba(226, 140, 96, .54);
+
   --ok: #5ec7a7;
-  --button-text: #151f2e;
-  --focus: #c46b44;
-  --button-hover-border: rgba(196, 107, 68, .52);
+  --on-ok: #10161f;
+  --info: #7bb4e0;
+  --on-info: #10161f;
+  --warning: #e0b268;
+  --on-warning: #10161f;
+  --danger: #f0907c;
+  --on-danger: #10161f;
+
+  --swipe-read: #5ec7a7;
+  --swipe-unread: #7bb4e0;
+  --swipe-snooze: #e0b268;
+  --swipe-archive: #6fc2d4;
+  --swipe-trash: #f0907c;
+  --on-swipe: #10161f;
+
+  --scrim: rgba(4, 8, 14, .58);
+  --scrim-strong: rgba(4, 8, 14, .72);
+  --highlight: rgba(224, 182, 77, .30);
+  --on-highlight: #f5f2ec;
   --shadow: 0 1px 2px rgba(0, 0, 0, .38), 0 14px 34px rgba(0, 0, 0, .26);
-}
-
-@mixin polish {
-  body {
-    background-attachment: fixed;
-  }
-
-  .topbar {
-    background: rgba(21, 31, 46, .94);
-    box-shadow: inset 0 -3px 0 rgba(196, 107, 68, .54), 0 12px 28px rgba(0, 0, 0, .22);
-    backdrop-filter: blur(14px);
-  }
-
-  .sidebar {
-    background: linear-gradient(180deg, rgba(21, 31, 46, .94), rgba(14, 21, 33, .96));
-  }
-
-  .top-search input,
-  input[type="text"],
-  input[type="email"],
-  input[type="password"],
-  input[type="number"],
-  textarea,
-  select {
-    background: rgba(14, 21, 33, .82);
-    border-color: var(--border);
-  }
-
-  button.secondary,
-  .button.secondary,
-  button.ghost,
-  .button.ghost {
-    background: rgba(29, 37, 45, .82);
-    color: var(--text);
-  }
-
-  .panel,
-  .message-table,
-  .thread-shell,
-  .thread-card,
-  .thread-body,
-  .compose-window,
-  .inline-reply,
-  .inline-reply-row,
-  .confirm-dialog,
-  .original-source-dialog,
-  .toast {
-    background: rgba(21, 31, 46, .94);
-    border-color: var(--border);
-  }
-
-  .message-row {
-    background: transparent;
-    border-bottom-color: rgba(183, 179, 170, .16);
-  }
-
-  .message-row.read {
-    background: rgba(14, 21, 33, .44);
-    color: var(--muted);
-  }
-
-  .message-row.unread {
-    background: rgba(196, 107, 68, .10);
-    color: var(--text);
-  }
-
-  .message-row:hover,
-  .thread-card.collapsed:hover,
-  .message-row.selected {
-    background: rgba(196, 107, 68, .18);
-    box-shadow: inset 3px 0 0 var(--accent-warm), 0 1px 0 rgba(196, 107, 68, .18);
-  }
-
-  .date-preview,
-  .stat-card,
-  .message-menu-panel,
-  .search-autocomplete,
-  .folder-sync-notice,
-  .sidebar-sync,
-  .sync-run-list,
-  .sync-run-mini,
-  .body-notice,
-  .image-notice,
-  .compose-format,
-  th {
-    background: rgba(14, 21, 33, .74);
-    border-color: var(--border);
-  }
-
-  .avatar,
-  .inline-reply-avatar {
-    background: var(--surface-ink);
-    color: #eef8f3;
-    box-shadow: inset 0 -3px 0 var(--accent-warm);
-  }
-
-  .email-frame {
-    background: var(--surface);
-  }
-
-  .search-hit,
-  mark {
-    background: rgba(183, 179, 170, .26);
-    color: var(--text);
-  }
-
-  .progress,
-  .folder-sync-progress,
-  .sync-percent > div {
-    background: rgba(183, 179, 170, .16);
-  }
-
-  .progress div,
-  .folder-sync-progress div,
-  .sync-percent > div span {
-    background: var(--accent);
-  }
+  --shadow-raised: 0 18px 44px rgba(0, 0, 0, .46);
 }

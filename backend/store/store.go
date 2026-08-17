@@ -228,7 +228,12 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 	}
 	if err := us.mirrorUser(ctx, user); err != nil {
 		_ = us.Close()
-		return nil, err
+		// Corruption surfaces on the first write into the tenant file as
+		// readily as during its migrations. Without the latch on this path the
+		// tenant is still skipped at startup, but nothing records why: the
+		// admin database page stays empty and every later request reopens and
+		// re-migrates a file that cannot answer.
+		return nil, s.NoteError(userID, err)
 	}
 	s.mu.Lock()
 	if existing := s.userStores[userID]; existing != nil {

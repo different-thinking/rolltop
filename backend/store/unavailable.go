@@ -11,13 +11,30 @@ package store
 import (
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"sync"
 )
 
 const unavailableDriverName = "rolltop-unavailable"
 
-var errDatabaseUnavailable = errors.New("tenant database is unavailable; see the log for the corruption report and the repair command")
+// databaseUnavailableError is what every statement on the poisoned handle
+// returns.
+//
+// It reports itself as corruption. The handle only exists because the tenant is
+// unreadable, so a caller that already branches on IsCorrupt must treat it
+// exactly like the CorruptionError it would have received from a path able to
+// return one. Without that, which of two internal helpers a request happened to
+// go through decided whether the caller saw recoverable corruption or an
+// opaque failure — and it was the opaque one that answered 500 to /login and
+// /api/bootstrap, locking the operator out of the page that repairs the tenant.
+type databaseUnavailableError struct{}
+
+func (databaseUnavailableError) Error() string {
+	return "tenant database is unavailable; see the log for the corruption report and the repair command"
+}
+
+func (databaseUnavailableError) Is(target error) bool { return target == ErrCorrupt }
+
+var errDatabaseUnavailable error = databaseUnavailableError{}
 
 func init() {
 	sql.Register(unavailableDriverName, unavailableDriver{})

@@ -1,11 +1,18 @@
 name: CI
 
-# Full build, packaging, and publishing pipeline.
+# Two-stage pipeline for `main` and tags.
 #
-# Pull requests are verified by `pr.yml`, which only runs the checks that the
-# changed paths require. This workflow deliberately does the expensive work
-# (Android APK, Docker image, artifacts, godoc) once per merge instead of once
-# per pull request push.
+# `verify` answers the one question a merge commit raises that no pull request
+# can: two changes that are each green on their own may still be broken
+# together. It runs on every push to `main` and stays lean.
+#
+# `release` does the expensive packaging (Android APK, Docker image, GHCR push,
+# artifacts, godoc) and runs only for `v*` tags, plus manual dispatch. Nothing
+# in this repository consumes a per-merge `latest` image: the README points
+# self-hosters at the upstream image, and deployments build the `Dockerfile`
+# from source. Publishing on every merge produced an image nobody pulled.
+#
+# Pull requests are verified by `pr.yml`, which is gated on changed paths.
 
 on:
   push:
@@ -22,13 +29,111 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  test-and-build:
-    name: Test, Build, And Report
+  verify:
+    name: Verify Merge Commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      - name: Prepare Artifact Directories
+        run: |
+          mkdir -p test-results
+          echo "Rolltop CI test artifacts" > test-results/manifest.txt
+
+      - name: Set Up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set Up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      # `plugins.LoadManifests` stats the theme CSS a manifest declares, so the
+      # Go suite needs the compiled themes. Build only those, not the full
+      # frontend bundle: `release` and the `Dockerfile` build that from source.
+      - name: Build Theme Assets
+        run: |
+          npm ci
+          npm run build:themes
+
+      # Deliberately no `-coverprofile`. Several tests compile a real backend
+      # plugin with `go build -buildmode=plugin` and load it via `plugin.Open`,
+      # which requires host and plugin to agree on the build fingerprint of
+      # every shared package. Coverage over `./...` instruments
+      # `plugins/client_side_pgp/schema` inside the test binary but not inside
+      # the plugin the test builds, so every such test failed with "plugin was
+      # built with a different version of package
+      # rolltop/plugins/client_side_pgp/schema". That broke 14 tests across
+      # backend/web and backend/syncer on every merge, which is why `main` was
+      # red while pull requests were green: `pr.yml` never asked for coverage.
+      # A merge gate that cannot run the suite is worth less than a coverage
+      # number nothing read.
+      - name: Run Go Tests
+        run: |
+          mkdir -p test-results
+          set +e
+          go test -json ./... 2>&1 | tee test-results/go-test.json
+          status=${PIPESTATUS[0]}
+          set -e
+
+          node .github/scripts/go-test-report.mjs test-results/go-test.json test-results
+          cat test-results/go-test-report.md >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$status"
+
+      # `go test` compiles every package, but not with `-buildmode=plugin`, and
+      # deployments link these shared objects while building the `Dockerfile`.
+      # A link failure has to surface here, not on the deployment host.
+      - name: Link Plugin Backends
+        run: |
+          set -euo pipefail
+          for backend in plugins/*/backend; do
+            plugin="$(basename "$(dirname "$backend")")"
+            CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -o "/tmp/${plugin}.so" "./${backend}"
+          done
+
+      - name: Verify Checked-In Spam Model
+        run: |
+          go run ./plugins/experimental_spam_filter/training/cmd/spamtrain verify \
+            --model plugins/experimental_spam_filter/model/model.bin \
+            --metadata plugins/experimental_spam_filter/model/model.json \
+            --report plugins/experimental_spam_filter/model/benchmark.json
+
+      - name: Ensure Test Results Artifact Exists
+        if: always()
+        run: |
+          mkdir -p test-results
+          if [ ! -e test-results/manifest.txt ]; then
+            echo "Rolltop CI test artifacts" > test-results/manifest.txt
+          fi
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results-${{ github.ref_name }}
+          path: test-results
+          if-no-files-found: error
+
+  release:
+    name: Package And Publish
+    needs: verify
+    # Tags publish a version; manual dispatch republishes `latest` on demand.
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Check Out
@@ -63,7 +168,7 @@ jobs:
       - name: Prepare Artifact Directories
         run: |
           mkdir -p test-results build-artifacts
-          echo "Rolltop CI test artifacts" > test-results/manifest.txt
+          echo "Rolltop CI packaging artifacts" > test-results/manifest.txt
 
       - name: Set Up Go
         uses: actions/setup-go@v6.4.0
@@ -142,6 +247,9 @@ jobs:
           path: frontend/dist
           if-no-files-found: error
 
+      # Writes the signed APK and its update feed into `frontend/public/android`,
+      # which the Docker frontend stage copies into the image. This step must
+      # stay ahead of the Docker build.
       - name: Build Android App
         id: android-build
         env:
@@ -189,6 +297,8 @@ jobs:
             artifact_suffix="release"
             echo "server_update=true" >> "$GITHUB_OUTPUT"
           else
+            # A debug-signed APK cannot update a release install, so a tagged
+            # release must not ship one.
             if [ "$GITHUB_REF_TYPE" = "tag" ]; then
               echo "Tagged builds require the five ROLLTOP_ANDROID_* signing secrets." >&2
               exit 1
@@ -252,21 +362,17 @@ jobs:
           path: build-artifacts/android/*.apk
           if-no-files-found: error
 
+      # Derived from the directories on disk, not a hand-maintained list, so a
+      # new plugin backend cannot be silently left out of the artifact.
       - name: Build Plugin Backends
         run: |
+          set -euo pipefail
           mkdir -p build-artifacts/plugins
-          plugins='attachment_preview bimi_brand_icons experimental_spam_filter gravatar_sender_icons language_search mail_filters one_click_unsubscribe remote_image_blocklist remote_imap_sync trusted_image_sources client_side_pgp mail_mcp'
-          for plugin in $plugins; do
+          for backend in plugins/*/backend; do
+            plugin="$(basename "$(dirname "$backend")")"
             mkdir -p "build-artifacts/plugins/${plugin}/backend"
-            CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -trimpath -ldflags="-s -w" -o "build-artifacts/plugins/${plugin}/backend/${plugin}.so" "./plugins/${plugin}/backend"
+            CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -trimpath -ldflags="-s -w" -o "build-artifacts/plugins/${plugin}/backend/${plugin}.so" "./${backend}"
           done
-
-      - name: Verify Checked-In Spam Model
-        run: |
-          go run ./plugins/experimental_spam_filter/training/cmd/spamtrain verify \
-            --model plugins/experimental_spam_filter/model/model.bin \
-            --metadata plugins/experimental_spam_filter/model/model.json \
-            --report plugins/experimental_spam_filter/model/benchmark.json
 
       - name: Upload Plugin Backends
         uses: actions/upload-artifact@v5
@@ -274,45 +380,6 @@ jobs:
           name: plugin-backends-${{ steps.build-meta.outputs.version }}
           path: build-artifacts/plugins
           if-no-files-found: error
-
-      # Must stay after the frontend build: `plugins.LoadManifests` stats the
-      # theme CSS that plugin manifests declare, and the Go suite parses the
-      # real manifests.
-      - name: Run Go Tests
-        run: |
-          mkdir -p test-results
-          # One instrumented run produces both the JSON report and the coverage
-          # profile, instead of executing the suite a second time to collect
-          # coverage. Measured at roughly 35s on a warm runner.
-          set +e
-          go test -json -covermode=atomic -coverprofile=test-results/go-coverage.out ./... 2>&1 | tee test-results/go-test.json
-          status=${PIPESTATUS[0]}
-          set -e
-
-          node .github/scripts/go-test-report.mjs test-results/go-test.json test-results
-
-          if [ "$status" -eq 0 ] && [ -s test-results/go-coverage.out ]; then
-            go tool cover -func=test-results/go-coverage.out > test-results/go-coverage.txt
-            go tool cover -html=test-results/go-coverage.out -o test-results/go-coverage.html
-          elif [ "$status" -ne 0 ]; then
-            echo "Go coverage skipped because tests failed." > test-results/go-coverage-run.log
-          else
-            echo "Go tests passed but no coverage profile was produced." > test-results/go-coverage-error.log
-          fi
-
-          cat test-results/go-test-report.md >> "$GITHUB_STEP_SUMMARY"
-          if [ -s test-results/go-coverage.txt ]; then
-            {
-              echo
-              echo "### Go Coverage"
-              echo
-              echo "\`\`\`"
-              tail -n 1 test-results/go-coverage.txt
-              echo "\`\`\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          exit "$status"
 
       - name: Generate Go Documentation
         run: |
@@ -329,7 +396,7 @@ jobs:
             echo "### Go Documentation"
             echo
             echo "Packages: ${package_count}"
-            echo "Artifact: `godoc-${ROLLTOP_VERSION}`"
+            echo "Artifact: \`godoc-${ROLLTOP_VERSION}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Go Documentation
@@ -337,22 +404,6 @@ jobs:
         with:
           name: godoc-${{ steps.build-meta.outputs.version }}
           path: godoc
-          if-no-files-found: error
-
-      - name: Ensure Test Results Artifact Exists
-        if: always()
-        run: |
-          mkdir -p test-results
-          if [ ! -e test-results/manifest.txt ]; then
-            echo "Rolltop CI test artifacts" > test-results/manifest.txt
-          fi
-
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: test-results-${{ steps.build-meta.outputs.version }}
-          path: test-results
           if-no-files-found: error
 
       - name: Build Backend Binary
@@ -419,3 +470,11 @@ jobs:
             echo "Image: \`${ROLLTOP_IMAGE}:${ROLLTOP_VERSION}\`"
             echo "Published: yes"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Packaging Logs
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: packaging-results-${{ steps.build-meta.outputs.version }}
+          path: test-results
+          if-no-files-found: ignore

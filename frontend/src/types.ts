@@ -487,6 +487,7 @@ export type Bootstrap = {
   swipe_preferences?: SwipePreferences;
   account_needs_password?: boolean;
   account_notice?: string;
+  database_unavailable?: boolean;
   enabled_plugins?: string[];
   auth_providers?: AuthProvider[];
   available_themes?: ThemeDefinition[];

@@ -43,7 +43,7 @@
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
-  border: 1px solid var(--border, #d5cec7);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px;
 }
@@ -75,7 +75,7 @@
   grid-template-columns: auto minmax(0, 1fr);
   gap: 8px 12px;
   align-items: start;
-  border-bottom: 1px solid var(--border, #d5cec7);
+  border-bottom: 1px solid var(--border);
   padding: 8px 0;
 }
 
@@ -90,7 +90,7 @@
 }
 
 .mail-filter-message-evaluation small {
-  color: var(--muted, #6f6a63);
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -99,23 +99,24 @@
   padding: 2px 8px;
   font-size: 12px;
   font-weight: 700;
-  background: #eee7df;
+  background: var(--surface-subtle);
+  color: var(--text-soft);
 }
 
 .mail-filter-status.matched {
-  background: #dcebdc;
-  color: #23512a;
+  background: color-mix(in srgb, var(--ok) 18%, var(--surface));
+  color: var(--ok);
 }
 
 .mail-filter-status.action_failed,
 .mail-filter-status.loop_prevented {
-  background: #f0d8d2;
-  color: #7a2f20;
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface));
+  color: var(--danger);
 }
 
 .mail-filter-status.scheduled {
-  background: #dbe7f2;
-  color: #234a68;
+  background: color-mix(in srgb, var(--info) 18%, var(--surface));
+  color: var(--info);
 }
 
 @media (max-width: 760px) {

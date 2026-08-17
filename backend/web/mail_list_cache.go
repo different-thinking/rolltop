@@ -199,7 +199,7 @@ func (s *Server) warmAllMailFirstPages(ctx context.Context) {
 	if s == nil || s.store == nil || s.mailListCache == nil {
 		return
 	}
-	users, err := s.store.ListUsers(ctx)
+	users, err := s.store.ServiceableUsers(ctx)
 	if err != nil {
 		log.Printf("warm all-mail first pages: %v", err)
 		return

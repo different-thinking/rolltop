@@ -16,6 +16,7 @@ import { messageCountLabel } from "./lib/format";
 import { currentLocation, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
+import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
 import { embeddedBootstrap } from "./lib/startup";
 import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
@@ -50,6 +51,7 @@ let inMemoryPushSubscriptionOwner = 0;
 
 function themeChoices(themes: ThemeDefinition[] | undefined): ThemeDefinition[] {
   return themes && themes.length > 0 ? themes : [
+    { id: systemThemeID, name: "System" },
     { id: "classic", name: "Classic" },
     { id: "classic_dark", name: "Classic Dark" }
   ];
@@ -69,6 +71,10 @@ function loadPluginThemeCSS(theme: ThemeDefinition | undefined) {
     document.head.appendChild(link);
   }
   if (link.href !== new URL(href, window.location.href).href) {
+    // A plugin theme brings its own --chrome, so the browser chrome can only be
+    // right once this stylesheet has actually applied. Reading the token before
+    // then yields the previous theme's colour and never corrects itself.
+    link.onload = () => syncBrowserChromeColor();
     link.href = href;
   }
 }
@@ -331,10 +337,15 @@ export default function App() {
   useEffect(() => {
     const savedTheme = bootstrap?.user?.theme;
     const choices = themeChoices(bootstrap?.available_themes);
-    const selected = choices.find((choice) => choice.id === savedTheme) || choices.find((choice) => choice.id === "classic");
+    // Falling back to Classic here would override the unmarked shell the server
+    // sends for the System theme, which is a flip to light on a dark desktop —
+    // and on the signed-out shells there is no stored theme at all.
+    const selected = choices.find((choice) => choice.id === savedTheme) || choices.find((choice) => choice.id === systemThemeID);
     loadPluginThemeCSS(selected);
-    document.documentElement.dataset.theme = selected?.id || "classic";
+    applyDocumentTheme(selected?.id || systemThemeID);
   }, [bootstrap?.user?.theme, bootstrap?.available_themes]);
+
+  useEffect(() => watchSystemThemePreference(), []);
 
   useEffect(() => {
     const userID = bootstrap?.user?.id || null;
@@ -825,6 +836,7 @@ export default function App() {
         syncRunning={Boolean(bootstrap.sync_running)}
         accountNeedsPassword={Boolean(bootstrap.account_needs_password)}
         accountNotice={bootstrap.account_notice || ""}
+        databaseUnavailable={Boolean(bootstrap.database_unavailable)}
         enabledPlugins={bootstrap.enabled_plugins || []}
         serverStartedAt={bootstrap.server_started_at || ""}
         serverUptimeSeconds={bootstrap.server_uptime_seconds || 0}

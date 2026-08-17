@@ -757,7 +757,7 @@
 .rich-signature-editor {
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #fff;
+  background: var(--field);
   overflow: hidden;
 }
 
@@ -973,9 +973,9 @@
   width: fit-content;
   margin-top: 2px;
   padding: 2px 8px;
-  border: 1px solid rgba(196, 107, 68, .44);
+  border: 1px solid color-mix(in srgb, var(--accent-warm) 48%, var(--border));
   border-radius: 999px;
-  background: rgba(196, 107, 68, .12);
+  background: var(--accent-soft);
   color: var(--accent-warm-strong);
   font-size: 11px;
   font-weight: 900;
@@ -988,10 +988,10 @@
   width: fit-content;
   margin-top: 2px;
   padding: 2px 8px;
-  border: 1px solid rgba(204, 76, 76, .44);
+  border: 1px solid color-mix(in srgb, var(--danger) 48%, var(--border));
   border-radius: 999px;
-  background: rgba(204, 76, 76, .12);
-  color: #d86b6b;
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface));
+  color: var(--danger);
   font-size: 11px;
   font-weight: 900;
   letter-spacing: 0;
@@ -999,7 +999,7 @@
 
 .plugin-error-message {
   overflow-wrap: anywhere;
-  color: #d86b6b;
+  color: var(--danger);
 }
 
 .folder-settings-panel {
@@ -1143,7 +1143,7 @@
   }
 
   &.warning:hover:not(:disabled) {
-    border-color: var(--warning, var(--accent));
+    border-color: var(--warning);
   }
 
   &:disabled {
@@ -1224,7 +1224,7 @@
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(0, 0, 0, .34);
+  background: var(--scrim);
 }
 
 .folder-edit-dialog {
@@ -1374,9 +1374,9 @@
 }
 
 .folder-role-warning {
-  border: 1px solid color-mix(in srgb, var(--warning, var(--accent)) 45%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
   border-radius: 6px;
-  background: color-mix(in srgb, var(--warning, var(--accent)) 10%, var(--surface));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
   color: var(--text);
   padding: 7px 9px;
   font-size: 12px;
@@ -1498,7 +1498,7 @@
   > div {
     height: 6px;
     border-radius: 999px;
-    background: #dbe6df;
+    background: color-mix(in srgb, var(--border-strong) 34%, transparent);
     overflow: hidden;
   }
 
@@ -1858,7 +1858,7 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgb(0 0 0 / 45%);
+  background: var(--scrim);
 }
 
 .database-confirm-panel {

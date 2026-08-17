@@ -3,7 +3,7 @@
 .thread-shell {
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: var(--shadow);
@@ -11,7 +11,7 @@
 }
 
 .thread-card {
-  background: #fff;
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
   overflow: visible;
 
@@ -66,7 +66,7 @@
   height: 40px;
   border-radius: 50%;
   background: var(--surface-ink);
-  color: #fff;
+  color: var(--on-ink);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -79,7 +79,7 @@
   height: 40px;
   border-radius: 8px;
   object-fit: contain;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--border);
   padding: 4px;
   box-shadow: inset 0 -3px 0 var(--accent-sun);
@@ -118,10 +118,10 @@
   }
 
   &.attention {
-    border-color: color-mix(in srgb, var(--warning, #a85d24) 45%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
 
     .icon {
-      color: var(--warning, #a85d24);
+      color: var(--warning);
     }
   }
 }
@@ -134,11 +134,11 @@
   white-space: nowrap;
 
   &.pass {
-    color: var(--ok, #2f7d54);
+    color: var(--ok);
   }
 
   &.attention {
-    color: var(--danger, #9f2f24);
+    color: var(--danger);
   }
 }
 
@@ -149,10 +149,10 @@
   min-height: 22px;
   max-width: 100%;
   padding: 2px 7px;
-  border: 1px solid color-mix(in srgb, var(--warning, #a85d24) 38%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
   border-radius: 999px;
-  background: color-mix(in srgb, var(--warning, #a85d24) 6%, var(--surface));
-  color: var(--warning, #8a4a1d);
+  background: color-mix(in srgb, var(--warning) 6%, var(--surface));
+  color: var(--warning);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.35;
@@ -176,7 +176,7 @@
   font-weight: 700;
 
   &:hover:not(:disabled) {
-    background: rgba(183, 179, 170, .22);
+    background: color-mix(in srgb, var(--border-strong) 26%, transparent);
     border-color: transparent;
   }
 
@@ -307,15 +307,15 @@
   }
 
   &.pass {
-    border-color: color-mix(in srgb, var(--ok, #2f7d54) 40%, var(--border));
-    background: color-mix(in srgb, var(--ok, #2f7d54) 7%, var(--surface));
-    color: var(--ok, #2f7d54);
+    border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+    background: color-mix(in srgb, var(--ok) 7%, var(--surface));
+    color: var(--ok);
   }
 
   &.attention {
-    border-color: color-mix(in srgb, var(--danger, #9f2f24) 42%, var(--border));
-    background: color-mix(in srgb, var(--danger, #9f2f24) 7%, var(--surface));
-    color: var(--danger, #9f2f24);
+    border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+    background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+    color: var(--danger);
   }
 }
 
@@ -556,7 +556,7 @@
   }
 
   .negative strong {
-    color: var(--danger, #a33a2b);
+    color: var(--danger);
   }
 }
 
@@ -609,7 +609,7 @@
 }
 
 .thread-body {
-  background: #fff;
+  background: var(--surface);
   margin-left: 76px;
   margin-right: 20px;
 }
@@ -620,10 +620,10 @@
   gap: 9px;
   margin: 8px 0 10px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--warning, #a85d24) 34%, var(--border));
-  border-left: 3px solid var(--warning, #a85d24);
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-left: 3px solid var(--warning);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--warning, #a85d24) 7%, var(--surface));
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
   color: var(--muted);
   font-size: 13px;
   line-height: 1.4;
@@ -633,7 +633,7 @@
     height: 17px;
     flex: none;
     margin-top: 1px;
-    color: var(--warning, #a85d24);
+    color: var(--warning);
   }
 
   strong {
@@ -646,7 +646,7 @@
   min-height: 84px;
   height: 96px;
   border: 0;
-  background: #fff;
+  background: var(--surface);
   display: block;
   overflow: hidden;
 
@@ -704,8 +704,8 @@
   }
 
   &.matched {
-    border-color: rgba(183, 179, 170, .72);
-    background: rgba(183, 179, 170, .18);
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--border-strong) 22%, transparent);
     color: var(--text);
   }
 }
@@ -751,7 +751,7 @@
   align-items: center;
   justify-content: center;
   padding: 18px;
-  background: rgba(32, 38, 56, .46);
+  background: var(--scrim-strong);
 }
 
 .attachment-preview-modal {
@@ -763,7 +763,7 @@
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 24px 60px rgba(32, 38, 56, .34);
+  box-shadow: var(--shadow-raised);
 
   &.pdf {
     width: min(1500px, calc(100vw - 32px));
@@ -810,7 +810,7 @@
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--surface-sunken);
 
   img,
   .pdf-preview-frame {
@@ -845,7 +845,7 @@
     border: 1px solid var(--border-strong);
     border-radius: 999px;
     background: var(--surface);
-    box-shadow: 0 8px 24px rgba(32, 38, 56, .18);
+    box-shadow: var(--shadow);
     color: var(--text);
     font-size: 12px;
     font-weight: 700;
@@ -853,7 +853,7 @@
 
     &.found {
       border-color: var(--accent-soft);
-      background: rgba(183, 179, 170, .26);
+      background: color-mix(in srgb, var(--border-strong) 28%, transparent);
     }
 
     &.missing,
@@ -909,8 +909,8 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 16px;
-  background: #fff;
-  color: #37413e;
+  background: var(--surface);
+  color: var(--text-soft);
   text-decoration: none;
   display: inline-flex;
   align-items: center;

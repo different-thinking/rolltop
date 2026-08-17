@@ -134,7 +134,7 @@
   row-gap: 0;
   min-height: 44px;
   padding: 8px 14px;
-  border-bottom: 1px solid #e6ece8;
+  border-bottom: 1px solid var(--separator);
   color: var(--text);
   text-decoration: none;
   align-items: center;
@@ -143,8 +143,8 @@
   z-index: 1;
 
   &.read {
-    background: #fff;
-    color: #56615c;
+    background: var(--row-read);
+    color: var(--muted);
 
     .sender,
     .subject strong,
@@ -159,7 +159,7 @@
   }
 
   &.unread {
-    background: #fff;
+    background: var(--row-unread);
     color: var(--text);
 
     &::before {
@@ -181,12 +181,12 @@
   }
 
   &:hover {
-    background: #fff;
-    box-shadow: inset 3px 0 0 var(--accent-warm), 0 1px 0 rgba(196, 107, 68, .12);
+    background: color-mix(in srgb, var(--hover) 55%, var(--row-read));
+    box-shadow: inset 3px 0 0 var(--accent-warm), 0 1px 0 var(--separator);
   }
 
   &.selected {
-    background: #f2faf7;
+    background: var(--selected);
     box-shadow: inset 3px 0 0 var(--accent);
   }
 
@@ -220,7 +220,7 @@
   --swipe-action-surface: var(--surface-subtle);
   --swipe-action-ink: var(--muted);
   --swipe-action-ready-surface: var(--surface-ink);
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-ready-ink: var(--on-swipe);
   --swipe-row-height: 72px;
   position: relative;
   overflow: hidden;
@@ -283,7 +283,6 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: rgba(21, 31, 46, .08);
   background: color-mix(in srgb, currentColor 12%, transparent);
   transform: scale(var(--swipe-action-icon-scale));
   will-change: transform;
@@ -313,38 +312,38 @@
 }
 
 .swipe-action-read {
-  --swipe-action-surface: #dcefe7;
-  --swipe-action-ink: #245c49;
-  --swipe-action-ready-surface: #2f7553;
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-surface: color-mix(in srgb, var(--swipe-read) 20%, var(--surface));
+  --swipe-action-ink: var(--swipe-read);
+  --swipe-action-ready-surface: var(--swipe-read);
+  --swipe-action-ready-ink: var(--on-swipe);
 }
 
 .swipe-action-unread {
-  --swipe-action-surface: #dce8f4;
-  --swipe-action-ink: #284f73;
-  --swipe-action-ready-surface: #386a94;
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-surface: color-mix(in srgb, var(--swipe-unread) 20%, var(--surface));
+  --swipe-action-ink: var(--swipe-unread);
+  --swipe-action-ready-surface: var(--swipe-unread);
+  --swipe-action-ready-ink: var(--on-swipe);
 }
 
 .swipe-action-snooze {
-  --swipe-action-surface: #f4e4dc;
-  --swipe-action-ink: #8a452b;
-  --swipe-action-ready-surface: #aa5536;
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-surface: color-mix(in srgb, var(--swipe-snooze) 20%, var(--surface));
+  --swipe-action-ink: var(--swipe-snooze);
+  --swipe-action-ready-surface: var(--swipe-snooze);
+  --swipe-action-ready-ink: var(--on-swipe);
 }
 
 .swipe-action-archive {
-  --swipe-action-surface: #dce9f1;
-  --swipe-action-ink: #28566c;
-  --swipe-action-ready-surface: #356a7f;
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-surface: color-mix(in srgb, var(--swipe-archive) 20%, var(--surface));
+  --swipe-action-ink: var(--swipe-archive);
+  --swipe-action-ready-surface: var(--swipe-archive);
+  --swipe-action-ready-ink: var(--on-swipe);
 }
 
 .swipe-action-trash {
-  --swipe-action-surface: #f3dddd;
-  --swipe-action-ink: #852f34;
-  --swipe-action-ready-surface: #9c3c42;
-  --swipe-action-ready-ink: #fff;
+  --swipe-action-surface: color-mix(in srgb, var(--swipe-trash) 20%, var(--surface));
+  --swipe-action-ink: var(--swipe-trash);
+  --swipe-action-ready-surface: var(--swipe-trash);
+  --swipe-action-ready-ink: var(--on-swipe);
 }
 
 .message-swipe-shell.revealing-start .message-swipe-action-start,
@@ -364,8 +363,8 @@
     color: var(--swipe-action-ready-ink);
 
     .message-swipe-action-icon {
-      background: rgba(255, 255, 255, .18);
-      box-shadow: 0 0 0 3px rgba(255, 255, 255, .12);
+      background: color-mix(in srgb, currentColor 18%, transparent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
     }
 
     &.swipe-action-trash .icon {
@@ -551,7 +550,7 @@
 
 .message-list-pane {
   flex: 0 0 calc((100% - var(--message-list-slide-gap)) / 2);
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
@@ -572,12 +571,12 @@
   width: 320px;
   max-width: 320px;
   padding: 10px 12px;
-  border: 1px solid rgba(196, 107, 68, .25);
+  border: 1px solid var(--active-strong);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface-raised);
   color: var(--text);
-  box-shadow: 0 14px 34px rgba(38, 35, 31, .22);
-  font: 13px/1.35 var(--font-sans);
+  box-shadow: var(--shadow-raised);
+  font: 13px/1.35 var(--font-ui);
   pointer-events: none;
 }
 
@@ -603,11 +602,11 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid rgba(196, 107, 68, .28);
+  border: 1px solid var(--active-strong);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface-raised);
   color: var(--text);
-  box-shadow: 0 12px 28px rgba(38, 35, 31, .24);
+  box-shadow: var(--shadow-raised);
   pointer-events: none;
   font-size: 13px;
   font-weight: 800;
@@ -652,7 +651,7 @@
 .star-action {
   @include icon-button(28px);
   background: transparent;
-  color: #9aa6a0;
+  color: var(--muted);
   cursor: pointer;
 
   .icon {
@@ -661,7 +660,7 @@
   }
 
   &:hover {
-    background: rgba(183, 179, 170, .18);
+    background: color-mix(in srgb, var(--border-strong) 22%, transparent);
     color: var(--accent-warm-strong);
   }
 
@@ -738,7 +737,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--muted);
-  background: #fff;
+  background: var(--surface);
   font-size: 12px;
 
   .icon {
@@ -749,8 +748,8 @@
   }
 
   &.matched {
-    border-color: rgba(183, 179, 170, .58);
-    background: rgba(183, 179, 170, .20);
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--border-strong) 24%, transparent);
     color: var(--text);
   }
 
@@ -760,8 +759,8 @@
 }
 
 .search-hit {
-  background: rgba(183, 179, 170, .28);
-  color: var(--text);
+  background: var(--highlight);
+  color: var(--on-highlight);
   border-radius: 3px;
   padding: 0 1px;
   box-shadow: none;
@@ -818,7 +817,7 @@
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(21, 31, 46, .42);
+  background: var(--scrim-strong);
 }
 
 .snooze-dialog {
@@ -826,7 +825,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 18px 50px rgba(21, 31, 46, .28);
+  box-shadow: var(--shadow-raised);
   overflow: hidden;
 
   header {

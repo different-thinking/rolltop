@@ -3,12 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f2f0eb" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f0eb" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#10161f" />
     <title>rolltop</title>
     <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f2f0eb; color: #26312d; font: 16px system-ui, sans-serif; }
+      /* Offline is served without a session, so the reader's stored theme is
+         unknown here and the operating system decides. Values mirror --chrome,
+         --bg, --text and --surface in frontend/src/styles/mixins/. */
+      :root {
+        color-scheme: light;
+        --bg: #f2f0eb;
+        --surface: #fff;
+        --text: #202426;
+        --border: #b7b3aa;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --bg: #10161f;
+          --surface: #1a2230;
+          --text: #e2dfd9;
+          --border: #6a7789;
+        }
+      }
+
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text); font: 16px system-ui, sans-serif; }
       main { text-align: center; }
-      button { min-height: 42px; margin-top: 12px; border: 1px solid #9ba7a1; border-radius: 6px; padding: 8px 16px; background: #fff; color: inherit; font: inherit; }
+      button { min-height: 42px; margin-top: 12px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 16px; background: var(--surface); color: inherit; font: inherit; }
     </style>
   </head>
   <body>

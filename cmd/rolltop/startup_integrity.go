@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"rolltop/backend/config"
@@ -139,3 +140,34 @@ func verifyUserDatabases(ctx context.Context, db *store.Store, dataDir string, p
 // maxLoggedIntegrityProblems bounds how much of a quick_check report reaches
 // the log; a badly damaged file can report thousands of lines.
 const maxLoggedIntegrityProblems = 10
+
+// damagedDatabaseWarnings turns the tenants this process latched as corrupt
+// into operator log lines.
+//
+// PrepareUserStores deliberately skips a damaged tenant so the remaining
+// accounts keep working, but that leaves the installation running with one
+// mailbox silently empty. The startup screen and the admin database page name
+// it; the log did not, so an operator watching "docker logs" saw a clean start
+// and an account that had simply stopped receiving mail. The integrity check
+// logs its own findings, but it only runs after an unclean shutdown, so a
+// tenant damaged earlier and found here would otherwise go unreported.
+//
+// Records are sorted by user so repeated starts produce a stable log.
+func damagedDatabaseWarnings(records []store.DatabaseHealth) []string {
+	if len(records) == 0 {
+		return nil
+	}
+	sorted := append([]store.DatabaseHealth(nil), records...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].UserID < sorted[j].UserID })
+	warnings := make([]string, 0, len(sorted))
+	for _, record := range sorted {
+		detail := strings.TrimSpace(record.Detail)
+		if detail == "" {
+			detail = "no detail recorded"
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"user %d database %s is damaged and will not be served: %s; repair it on the admin database page or run \"rolltop recover-db --user-id %d --confirm-offline\"",
+			record.UserID, record.Path, detail, record.UserID))
+	}
+	return warnings
+}

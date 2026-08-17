@@ -346,7 +346,7 @@ func (s *Store) ListDueInboxArrivals(ctx context.Context, userID, accountID int6
 // ListPendingInboxArrivalSchedules supports startup recovery in combined and split stores.
 func (s *Store) ListPendingInboxArrivalSchedules(ctx context.Context) ([]PendingInboxArrivalSchedule, error) {
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return nil, err
 		}

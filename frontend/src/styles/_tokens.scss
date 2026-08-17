@@ -1,11 +1,23 @@
 @use "mixins/classic-theme" as classic;
 @use "mixins/classic-dark-theme" as classicDark;
 
+// No data-theme attribute means "follow the system". The server stamps the
+// attribute into index.html for an explicit choice, so the very first paint is
+// already correct and the app never flashes the wrong theme.
 :root {
+  @include classic.theme;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    @include classicDark.theme;
+  }
+}
+
+:root[data-theme="classic"] {
   @include classic.theme;
 }
 
 :root[data-theme="classic_dark"] {
   @include classicDark.theme;
-  @include classicDark.polish;
 }

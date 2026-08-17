@@ -18,7 +18,7 @@ func (s *Store) BackfillThreadKeys(ctx context.Context, limit int) (int, error) 
 		limit = 10000
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -83,7 +83,7 @@ func (s *Store) BackfillThreadHeadersFromBlobs(ctx context.Context, dataDir stri
 		limit = 1000
 	}
 	if s.split {
-		users, err := s.ListUsers(ctx)
+		users, err := s.ServiceableUsers(ctx)
 		if err != nil {
 			return 0, 0, err
 		}

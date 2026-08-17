@@ -14,6 +14,7 @@ import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
 import { folderParentNames, folderTree, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
+import { systemThemeID } from "../../lib/theme";
 import { pluginIDs } from "../../plugins/registry";
 import { accountSettingsRoutes, matchAccountSettingsRoute } from "../../plugins/runtime";
 import type { RuntimePlugin, RuntimePlugins } from "../../plugins/runtime";
@@ -270,6 +271,7 @@ function IdentityMailboxFields({
 
 function fallbackThemes(): ThemeDefinition[] {
   return [
+    { id: systemThemeID, name: "System" },
     { id: "classic", name: "Classic" },
     { id: "classic_dark", name: "Classic Dark" }
   ];
@@ -282,7 +284,7 @@ function profileFormForUser(user: User, availableThemes: ThemeDefinition[] = fal
     backup_email: user.backup_email || "",
     date_locale: user.date_locale || "",
     date_format: user.date_format || "mdy",
-    theme: themeIDs.has(user.theme) ? user.theme : "classic",
+    theme: themeIDs.has(user.theme) ? user.theme : systemThemeID,
     search_preset: ["strict", "balanced", "forgiving"].includes(user.search_preset) ? user.search_preset : defaults.search_preset,
     search_recency_bias: ["none", "light", "normal", "strong"].includes(user.search_recency_bias) ? user.search_recency_bias : defaults.search_recency_bias,
     search_fuzzy: ["off", "balanced", "forgiving"].includes(user.search_fuzzy) ? user.search_fuzzy : defaults.search_fuzzy,
