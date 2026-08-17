@@ -1,18 +1,18 @@
 // File overview: Mailbox and search result lists. These components fetch paged conversations,
 // surface sync clues, keep selection state stable, and link rows back to their source page.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { Star } from "@phosphor-icons/react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
-import type { Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
+import type { AccountMailboxChoice, Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { archiveMailboxForAccount, trashMailboxForAccount } from "../../lib/folders";
+import { archiveMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -21,6 +21,7 @@ import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
 import type { MailSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { mailRoute, mailURL, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
+import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
@@ -74,6 +75,7 @@ export function MailView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   latestSyncRun,
   activeSyncRuns,
   mailGeneration,
@@ -91,6 +93,7 @@ export function MailView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   latestSyncRun: SyncRun | null;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -120,6 +123,7 @@ export function MailView({
   const route = mailRoute(location.path);
   const mailboxID = route.mailboxID;
   const page = route.page;
+  const view = route.view;
   // A different signed-in user brings their own stored direction along. This is
   // adjusted during render rather than in an effect so the fetch below already
   // closes over the new user's order instead of requesting the old one first.
@@ -128,22 +132,39 @@ export function MailView({
     setSortOrder(loadMailSortOrder(userID));
   }
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
-  const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
+  // Each named view counts the folders it actually reads, mirroring how the
+  // server builds it: Sent and Drafts are the folders carrying that role, and
+  // Unarchived is All Mail minus every account's chosen Archive folder.
+  const archiveMailboxIDs = new Set(archiveMailboxes.map((item) => item.mailbox_id));
+  const viewRole = view === "sent" ? "sent" : view === "drafts" ? "drafts" : "";
+  const roleMailboxIDSet = useMemo(
+    () => viewRole ? roleMailboxIDs(mailboxes, viewRole) : new Set<number>(),
+    [mailboxes, viewRole]
+  );
+  const viewMailboxes = mailboxes.filter((item) => {
+    if (viewRole) return roleMailboxIDSet.has(item.id);
+    if (item.show_in_all_mail === false) return false;
+    return view !== "unarchived" || !archiveMailboxIDs.has(item.id);
+  });
+  const totalCount = mailbox
+    ? mailbox.message_count
+    : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
+  const viewLabel = view === "unarchived" ? "Unarchived" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the
   // route names a folder this view cannot see, no whole-folder scope is offered.
   const scopeMailboxID = Number.parseInt(mailboxID || "0", 10) || 0;
   const listScope = scopeMailboxID === 0
-    ? { mailboxID: 0, query: "", label: "All Mail", total: totalCount }
+    ? { mailboxID: 0, query: "", view, label: viewLabel, total: totalCount }
     : mailbox
       ? { mailboxID: scopeMailboxID, query: "", label: mailbox.name, total: mailbox.message_count }
       : undefined;
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
-  const listScopeKey = `${userID}:${mailboxID || "all"}:${sortOrder}`;
+  const listScopeKey = `${userID}:${mailboxID || view || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
   const slideDirection = useListSlideDirection(listScopeKey, page);
-  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder) : null;
+  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder, view) : null;
   const displayConversations = cachedTransitionPage?.conversations || conversations;
   const displayHasPrev = cachedTransitionPage?.has_prev ?? hasPrev;
   const displayHasNext = cachedTransitionPage?.has_next ?? hasNext;
@@ -235,7 +256,7 @@ export function MailView({
     const isNewList = previousListKey.current !== listKey;
     const canAnimateNewMail = page === 1 && loaded.current && !isNewList && Boolean(refreshKey) && Boolean(latestSyncRun?.new_messages);
     if (isNewList || !loaded.current) {
-      const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
+      const cached = api.cachedMail(userID, mailboxID, page, sortOrder, view);
       if (cached) {
         previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
         previousListKey.current = listKey;
@@ -254,7 +275,7 @@ export function MailView({
     }
     setError("");
     api
-      .mail(userID, mailboxID, page, sortOrder)
+      .mail(userID, mailboxID, page, sortOrder, view)
       .then((data) => {
         if (cancelled) return;
         const nextIDs = new Set(data.conversations.map((conversation) => conversation.message.id));
@@ -279,13 +300,13 @@ export function MailView({
         // Deleting a full page can leave a later page with nothing on it. The
         // rows did not vanish, they moved forward, so follow them back instead
         // of parking the user on an empty page.
-        if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1));
-        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder);
-        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder);
+        if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1, view));
+        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder, view);
+        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder, view);
       })
       .catch((err) => {
         if (!cancelled) {
-          const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
+          const cached = api.cachedMail(userID, mailboxID, page, sortOrder, view);
           previousListKey.current = listKey;
           if (cached) {
             previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
@@ -313,9 +334,9 @@ export function MailView({
     return () => {
       cancelled = true;
     };
-  }, [userID, mailboxID, page, sortOrder, refreshKey, listKey, latestSyncRun?.new_messages]);
+  }, [userID, mailboxID, page, sortOrder, view, refreshKey, listKey, latestSyncRun?.new_messages]);
 
-  const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage);
+  const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage, view);
 
   // Reversing the direction rebuilds the paging window from the other end, so a
   // reader who was on page 4 of newest-first is sent back to the new first page.
@@ -323,7 +344,7 @@ export function MailView({
     if (next === sortOrder) return;
     saveMailSortOrder(userID, next);
     setSortOrder(next);
-    if (page !== 1) navigate(mailURL(mailboxID, 1));
+    if (page !== 1) navigate(mailURL(mailboxID, 1, view));
   }
 
   function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
@@ -374,7 +395,7 @@ export function MailView({
   return (
     <>
       <ListHeader
-        title={mailbox?.name || "All Mail"}
+        title={mailbox?.name || viewLabel}
         titleClassName="mailbox-title"
         actions={<MailSortToggle order={sortOrder} onChange={changeSortOrder} />}
         pager={{
@@ -426,11 +447,12 @@ export function MailView({
                 mailboxes={mailboxes}
                 currentMailboxID={mailbox?.id || 0}
                 swipePreferences={swipePreferences}
+                archiveMailboxes={archiveMailboxes}
                 highlightMessageIDs={newMessageIDs}
-                showRecipients={mailbox?.role === "sent" || mailbox?.role === "drafts"}
-                openAsDraft={mailbox?.role === "drafts"}
+                showRecipients={Boolean(viewRole) || mailbox?.role === "sent" || mailbox?.role === "drafts"}
+                openAsDraft={view === "drafts" || mailbox?.role === "drafts"}
                 datePrefs={datePrefs}
-                returnURL={mailURL(mailboxID, page)}
+                returnURL={mailURL(mailboxID, page, view)}
                 navigate={navigate}
                 messageSecurityPlugins={messageSecurityPlugins}
                 addToast={addToast}
@@ -497,6 +519,7 @@ export function SnoozedView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   mailGeneration,
   messageSecurityPlugins = [],
   addToast
@@ -508,6 +531,7 @@ export function SnoozedView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   mailGeneration: number;
   messageSecurityPlugins?: RuntimePlugin[];
   addToast: AddToast;
@@ -598,6 +622,7 @@ export function SnoozedView({
               hiddenMessageIDs={hiddenMessageIDs}
               mailboxes={mailboxes}
               swipePreferences={swipePreferences}
+              archiveMailboxes={archiveMailboxes}
               datePrefs={datePrefs}
               returnURL={routeWithSearch(location.path, location.search)}
               navigate={navigate}
@@ -770,6 +795,7 @@ export function SearchView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   datePrefs,
   activeSyncRuns,
   mailGeneration,
@@ -785,6 +811,7 @@ export function SearchView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   datePrefs: DatePrefs;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -934,6 +961,7 @@ export function SearchView({
               hiddenMessageIDs={hiddenMessageIDs}
               mailboxes={mailboxes}
               swipePreferences={swipePreferences}
+              archiveMailboxes={archiveMailboxes}
               navigate={navigate}
               searchQuery={query}
               datePrefs={datePrefs}
@@ -1137,6 +1165,8 @@ type ConversationReadState = {
 type MessageListScope = {
   mailboxID: number;
   query: string;
+  /** Names the whole-account list so a delete matches exactly what it shows. */
+  view?: MailView;
   label: string;
   total?: number;
 };
@@ -1208,6 +1238,7 @@ function MessageList({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes = [],
   highlightMessageIDs,
   showRecipients = false,
   openAsDraft = false,
@@ -1231,6 +1262,8 @@ function MessageList({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
+  archiveMailboxes?: AccountMailboxChoice[];
   highlightMessageIDs?: Set<number>;
   showRecipients?: boolean;
   openAsDraft?: boolean;
@@ -1374,7 +1407,7 @@ function MessageList({
   useEffect(() => {
     setScopeSelected(false);
     setScopeDeletePending(false);
-  }, [listScope?.mailboxID, listScope?.query]);
+  }, [listScope?.mailboxID, listScope?.query, listScope?.view]);
 
   useEffect(() => {
     const ids = new Set(visible.map((conversation) => conversation.message.id));
@@ -1538,7 +1571,7 @@ function MessageList({
     setScopeDeletePending(false);
     setScopeDeleteBusy(true);
     try {
-      const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query });
+      const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query, view: listScope.view });
       const queuedMessages = result.queued_messages || 0;
       // One action, one summary: the counts belong in a single sentence rather
       // than a stack of toasts the user has to read in order.
@@ -2061,7 +2094,7 @@ function MessageList({
     const accountID = accountIDs[0];
     const target = action === "trash"
       ? trashMailboxForAccount(mailboxes, accountID)
-      : archiveMailboxForAccount(mailboxes, effectiveSwipePreferences.archive_mailboxes, accountID);
+      : archiveMailboxForAccount(mailboxes, archiveMailboxes, accountID);
     if (!target) {
       addToast(
         action === "trash"

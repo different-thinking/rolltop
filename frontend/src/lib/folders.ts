@@ -103,6 +103,15 @@ export function isArchiveMailboxChoice(mailbox: Mailbox): boolean {
   return !["inbox", "sent", "drafts", "trash", "junk"].includes(mailbox.role);
 }
 
+/**
+ * roleMailboxIDs collects every folder carrying one mailbox role across all
+ * accounts, mirroring how the server builds the Sent and Drafts views. The role
+ * is set on the folder itself, so no separate per-view setting is involved.
+ */
+export function roleMailboxIDs(mailboxes: Mailbox[], role: string): Set<number> {
+  return new Set(mailboxes.filter((mailbox) => mailbox.role === role).map((mailbox) => mailbox.id));
+}
+
 /** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */
 export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
   return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");

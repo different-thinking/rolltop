@@ -53,6 +53,88 @@ func DefaultSwipePreferences(userID int64) SwipePreferences {
 	}
 }
 
+// ArchiveMailboxesForUser resolves each account's effective Archive folder. An
+// identity's own choice wins because it is the more specific setting, and an
+// account no identity speaks for keeps the per-account swipe mapping. Where
+// several identities on one account disagree, the primary identity decides and
+// the rest are ignored, so the answer stays single-valued per account.
+//
+// Both sources are re-validated against the folder's current role, so a folder
+// that has since become Trash or Sent stops standing in as an Archive target.
+func (s *Store) ArchiveMailboxesForUser(ctx context.Context, userID int64) ([]SwipeArchiveMailbox, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	byAccount := map[int64]int64{}
+	// The account comes from the chosen folder, not from the identity's IMAP
+	// server field: that field may be left on Automatic, and a choice that named
+	// a real folder would otherwise be stored and then silently ignored.
+	identityRows, err := db.QueryContext(ctx, `SELECT mb.account_id, i.archive_mailbox_id
+		FROM mail_identities i
+		JOIN mailboxes mb ON mb.user_id = i.user_id AND mb.id = i.archive_mailbox_id
+			AND (i.imap_account_id = 0 OR mb.account_id = i.imap_account_id)
+			AND mb.role NOT IN ('inbox', 'sent', 'drafts', 'trash', 'junk')
+		WHERE i.user_id = ? AND i.archive_mailbox_id > 0
+		ORDER BY i.is_primary DESC, i.id ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := scanAccountMailboxPairs(identityRows, byAccount); err != nil {
+		return nil, err
+	}
+	swipeRows, err := db.QueryContext(ctx, `SELECT sam.account_id, sam.mailbox_id
+		FROM swipe_archive_mailboxes sam
+		JOIN mailboxes mb ON mb.user_id = sam.user_id AND mb.id = sam.mailbox_id AND mb.role = ''
+		WHERE sam.user_id = ? ORDER BY sam.account_id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := scanAccountMailboxPairs(swipeRows, byAccount); err != nil {
+		return nil, err
+	}
+	accountIDs := make([]int64, 0, len(byAccount))
+	for accountID := range byAccount {
+		accountIDs = append(accountIDs, accountID)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	out := make([]SwipeArchiveMailbox, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		out = append(out, SwipeArchiveMailbox{AccountID: accountID, MailboxID: byAccount[accountID]})
+	}
+	return out, nil
+}
+
+// scanAccountMailboxPairs fills in accounts the map does not cover yet, so the
+// first source scanned wins and later ones only fill gaps.
+func scanAccountMailboxPairs(rows *sql.Rows, byAccount map[int64]int64) error {
+	defer rows.Close()
+	for rows.Next() {
+		var accountID, mailboxID int64
+		if err := rows.Scan(&accountID, &mailboxID); err != nil {
+			return err
+		}
+		if _, taken := byAccount[accountID]; !taken {
+			byAccount[accountID] = mailboxID
+		}
+	}
+	return rows.Err()
+}
+
+// ArchiveMailboxIDsForUser lists the effective Archive folders as bare IDs, for
+// queries that only need to know which folders count as archived.
+func (s *Store) ArchiveMailboxIDsForUser(ctx context.Context, userID int64) ([]int64, error) {
+	targets, err := s.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(targets))
+	for _, target := range targets {
+		ids = append(ids, target.MailboxID)
+	}
+	return ids, nil
+}
+
 // GetSwipePreferences loads one user's swipe settings, returning stable defaults
 // before that user has saved an explicit preference row.
 func (s *Store) GetSwipePreferences(ctx context.Context, userID int64) (SwipePreferences, error) {

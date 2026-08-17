@@ -69,7 +69,7 @@ func TestSwipePreferencesAPIIsUserScopedAndValidatesArchiveFolders(t *testing.T)
 	valid := apiSwipePreferences{
 		LeftAction: "archive", LeftSnoozePreset: "later_today",
 		RightAction: "mark_unread", RightSnoozePreset: "next_week",
-		ArchiveMailboxes: []apiSwipeArchiveMailbox{{AccountID: ownerAccount.ID, MailboxID: ownerArchive.ID}},
+		ArchiveMailboxes: []apiAccountMailboxChoice{{AccountID: ownerAccount.ID, MailboxID: ownerArchive.ID}},
 	}
 	validBody, _ := json.Marshal(valid)
 	missingCSRF := httptest.NewRequest(http.MethodPost, "/api/profile/swipes", bytes.NewReader(validBody))
@@ -87,7 +87,7 @@ func TestSwipePreferencesAPIIsUserScopedAndValidatesArchiveFolders(t *testing.T)
 	}
 
 	foreign := valid
-	foreign.ArchiveMailboxes = []apiSwipeArchiveMailbox{{AccountID: otherAccount.ID, MailboxID: otherArchive.ID}}
+	foreign.ArchiveMailboxes = []apiAccountMailboxChoice{{AccountID: otherAccount.ID, MailboxID: otherArchive.ID}}
 	foreignBody, _ := json.Marshal(foreign)
 	foreignResponse := httptest.NewRecorder()
 	server.apiSwipePreferences(foreignResponse, authenticatedSwipePreferencesRequest(t, server, owner, http.MethodPost, foreignBody))
@@ -141,4 +141,48 @@ func authenticatedSwipePreferencesRequest(t *testing.T, server *Server, user sto
 		request.Header.Set("Content-Type", "application/json")
 	}
 	return request
+}
+
+// The Archive mapping decides what the Unarchived list leaves out, so saving it
+// has to retire that list's cached pages. Without this the browser keeps
+// revalidating to 304 and shows the pre-change rows until unrelated mail
+// activity happens to bump the generation.
+func TestSavingSwipePreferencesRetiresCachedMailLists(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner, err := db.CreateUser(ctx, "cache-swipes@example.test", "Cache", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.UpsertMailAccount(ctx, store.MailAccount{
+		UserID: owner.ID, Email: owner.Email, Host: "imap.example.test", Port: 993,
+		Username: owner.Email, EncryptedPassword: "encrypted", Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := db.GetOrCreateMailbox(ctx, owner.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: db, masterKey: bytes.Repeat([]byte{9}, 32), events: newEventHub(), mailListCache: newMailListCache()}
+	before := server.mailListGeneration(owner.ID)
+
+	body, _ := json.Marshal(apiSwipePreferences{
+		LeftAction: "snooze", LeftSnoozePreset: "tomorrow",
+		RightAction: "mark_read", RightSnoozePreset: "tomorrow",
+		ArchiveMailboxes: []apiAccountMailboxChoice{{AccountID: account.ID, MailboxID: archive.ID}},
+	})
+	response := httptest.NewRecorder()
+	server.apiSwipePreferences(response, authenticatedSwipePreferencesRequest(t, server, owner, http.MethodPost, body))
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST status=%d body=%s", response.Code, response.Body.String())
+	}
+	if server.mailListGeneration(owner.ID) == before {
+		t.Fatal("saving the archive mapping left the cached mail lists in place")
+	}
 }

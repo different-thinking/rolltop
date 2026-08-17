@@ -33,10 +33,13 @@ const (
 )
 
 // scopeSelection mirrors the list view the user is looking at. A query wins over
-// a mailbox because search results are their own list; an empty scope is All Mail.
+// a mailbox because search results are their own list; without either, View
+// decides which whole-account list is meant, so a delete from a named view
+// reaches exactly the rows that view shows and no others.
 type scopeSelection struct {
 	MailboxID int64
 	Query     string
+	View      mailView
 }
 
 // scopeTrashGroup is one account's share of a scope trash: Trash belongs to an
@@ -92,11 +95,17 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ScopeMailboxID int64  `json:"scope_mailbox_id"`
 		ScopeQuery     string `json:"scope_query"`
+		ScopeView      string `json:"scope_view"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	scope := scopeSelection{MailboxID: in.ScopeMailboxID, Query: strings.TrimSpace(in.ScopeQuery)}
+	view, viewKnown := parseMailView(in.ScopeView)
+	if !viewKnown {
+		writeAPIError(w, http.StatusBadRequest, "unknown list view")
+		return
+	}
+	scope := scopeSelection{MailboxID: in.ScopeMailboxID, Query: strings.TrimSpace(in.ScopeQuery), View: view}
 	plan, err := s.scopeTrashPlan(r.Context(), cu.User, scope)
 	if err != nil {
 		var missingTrash missingTrashMailboxError
@@ -250,6 +259,14 @@ func (s *Server) resolveScopeMessages(ctx context.Context, user store.User, scop
 			return nil, false, err
 		}
 		messages, err := s.store.ListMailboxScopeMessagesForUser(ctx, user.ID, scope.MailboxID, scopeTrashMessageLimit+1)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
+	}
+	if role := scope.View.role(); role != "" {
+		messages, err := s.store.ListRoleMailScopeMessagesForUser(ctx, user.ID, role, scopeTrashMessageLimit+1)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
+	}
+	if scope.View == mailViewUnarchived {
+		messages, err := s.store.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)
 		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 	}
 	messages, err := s.store.ListAllMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)

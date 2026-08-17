@@ -98,23 +98,31 @@ func (s *Server) syncEventPayload(ctx context.Context, userID int64) (map[string
 	if err != nil {
 		return nil, err
 	}
+	// The Archive action reads the resolved mapping, not the stored one, so it
+	// has to travel with swipe_preferences: a tab that did not save the change
+	// would otherwise keep filing mail into the previous folder.
+	archiveMailboxes, err := s.store.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	info := buildinfo.Current()
 	return map[string]any{
-		"mailboxes":             apiMailboxes(data.Mailboxes),
-		"latest_sync_run":       apiSyncRunPtr(data.LatestSyncRun),
-		"active_sync_runs":      apiSyncRuns(data.ActiveSyncRuns),
-		"unfinished_move_run":   apiSyncRunPtr(data.UnfinishedMoveRun),
-		"sync_running":          data.SyncRunning,
-		"mail_generation":       s.mailListGeneration(userID),
-		"swipe_preferences":     apiSwipePreferencesFromStore(swipePreferences),
-		"server_started_at":     timeString(s.startedAt),
-		"server_uptime_seconds": int(time.Since(s.startedAt).Seconds()),
-		"build_version":         info.Version,
-		"build_date":            info.BuildDate,
-		"build_label":           info.Label,
-		"build_commit":          info.Commit,
-		"public_site_url":       info.PublicSiteURL,
-		"storage_retained":      true,
+		"mailboxes":                   apiMailboxes(data.Mailboxes),
+		"latest_sync_run":             apiSyncRunPtr(data.LatestSyncRun),
+		"active_sync_runs":            apiSyncRuns(data.ActiveSyncRuns),
+		"unfinished_move_run":         apiSyncRunPtr(data.UnfinishedMoveRun),
+		"sync_running":                data.SyncRunning,
+		"mail_generation":             s.mailListGeneration(userID),
+		"swipe_preferences":           apiSwipePreferencesFromStore(swipePreferences),
+		"effective_archive_mailboxes": apiAccountMailboxChoices(archiveMailboxes),
+		"server_started_at":           timeString(s.startedAt),
+		"server_uptime_seconds":       int(time.Since(s.startedAt).Seconds()),
+		"build_version":               info.Version,
+		"build_date":                  info.BuildDate,
+		"build_label":                 info.Label,
+		"build_commit":                info.Commit,
+		"public_site_url":             info.PublicSiteURL,
+		"storage_retained":            true,
 	}, nil
 }
 func (s *Server) apiStorage(w http.ResponseWriter, r *http.Request) {
