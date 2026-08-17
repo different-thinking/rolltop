@@ -11,6 +11,7 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { loadCollapsedAccounts, saveCollapsedAccounts } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
 
@@ -399,6 +400,7 @@ export function AppShell({
           <button className="mobile-sidebar-scrim" type="button" aria-label="Close folders" onClick={closeMobileSidebar} />
         ) : null}
         <Sidebar
+          userID={user.id}
           mailboxes={mailboxes}
           csrf={csrf}
           latestSyncRun={latestSyncRun}
@@ -748,6 +750,7 @@ function Topbar({
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,
 // and accepts dragged message IDs from the message list.
 function Sidebar({
+  userID,
   mailboxes,
   csrf,
   latestSyncRun,
@@ -769,6 +772,7 @@ function Sidebar({
   touchDropID,
   onClose
 }: {
+  userID: number;
   mailboxes: Mailbox[];
   csrf: string;
   latestSyncRun: SyncRun | null;
@@ -792,6 +796,7 @@ function Sidebar({
 }) {
   const [dropID, setDropID] = useState<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
+  const [collapsedAccounts, setCollapsedAccounts] = useState<Set<string>>(() => loadCollapsedAccounts(userID));
   const uptimeLabel = useServerUptimeLabel(serverStartedAt, serverUptimeSeconds);
   const releaseLabel = buildDisplayLabel(buildVersion, buildDate, buildLabel);
   const uptimeParts = [uptimeLabel ? `Up ${uptimeLabel}` : "", releaseLabel].filter(Boolean);
@@ -809,6 +814,13 @@ function Sidebar({
   useEffect(() => {
     if (!dragActive) setDropID(null);
   }, [dragActive]);
+
+  // Navigating into a mailbox always reveals it, even when its account group was collapsed.
+  useEffect(() => {
+    if (!activeMailbox) return;
+    const group = accountGroups.find((candidate) => candidate.folders.some((node) => nodeContainsMailbox(node, activeMailbox)));
+    if (group) setAccountCollapsed(group.key, false);
+  }, [activeMailbox, accountGroups]);
 
   function open(event: MouseEvent, url: string) {
     event.preventDefault();
@@ -888,6 +900,17 @@ function Sidebar({
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
+      return next;
+    });
+  }
+
+  function setAccountCollapsed(key: string, collapsed: boolean) {
+    setCollapsedAccounts((current) => {
+      if (current.has(key) === collapsed) return current;
+      const next = new Set(current);
+      if (collapsed) next.add(key);
+      else next.delete(key);
+      saveCollapsedAccounts(userID, next);
       return next;
     });
   }
@@ -988,12 +1011,29 @@ function Sidebar({
       <span className="folder-name"><Icon name="clock" weight={snoozedActive ? "bold" : undefined} />Snoozed</span>
     </a>
         <div className="side-section">Folders</div>
-        {accountGroups.map((group) => (
-          <div className="account-folder-group" key={group.key}>
-            <div className="account-section">{group.label}</div>
-            {group.folders.map((node) => folderNode(node))}
-          </div>
-        ))}
+        {accountGroups.map((group) => {
+          const collapsed = collapsedAccounts.has(group.key);
+          const unread = collapsed ? folderTreeUnreadCount(group.folders) : 0;
+          return (
+            <div className="account-folder-group" key={group.key}>
+              <button
+                type="button"
+                className="account-toggle"
+                aria-expanded={!collapsed}
+                title={collapsed ? "Expand account folders" : "Collapse account folders"}
+                onClick={() => setAccountCollapsed(group.key, !collapsed)}
+                onDragEnter={(event) => {
+                  if (collapsed && canAcceptDraggedMessages(event)) setAccountCollapsed(group.key, false);
+                }}
+              >
+                <Icon name={collapsed ? "chevron_right" : "expand_more"} />
+                <span className="account-toggle-label">{group.label}</span>
+                {collapsed && unread > 0 ? <span className="folder-count">{unread.toLocaleString()}</span> : null}
+              </button>
+              {collapsed ? null : group.folders.map((node) => folderNode(node))}
+            </div>
+          );
+        })}
         <div className="side-section">Address Book</div>
         <a
           href="/contacts"
@@ -1066,6 +1106,14 @@ function mailboxAccountLabel(mailbox: Mailbox): string {
 
 function folderExpandKey(mailbox: Mailbox): string {
   return `${mailbox.account_id}:${mailbox.name}`;
+}
+
+function folderTreeUnreadCount(nodes: FolderNode[]): number {
+  let total = 0;
+  for (const node of nodes) {
+    total += Math.max(0, node.mailbox.unread_count) + folderTreeUnreadCount(node.children);
+  }
+  return total;
 }
 
 function SidebarSync({
