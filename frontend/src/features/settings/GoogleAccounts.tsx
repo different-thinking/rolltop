@@ -6,18 +6,14 @@ import { useCallback, useEffect, useState } from "react";
 import { deleteJSON, getJSON, postJSON } from "../../api";
 import { Icon } from "../../components/Icon";
 import type { Toast } from "../../appTypes";
+import { messageFromError } from "../../lib/errors";
 import { SettingsEmpty, SettingsError, SettingsLoading } from "./SettingsUI";
 
-export type GoogleConnection = {
+type GoogleConnection = {
   id: number;
   email: string;
   scopes: string[];
-  status: string;
-  status_detail: string;
   needs_reauth: boolean;
-  has_mail_scope: boolean;
-  connected_at: string;
-  last_updated_at: string;
 };
 
 type GoogleConnectionsResponse = {
@@ -59,17 +55,31 @@ function messageFromCallback(search: string): { text: string; kind: Toast["kind"
 export function GoogleAccountsSettings({
   csrf,
   search,
+  replaceRoute,
   addToast
 }: {
   csrf: string;
   search: string;
+  replaceRoute: (url: string) => void;
   addToast: (message: string, kind?: Toast["kind"]) => number;
 }) {
   const [configured, setConfigured] = useState(true);
   const [connections, setConnections] = useState<GoogleConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [busyID, setBusyID] = useState<number | null>(null);
+  // Keyed per connection and operation: a single shared id would be cleared by
+  // whichever request finished first, re-enabling buttons still in flight.
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const isBusy = (connectionID: number) =>
+    Boolean(busy[`test:${connectionID}`] || busy[`disconnect:${connectionID}`]);
+  const setOperationBusy = (key: string, running: boolean) =>
+    setBusy((current) => {
+      if (!running) {
+        const { [key]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [key]: true };
+    });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,7 +89,7 @@ export function GoogleAccountsSettings({
       setConnections(data.connections || []);
       setLoadError("");
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Could not load Google accounts.");
+      setLoadError(messageFromError(error));
     } finally {
       setLoading(false);
     }
@@ -95,12 +105,22 @@ export function GoogleAccountsSettings({
     const message = messageFromCallback(search);
     if (!message) return;
     addToast(message.text, message.kind);
-    window.history.replaceState(null, "", "/settings/account/google");
-  }, [search, addToast]);
+    // Clear the callback query through the router so App's own location state
+    // stops reporting a query the URL no longer has.
+    replaceRoute("/settings/account/google");
+  }, [search, addToast, replaceRoute]);
 
-  function connect(connectionID?: number) {
-    const suffix = connectionID ? `?connection_id=${connectionID}` : "";
-    window.location.assign(`/api/google/connect${suffix}`);
+  async function connect(connectionID?: number) {
+    const key = connectionID ? `connect:${connectionID}` : "connect";
+    setOperationBusy(key, true);
+    try {
+      const body = connectionID ? { connection_id: connectionID } : {};
+      const result = await postJSON<{ authorization_url: string }>("/api/google/connect", csrf, body);
+      window.location.assign(result.authorization_url);
+    } catch (error) {
+      addToast(messageFromError(error), "error");
+      setOperationBusy(key, false);
+    }
   }
 
   async function disconnect(connection: GoogleConnection) {
@@ -108,7 +128,8 @@ export function GoogleAccountsSettings({
       `Disconnect ${connection.email}?\n\nRolltop will revoke its access at Google and remove the stored authorization.`
     );
     if (!confirmed) return;
-    setBusyID(connection.id);
+    const key = `disconnect:${connection.id}`;
+    setOperationBusy(key, true);
     try {
       const result = await deleteJSON<{ disconnected: boolean; warning?: string }>(
         `/api/google/connections/${connection.id}`,
@@ -117,14 +138,15 @@ export function GoogleAccountsSettings({
       addToast(result.warning || `Disconnected ${connection.email}.`, result.warning ? "error" : "success");
       await load();
     } catch (error) {
-      addToast(error instanceof Error ? error.message : "Could not disconnect the account.", "error");
+      addToast(messageFromError(error), "error");
     } finally {
-      setBusyID(null);
+      setOperationBusy(key, false);
     }
   }
 
   async function testConnection(connection: GoogleConnection) {
-    setBusyID(connection.id);
+    const key = `test:${connection.id}`;
+    setOperationBusy(key, true);
     try {
       const result = await postJSON<{ ok: boolean; email: string }>(
         `/api/google/connections/${connection.id}/test`,
@@ -133,10 +155,10 @@ export function GoogleAccountsSettings({
       addToast(`${result.email} responded. The connection works.`, "success");
       await load();
     } catch (error) {
-      addToast(error instanceof Error ? error.message : "The connection test failed.", "error");
+      addToast(messageFromError(error), "error");
       await load();
     } finally {
-      setBusyID(null);
+      setOperationBusy(key, false);
     }
   }
 
@@ -160,7 +182,7 @@ export function GoogleAccountsSettings({
             <h2>Connected accounts</h2>
             <p>Each connection authorizes one Google account for mail, contacts, and calendar.</p>
           </div>
-          <button className="secondary" type="button" disabled={!configured} onClick={() => connect()}>
+          <button className="secondary" type="button" disabled={!configured || busy.connect} onClick={() => void connect()}>
             <Icon name="link" />
             Connect Google account
           </button>
@@ -176,7 +198,8 @@ export function GoogleAccountsSettings({
           <div className="settings-index" role="list" aria-label="Connected Google accounts">
             {connections.map((connection) => {
               const badges = scopeBadges(connection.scopes);
-              const busy = busyID === connection.id;
+              const rowBusy = isBusy(connection.id);
+              const reconnecting = Boolean(busy[`connect:${connection.id}`]);
               return (
                 <div key={connection.id} className="settings-index-item" role="listitem">
                   <div className="settings-connection-row">
@@ -204,15 +227,20 @@ export function GoogleAccountsSettings({
                     </span>
                     <span className="settings-connection-actions">
                       {connection.needs_reauth ? (
-                        <button className="secondary" type="button" disabled={!configured} onClick={() => connect(connection.id)}>
+                        <button
+                          className="secondary"
+                          type="button"
+                          disabled={!configured || reconnecting}
+                          onClick={() => void connect(connection.id)}
+                        >
                           Reauthorize
                         </button>
                       ) : (
-                        <button className="secondary" type="button" disabled={busy} onClick={() => void testConnection(connection)}>
-                          {busy ? "Testing..." : "Test connection"}
+                        <button className="secondary" type="button" disabled={rowBusy} onClick={() => void testConnection(connection)}>
+                          {busy[`test:${connection.id}`] ? "Testing..." : "Test connection"}
                         </button>
                       )}
-                      <button className="danger" type="button" disabled={busy} onClick={() => void disconnect(connection)}>
+                      <button className="danger" type="button" disabled={rowBusy} onClick={() => void disconnect(connection)}>
                         Disconnect
                       </button>
                     </span>

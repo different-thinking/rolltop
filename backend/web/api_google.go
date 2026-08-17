@@ -75,31 +75,45 @@ func (s *Server) apiGoogleConnections(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiGoogleConnect redirects the browser into Google's consent screen. It is a
-// GET because it is a top-level navigation; the flow's integrity rests on the
-// single-use state value bound to this user, not on a form token.
+// apiGoogleConnect starts consent and returns the Google URL for the browser to
+// navigate to.
+//
+// It is a CSRF-checked POST rather than a redirecting GET. Starting a flow
+// changes server state -- it takes one of this user's pending-flow slots -- so
+// a cross-site page able to trigger it could evict a consent the user has open
+// in another tab and keep them from ever connecting an account.
 func (s *Server) apiGoogleConnect(w http.ResponseWriter, r *http.Request) {
 	cu, ok := s.requireAPIAuth(w, r)
 	if !ok {
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
+		return
+	}
+	if !s.verifyCSRF(w, r) {
 		return
 	}
 	if s.googleAuth == nil || !s.googleAuth.Configured() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Google is not configured on this server.")
 		return
 	}
+	var in struct {
+		ConnectionID int64 `json:"connection_id"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if !decodeJSON(w, r, &in) {
+			return
+		}
+	}
 	loginHint := ""
 	// Re-authorizing an existing connection should return to the same account.
-	if raw := strings.TrimSpace(r.URL.Query().Get("connection_id")); raw != "" {
-		connectionID, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
+	if in.ConnectionID != 0 {
+		if in.ConnectionID < 0 {
 			writeAPIError(w, http.StatusBadRequest, "Invalid connection id.")
 			return
 		}
-		connection, err := s.googleAuth.Get(r.Context(), cu.User.ID, connectionID)
+		connection, err := s.googleAuth.Get(r.Context(), cu.User.ID, in.ConnectionID)
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
 			return
@@ -115,19 +129,28 @@ func (s *Server) apiGoogleConnect(w http.ResponseWriter, r *http.Request) {
 		s.writeGoogleError(w, err)
 		return
 	}
-	http.Redirect(w, r, authURL, http.StatusFound)
+	writeJSON(w, map[string]any{"authorization_url": authURL})
 }
 
 // apiGoogleCallback finishes consent and sends the browser back to settings.
 // Failures travel as a short reason code in the URL so the settings page can
 // render a message without the error text ever passing through a template.
 func (s *Server) apiGoogleCallback(w http.ResponseWriter, r *http.Request) {
-	cu, ok := s.requireAPIAuth(w, r)
-	if !ok {
-		return
-	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
+		return
+	}
+	// Google sends the browser here as a top-level navigation, so every exit
+	// from this handler has to be a page the user can read. Answering the JSON
+	// body requireAPIAuth would write leaves them staring at raw JSON with the
+	// consent result lost.
+	cu, ok := current(r)
+	if !ok {
+		if sessionLookupFailed(r) {
+			s.redirectToGoogleSettings(w, r, "error", "unavailable")
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 	if s.googleAuth == nil || !s.googleAuth.Configured() {
@@ -136,7 +159,10 @@ func (s *Server) apiGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	if consentErr := strings.TrimSpace(query.Get("error")); consentErr != "" {
-		// access_denied is the normal "user pressed cancel" path.
+		// access_denied is the normal "user pressed cancel" path. Release the
+		// slot now instead of letting a cancelled flow occupy one of this
+		// user's few pending slots until the TTL expires.
+		s.googleAuth.AbandonFlow(cu.User.ID, strings.TrimSpace(query.Get("state")))
 		s.redirectToGoogleSettings(w, r, "error", consentErr)
 		return
 	}
@@ -165,7 +191,7 @@ func (s *Server) redirectToGoogleSettings(w http.ResponseWriter, r *http.Request
 
 // apiGoogleConnectionByID handles the per-connection operations: DELETE to
 // disconnect, POST .../test to prove the stored refresh token still works.
-func (s *Server) apiGoogleConnectionByID(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiGoogleConnectionByID(w http.ResponseWriter, r *http.Request, rest string) {
 	cu, ok := s.requireAPIAuth(w, r)
 	if !ok {
 		return
@@ -174,7 +200,6 @@ func (s *Server) apiGoogleConnectionByID(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusServiceUnavailable, "Google is not configured on this server.")
 		return
 	}
-	rest := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/"), "google/connections/")
 	idPart, action, _ := strings.Cut(rest, "/")
 	connectionID, err := strconv.ParseInt(strings.TrimSpace(idPart), 10, 64)
 	if err != nil || connectionID <= 0 {
@@ -198,7 +223,7 @@ func (s *Server) googleConnectionTest(w http.ResponseWriter, r *http.Request, us
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	token, err := s.googleAuth.AccessToken(r.Context(), userID, connectionID)
+	token, connection, err := s.googleAuth.AccessTokenAndConnection(r.Context(), userID, connectionID)
 	if store.IsNotFound(err) {
 		http.NotFound(w, r)
 		return
@@ -208,13 +233,21 @@ func (s *Server) googleConnectionTest(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 	info, err := s.googleAuth.Client().Userinfo(r.Context(), token)
+	if errors.Is(err, googleauth.ErrUnauthorized) {
+		// The stored token is not expired but Google no longer honours it,
+		// which is what a grant revoked from the Google account settings looks
+		// like. Refreshing turns that into the real answer: either a working
+		// token, or invalid_grant, which flags the connection for consent.
+		token, err = s.googleAuth.ForceRefresh(r.Context(), userID, connectionID)
+		if err == nil {
+			info, err = s.googleAuth.Client().Userinfo(r.Context(), token)
+		}
+		if err == nil {
+			connection, err = s.googleAuth.Get(r.Context(), userID, connectionID)
+		}
+	}
 	if err != nil {
 		s.writeGoogleError(w, err)
-		return
-	}
-	connection, err := s.googleAuth.Get(r.Context(), userID, connectionID)
-	if err != nil {
-		s.serverError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -264,7 +297,12 @@ func (s *Server) writeGoogleError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "This Google account needs to be authorized again.")
 	case errors.Is(err, googleauth.ErrUnknownFlow):
 		writeAPIError(w, http.StatusBadRequest, "This Google authorization request has expired. Start again.")
-	default:
+	case errors.Is(err, googleauth.ErrUnauthorized), errors.Is(err, googleauth.ErrUpstream):
 		writeAPIError(w, http.StatusBadGateway, "Google could not be reached.")
+	default:
+		// Anything left is local -- a busy database, a missing master key, an
+		// encryption failure. Blaming Google would send the operator off
+		// debugging OAuth while the fault is on this machine.
+		s.serverError(w, err)
 	}
 }

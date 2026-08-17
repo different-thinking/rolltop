@@ -13,8 +13,11 @@ func userGoogleConnectionMigrationSet() migrationSet {
 			`CREATE TABLE IF NOT EXISTS google_connections (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				-- The address is display data and can change; Google's subject
+				-- claim is the account's stable identifier and therefore the
+				-- key a reconnect matches on.
 				google_email TEXT NOT NULL,
-				google_subject TEXT NOT NULL DEFAULT '',
+				google_subject TEXT NOT NULL,
 				encrypted_refresh_token TEXT NOT NULL,
 				encrypted_access_token TEXT NOT NULL DEFAULT '',
 				access_token_expires_at INTEGER NOT NULL DEFAULT 0,
@@ -24,9 +27,9 @@ func userGoogleConnectionMigrationSet() migrationSet {
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL,
 				-- Also the lookup index for every read: connections are always
-				-- fetched by tenant, and by address when a reconnect reuses a
+				-- fetched by tenant, and by subject when a reconnect reuses a
 				-- row, so no separate index is needed on those columns.
-				UNIQUE(user_id, google_email)
+				UNIQUE(user_id, google_subject)
 			)`,
 		},
 	}

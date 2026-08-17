@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"rolltop/backend/googleauth"
 	"rolltop/backend/store"
@@ -107,25 +109,21 @@ func (e *googleTestEnv) request(t *testing.T, user store.User, method, target st
 	return request
 }
 
+// send drives a request through the real /api dispatcher, so these tests cover
+// the path parsing and method routing a handler call would skip.
+func (e *googleTestEnv) send(t *testing.T, user store.User, method, target string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	e.server.handleAPI(response, e.request(t, user, method, target, body))
+	return response
+}
+
 // connect drives a full consent round trip through the real routes.
 func (e *googleTestEnv) connect(t *testing.T, user store.User) store.GoogleConnection {
 	t.Helper()
-	connectResponse := httptest.NewRecorder()
-	e.server.apiGoogleConnect(connectResponse, e.request(t, user, http.MethodGet, "/api/google/connect", nil))
-	if connectResponse.Code != http.StatusFound {
-		t.Fatalf("connect status=%d body=%s", connectResponse.Code, connectResponse.Body.String())
-	}
-	authURL, err := url.Parse(connectResponse.Header().Get("Location"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := authURL.Query().Get("state")
-	if state == "" {
-		t.Fatal("connect redirect carried no state")
-	}
-	callback := e.request(t, user, http.MethodGet, "/api/google/callback?code=auth-code&state="+url.QueryEscape(state), nil)
-	callbackResponse := httptest.NewRecorder()
-	e.server.apiGoogleCallback(callbackResponse, callback)
+	state := e.startConnect(t, user, nil)
+	callbackResponse := e.send(t, user, http.MethodGet,
+		"/api/google/callback?code=auth-code&state="+url.QueryEscape(state), nil)
 	if callbackResponse.Code != http.StatusFound {
 		t.Fatalf("callback status=%d body=%s", callbackResponse.Code, callbackResponse.Body.String())
 	}
@@ -142,6 +140,33 @@ func (e *googleTestEnv) connect(t *testing.T, user store.User) store.GoogleConne
 	return connections[0]
 }
 
+// startConnect performs the connect request and returns the pending state value.
+func (e *googleTestEnv) startConnect(t *testing.T, user store.User, body []byte) string {
+	t.Helper()
+	if body == nil {
+		body = []byte(`{}`)
+	}
+	response := e.send(t, user, http.MethodPost, "/api/google/connect", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("connect status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(payload.AuthorizationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authURL.Query().Get("state")
+	if state == "" {
+		t.Fatal("connect response carried no state")
+	}
+	return state
+}
+
 func TestGoogleConnectFlowStoresConnectionAndListsIt(t *testing.T) {
 	env := newGoogleTestEnv(t)
 	connection := env.connect(t, env.owner)
@@ -149,8 +174,7 @@ func TestGoogleConnectFlowStoresConnectionAndListsIt(t *testing.T) {
 		t.Fatalf("connection email = %q", connection.GoogleEmail)
 	}
 
-	listResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnections(listResponse, env.request(t, env.owner, http.MethodGet, "/api/google/connections", nil))
+	listResponse := env.send(t, env.owner, http.MethodGet, "/api/google/connections", nil)
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("list status=%d body=%s", listResponse.Code, listResponse.Body.String())
 	}
@@ -180,8 +204,7 @@ func TestGoogleConnectionsAreNotVisibleToOtherTenants(t *testing.T) {
 	env := newGoogleTestEnv(t)
 	connection := env.connect(t, env.owner)
 
-	listResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnections(listResponse, env.request(t, env.other, http.MethodGet, "/api/google/connections", nil))
+	listResponse := env.send(t, env.other, http.MethodGet, "/api/google/connections", nil)
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("other tenant list status=%d", listResponse.Code)
 	}
@@ -190,13 +213,11 @@ func TestGoogleConnectionsAreNotVisibleToOtherTenants(t *testing.T) {
 	}
 
 	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10)
-	deleteResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnectionByID(deleteResponse, env.request(t, env.other, http.MethodDelete, target, nil))
+	deleteResponse := env.send(t, env.other, http.MethodDelete, target, nil)
 	if deleteResponse.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant delete status=%d, want 404", deleteResponse.Code)
 	}
-	testResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnectionByID(testResponse, env.request(t, env.other, http.MethodPost, target+"/test", nil))
+	testResponse := env.send(t, env.other, http.MethodPost, target+"/test", nil)
 	if testResponse.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant test status=%d, want 404", testResponse.Code)
 	}
@@ -205,13 +226,9 @@ func TestGoogleConnectionsAreNotVisibleToOtherTenants(t *testing.T) {
 	}
 
 	// A connect started by the owner must not be completable by another user.
-	connectResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnect(connectResponse, env.request(t, env.owner, http.MethodGet, "/api/google/connect", nil))
-	authURL, _ := url.Parse(connectResponse.Header().Get("Location"))
-	stolen := env.request(t, env.other, http.MethodGet,
-		"/api/google/callback?code=auth-code&state="+url.QueryEscape(authURL.Query().Get("state")), nil)
-	stolenResponse := httptest.NewRecorder()
-	env.server.apiGoogleCallback(stolenResponse, stolen)
+	state := env.startConnect(t, env.owner, nil)
+	stolenResponse := env.send(t, env.other, http.MethodGet,
+		"/api/google/callback?code=auth-code&state="+url.QueryEscape(state), nil)
 	if location := stolenResponse.Header().Get("Location"); !strings.Contains(location, "error=expired") {
 		t.Fatalf("hijacked callback redirected to %q, want an error", location)
 	}
@@ -228,13 +245,16 @@ func TestGoogleMutationsRequireCSRF(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodDelete, target},
 		{http.MethodPost, target + "/test"},
+		// Starting a flow takes one of this user's pending slots, so it is a
+		// mutation and must be unreachable without a token too.
+		{http.MethodPost, "/api/google/connect"},
 	} {
 		request := httptest.NewRequest(tc.method, tc.path, nil)
 		request.Host = "rolltop.example.test"
 		request = request.WithContext(context.WithValue(request.Context(), userContextKey, currentUser{User: env.owner}))
 		request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "google-test-session"})
 		response := httptest.NewRecorder()
-		env.server.apiGoogleConnectionByID(response, request)
+		env.server.handleAPI(response, request)
 		if response.Code != http.StatusForbidden {
 			t.Fatalf("%s %s without CSRF token status=%d, want 403", tc.method, tc.path, response.Code)
 		}
@@ -246,20 +266,26 @@ func TestGoogleMutationsRequireCSRF(t *testing.T) {
 
 func TestGoogleRoutesRequireAuthentication(t *testing.T) {
 	env := newGoogleTestEnv(t)
-	for _, target := range []string{"/api/google/connections", "/api/google/connect", "/api/google/callback"} {
+	for _, target := range []string{"/api/google/connections", "/api/google/connect"} {
 		request := httptest.NewRequest(http.MethodGet, target, nil)
 		response := httptest.NewRecorder()
-		switch target {
-		case "/api/google/connections":
-			env.server.apiGoogleConnections(response, request)
-		case "/api/google/connect":
-			env.server.apiGoogleConnect(response, request)
-		default:
-			env.server.apiGoogleCallback(response, request)
+		env.server.handleAPI(response, request)
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("anonymous %s status=%d, want 401 or 405", target, response.Code)
 		}
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("anonymous %s status=%d, want 401", target, response.Code)
-		}
+	}
+	// The callback is a browser navigation, so an unresolvable session must
+	// land the user on a page rather than on a raw JSON error body.
+	response := httptest.NewRecorder()
+	env.server.handleAPI(response, httptest.NewRequest(http.MethodGet, "/api/google/callback?code=c&state=s", nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("anonymous callback status=%d, want a redirect", response.Code)
+	}
+	if location := response.Header().Get("Location"); location != "/login" {
+		t.Fatalf("anonymous callback redirected to %q, want /login", location)
+	}
+	if body := response.Body.String(); strings.Contains(body, "\"error\"") {
+		t.Fatalf("anonymous callback rendered a JSON error body: %s", body)
 	}
 }
 
@@ -268,8 +294,7 @@ func TestGoogleConnectionTestReportsAccount(t *testing.T) {
 	connection := env.connect(t, env.owner)
 	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10) + "/test"
 
-	response := httptest.NewRecorder()
-	env.server.apiGoogleConnectionByID(response, env.request(t, env.owner, http.MethodPost, target, nil))
+	response := env.send(t, env.owner, http.MethodPost, target, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("test status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -293,8 +318,7 @@ func TestGoogleDisconnectRemovesConnection(t *testing.T) {
 	connection := env.connect(t, env.owner)
 	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10)
 
-	response := httptest.NewRecorder()
-	env.server.apiGoogleConnectionByID(response, env.request(t, env.owner, http.MethodDelete, target, nil))
+	response := env.send(t, env.owner, http.MethodDelete, target, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("disconnect status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -306,14 +330,19 @@ func TestGoogleDisconnectRemovesConnection(t *testing.T) {
 func TestGoogleReauthConnectUsesLoginHintForOwnConnectionOnly(t *testing.T) {
 	env := newGoogleTestEnv(t)
 	connection := env.connect(t, env.owner)
-	suffix := "?connection_id=" + strconv.FormatInt(connection.ID, 10)
+	body := []byte(`{"connection_id":` + strconv.FormatInt(connection.ID, 10) + `}`)
 
-	response := httptest.NewRecorder()
-	env.server.apiGoogleConnect(response, env.request(t, env.owner, http.MethodGet, "/api/google/connect"+suffix, nil))
-	if response.Code != http.StatusFound {
-		t.Fatalf("reauth connect status=%d", response.Code)
+	response := env.send(t, env.owner, http.MethodPost, "/api/google/connect", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reauth connect status=%d body=%s", response.Code, response.Body.String())
 	}
-	authURL, err := url.Parse(response.Header().Get("Location"))
+	var payload struct {
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(payload.AuthorizationURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,8 +351,7 @@ func TestGoogleReauthConnectUsesLoginHintForOwnConnectionOnly(t *testing.T) {
 	}
 
 	// Another tenant may not probe which connection ids exist.
-	foreign := httptest.NewRecorder()
-	env.server.apiGoogleConnect(foreign, env.request(t, env.other, http.MethodGet, "/api/google/connect"+suffix, nil))
+	foreign := env.send(t, env.other, http.MethodPost, "/api/google/connect", body)
 	if foreign.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant reauth connect status=%d, want 404", foreign.Code)
 	}
@@ -333,8 +361,7 @@ func TestGoogleRoutesReportUnconfiguredServer(t *testing.T) {
 	env := newGoogleTestEnv(t)
 	env.server.googleAuth = googleauth.NewManager(googleauth.Config{}, env.db, googleTestMasterKey)
 
-	listResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnections(listResponse, env.request(t, env.owner, http.MethodGet, "/api/google/connections", nil))
+	listResponse := env.send(t, env.owner, http.MethodGet, "/api/google/connections", nil)
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("list status=%d", listResponse.Code)
 	}
@@ -347,8 +374,7 @@ func TestGoogleRoutesReportUnconfiguredServer(t *testing.T) {
 	if payload.Configured {
 		t.Fatal("unconfigured server reported Google as configured")
 	}
-	connectResponse := httptest.NewRecorder()
-	env.server.apiGoogleConnect(connectResponse, env.request(t, env.owner, http.MethodGet, "/api/google/connect", nil))
+	connectResponse := env.send(t, env.owner, http.MethodPost, "/api/google/connect", []byte(`{}`))
 	if connectResponse.Code != http.StatusServiceUnavailable {
 		t.Fatalf("connect on unconfigured server status=%d, want 503", connectResponse.Code)
 	}
@@ -356,9 +382,7 @@ func TestGoogleRoutesReportUnconfiguredServer(t *testing.T) {
 
 func TestGoogleCallbackSurfacesConsentDenial(t *testing.T) {
 	env := newGoogleTestEnv(t)
-	request := env.request(t, env.owner, http.MethodGet, "/api/google/callback?error=access_denied&state=whatever", nil)
-	response := httptest.NewRecorder()
-	env.server.apiGoogleCallback(response, request)
+	response := env.send(t, env.owner, http.MethodGet, "/api/google/callback?error=access_denied&state=whatever", nil)
 	if response.Code != http.StatusFound {
 		t.Fatalf("denied callback status=%d", response.Code)
 	}
@@ -387,8 +411,7 @@ func TestGoogleDisconnectDoesNotReportSuccessWhenTheRowSurvives(t *testing.T) {
 		env.manager.Config(), &deleteFailingStore{ConnectionStore: env.db}, googleTestMasterKey)
 
 	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10)
-	response := httptest.NewRecorder()
-	env.server.apiGoogleConnectionByID(response, env.request(t, env.owner, http.MethodDelete, target, nil))
+	response := env.send(t, env.owner, http.MethodDelete, target, nil)
 
 	// The connection is still there, so telling the user it was disconnected
 	// would leave them believing a revoked, dead account was cleaned up.
@@ -412,8 +435,7 @@ func TestGoogleConnectReportsUnmatchedRedirectURI(t *testing.T) {
 	}
 	env.server.googleAuth = googleauth.NewManager(cfg, env.db, googleTestMasterKey)
 
-	response := httptest.NewRecorder()
-	env.server.apiGoogleConnect(response, env.request(t, env.owner, http.MethodGet, "/api/google/connect", nil))
+	response := env.send(t, env.owner, http.MethodPost, "/api/google/connect", []byte(`{}`))
 	// Redirecting to Google with a URI it has never seen only yields an opaque
 	// redirect_uri_mismatch page, so the misconfiguration is reported here.
 	if response.Code != http.StatusServiceUnavailable {
@@ -421,5 +443,109 @@ func TestGoogleConnectReportsUnmatchedRedirectURI(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "ROLLTOP_GOOGLE_REDIRECT_URLS") {
 		t.Fatalf("error does not name the setting to fix: %s", response.Body.String())
+	}
+}
+
+func TestGoogleConnectionByIDToleratesATrailingSlash(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	// The dispatcher normalizes the path, so a handler that re-parses the raw
+	// URL instead of taking the trimmed remainder answers 405 here.
+	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10) + "/test/"
+	response := env.send(t, env.owner, http.MethodPost, target, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("test with a trailing slash status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestGoogleCallbackReleasesTheFlowWhenConsentIsDenied(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	state := env.startConnect(t, env.owner, nil)
+
+	denied := env.send(t, env.owner, http.MethodGet,
+		"/api/google/callback?error=access_denied&state="+url.QueryEscape(state), nil)
+	if denied.Code != http.StatusFound {
+		t.Fatalf("denied callback status=%d", denied.Code)
+	}
+	// A cancelled consent must not keep occupying one of this user's few
+	// pending slots until the TTL expires.
+	completed := env.send(t, env.owner, http.MethodGet,
+		"/api/google/callback?code=auth-code&state="+url.QueryEscape(state), nil)
+	if location := completed.Header().Get("Location"); !strings.Contains(location, "error=expired") {
+		t.Fatalf("cancelled flow was still pending, callback went to %q", location)
+	}
+}
+
+// unauthorizedUserinfoStore serves a Google whose userinfo rejects the first
+// access token, the way a grant revoked from the Google account settings does.
+func TestGoogleConnectionTestRefreshesWhenTheStoredTokenIsRejected(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+
+	var rejectOnce sync.Once
+	rejected := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		// The refresh that follows the rejection reports the grant is gone.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		rejectOnce.Do(func() { close(rejected) })
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+	})
+	google := httptest.NewServer(mux)
+	t.Cleanup(google.Close)
+
+	cfg := env.manager.Config()
+	cfg.TokenEndpoint = google.URL + "/token"
+	cfg.UserinfoEndpoint = google.URL + "/userinfo"
+	manager := googleauth.NewManager(cfg, env.db, googleTestMasterKey)
+	manager.Client().RetryDelay = func(int) time.Duration { return time.Millisecond }
+	env.server.googleAuth = manager
+
+	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10) + "/test"
+	response := env.send(t, env.owner, http.MethodPost, target, nil)
+
+	<-rejected
+	// Reporting a Google outage would be wrong and would repeat for as long as
+	// the unexpired token stays cached; the user needs to be told to reconnect.
+	if response.Code != http.StatusConflict {
+		t.Fatalf("test against a revoked grant status=%d body=%s", response.Code, response.Body.String())
+	}
+	stored, err := env.db.GoogleConnection(context.Background(), env.owner.ID, connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.NeedsReauth() {
+		t.Fatalf("connection status=%q, want reauth_required", stored.Status)
+	}
+}
+
+// lockedStore fails every read the way a busy SQLite does.
+type lockedStore struct {
+	googleauth.ConnectionStore
+}
+
+func (s *lockedStore) GoogleConnection(ctx context.Context, userID, connectionID int64) (store.GoogleConnection, error) {
+	return store.GoogleConnection{}, errors.New("database is locked")
+}
+
+func TestGoogleLocalFailuresAreNotReportedAsAGoogleOutage(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	env.server.googleAuth = googleauth.NewManager(
+		env.manager.Config(), &lockedStore{ConnectionStore: env.db}, googleTestMasterKey)
+
+	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10) + "/test"
+	response := env.send(t, env.owner, http.MethodPost, target, nil)
+	// Blaming Google sends the operator off debugging OAuth while the fault is
+	// on this machine.
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("local store failure status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Google could not be reached") {
+		t.Fatalf("local store failure blamed on Google: %s", response.Body.String())
 	}
 }

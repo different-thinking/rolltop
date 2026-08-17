@@ -45,8 +45,8 @@ func TestGoogleConnectionsAreScopedByUser(t *testing.T) {
 	if _, err := db.GoogleConnection(ctx, other.ID, connection.ID); !IsNotFound(err) {
 		t.Fatalf("cross-tenant read error = %v, want not found", err)
 	}
-	if _, err := db.GoogleConnectionByEmail(ctx, other.ID, "shared@gmail.example.test"); !IsNotFound(err) {
-		t.Fatalf("cross-tenant email read error = %v, want not found", err)
+	if _, err := db.GoogleConnectionBySubject(ctx, other.ID, connection.GoogleSubject); !IsNotFound(err) {
+		t.Fatalf("cross-tenant subject read error = %v, want not found", err)
 	}
 	if err := db.DeleteGoogleConnection(ctx, other.ID, connection.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("cross-tenant delete error = %v, want not found", err)
@@ -108,10 +108,17 @@ func TestUpsertGoogleConnectionReusesRowAndClearsReauth(t *testing.T) {
 		t.Fatalf("stale access token survived reauth marking: %q %v", broken.EncryptedAccessToken, broken.AccessTokenExpiresAt)
 	}
 
-	// Reconnecting the same Google address must heal the existing row, not add a second one.
-	second, err := db.UpsertGoogleConnection(ctx, user.ID, testGoogleUpsert("me@gmail.example.test"))
+	// Reconnecting the same Google account must heal the existing row, not add
+	// a second one -- including when the account's primary address changed,
+	// which is why identity is keyed on the subject claim.
+	renamed := testGoogleUpsert("me@gmail.example.test")
+	renamed.GoogleEmail = "renamed@gmail.example.test"
+	second, err := db.UpsertGoogleConnection(ctx, user.ID, renamed)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if second.GoogleEmail != "renamed@gmail.example.test" {
+		t.Fatalf("reconnect kept stale email %q", second.GoogleEmail)
 	}
 	if second.ID != first.ID {
 		t.Fatalf("reconnect created connection id %d, want reuse of %d", second.ID, first.ID)
@@ -177,6 +184,11 @@ func TestUpsertGoogleConnectionRejectsMissingRefreshToken(t *testing.T) {
 	in.EncryptedRefreshToken = "v1:refresh:x"
 	if _, err := db.UpsertGoogleConnection(ctx, user.ID, in); !errors.Is(err, ErrInvalidGoogleConnection) {
 		t.Fatalf("upsert without email error = %v, want ErrInvalidGoogleConnection", err)
+	}
+	in.GoogleEmail = "norefresh@gmail.example.test"
+	in.GoogleSubject = "  "
+	if _, err := db.UpsertGoogleConnection(ctx, user.ID, in); !errors.Is(err, ErrInvalidGoogleConnection) {
+		t.Fatalf("upsert without subject error = %v, want ErrInvalidGoogleConnection", err)
 	}
 }
 

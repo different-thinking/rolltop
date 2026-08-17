@@ -677,6 +677,7 @@ export function SettingsView({
   availableThemes,
   location,
   navigate,
+  replaceRoute,
   refreshChrome,
   runtimePlugins,
   reloadRuntimePlugins,
@@ -692,6 +693,7 @@ export function SettingsView({
   availableThemes: ThemeDefinition[];
   location: LocationState;
   navigate: (url: string) => void;
+  replaceRoute: (url: string) => void;
   refreshChrome: () => Promise<Bootstrap | null>;
   runtimePlugins: RuntimePlugins;
   reloadRuntimePlugins: () => Promise<void>;
@@ -2570,7 +2572,7 @@ export function SettingsView({
     page = (
       <SettingsPage title="Google" description="Google accounts authorized for mail, contacts, and calendar." navigate={navigate}>
         {noticeNode}
-        <GoogleAccountsSettings csrf={csrf} search={location.search} addToast={addToast} />
+        <GoogleAccountsSettings csrf={csrf} search={location.search} replaceRoute={replaceRoute} addToast={addToast} />
       </SettingsPage>
     );
   } else if (route.kind === "preferences") {

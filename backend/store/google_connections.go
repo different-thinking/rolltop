@@ -100,7 +100,11 @@ func splitGoogleScopes(raw string) []string {
 // clears a previous reauth_required state because consent just succeeded.
 func (s *Store) UpsertGoogleConnection(ctx context.Context, userID int64, in GoogleConnectionUpsert) (GoogleConnection, error) {
 	email := cleanEmail(in.GoogleEmail)
-	if userID <= 0 || email == "" {
+	subject := strings.TrimSpace(in.GoogleSubject)
+	if userID <= 0 || email == "" || subject == "" {
+		// Without the subject claim a reconnect cannot be matched to its
+		// existing row, so a renamed Google account would silently fork into
+		// a duplicate connection.
 		return GoogleConnection{}, ErrInvalidGoogleConnection
 	}
 	if strings.TrimSpace(in.EncryptedRefreshToken) == "" {
@@ -115,8 +119,8 @@ func (s *Store) UpsertGoogleConnection(ctx context.Context, userID int64, in Goo
 			 encrypted_access_token, access_token_expires_at, granted_scopes,
 			 status, status_detail, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
-		ON CONFLICT(user_id, google_email) DO UPDATE SET
-			google_subject = excluded.google_subject,
+		ON CONFLICT(user_id, google_subject) DO UPDATE SET
+			google_email = excluded.google_email,
 			encrypted_refresh_token = excluded.encrypted_refresh_token,
 			encrypted_access_token = excluded.encrypted_access_token,
 			access_token_expires_at = excluded.access_token_expires_at,
@@ -124,13 +128,13 @@ func (s *Store) UpsertGoogleConnection(ctx context.Context, userID int64, in Goo
 			status = excluded.status,
 			status_detail = '',
 			updated_at = excluded.updated_at`,
-		userID, email, strings.TrimSpace(in.GoogleSubject), in.EncryptedRefreshToken,
+		userID, email, subject, in.EncryptedRefreshToken,
 		in.EncryptedAccessToken, unixOrZero(in.AccessTokenExpiresAt), scopes,
 		GoogleConnectionStatusOK, ts, ts)
 	if err != nil {
 		return GoogleConnection{}, err
 	}
-	return s.GoogleConnectionByEmail(ctx, userID, email)
+	return s.GoogleConnectionBySubject(ctx, userID, subject)
 }
 
 // ListGoogleConnections returns every Google account the user has connected.
@@ -159,10 +163,12 @@ func (s *Store) GoogleConnection(ctx context.Context, userID, connectionID int64
 		FROM google_connections WHERE user_id = ? AND id = ?`, userID, connectionID))
 }
 
-// GoogleConnectionByEmail loads one connection by the Google address it authorized.
-func (s *Store) GoogleConnectionByEmail(ctx context.Context, userID int64, email string) (GoogleConnection, error) {
+// GoogleConnectionBySubject loads one connection by Google's stable account
+// identifier, which is what a reconnect matches on because the account's
+// primary address can change underneath us.
+func (s *Store) GoogleConnectionBySubject(ctx context.Context, userID int64, subject string) (GoogleConnection, error) {
 	return scanGoogleConnection(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+googleConnectionSelectColumns+`
-		FROM google_connections WHERE user_id = ? AND google_email = ?`, userID, cleanEmail(email)))
+		FROM google_connections WHERE user_id = ? AND google_subject = ?`, userID, strings.TrimSpace(subject)))
 }
 
 // UpdateGoogleAccessToken persists a refreshed access token. Google only returns

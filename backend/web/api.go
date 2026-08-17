@@ -68,7 +68,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "google/connections":
 		s.apiGoogleConnections(w, r)
 	case strings.HasPrefix(path, "google/connections/"):
-		s.apiGoogleConnectionByID(w, r)
+		s.apiGoogleConnectionByID(w, r, strings.TrimPrefix(path, "google/connections/"))
 	case path == "account":
 		s.apiAccount(w, r)
 	case path == "account/imap":

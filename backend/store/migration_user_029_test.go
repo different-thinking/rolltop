@@ -29,34 +29,39 @@ func TestGoogleConnectionMigrationScopesConnectionsPerTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	insert := `INSERT INTO google_connections
-		(user_id, google_email, encrypted_refresh_token, created_at, updated_at)
-		VALUES (?, ?, ?, 1, 1)`
-	if _, err := db.ExecContext(ctx, insert, 1, "shared@gmail.example.test", "v1:a:b"); err != nil {
+		(user_id, google_email, google_subject, encrypted_refresh_token, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, 1)`
+	if _, err := db.ExecContext(ctx, insert, 1, "shared@gmail.example.test", "subject-1", "v1:a:b"); err != nil {
 		t.Fatal(err)
 	}
-	// The same Google address may be connected by two different Rolltop users;
+	// The same Google account may be connected by two different Rolltop users;
 	// uniqueness is per tenant, not global.
-	if _, err := db.ExecContext(ctx, insert, 2, "shared@gmail.example.test", "v1:c:d"); err != nil {
+	if _, err := db.ExecContext(ctx, insert, 2, "shared@gmail.example.test", "subject-1", "v1:c:d"); err != nil {
 		t.Fatalf("second tenant connecting the same Google account: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, insert, 1, "shared@gmail.example.test", "v1:e:f"); err == nil {
-		t.Fatal("duplicate connection for one tenant was accepted, want unique constraint failure")
+	if _, err := db.ExecContext(ctx, insert, 1, "other@gmail.example.test", "subject-1", "v1:e:f"); err == nil {
+		t.Fatal("duplicate subject for one tenant was accepted, want unique constraint failure")
+	}
+	// The address is not the identity: one tenant may hold two connections that
+	// currently report the same address but are different Google accounts.
+	if _, err := db.ExecContext(ctx, insert, 1, "shared@gmail.example.test", "subject-2", "v1:g:h"); err != nil {
+		t.Fatalf("same address under a different subject was rejected: %v", err)
 	}
 
-	var status, detail, scopes, subject, accessToken string
+	var status, detail, scopes, accessToken string
 	var expiresAt int64
-	if err := db.QueryRowContext(ctx, `SELECT status, status_detail, granted_scopes, google_subject,
+	if err := db.QueryRowContext(ctx, `SELECT status, status_detail, granted_scopes,
 		encrypted_access_token, access_token_expires_at
-		FROM google_connections WHERE user_id = 1`).
-		Scan(&status, &detail, &scopes, &subject, &accessToken, &expiresAt); err != nil {
+		FROM google_connections WHERE user_id = 1 AND google_subject = 'subject-1'`).
+		Scan(&status, &detail, &scopes, &accessToken, &expiresAt); err != nil {
 		t.Fatal(err)
 	}
 	if status != "ok" {
 		t.Fatalf("default status=%q, want %q", status, "ok")
 	}
-	if detail != "" || scopes != "" || subject != "" || accessToken != "" || expiresAt != 0 {
-		t.Fatalf("defaults not empty: detail=%q scopes=%q subject=%q accessToken=%q expiresAt=%d",
-			detail, scopes, subject, accessToken, expiresAt)
+	if detail != "" || scopes != "" || accessToken != "" || expiresAt != 0 {
+		t.Fatalf("defaults not empty: detail=%q scopes=%q accessToken=%q expiresAt=%d",
+			detail, scopes, accessToken, expiresAt)
 	}
 
 	var definition string

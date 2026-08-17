@@ -176,7 +176,17 @@ func requestOrigin(r *http.Request) string {
 			scheme = forwarded
 		}
 	}
-	host := strings.TrimSpace(r.Host)
+	// A proxy that forwards to an internal upstream rewrites Host, so the
+	// forwarded value is the address the browser actually used. Missing it here
+	// while the rest of the app honours it would make this the one place that
+	// computes a different origin for the same request.
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if first, _, found := strings.Cut(host, ","); found {
+		host = strings.TrimSpace(first)
+	}
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
 	if host == "" {
 		return ""
 	}

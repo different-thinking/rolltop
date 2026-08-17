@@ -51,9 +51,10 @@ type refreshKey struct {
 }
 
 type refreshCall struct {
-	done  chan struct{}
-	token string
-	err   error
+	done       chan struct{}
+	token      string
+	connection store.GoogleConnection
+	err        error
 }
 
 // NewManager builds a manager. A nil store or a master key of the wrong length
@@ -163,6 +164,15 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 	if email == "" {
 		return store.GoogleConnection{}, errors.New("google did not report an email address for this account")
 	}
+	if !info.EmailVerified {
+		// The address becomes this connection's display identity, its
+		// reauthorization login hint, and the IMAP/SMTP username, so an
+		// address Google itself does not vouch for must not be adopted.
+		return store.GoogleConnection{}, errors.New("google reports this account's email address as unverified")
+	}
+	if strings.TrimSpace(info.Subject) == "" {
+		return store.GoogleConnection{}, errors.New("google did not report a stable account identifier")
+	}
 	encryptedRefresh, err := crypto.EncryptString(m.masterKey, token.RefreshToken)
 	if err != nil {
 		return store.GoogleConnection{}, err
@@ -184,20 +194,29 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 // AccessToken returns a currently valid access token for a connection,
 // refreshing it when it is expired or close to expiring.
 func (m *Manager) AccessToken(ctx context.Context, userID, connectionID int64) (string, error) {
+	token, _, err := m.AccessTokenAndConnection(ctx, userID, connectionID)
+	return token, err
+}
+
+// AccessTokenAndConnection is AccessToken for callers that also need the
+// connection's current state. It hands back the row this call already loaded
+// (updated in place when a refresh ran) so the caller does not have to read it
+// again straight after.
+func (m *Manager) AccessTokenAndConnection(ctx context.Context, userID, connectionID int64) (string, store.GoogleConnection, error) {
 	if err := m.ready(); err != nil {
-		return "", err
+		return "", store.GoogleConnection{}, err
 	}
 	connection, err := m.store.GoogleConnection(ctx, userID, connectionID)
 	if err != nil {
-		return "", err
+		return "", store.GoogleConnection{}, err
 	}
 	if connection.NeedsReauth() {
-		return "", fmt.Errorf("%w: %s", ErrReauthRequired, connection.GoogleEmail)
+		return "", connection, fmt.Errorf("%w: %s", ErrReauthRequired, connection.GoogleEmail)
 	}
 	if token, ok := m.usableStoredToken(connection); ok {
-		return token, nil
+		return token, connection, nil
 	}
-	return m.refresh(ctx, userID, connectionID, false)
+	return m.refresh(ctx, userID, connectionID, false, &connection)
 }
 
 // ForceRefresh discards the stored access token and fetches a new one. The IMAP
@@ -211,7 +230,17 @@ func (m *Manager) ForceRefresh(ctx context.Context, userID, connectionID int64) 
 	if err := m.ready(); err != nil {
 		return "", err
 	}
-	return m.refresh(ctx, userID, connectionID, true)
+	token, _, err := m.refresh(ctx, userID, connectionID, true, nil)
+	return token, err
+}
+
+// AbandonFlow releases a pending authorization the user will never finish, so a
+// cancelled consent does not hold its slot until the TTL expires.
+func (m *Manager) AbandonFlow(userID int64, state string) {
+	if m == nil || strings.TrimSpace(state) == "" {
+		return
+	}
+	_, _ = m.flows.take(state, userID)
 }
 
 // usableStoredToken reports the stored access token when it is still good.
@@ -241,7 +270,10 @@ func (m *Manager) usableStoredToken(connection store.GoogleConnection) (string, 
 // A forced refresh waits for any running refresh to finish and then performs
 // its own, because its caller has already established that the token in flight
 // is not good enough.
-func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force bool) (string, error) {
+// loaded carries a connection row the caller already read, so the claimant of
+// the refresh slot does not query it a second time. Waiters and forced
+// refreshes pass nil because the row may have changed since.
+func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force bool, loaded *store.GoogleConnection) (string, store.GoogleConnection, error) {
 	key := refreshKey{userID: userID, connectionID: connectionID}
 	for {
 		m.refreshMu.Lock()
@@ -251,38 +283,45 @@ func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force
 			m.refreshes[key] = call
 			m.refreshMu.Unlock()
 
-			call.token, call.err = m.doRefresh(ctx, userID, connectionID)
+			call.token, call.connection, call.err = m.doRefresh(ctx, userID, connectionID, loaded)
 
 			m.refreshMu.Lock()
 			delete(m.refreshes, key)
 			m.refreshMu.Unlock()
 			close(call.done)
-			return call.token, call.err
+			return call.token, call.connection, call.err
 		}
 		m.refreshMu.Unlock()
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", store.GoogleConnection{}, ctx.Err()
 		case <-inflight.done:
 		}
 		if !force {
-			return inflight.token, inflight.err
+			return inflight.token, inflight.connection, inflight.err
 		}
-		// Loop around and claim the slot for a refresh of our own.
+		// Claim the slot for a refresh of our own. The row this caller was
+		// handed is stale now, so the next attempt re-reads it.
+		loaded = nil
 	}
 }
 
-func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64) (string, error) {
-	connection, err := m.store.GoogleConnection(ctx, userID, connectionID)
-	if err != nil {
-		return "", err
+func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64, loaded *store.GoogleConnection) (string, store.GoogleConnection, error) {
+	var connection store.GoogleConnection
+	if loaded != nil {
+		connection = *loaded
+	} else {
+		var err error
+		if connection, err = m.store.GoogleConnection(ctx, userID, connectionID); err != nil {
+			return "", store.GoogleConnection{}, err
+		}
 	}
 	refreshToken, err := crypto.DecryptString(m.masterKey, connection.EncryptedRefreshToken)
 	if err != nil {
 		// The master key no longer matches this ciphertext, so no amount of
 		// retrying helps; the user has to reconnect.
 		_ = m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "stored token could not be decrypted")
-		return "", fmt.Errorf("%w: stored token could not be decrypted", ErrReauthRequired)
+		return "", connection, fmt.Errorf("%w: stored token could not be decrypted", ErrReauthRequired)
 	}
 	token, err := m.client.RefreshToken(ctx, refreshToken)
 	if err != nil {
@@ -295,23 +334,33 @@ func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64) (st
 			if markErr := m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "Google rejected the stored authorization."); markErr != nil {
 				log.Printf("google connection user_id=%d connection_id=%d could not be flagged for reauthorization: %v", userID, connectionID, markErr)
 			}
+			connection.Status = store.GoogleConnectionStatusReauthRequired
 		}
-		return "", err
+		return "", connection, err
 	}
 	encryptedAccess, err := m.encryptAccessToken(token.AccessToken)
 	if err != nil {
-		return "", err
+		return "", connection, err
 	}
 	encryptedRefresh := ""
 	if token.RefreshToken != "" {
 		if encryptedRefresh, err = crypto.EncryptString(m.masterKey, token.RefreshToken); err != nil {
-			return "", err
+			return "", connection, err
 		}
 	}
 	if err := m.store.UpdateGoogleAccessToken(ctx, userID, connectionID, encryptedAccess, token.ExpiresAt, encryptedRefresh); err != nil {
-		return "", err
+		return "", connection, err
 	}
-	return token.AccessToken, nil
+	// Mirror the write onto the copy handed back, so a caller that needs the
+	// connection's current state does not have to re-read the row.
+	connection.EncryptedAccessToken = encryptedAccess
+	connection.AccessTokenExpiresAt = token.ExpiresAt
+	if encryptedRefresh != "" {
+		connection.EncryptedRefreshToken = encryptedRefresh
+	}
+	connection.Status = store.GoogleConnectionStatusOK
+	connection.StatusDetail = ""
+	return token.AccessToken, connection, nil
 }
 
 func (m *Manager) encryptAccessToken(token string) (string, error) {

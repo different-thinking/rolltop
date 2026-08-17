@@ -20,6 +20,16 @@ import (
 // user has to walk through consent again; retrying cannot fix it.
 var ErrReauthRequired = errors.New("google connection requires re-authorization")
 
+// ErrUpstream marks a failure that came from talking to Google, as opposed to a
+// local one. Callers use it to decide between "Google could not be reached" and
+// an internal error; without it a busy SQLite read would be reported to the
+// user as a Google outage.
+var ErrUpstream = errors.New("google request failed")
+
+// ErrUnauthorized reports that Google rejected the access token itself. It is
+// recoverable by refreshing, unlike ErrReauthRequired.
+var ErrUnauthorized = errors.New("google rejected the access token")
+
 // maxTokenResponseBytes caps how much of a token or userinfo response is read.
 // Google's responses are well under a kilobyte; anything larger is a fault.
 const maxTokenResponseBytes = 1 << 20
@@ -128,15 +138,30 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (Token, 
 	return c.postToken(ctx, form)
 }
 
-// Revoke asks Google to invalidate a grant. Callers delete their local copy
-// regardless of the outcome, so this reports the error without acting on it.
+// revokeTimeout bounds the whole revocation. Callers delete their local copy
+// regardless of the outcome and only surface a warning, so an unreachable
+// Google must not hold the user's disconnect request open for minutes.
+const revokeTimeout = 5 * time.Second
+
+// Revoke asks Google to invalidate a grant. A token Google has already
+// invalidated counts as success: the grant is gone, which is what the caller
+// wanted. Because the result is best effort, this runs a single attempt under a
+// short deadline rather than the shared retry policy — retrying a result nobody
+// acts on only makes the user wait.
 func (c *Client) Revoke(ctx context.Context, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+	defer cancel()
 	form := url.Values{}
 	form.Set("token", token)
-	_, err := c.postForm(ctx, c.Config.RevokeEndpoint, form)
+	_, err := c.doOnce(ctx, func() (*http.Request, error) {
+		return formRequest(ctx, c.Config.RevokeEndpoint, form)
+	})
+	if err != nil && revokedTokenError(err) {
+		return nil
+	}
 	return err
 }
 
@@ -193,16 +218,19 @@ func (c *Client) postToken(ctx context.Context, form url.Values) (Token, error) 
 }
 
 func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values) ([]byte, error) {
-	encoded := form.Encode()
 	return c.do(ctx, func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(encoded))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "application/json")
-		return req, nil
+		return formRequest(ctx, endpoint, form)
 	})
+}
+
+func formRequest(ctx context.Context, endpoint string, form url.Values) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	return req, nil
 }
 
 // do runs a request with backoff on rate limits and transient server errors.
@@ -215,31 +243,43 @@ func (c *Client) do(ctx context.Context, build func() (*http.Request, error)) ([
 				return nil, err
 			}
 		}
-		req, err := build()
-		if err != nil {
-			return nil, err
-		}
-		resp, err := c.httpClient().Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
+		body, retryable, err := c.attempt(build)
+		if err == nil {
 			return body, nil
 		}
-		if retryableStatus(resp.StatusCode) {
-			lastErr = statusError(resp.StatusCode, body)
-			continue
+		if !retryable {
+			return nil, err
 		}
-		return nil, statusError(resp.StatusCode, body)
+		lastErr = err
 	}
-	return nil, fmt.Errorf("google request failed after %d attempts: %w", defaultMaxAttempts, lastErr)
+	return nil, fmt.Errorf("%w after %d attempts: %w", ErrUpstream, defaultMaxAttempts, lastErr)
+}
+
+// doOnce runs a single attempt, for callers whose result nobody retries on.
+func (c *Client) doOnce(ctx context.Context, build func() (*http.Request, error)) ([]byte, error) {
+	body, _, err := c.attempt(build)
+	return body, err
+}
+
+// attempt performs one request and reports whether a retry could help.
+func (c *Client) attempt(build func() (*http.Request, error)) (body []byte, retryable bool, err error) {
+	req, err := build()
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: %v", ErrUpstream, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes))
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, true, fmt.Errorf("%w: %v", ErrUpstream, readErr)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return body, false, nil
+	}
+	return nil, retryableStatus(resp.StatusCode), statusError(resp.StatusCode, body)
 }
 
 func retryableStatus(status int) bool {
@@ -258,12 +298,22 @@ func statusError(status int, body []byte) error {
 	if payload.Error == "invalid_grant" {
 		return fmt.Errorf("%w: %s", ErrReauthRequired, describeOAuthError(payload.Error, payload.ErrorDescription))
 	}
+	if status == http.StatusUnauthorized {
+		return fmt.Errorf("%w: %s", ErrUnauthorized, describeOAuthError(payload.Error, payload.ErrorDescription))
+	}
 	if payload.Error != "" {
-		return fmt.Errorf("google returned HTTP %d: %s", status, describeOAuthError(payload.Error, payload.ErrorDescription))
+		return fmt.Errorf("%w: HTTP %d: %s", ErrUpstream, status, describeOAuthError(payload.Error, payload.ErrorDescription))
 	}
 	// The body of a non-JSON error can echo request parameters, so it is
 	// summarized by status alone rather than included verbatim.
-	return fmt.Errorf("google returned HTTP %d", status)
+	return fmt.Errorf("%w: HTTP %d", ErrUpstream, status)
+}
+
+// revokedTokenError reports whether Google's rejection means the grant is
+// already gone. Revoking a token that Google has already invalidated answers
+// HTTP 400 invalid_token, which is the desired end state, not a failure.
+func revokedTokenError(err error) bool {
+	return errors.Is(err, ErrReauthRequired) || strings.Contains(err.Error(), "invalid_token")
 }
 
 func describeOAuthError(code, description string) string {

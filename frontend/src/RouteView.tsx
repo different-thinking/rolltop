@@ -29,6 +29,7 @@ export function RouteView({
   availableThemes,
   location,
   navigate,
+  replaceRoute,
   hiddenMessageIDs,
   openCompose,
   refreshChrome,
@@ -50,6 +51,7 @@ export function RouteView({
   availableThemes: ThemeDefinition[];
   location: LocationState;
   navigate: (url: string) => void;
+  replaceRoute: (url: string) => void;
   hiddenMessageIDs: Set<number>;
   openCompose: (query?: string) => void;
   refreshChrome: () => Promise<Bootstrap | null>;
@@ -92,7 +94,7 @@ export function RouteView({
     return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
   }
   if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
-    return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;
+    return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} replaceRoute={replaceRoute} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;
   }
   if (location.path === "/admin/users" && user.is_admin) {
     return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
