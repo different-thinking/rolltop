@@ -66,11 +66,51 @@ func TestRedirectURLMatchesRequestOrigin(t *testing.T) {
 	if got := cfg.RedirectURL(proxied); got != "https://rolltop.example.test"+CallbackPath {
 		t.Fatalf("proxied redirect = %q", got)
 	}
-	// An unrecognized origin falls back to the first configured entry rather
-	// than inventing one that Google has never seen.
+}
+
+func TestRedirectURLPrefersHostMatchOverListOrder(t *testing.T) {
+	// A TLS-terminating proxy that forwards without X-Forwarded-Proto makes an
+	// https deployment look like plain http here. Picking the first list entry
+	// would hand Google the localhost URI and make production unusable, so the
+	// entry whose host actually matches wins.
+	cfg := Config{
+		RedirectURLs: []string{
+			"http://localhost:8080" + CallbackPath,
+			"https://rolltop.example.test" + CallbackPath,
+		},
+	}
+	got := cfg.RedirectURL(requestTo(t, "http://rolltop.example.test/api/google/connect", ""))
+	if got != "https://rolltop.example.test"+CallbackPath {
+		t.Fatalf("host-matched redirect = %q, want the production entry", got)
+	}
+}
+
+func TestRedirectURLRefusesToGuessForUnknownOrigin(t *testing.T) {
+	cfg := Config{
+		RedirectURLs: []string{
+			"https://rolltop.example.test" + CallbackPath,
+			"http://localhost:8080" + CallbackPath,
+		},
+	}
+	// Sending an unrelated origin to Google guarantees redirect_uri_mismatch.
+	// Reporting the misconfiguration up front is the honest outcome.
 	unknown := requestTo(t, "https://other.example.test/api/google/connect", "https")
-	if got := cfg.RedirectURL(unknown); got != "https://rolltop.example.test"+CallbackPath {
-		t.Fatalf("unknown-origin redirect = %q", got)
+	if got := cfg.RedirectURL(unknown); got != "" {
+		t.Fatalf("unknown-origin redirect = %q, want no guess", got)
+	}
+}
+
+func TestRedirectURLUsesSoleConfiguredEntry(t *testing.T) {
+	// With one URI there is nothing to choose, so a proxy that rewrites the
+	// host or scheme must not be able to break the flow.
+	cfg := Config{RedirectURLs: []string{"https://rolltop.example.test" + CallbackPath}}
+	for _, request := range []*http.Request{
+		requestTo(t, "http://rolltop.example.test/api/google/connect", ""),
+		requestTo(t, "http://10.0.0.5:8080/api/google/connect", ""),
+	} {
+		if got := cfg.RedirectURL(request); got != "https://rolltop.example.test"+CallbackPath {
+			t.Fatalf("sole-entry redirect = %q", got)
+		}
 	}
 }
 

@@ -23,12 +23,11 @@ func userGoogleConnectionMigrationSet() migrationSet {
 				status_detail TEXT NOT NULL DEFAULT '',
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL,
+				-- Also the lookup index for every read: connections are always
+				-- fetched by tenant, and by address when a reconnect reuses a
+				-- row, so no separate index is needed on those columns.
 				UNIQUE(user_id, google_email)
 			)`,
-			// Reconnecting an account reuses its row, so lookups are always
-			// tenant-scoped and ordered for the settings list.
-			`CREATE INDEX IF NOT EXISTS idx_google_connections_user_email
-				ON google_connections(user_id, google_email)`,
 		},
 	}
 }

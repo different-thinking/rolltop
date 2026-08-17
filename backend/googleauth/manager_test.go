@@ -40,6 +40,9 @@ type fakeGoogle struct {
 	email         string
 	scope         string
 	omitRefresh   bool
+	// beforeToken blocks inside the token handler so a test can hold a refresh
+	// in flight while it starts a second one.
+	beforeToken func()
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
@@ -56,6 +59,12 @@ func newFakeGoogle(t *testing.T) *fakeGoogle {
 
 func (g *fakeGoogle) handleToken(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
+	g.mu.Lock()
+	hold := g.beforeToken
+	g.mu.Unlock()
+	if hold != nil {
+		hold()
+	}
 	g.mu.Lock()
 	g.tokenCalls++
 	g.lastTokenForm = r.PostForm
@@ -481,8 +490,9 @@ func TestDisconnectRevokesGrantAndDeletesConnection(t *testing.T) {
 	env := newTestEnv(t)
 	connection := env.connect(t, env.userID)
 
-	if err := env.manager.Disconnect(context.Background(), env.userID, connection.ID); err != nil {
-		t.Fatal(err)
+	revokeErr, err := env.manager.Disconnect(context.Background(), env.userID, connection.ID)
+	if err != nil || revokeErr != nil {
+		t.Fatalf("disconnect err=%v revokeErr=%v", err, revokeErr)
 	}
 	_, revokeCalls := env.google.counts()
 	if revokeCalls != 1 {
@@ -507,9 +517,14 @@ func TestDisconnectDeletesLocallyWhenRevokeFails(t *testing.T) {
 	cfg.RevokeEndpoint = "http://127.0.0.1:1/revoke"
 	env.manager.Client().Config = cfg
 
-	err := env.manager.Disconnect(context.Background(), env.userID, connection.ID)
-	if err == nil {
+	revokeErr, err := env.manager.Disconnect(context.Background(), env.userID, connection.ID)
+	if revokeErr == nil {
 		t.Fatal("disconnect hid the revocation failure, want it reported")
+	}
+	// The revoke failure must not masquerade as a failed disconnect: the local
+	// connection really is gone, and the caller has to be able to tell.
+	if err != nil {
+		t.Fatalf("failed revoke reported as a disconnect failure: %v", err)
 	}
 	if _, err := env.db.GoogleConnection(context.Background(), env.userID, connection.ID); !store.IsNotFound(err) {
 		t.Fatalf("connection survived a failed revoke: %v", err)
@@ -523,7 +538,7 @@ func TestManagerRefusesCrossTenantConnectionAccess(t *testing.T) {
 	if _, err := env.manager.AccessToken(context.Background(), env.otherID, connection.ID); !store.IsNotFound(err) {
 		t.Fatalf("cross-tenant access token error = %v, want not found", err)
 	}
-	if err := env.manager.Disconnect(context.Background(), env.otherID, connection.ID); !store.IsNotFound(err) {
+	if _, err := env.manager.Disconnect(context.Background(), env.otherID, connection.ID); !store.IsNotFound(err) {
 		t.Fatalf("cross-tenant disconnect error = %v, want not found", err)
 	}
 	if _, err := env.db.GoogleConnection(context.Background(), env.userID, connection.ID); err != nil {
@@ -598,4 +613,144 @@ func TestRefreshMapIsEmptyAfterUse(t *testing.T) {
 	if remaining != 0 {
 		t.Fatalf("refresh map still holds %d entries", remaining)
 	}
+}
+
+func TestPendingFlowsAreCappedPerUserNotGlobally(t *testing.T) {
+	env := newTestEnv(t)
+	redirect := "https://rolltop.example.test" + CallbackPath
+
+	// A victim starts a normal authorization.
+	victimURL, err := env.manager.StartConnect(env.otherID, redirect, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	victimState, _ := url.Parse(victimURL)
+
+	// Another user floods connect far past the per-user cap. Starting a flow is
+	// a plain GET, so a page the user merely visits can do this.
+	for range maxPendingFlowsPerUser * 4 {
+		if _, err := env.manager.StartConnect(env.userID, redirect, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	env.manager.flows.mu.Lock()
+	flooderFlows := env.manager.flows.countForUserLocked(env.userID)
+	env.manager.flows.mu.Unlock()
+	if flooderFlows > maxPendingFlowsPerUser {
+		t.Fatalf("one user holds %d pending flows, want at most %d", flooderFlows, maxPendingFlowsPerUser)
+	}
+
+	// The victim's consent must still be completable.
+	if _, err := env.manager.CompleteConnect(context.Background(), env.otherID,
+		victimState.Query().Get("state"), "auth-code"); err != nil {
+		t.Fatalf("victim's flow was evicted by another user: %v", err)
+	}
+}
+
+func TestForceRefreshDoesNotAdoptAnInFlightToken(t *testing.T) {
+	env := newTestEnv(t)
+	connection := env.connect(t, env.userID)
+	env.now = env.now.Add(2 * time.Hour)
+
+	// Hold the token endpoint so a refresh is provably in flight while the
+	// forced one starts.
+	release := make(chan struct{})
+	env.google.mu.Lock()
+	env.google.beforeToken = func() { <-release }
+	env.google.mu.Unlock()
+
+	type refreshResult struct {
+		token string
+		err   error
+	}
+	inflight := make(chan refreshResult, 1)
+	go func() {
+		token, err := env.manager.AccessToken(context.Background(), env.userID, connection.ID)
+		inflight <- refreshResult{token, err}
+	}()
+	waitForInflightRefresh(t, env.manager)
+
+	forced := make(chan refreshResult, 1)
+	go func() {
+		token, err := env.manager.ForceRefresh(context.Background(), env.userID, connection.ID)
+		forced <- refreshResult{token, err}
+	}()
+
+	env.google.mu.Lock()
+	env.google.beforeToken = nil
+	env.google.mu.Unlock()
+	close(release)
+
+	slow := <-inflight
+	forcedResult := <-forced
+	if slow.err != nil {
+		t.Fatalf("in-flight refresh: %v", slow.err)
+	}
+	if forcedResult.err != nil {
+		t.Fatalf("force refresh: %v", forcedResult.err)
+	}
+	slowToken, forcedToken := slow.token, forcedResult.token
+	// A caller that forces a refresh has already established the in-flight
+	// token is unusable, so handing that same token back would silently make
+	// the retry a no-op.
+	if forcedToken == slowToken {
+		t.Fatalf("force refresh returned the in-flight token %q", forcedToken)
+	}
+}
+
+func TestFailureToFlagReauthStillReportsReauthRequired(t *testing.T) {
+	env := newTestEnv(t)
+	connection := env.connect(t, env.userID)
+	env.google.mu.Lock()
+	env.google.refreshFailure = "invalid_grant"
+	env.google.mu.Unlock()
+	env.now = env.now.Add(2 * time.Hour)
+
+	failing := &markFailingStore{ConnectionStore: env.db}
+	manager := googleauthManagerWithStore(env, failing)
+
+	// Even when the connection cannot be flagged, the caller must learn that
+	// consent is gone; a generic upstream error would leave the settings page
+	// offering "Test connection" instead of "Reauthorize".
+	_, err := manager.AccessToken(context.Background(), env.userID, connection.ID)
+	if !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("refresh error when flagging fails = %v, want ErrReauthRequired", err)
+	}
+	if !failing.attempted {
+		t.Fatal("no attempt was made to flag the connection")
+	}
+}
+
+// markFailingStore makes only the reauth flag write fail.
+type markFailingStore struct {
+	ConnectionStore
+	attempted bool
+}
+
+func (s *markFailingStore) MarkGoogleConnectionReauthRequired(ctx context.Context, userID, connectionID int64, detail string) error {
+	s.attempted = true
+	return errors.New("database is locked")
+}
+
+func googleauthManagerWithStore(env *testEnv, connections ConnectionStore) *Manager {
+	manager := NewManager(env.google.config(), connections, testMasterKey)
+	manager.SetNow(func() time.Time { return env.now })
+	manager.Client().RetryDelay = func(int) time.Duration { return time.Millisecond }
+	return manager
+}
+
+// waitForInflightRefresh blocks until a refresh has claimed its slot.
+func waitForInflightRefresh(t *testing.T, manager *Manager) {
+	t.Helper()
+	for range 2000 {
+		manager.refreshMu.Lock()
+		running := len(manager.refreshes)
+		manager.refreshMu.Unlock()
+		if running > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no refresh became in flight")
 }

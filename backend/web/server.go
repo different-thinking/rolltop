@@ -372,6 +372,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/android/", s.handleFrontendAsset)
 	mux.HandleFunc("/setup", s.handleApp)
 	mux.HandleFunc("/login", s.handleApp)
+	// Password reset emails link here; without a route the link 404s.
+	mux.HandleFunc("/reset-password", s.handleApp)
 	mux.HandleFunc("/mail", s.handleApp)
 	mux.HandleFunc("/mail/", s.handleApp)
 	mux.HandleFunc("/snoozes", s.handleApp)

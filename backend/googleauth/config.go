@@ -17,6 +17,10 @@ import (
 // of starting a flow that cannot complete.
 var ErrNotConfigured = errors.New("google oauth is not configured")
 
+// ErrNoRedirectURI reports that no configured redirect URI matches the origin
+// the browser used, so the flow would fail at Google with redirect_uri_mismatch.
+var ErrNoRedirectURI = errors.New("no configured google redirect URI matches this server's address")
+
 // Default endpoints for Google's OAuth 2.0 and OpenID Connect services.
 const (
 	DefaultAuthorizationEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -82,25 +86,46 @@ func (c Config) ScopeString() string {
 	return strings.Join(c.Scopes, " ")
 }
 
-// RedirectURL picks the configured redirect URI that matches how the browser
-// reached this server. Falling back to the first entry keeps a single-origin
-// install working without the operator having to think about ordering; falling
-// back to the request origin keeps development usable before any redirect URI
-// has been configured.
+// RedirectURL picks the configured redirect URI matching how the browser
+// reached this server. Google compares the value byte for byte against the URIs
+// registered in the Cloud console, so guessing wrong is not a degraded
+// experience, it is a flow that can never complete.
+//
+// With a single configured URI there is nothing to choose and it is used as-is,
+// which keeps a normal install working even behind a proxy that rewrites the
+// scheme or host. With several, the request origin decides. Host-only matching
+// is the second pass because a TLS-terminating proxy that forwards without
+// X-Forwarded-Proto makes an https deployment look like http here, and picking
+// some other entry over the one whose host actually matches would be worse than
+// a scheme mismatch the operator can see and fix.
+//
+// When nothing matches, this returns the empty string rather than an arbitrary
+// entry: an unresolvable origin is a configuration problem, and failing at the
+// connect button with a clear message beats bouncing the user off Google with
+// redirect_uri_mismatch.
 func (c Config) RedirectURL(r *http.Request) string {
+	if len(c.RedirectURLs) == 1 {
+		return c.RedirectURLs[0]
+	}
 	origin := requestOrigin(r)
+	if len(c.RedirectURLs) == 0 {
+		// Nothing configured: development against the origin the browser used.
+		if origin == "" {
+			return ""
+		}
+		return origin + CallbackPath
+	}
 	for _, candidate := range c.RedirectURLs {
 		if sameOrigin(candidate, origin) {
 			return candidate
 		}
 	}
-	if len(c.RedirectURLs) > 0 {
-		return c.RedirectURLs[0]
+	for _, candidate := range c.RedirectURLs {
+		if sameHost(candidate, origin) {
+			return candidate
+		}
 	}
-	if origin == "" {
-		return ""
-	}
-	return origin + CallbackPath
+	return ""
 }
 
 // CallbackPath is the route Google redirects back to after consent.
@@ -115,6 +140,23 @@ func sameOrigin(rawURL, origin string) bool {
 		return false
 	}
 	return strings.EqualFold(parsed.Scheme+"://"+parsed.Host, origin)
+}
+
+// sameHost compares only the host, which is what survives a proxy that
+// terminates TLS without announcing it.
+func sameHost(rawURL, origin string) bool {
+	if rawURL == "" || origin == "" {
+		return false
+	}
+	candidate, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	reached, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return candidate.Host != "" && strings.EqualFold(candidate.Host, reached.Host)
 }
 
 func requestOrigin(r *http.Request) string {

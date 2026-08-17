@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -79,11 +80,15 @@ func (m *Manager) Configured() bool {
 // Client exposes the HTTP client so tests can retarget endpoints and backoff.
 func (m *Manager) Client() *Client { return m.client }
 
-// SetNow overrides the clock. Tests use it to force token expiry.
+// SetNow overrides the clock so tests can force token expiry. It must be called
+// before the manager starts serving requests: the manager's own clock and the
+// client's are plain fields read without synchronization on every call.
 func (m *Manager) SetNow(now func() time.Time) {
 	m.now = now
 	m.client.Now = now
-	m.flows.now = now
+	// The flow store is read under its own lock by concurrent connect and
+	// callback requests, so its clock is swapped under that same lock.
+	m.flows.setNow(now)
 }
 
 func (m *Manager) timeNow() time.Time {
@@ -117,7 +122,7 @@ func (m *Manager) StartConnect(userID int64, redirectURI, loginHint string) (str
 		return "", errors.New("google authorization requires a signed-in user")
 	}
 	if strings.TrimSpace(redirectURI) == "" {
-		return "", errors.New("google authorization has no usable redirect URI; set ROLLTOP_GOOGLE_REDIRECT_URLS")
+		return "", ErrNoRedirectURI
 	}
 	state, err := randomToken()
 	if err != nil {
@@ -192,17 +197,21 @@ func (m *Manager) AccessToken(ctx context.Context, userID, connectionID int64) (
 	if token, ok := m.usableStoredToken(connection); ok {
 		return token, nil
 	}
-	return m.refresh(ctx, userID, connectionID)
+	return m.refresh(ctx, userID, connectionID, false)
 }
 
 // ForceRefresh discards the stored access token and fetches a new one. The IMAP
 // and SMTP paths use it to retry once after an authentication failure, which
 // covers a token Google invalidated before its stated expiry.
+//
+// Unlike AccessToken it never adopts the result of a refresh that was already
+// running: that refresh may well have produced the very token the caller just
+// had rejected, and handing it back would turn the retry into a no-op.
 func (m *Manager) ForceRefresh(ctx context.Context, userID, connectionID int64) (string, error) {
 	if err := m.ready(); err != nil {
 		return "", err
 	}
-	return m.refresh(ctx, userID, connectionID)
+	return m.refresh(ctx, userID, connectionID, true)
 }
 
 // usableStoredToken reports the stored access token when it is still good.
@@ -228,29 +237,39 @@ func (m *Manager) usableStoredToken(connection store.GoogleConnection) (string, 
 // refresh performs one refresh per connection at a time. Sync workers for the
 // same account run concurrently, and letting each of them refresh would race
 // for which token gets persisted last.
-func (m *Manager) refresh(ctx context.Context, userID, connectionID int64) (string, error) {
+//
+// A forced refresh waits for any running refresh to finish and then performs
+// its own, because its caller has already established that the token in flight
+// is not good enough.
+func (m *Manager) refresh(ctx context.Context, userID, connectionID int64, force bool) (string, error) {
 	key := refreshKey{userID: userID, connectionID: connectionID}
-	m.refreshMu.Lock()
-	if inflight, ok := m.refreshes[key]; ok {
+	for {
+		m.refreshMu.Lock()
+		inflight, running := m.refreshes[key]
+		if !running {
+			call := &refreshCall{done: make(chan struct{})}
+			m.refreshes[key] = call
+			m.refreshMu.Unlock()
+
+			call.token, call.err = m.doRefresh(ctx, userID, connectionID)
+
+			m.refreshMu.Lock()
+			delete(m.refreshes, key)
+			m.refreshMu.Unlock()
+			close(call.done)
+			return call.token, call.err
+		}
 		m.refreshMu.Unlock()
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-inflight.done:
+		}
+		if !force {
 			return inflight.token, inflight.err
 		}
+		// Loop around and claim the slot for a refresh of our own.
 	}
-	call := &refreshCall{done: make(chan struct{})}
-	m.refreshes[key] = call
-	m.refreshMu.Unlock()
-
-	call.token, call.err = m.doRefresh(ctx, userID, connectionID)
-
-	m.refreshMu.Lock()
-	delete(m.refreshes, key)
-	m.refreshMu.Unlock()
-	close(call.done)
-	return call.token, call.err
 }
 
 func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64) (string, error) {
@@ -268,8 +287,13 @@ func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64) (st
 	token, err := m.client.RefreshToken(ctx, refreshToken)
 	if err != nil {
 		if errors.Is(err, ErrReauthRequired) {
+			// Flagging the row is best effort. If the write fails the caller
+			// still has to learn that consent is gone, so the authorization
+			// error wins over the storage error: reporting a generic upstream
+			// failure here would leave the UI offering "Test connection"
+			// instead of "Reauthorize".
 			if markErr := m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "Google rejected the stored authorization."); markErr != nil {
-				return "", markErr
+				log.Printf("google connection user_id=%d connection_id=%d could not be flagged for reauthorization: %v", userID, connectionID, markErr)
 			}
 		}
 		return "", err
@@ -313,23 +337,29 @@ func (m *Manager) Get(ctx context.Context, userID, connectionID int64) (store.Go
 	return m.store.GoogleConnection(ctx, userID, connectionID)
 }
 
-// Disconnect revokes the grant at Google and removes the local connection. The
-// local row is always deleted, even when revocation fails, so a user can detach
-// an account Google has already forgotten about. The revocation error is
-// returned alongside so callers can surface it.
-func (m *Manager) Disconnect(ctx context.Context, userID, connectionID int64) error {
+// Disconnect revokes the grant at Google and removes the local connection.
+//
+// The two failures mean opposite things to the user, so they are reported
+// separately: revokeErr means Rolltop forgot the account but Google may still
+// list the grant, while err means the local connection is still there and the
+// user's click did not take effect. Collapsing them would let a failed delete
+// be presented as a successful disconnect.
+//
+// The local row is deleted even when revocation fails, so an account Google has
+// already forgotten about can still be detached.
+func (m *Manager) Disconnect(ctx context.Context, userID, connectionID int64) (revokeErr error, err error) {
 	if m == nil || m.store == nil {
-		return errors.New("google connections are unavailable")
+		return nil, errors.New("google connections are unavailable")
 	}
 	connection, err := m.store.GoogleConnection(ctx, userID, connectionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	revokeErr := m.revoke(ctx, connection)
+	revokeErr = m.revoke(ctx, connection)
 	if err := m.store.DeleteGoogleConnection(ctx, userID, connectionID); err != nil {
-		return err
+		return revokeErr, err
 	}
-	return revokeErr
+	return revokeErr, nil
 }
 
 // revoke asks Google to drop the grant. Revoking the refresh token invalidates

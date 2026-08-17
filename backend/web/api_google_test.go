@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -366,5 +367,59 @@ func TestGoogleCallbackSurfacesConsentDenial(t *testing.T) {
 	}
 	if connections, _ := env.db.ListGoogleConnections(context.Background(), env.owner.ID); len(connections) != 0 {
 		t.Fatalf("denied consent created %d connections", len(connections))
+	}
+}
+
+// deleteFailingStore makes only the local delete fail, leaving the row behind
+// after the grant was already revoked at Google.
+type deleteFailingStore struct {
+	googleauth.ConnectionStore
+}
+
+func (s *deleteFailingStore) DeleteGoogleConnection(ctx context.Context, userID, connectionID int64) error {
+	return errors.New("database is locked")
+}
+
+func TestGoogleDisconnectDoesNotReportSuccessWhenTheRowSurvives(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	env.server.googleAuth = googleauth.NewManager(
+		env.manager.Config(), &deleteFailingStore{ConnectionStore: env.db}, googleTestMasterKey)
+
+	target := "/api/google/connections/" + strconv.FormatInt(connection.ID, 10)
+	response := httptest.NewRecorder()
+	env.server.apiGoogleConnectionByID(response, env.request(t, env.owner, http.MethodDelete, target, nil))
+
+	// The connection is still there, so telling the user it was disconnected
+	// would leave them believing a revoked, dead account was cleaned up.
+	if response.Code == http.StatusOK {
+		t.Fatalf("failed delete reported as success: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "disconnected") {
+		t.Fatalf("failed delete claimed disconnection: %s", response.Body.String())
+	}
+	if _, err := env.db.GoogleConnection(context.Background(), env.owner.ID, connection.ID); err != nil {
+		t.Fatalf("connection should still exist: %v", err)
+	}
+}
+
+func TestGoogleConnectReportsUnmatchedRedirectURI(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	cfg := env.manager.Config()
+	cfg.RedirectURLs = []string{
+		"https://elsewhere.example.test" + googleauth.CallbackPath,
+		"http://localhost:8080" + googleauth.CallbackPath,
+	}
+	env.server.googleAuth = googleauth.NewManager(cfg, env.db, googleTestMasterKey)
+
+	response := httptest.NewRecorder()
+	env.server.apiGoogleConnect(response, env.request(t, env.owner, http.MethodGet, "/api/google/connect", nil))
+	// Redirecting to Google with a URI it has never seen only yields an opaque
+	// redirect_uri_mismatch page, so the misconfiguration is reported here.
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unmatched redirect URI status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "ROLLTOP_GOOGLE_REDIRECT_URLS") {
+		t.Fatalf("error does not name the setting to fix: %s", response.Body.String())
 	}
 }

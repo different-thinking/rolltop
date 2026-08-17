@@ -225,18 +225,23 @@ func (s *Server) googleConnectionTest(w http.ResponseWriter, r *http.Request, us
 }
 
 // googleConnectionDisconnect revokes the grant at Google and removes the local
-// connection. The local row is gone either way, so a revoke failure is reported
-// as a warning rather than an error the user has to resolve.
+// connection. A failed revoke still leaves the account detached and is reported
+// as a warning; a failed delete means nothing was disconnected at all and must
+// not be dressed up as success.
 func (s *Server) googleConnectionDisconnect(w http.ResponseWriter, r *http.Request, userID, connectionID int64) {
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	err := s.googleAuth.Disconnect(r.Context(), userID, connectionID)
+	revokeErr, err := s.googleAuth.Disconnect(r.Context(), userID, connectionID)
 	if store.IsNotFound(err) {
 		http.NotFound(w, r)
 		return
 	}
 	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if revokeErr != nil {
 		writeJSON(w, map[string]any{
 			"disconnected": true,
 			"warning":      "The account was removed from Rolltop, but Google could not be reached to revoke access. Revoke it manually in your Google account settings.",
@@ -252,6 +257,9 @@ func (s *Server) writeGoogleError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, googleauth.ErrNotConfigured):
 		writeAPIError(w, http.StatusServiceUnavailable, "Google is not configured on this server.")
+	case errors.Is(err, googleauth.ErrNoRedirectURI):
+		writeAPIError(w, http.StatusServiceUnavailable,
+			"No configured Google redirect URI matches this server's address. Add it to ROLLTOP_GOOGLE_REDIRECT_URLS and to the OAuth client in the Google Cloud console.")
 	case errors.Is(err, googleauth.ErrReauthRequired):
 		writeAPIError(w, http.StatusConflict, "This Google account needs to be authorized again.")
 	case errors.Is(err, googleauth.ErrUnknownFlow):

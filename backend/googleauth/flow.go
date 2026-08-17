@@ -23,8 +23,15 @@ var ErrUnknownFlow = errors.New("google authorization request is unknown or expi
 // minutes is long enough for consent including a password prompt and 2FA.
 const flowTTL = 10 * time.Minute
 
-// maxPendingFlows caps memory use if callbacks are never completed. Reaching it
-// evicts the oldest entries, which at worst forces a user to click connect again.
+// maxPendingFlowsPerUser bounds how many unfinished authorizations one user can
+// hold. Starting a flow is a plain GET, so a page a user merely visits can fire
+// off connect requests; without a per-user bound those would evict every other
+// user's pending consent and a signed-in victim could be kept from ever
+// completing one. Eight covers a person retrying in several tabs.
+const maxPendingFlowsPerUser = 8
+
+// maxPendingFlows is the whole-process backstop, only reachable with many
+// distinct users mid-consent at once.
 const maxPendingFlows = 256
 
 type pendingFlow struct {
@@ -47,10 +54,21 @@ func newFlowStore(now func() time.Time) *flowStore {
 	return &flowStore{flows: map[string]pendingFlow{}, now: now}
 }
 
+func (s *flowStore) setNow(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
+}
+
 func (s *flowStore) put(state string, flow pendingFlow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evictLocked()
+	s.evictExpiredLocked()
+	s.evictOverflowForUserLocked(flow.userID)
+	s.evictGlobalOverflowLocked()
 	s.flows[state] = flow
 }
 
@@ -59,7 +77,7 @@ func (s *flowStore) put(state string, flow pendingFlow) {
 func (s *flowStore) take(state string, userID int64) (pendingFlow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evictLocked()
+	s.evictExpiredLocked()
 	flow, ok := s.flows[state]
 	if !ok {
 		return pendingFlow{}, ErrUnknownFlow
@@ -72,26 +90,62 @@ func (s *flowStore) take(state string, userID int64) (pendingFlow, error) {
 	return flow, nil
 }
 
-func (s *flowStore) evictLocked() {
+func (s *flowStore) evictExpiredLocked() {
 	cutoff := s.now().Add(-flowTTL)
 	for state, flow := range s.flows {
 		if flow.createdAt.Before(cutoff) {
 			delete(s.flows, state)
 		}
 	}
-	for len(s.flows) >= maxPendingFlows {
-		oldestState := ""
-		var oldestAt time.Time
-		for state, flow := range s.flows {
-			if oldestState == "" || flow.createdAt.Before(oldestAt) {
-				oldestState, oldestAt = state, flow.createdAt
-			}
-		}
-		if oldestState == "" {
+}
+
+// evictOverflowForUserLocked makes room for one more flow belonging to userID by
+// dropping that user's own oldest entries. Overflow caused by one user is paid
+// for by that user, never by anyone else's pending consent.
+func (s *flowStore) evictOverflowForUserLocked(userID int64) {
+	for s.countForUserLocked(userID) >= maxPendingFlowsPerUser {
+		if !s.deleteOldestLocked(&userID) {
 			return
 		}
-		delete(s.flows, oldestState)
 	}
+}
+
+func (s *flowStore) evictGlobalOverflowLocked() {
+	for len(s.flows) >= maxPendingFlows {
+		if !s.deleteOldestLocked(nil) {
+			return
+		}
+	}
+}
+
+func (s *flowStore) countForUserLocked(userID int64) int {
+	count := 0
+	for _, flow := range s.flows {
+		if flow.userID == userID {
+			count++
+		}
+	}
+	return count
+}
+
+// deleteOldestLocked removes the oldest flow, optionally restricted to one user.
+// It reports whether anything was removed.
+func (s *flowStore) deleteOldestLocked(userID *int64) bool {
+	oldestState := ""
+	var oldestAt time.Time
+	for state, flow := range s.flows {
+		if userID != nil && flow.userID != *userID {
+			continue
+		}
+		if oldestState == "" || flow.createdAt.Before(oldestAt) {
+			oldestState, oldestAt = state, flow.createdAt
+		}
+	}
+	if oldestState == "" {
+		return false
+	}
+	delete(s.flows, oldestState)
+	return true
 }
 
 // randomToken returns 32 bytes of entropy in URL-safe base64.
