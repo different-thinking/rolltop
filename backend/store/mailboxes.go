@@ -395,11 +395,18 @@ func (s *Store) ListMailboxesForUser(ctx context.Context, userID int64) ([]Mailb
 // Callers that only need to know where a role lives use this instead of the full
 // folder summary, which aggregates per-folder message counts.
 func (s *Store) ListMailboxIDsWithRoleForUser(ctx context.Context, userID int64, role string) ([]int64, error) {
+	// An unrecognized role normalizes to the empty string, which is what every
+	// ordinary folder carries. Answering that query would hand the caller the
+	// whole mailbox list under the name of a role, so it is refused instead.
+	role = normalizeMailboxRole(role)
+	if role == "" {
+		return nil, nil
+	}
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id FROM mailboxes WHERE user_id = ? AND role = ?`, userID, normalizeMailboxRole(role))
+	rows, err := db.QueryContext(ctx, `SELECT id FROM mailboxes WHERE user_id = ? AND role = ?`, userID, role)
 	if err != nil {
 		return nil, err
 	}

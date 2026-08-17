@@ -246,6 +246,101 @@ func TestScopeTrashPlanPagesBeyondOneSearchBatch(t *testing.T) {
 	}
 }
 
+// A filter can span accounts, and Trash belongs to an account: that is the path
+// that produces more than one group, and one background run per account.
+func TestScopeTrashPlanGroupsPerAccount(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-multi@example.test")
+	second, err := db.UpsertMailAccount(ctx, store.MailAccount{
+		UserID: tenant.user.ID, Email: "scope-multi-second@example.test", Host: "imap.example.test", Port: 993,
+		Username: "scope-multi-second@example.test", EncryptedPassword: "encrypted", UseTLS: true, Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInbox, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, second.ID, "Second/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTrash, err := db.GetOrCreateMailboxWithRole(ctx, tenant.user.ID, second.ID, "Second/Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTenant := scopeTestTenant{user: tenant.user, accountID: second.ID, inbox: secondInbox, trash: secondTrash}
+	first := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, 1101, "")
+	other := createScopeTestMessage(t, ctx, db, secondTenant, secondInbox, 1102, "")
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Groups) != 2 {
+		t.Fatalf("groups = %d, want one per account", len(plan.Groups))
+	}
+	if plan.Groups[0].AccountID > plan.Groups[1].AccountID {
+		t.Fatalf("groups ordered %d then %d, want ascending account IDs",
+			plan.Groups[0].AccountID, plan.Groups[1].AccountID)
+	}
+	byAccount := map[int64]scopeTrashGroup{}
+	for _, group := range plan.Groups {
+		byAccount[group.AccountID] = group
+	}
+	if got := byAccount[tenant.accountID]; got.Target.ID != tenant.trash.ID || !slices.Contains(got.MessageIDs, first.ID) {
+		t.Fatalf("first account group = target %d ids %v", got.Target.ID, got.MessageIDs)
+	}
+	if got := byAccount[second.ID]; got.Target.ID != secondTrash.ID || !slices.Contains(got.MessageIDs, other.ID) {
+		t.Fatalf("second account group = target %d ids %v", got.Target.ID, got.MessageIDs)
+	}
+	// Each account's messages go to its own Trash and nowhere else.
+	if slices.Contains(byAccount[tenant.accountID].MessageIDs, other.ID) ||
+		slices.Contains(byAccount[second.ID].MessageIDs, first.ID) {
+		t.Fatal("messages were grouped under the wrong account")
+	}
+}
+
+// A filter larger than one pass has to say so, because the UI offers another
+// pass rather than pretending the whole filter was handled.
+func TestScopeTrashPlanReportsTruncation(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-truncate@example.test")
+	for i := 0; i < 5; i++ {
+		createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, uint32(1200+i), "")
+	}
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	overFetched, err := db.ListAllMailScopeMessagesForUser(ctx, tenant.user.ID, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, truncated, err := trimScopeMessages(overFetched, 3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(messages) != 3 {
+		t.Fatalf("trim = %d messages truncated %t, want 3/true", len(messages), truncated)
+	}
+
+	// The full pass over the same folder fits, so nothing is reported as cut off.
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{MailboxID: tenant.inbox.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Truncated || plan.Matched != 5 {
+		t.Fatalf("plan = matched %d truncated %t, want 5/false", plan.Matched, plan.Truncated)
+	}
+}
+
 func TestScopeTrashPlanIsUserScoped(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))

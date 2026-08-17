@@ -717,6 +717,14 @@ function MailboxRecoveryEmptyState({
 }
 
 
+// The server treats in: as a folder operator only at the start of the query or
+// after whitespace, so the same rule decides whether a query is folder-scoped.
+const searchMailboxOperator = /(^|\s)in:("[^"]+"|\S+)/i;
+
+function searchNamesMailbox(query: string): boolean {
+  return searchMailboxOperator.test(query);
+}
+
 function activeSearchMaintenanceRun(runs: SyncRun[]): SyncRun | null {
   return runs.find((run) => {
     const subject = (run.latest_new_subject || "").toLowerCase();
@@ -903,8 +911,11 @@ export function SearchView({
           <div className="muted">
             Results for <strong>{query}</strong>
             {/* Deleted mail is left out the way All Mail leaves it out, so say
-                where it went instead of letting results look incomplete. */}
-            {query.toLowerCase().includes("in:") ? null : <span className="search-scope-hint"> · Trash excluded, add in:trash to include it</span>}
+                where it went instead of letting results look incomplete. A query
+                that names a folder is already explicitly scoped, so it says
+                nothing there — matched against the operator the server parses,
+                not any "in:" in the text, so "checkin:notes" still gets it. */}
+            {searchNamesMailbox(query) ? null : <span className="search-scope-hint"> · Trash excluded, add in:trash to include it</span>}
           </div>
           {pluginSearchActions}
         </div>
@@ -1270,6 +1281,9 @@ function MessageList({
   // Set on unmount so the queued-move watch stops touching state after the view
   // is gone; it outlives a single render by design.
   const unmounted = useRef(false);
+  const scopeDeleteTrigger = useRef<HTMLButtonElement | null>(null);
+  const scopeDeleteCancel = useRef<HTMLButtonElement | null>(null);
+  const scopeDeleteConfirm = useRef<HTMLButtonElement | null>(null);
   const swipeSession = useRef<{ id: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean; blocked: boolean } | null>(null);
   const suppressRowClickUntil = useRef(0);
   // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
@@ -1348,6 +1362,12 @@ function MessageList({
       }
     });
   }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs, pendingSwipeMoveIDs, pendingSwipeSnoozeIDs]);
+
+  // Focus lands on Cancel rather than the destructive control: a stray Enter on
+  // a freshly opened confirmation must not delete a whole filter.
+  useEffect(() => {
+    if (scopeDeletePending) scopeDeleteCancel.current?.focus();
+  }, [scopeDeletePending]);
 
   // A different folder or query is a different selection: whole-filter mode must
   // not survive the move, or Delete would act on a filter the user left.
@@ -1477,6 +1497,32 @@ function MessageList({
     setScopeDeletePending(false);
   }
 
+  // The confirmation is modal over an irreversible action, so it owns the
+  // keyboard while it is open: Escape backs out, Tab cannot wander behind the
+  // backdrop, and whichever way it closes, focus returns to the button that
+  // opened it.
+  function closeScopeDeleteDialog() {
+    setScopeDeletePending(false);
+    scopeDeleteTrigger.current?.focus();
+  }
+
+  function handleScopeDeleteKeys(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeScopeDeleteDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const cancel = scopeDeleteCancel.current;
+    const confirm = scopeDeleteConfirm.current;
+    if (!cancel || !confirm) return;
+    event.preventDefault();
+    const forward = !event.shiftKey;
+    const active = document.activeElement;
+    if (forward) (active === cancel ? confirm : cancel).focus();
+    else (active === confirm ? cancel : confirm).focus();
+  }
+
   function selectWholeScope() {
     if (!listScope || selectionBusy) return;
     setSelectedIDs(new Set(visible.map((conversation) => conversation.message.id)));
@@ -1494,19 +1540,15 @@ function MessageList({
     try {
       const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query });
       const queuedMessages = result.queued_messages || 0;
-      if (queuedMessages > 0) {
-        addToast(`Moving ${messageCountLabel(queuedMessages)} to Trash. This continues in the background.`);
-      } else if (result.skipped > 0) {
-        addToast("Every matching message is already in Trash.");
-      } else {
-        addToast("This filter has no messages left to delete.");
-      }
-      if (queuedMessages > 0 && result.skipped > 0) {
-        addToast(`Skipped ${messageCountLabel(result.skipped)} already in Trash.`);
-      }
-      if (result.truncated) {
-        addToast(`This pass covers ${messageCountLabel(result.matched)}. Repeat the delete to continue with the rest.`);
-      }
+      // One action, one summary: the counts belong in a single sentence rather
+      // than a stack of toasts the user has to read in order.
+      const parts: string[] = [];
+      if (queuedMessages > 0) parts.push(`Moving ${messageCountLabel(queuedMessages)} to Trash. This continues in the background.`);
+      else if (result.skipped > 0) parts.push("Every matching message is already in Trash.");
+      else parts.push("This filter has no messages left to delete.");
+      if (queuedMessages > 0 && result.skipped > 0) parts.push(`${messageCountLabel(result.skipped)} already there were skipped.`);
+      if (result.truncated) parts.push(`This pass covers ${messageCountLabel(result.matched)} — repeat the delete to continue with the rest.`);
+      addToast(parts.join(" "));
       if (result.partial_error) addToast(result.partial_error, "error");
       clearSelection();
       onListChanged?.();
@@ -2373,6 +2415,7 @@ function MessageList({
             <button
               type="button"
               className="selection-delete"
+              ref={scopeDeleteTrigger}
               disabled={selectionBusy}
               onClick={() => scopeSelected ? setScopeDeletePending(true) : void deleteSelected()}
               title={scopeSelected ? "Move every message matching this filter to Trash" : "Move selected messages to Trash"}
@@ -2384,13 +2427,14 @@ function MessageList({
         </div>
       ) : null}
       {scopeDeletePending && listScope ? (
-        <div className="confirm-backdrop" role="presentation" onClick={() => setScopeDeletePending(false)}>
+        <div className="confirm-backdrop" role="presentation" onClick={closeScopeDeleteDialog}>
           <section
             className="confirm-dialog"
             role="dialog"
             aria-modal="true"
             aria-labelledby="scope-delete-title"
             onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleScopeDeleteKeys}
           >
             <h2 id="scope-delete-title">Delete everything this filter matches?</h2>
             <p>
@@ -2399,8 +2443,8 @@ function MessageList({
               This is not limited to the page you can see, it runs in the background, and it cannot be undone.
             </p>
             <div className="actions">
-              <button className="secondary" type="button" onClick={() => setScopeDeletePending(false)}>Cancel</button>
-              <button type="button" onClick={() => void deleteWholeScope()}>Move all to Trash</button>
+              <button className="secondary" type="button" ref={scopeDeleteCancel} onClick={closeScopeDeleteDialog}>Cancel</button>
+              <button type="button" ref={scopeDeleteConfirm} onClick={() => void deleteWholeScope()}>Move all to Trash</button>
             </div>
           </section>
         </div>
