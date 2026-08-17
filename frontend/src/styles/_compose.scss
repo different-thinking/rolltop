@@ -88,6 +88,7 @@
   padding: 18px 20px 22px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+
   // Opening a reply scrolls this row into view. The top bar is sticky and 64px
   // tall, so without the margin the composer lands underneath it.
   scroll-margin-top: 84px;
