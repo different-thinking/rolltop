@@ -25,18 +25,26 @@ It changes only derived search completion state; it does not delete or alter
 message content, IMAP state, attachments, or blobs.
 `
 
+const commandUsage = resetSearchUsage + "\n" + databaseMaintenanceUsage + "\n" + backupDatabaseUsage
+
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("a command is required\n\n%s", resetSearchUsage)
+		return fmt.Errorf("a command is required\n\n%s", commandUsage)
 	}
 	switch args[0] {
 	case "reset-search":
 		return runResetSearch(ctx, args[1:], stdout, stderr)
+	case "check-db":
+		return runCheckDatabase(ctx, args[1:], stdout, stderr)
+	case "recover-db":
+		return runRecoverDatabase(ctx, args[1:], stdout, stderr)
+	case "backup-db":
+		return runBackupDatabase(ctx, args[1:], stdout, stderr)
 	case "help", "--help", "-h":
-		_, _ = io.WriteString(stdout, resetSearchUsage)
+		_, _ = io.WriteString(stdout, commandUsage)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q\n\n%s", args[0], resetSearchUsage)
+		return fmt.Errorf("unknown command %q\n\n%s", args[0], commandUsage)
 	}
 }
 

@@ -10,7 +10,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,6 +33,7 @@ const (
 // Store is the SQLite access layer; in production the root store opens the system DB and caches per-user stores.
 type Store struct {
 	db                *sql.DB
+	path              string
 	dataDir           string
 	schema            schemaKind
 	split             bool
@@ -38,6 +41,8 @@ type Store struct {
 	pluginMigrations  []plugins.Migration
 	mu                sync.Mutex
 	userStores        map[int64]*Store
+	healthMu          sync.Mutex
+	health            map[int64]DatabaseHealth
 }
 
 // Open creates a combined store in one SQLite file. It is mostly used by tests
@@ -90,6 +95,7 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 	db.SetMaxIdleConns(4)
 	s := &Store{
 		db:                db,
+		path:              path,
 		dataDir:           dataDir,
 		schema:            schema,
 		split:             split,
@@ -101,9 +107,22 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 	}
 	if err := s.migrate(context.Background(), schema, progress); err != nil {
 		_ = db.Close()
+		// A corrupt file reports SQLITE_CORRUPT from the first migration
+		// statement onward. Name the file and the offline repair command here
+		// so startup never fails with a bare "database disk image is malformed".
+		if IsCorrupt(err) {
+			return nil, newCorruptionError(0, path, err)
+		}
 		return nil, err
 	}
 	return s, nil
+}
+
+// DatabasePath returns the SQLite file backing the receiver. On the root
+// production store this is the system database; per-user stores return their
+// own tenant file.
+func (s *Store) DatabasePath() string {
+	return s.path
 }
 
 // Close shuts down the root store and any cached per-user stores opened through
@@ -156,6 +175,14 @@ func (s *Store) PrepareUserStores(ctx context.Context, progress MigrationReporte
 	for i, user := range users {
 		reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d", user.ID), Done: i, Total: len(users)})
 		if _, err := s.userStore(ctx, user.ID, progress); err != nil {
+			// A corrupt tenant database must not keep the installation down.
+			// userStore has already latched it, so its own requests fail with
+			// the repair instructions while every other tenant is served — and
+			// the admin UI that schedules the repair stays reachable.
+			if IsCorrupt(err) {
+				reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d is damaged", user.ID), Done: i + 1, Total: len(users)})
+				continue
+			}
 			return err
 		}
 		reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d", user.ID), Done: i + 1, Total: len(users)})
@@ -170,6 +197,12 @@ func (s *Store) PrepareUserStores(ctx context.Context, progress MigrationReporte
 func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationReporter) (*Store, error) {
 	if !s.split || userID == 0 {
 		return s, nil
+	}
+	// UserStore and UserDB reach this without going through dataDB, so the
+	// latch has to be honored here too; otherwise every request re-opens and
+	// re-migrates a database that is known to be unreadable.
+	if health, corrupt := s.databaseHealth(userID); corrupt {
+		return nil, newCorruptionError(userID, health.Path, errors.New(health.Detail))
 	}
 	s.mu.Lock()
 	if us := s.userStores[userID]; us != nil {
@@ -191,7 +224,7 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 		migrations:  s.pluginMigrations,
 	})
 	if err != nil {
-		return nil, err
+		return nil, s.NoteError(userID, err)
 	}
 	if err := us.mirrorUser(ctx, user); err != nil {
 		_ = us.Close()
@@ -221,6 +254,9 @@ func (s *Store) UserDB(ctx context.Context, userID int64) (*sql.DB, error) {
 
 // dataDB is the central tenant-routing helper. Any method that reads or writes
 // user-owned mail/contact/blob metadata should reach SQLite through this path.
+// A tenant already known to be corrupt fails here without touching the file, so
+// every caller stops retrying a database that cannot answer until it is
+// repaired offline.
 func (s *Store) dataDB(ctx context.Context, userID int64) (*sql.DB, error) {
 	if !s.split || userID == 0 {
 		return s.db, nil
@@ -230,10 +266,18 @@ func (s *Store) dataDB(ctx context.Context, userID int64) (*sql.DB, error) {
 
 // mustDataDB is used only in helpers that must satisfy database/sql callback
 // shapes and cannot return an error at the point they resolve the tenant DB.
+// It never panics: an unresolvable tenant yields a handle whose statements all
+// fail, which every caller already handles as a query error.
 func (s *Store) mustDataDB(ctx context.Context, userID int64) *sql.DB {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
-		panic(err)
+		// Corruption already reported itself when it was latched. Anything else
+		// would be lost entirely, because the caller only sees the generic
+		// statement failure the unavailable handle produces.
+		if !IsCorrupt(err) {
+			log.Printf("resolve user %d database: %v", userID, err)
+		}
+		return unavailableDB()
 	}
 	return db
 }

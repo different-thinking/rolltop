@@ -1664,3 +1664,188 @@
     overflow-wrap: anywhere;
   }
 }
+
+/* Admin database maintenance page. */
+.database-admin {
+  display: grid;
+  gap: 18px;
+}
+
+.database-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.database-disk {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+
+  &.is-low {
+    color: var(--danger);
+    font-weight: 700;
+  }
+}
+
+.database-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+
+  th,
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  td small {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+}
+
+.database-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.database-state {
+  font-weight: 700;
+
+  &.is-ok {
+    color: var(--muted);
+  }
+
+  &.is-warn {
+    color: var(--danger);
+  }
+
+  &.is-bad {
+    color: var(--danger);
+  }
+}
+
+.database-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.database-job {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--surface);
+
+  h2 {
+    margin: 0;
+    font-size: 14px;
+  }
+
+  &.is-running h2::after {
+    content: "";
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-left: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+}
+
+.database-job-detail {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.database-job-log {
+  max-height: 260px;
+  margin: 10px 0 0;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.database-backups {
+  h2 {
+    margin: 0 0 4px;
+    font-size: 14px;
+  }
+
+  ul {
+    margin: 10px 0 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 6px;
+  }
+
+  li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 13px;
+
+    small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+  }
+}
+
+.database-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 45%);
+}
+
+.database-confirm-panel {
+  width: min(520px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 22px;
+  background: var(--surface);
+
+  h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+  }
+
+  p {
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+}
+
+.database-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}

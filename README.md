@@ -54,9 +54,18 @@ export ROLLTOP_BLOB_RETENTION="336h"
 export ROLLTOP_COOKIE_SECURE="false"
 export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
+export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
+
+`ROLLTOP_STARTUP_INTEGRITY_CHECK` decides when SQLite files are verified during
+startup. `auto` (the default) verifies them only after a run that did not shut
+down cleanly, `always` verifies on every start, `never` disables the check.
+Verification reads every page, so `always` costs startup time proportional to
+the size of the mirror. A database found damaged is reported and set aside, not
+repaired: startup continues so every other tenant keeps working and the admin
+Database page stays reachable to schedule the repair.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
@@ -127,6 +136,108 @@ Crash reporting is armed before the listener binds and before the
 configuration is read, so a port conflict or an unusable `ROLLTOP_MASTER_KEY`
 also lands in `/data/crash.log`. The deliberate restart for search index
 recovery (below) is not a crash and is not recorded as one.
+
+### Corrupt SQLite Databases
+
+`database disk image is malformed` is SQLite reporting that the file itself is
+damaged, so every operation for that tenant fails until the file is repaired.
+Rolltop names the damaged file and the repair command in its logs, for example:
+
+```text
+sync user_id=1 mailboxes=INBOX: store message mailbox "INBOX" UID 48882: user 1
+database /data/users/1/rolltop.db is corrupt: database disk image is malformed;
+stop rolltop and run "rolltop recover-db --user-id 1 --confirm-offline"
+```
+
+Everything below is also available to admins under **Account menu → Database**,
+which is the shorter path: it lists every database with its size, WAL size, and
+integrity state next to the free space on the data volume, runs the integrity
+check and backups in the background while Rolltop keeps serving, and schedules
+a repair. Scheduling a repair writes a durable marker and restarts Rolltop,
+because a database can only be replaced while nothing holds a handle on it; the
+repair then runs during startup and its report appears on the same page. The
+commands below do the same work from a shell.
+
+Repair is always an explicit step, and it never modifies the damaged file.
+Stop every Rolltop process that mounts the data volume, then check which files
+SQLite considers damaged:
+
+```sh
+ROLLTOP_SERVICE=<your-service-name>
+docker compose stop "$ROLLTOP_SERVICE"
+docker compose run --rm --no-deps "$ROLLTOP_SERVICE" check-db --confirm-offline
+```
+
+`check-db` runs SQLite's `quick_check` against the installation database and
+every `/data/users/<id>/rolltop.db`, changes nothing, and exits non-zero when a
+file is damaged. Repair a damaged tenant database with:
+
+```sh
+docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
+  recover-db --user-id 1 --confirm-offline
+```
+
+`recover-db` copies every readable row into a freshly migrated database, steps
+over the damaged pages, repairs foreign key references the lost rows leave
+behind, moves the damaged file aside as
+`/data/users/<id>/rolltop.db.corrupt-<stamp>`, and installs the recovered file
+only after verifying it. A recovered database that fails that verification is
+discarded and the original is restored, so a failing disk under the destination
+cannot cost you the file you still had.
+It prints what survived per table. Mail that the IMAP server still holds is
+re-downloaded by the next sync; locally created state on lost pages (contacts,
+snoozes, identities, pending flag changes) is not recoverable. Because the row
+set changed, the command prints the matching `reset-search` invocation when
+anything was lost. The quarantined file is kept, so nothing is deleted.
+
+Corruption comes from the storage under the data volume, not from a Rolltop
+write path: Rolltop opens SQLite in WAL mode with one writer per tenant and an
+exclusive lock on the data directory. A killed process does not corrupt a WAL
+database — SQLite discards a partially written frame by its checksum on the
+next open. Recurring corruption on the same installation usually means the
+volume is on a network or overlay filesystem that does not honor SQLite's
+locking, that the host lost power, or that the data directory was copied while
+the server was running.
+
+### Shutdown And Restart
+
+Rolltop's shutdown ends with closing SQLite, which checkpoints the WAL into the
+database file. Everything before that step is bounded so the close is reached:
+the HTTP drain gets 3 seconds, the plugin host and search index together get 3
+more, and whatever has not finished by then is abandoned. Give the container
+enough grace for that sequence plus the checkpoint:
+
+```yaml
+services:
+  rolltop:
+    stop_grace_period: 60s
+    restart: unless-stopped
+```
+
+Without it, `docker stop` sends SIGKILL after its default 10 seconds. That does
+not corrupt the database, but it leaves a hot WAL that the next start has to
+replay, and the next start then treats the run as unclean and verifies the
+tenant files before serving (see `ROLLTOP_STARTUP_INTEGRITY_CHECK`).
+
+### Backups
+
+Copying `/data` with `cp`, `rsync`, `docker cp`, or a volume snapshot while
+Rolltop runs produces a torn database: the committed state is split between
+`rolltop.db` and its WAL. Use `backup-db`, which writes each database with
+SQLite's `VACUUM INTO` from a single read transaction and is safe to run while
+the server is serving:
+
+```sh
+docker compose exec "$ROLLTOP_SERVICE" \
+  rolltop backup-db --output /data/backups/$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+The copies mirror the data directory layout (`rolltop.db` and
+`users/<id>/rolltop.db`) and are already checkpointed, so no WAL sidecar is
+needed to read them. Message blobs and the Bleve index are deliberately not
+copied: blobs are re-fetchable from IMAP and the index is rebuilt from the
+database. Write backups outside the data volume if you want them to survive
+losing that volume.
 
 ### Automatic Search Index Recovery
 

@@ -710,13 +710,23 @@ func (r *Runner) RefreshSenderStats(userID int64) {
 	r.mu.Unlock()
 	close(done)
 	if err != nil {
-		log.Printf("refresh sender stats user_id=%d: %v", userID, err)
+		log.Printf("refresh sender stats user_id=%d: %v", userID, r.noteStoreError(userID, err))
 	}
 	if rerun && r.context().Err() == nil {
 		go r.RefreshSenderStats(userID)
 	} else if resumeAttachments && r.context().Err() == nil {
 		r.StartAttachmentIndex(userID)
 	}
+}
+
+// noteStoreError rewrites tenant SQLite corruption into an operator-actionable
+// error naming the damaged file and the offline command that repairs it. Every
+// other error is returned unchanged.
+func (r *Runner) noteStoreError(userID int64, err error) error {
+	if r == nil || r.Service == nil {
+		return err
+	}
+	return r.Service.Store.NoteError(userID, err)
 }
 
 func (r *Runner) refreshReadSenderStatsForUser(ctx context.Context, userID int64) error {
@@ -1033,6 +1043,10 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 		onRunStarted:     func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 		onRunFinished:    r.unregisterSyncRunControl,
 	}); err != nil {
+		// A corrupt tenant database fails every mailbox in the same way, so the
+		// log has to name the file and the repair command rather than repeat a
+		// bare driver message once per sync turn.
+		err = r.noteStoreError(userID, err)
 		log.Printf("sync user_id=%d mailboxes=%s: %v", userID, strings.Join(mailboxes, ","), err)
 		return err
 	}
@@ -1350,7 +1364,7 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 		if err != nil {
 			indexFailed = true
 			if ctx.Err() == nil {
-				log.Printf("attachment index user_id=%d: %v", userID, err)
+				log.Printf("attachment index user_id=%d: %v", userID, r.noteStoreError(userID, err))
 			}
 			return
 		}

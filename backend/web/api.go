@@ -90,6 +90,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiAdminPlugins(w, r)
 	case strings.HasPrefix(path, "admin/plugins/"):
 		s.apiAdminPlugin(w, r, strings.TrimPrefix(path, "admin/plugins/"))
+	case path == "admin/database":
+		s.apiAdminDatabase(w, r)
+	case path == "admin/database/job":
+		s.apiAdminDatabaseJob(w, r)
+	case strings.HasPrefix(path, "admin/database/"):
+		s.apiAdminDatabaseAction(w, r, strings.TrimPrefix(path, "admin/database/"))
 	case path == "admin/remote-image-blocklist":
 		s.apiAdminRemoteImageBlocklist(w, r)
 	case path == "messages/bulk-move":
