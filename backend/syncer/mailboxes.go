@@ -23,7 +23,8 @@ func (s *Service) mailboxesToSync(ctx context.Context, account store.MailAccount
 	}
 	out := make([]string, 0, len(infos))
 	for _, info := range infos {
-		mb, err := s.Store.GetOrCreateMailboxWithRole(ctx, account.UserID, account.ID, info.Name, mailboxSpecialUseRole(info.Attributes))
+		mb, err := s.Store.GetOrCreateMailboxFromDiscovery(ctx, account.UserID, account.ID, info.Name,
+			mailboxSpecialUseRole(info.Attributes), info.Attributes)
 		if err != nil {
 			return nil, err
 		}

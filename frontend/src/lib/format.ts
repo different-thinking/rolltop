@@ -85,6 +85,22 @@ export function displayDateTime(value: string, prefs?: DatePrefs): string {
   return date.toLocaleString(locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+/** displayLogTimestamp keeps the seconds every other formatter here rounds
+ * away. A log tail is read to put events in order, and a burst of lines inside
+ * one minute is exactly the case that has to stay orderable. */
+export function displayLogTimestamp(value: string, prefs?: DatePrefs): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(dateLocale(prefs), {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 /** displaySnoozeUntil keeps same-day confirmations compact and adds a localized
  * calendar day when the reminder is later than today. */
 export function displaySnoozeUntil(value: string | Date, prefs?: DatePrefs, now = new Date()): string {

@@ -86,15 +86,25 @@ type apiAccount struct {
 	SMTPSameAsIMAP      bool   `json:"smtp_same_as_imap"`
 	Mailbox             string `json:"mailbox"`
 	SyncIntervalMinutes int    `json:"sync_interval_minutes"`
+	AuthType            string `json:"auth_type"`
+	GoogleConnectionID  int64  `json:"google_connection_id"`
+	// GoogleEmail names the connected account so the form can show which Google
+	// identity an account authenticates as without a second request.
+	GoogleEmail string `json:"google_email,omitempty"`
+	// SyncStartAt is a calendar date (YYYY-MM-DD) or empty for no limit. A date
+	// rather than a timestamp because IMAP compares whole days anyway.
+	SyncStartAt string `json:"sync_start_at,omitempty"`
 }
 
 type apiSMTPAccount struct {
-	ID       int64  `json:"id"`
-	Label    string `json:"label"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	UseTLS   bool   `json:"use_tls"`
+	ID                 int64  `json:"id"`
+	Label              string `json:"label"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	UseTLS             bool   `json:"use_tls"`
+	AuthType           string `json:"auth_type"`
+	GoogleConnectionID int64  `json:"google_connection_id"`
 }
 
 type apiMailIdentity struct {

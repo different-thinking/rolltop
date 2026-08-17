@@ -12,6 +12,15 @@ func prepareSMTPAccount(a SMTPAccount) (SMTPAccount, error) {
 	if a.UserID == 0 || strings.TrimSpace(a.Host) == "" || a.Port <= 0 {
 		return SMTPAccount{}, errors.New("SMTP account fields are incomplete")
 	}
+	a.AuthType = NormalizeAuthType(a.AuthType)
+	if a.AuthType == AuthTypeGoogleOAuth {
+		if a.GoogleConnectionID <= 0 {
+			return SMTPAccount{}, errors.New("google SMTP account is missing its connection")
+		}
+		a.EncryptedPassword = ""
+	} else {
+		a.GoogleConnectionID = 0
+	}
 	a.Label = trimLimit(a.Label, 240)
 	a.Host = strings.TrimSpace(a.Host)
 	a.Username = strings.TrimSpace(a.Username)
@@ -28,8 +37,8 @@ func (s *Store) CreateSMTPAccount(ctx context.Context, a SMTPAccount) (SMTPAccou
 		return SMTPAccount{}, err
 	}
 	ts := nowUnix()
-	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO smtp_accounts (user_id, label, host, port, username, encrypted_password, use_tls, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, a.UserID, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), ts, ts)
+	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO smtp_accounts (user_id, label, host, port, username, encrypted_password, use_tls, auth_type, google_connection_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, a.UserID, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.AuthType, a.GoogleConnectionID, ts, ts)
 	if err != nil {
 		return SMTPAccount{}, err
 	}
@@ -49,8 +58,8 @@ func (s *Store) UpsertSMTPAccount(ctx context.Context, a SMTPAccount) (SMTPAccou
 	if err != nil {
 		return SMTPAccount{}, err
 	}
-	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `UPDATE smtp_accounts SET label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, updated_at = ?
-		WHERE user_id = ? AND id = ?`, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), nowUnix(), a.UserID, a.ID)
+	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `UPDATE smtp_accounts SET label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, auth_type = ?, google_connection_id = ?, updated_at = ?
+		WHERE user_id = ? AND id = ?`, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.AuthType, a.GoogleConnectionID, nowUnix(), a.UserID, a.ID)
 	if err != nil {
 		return SMTPAccount{}, err
 	}
@@ -131,14 +140,14 @@ func (s *Store) firstSMTPAccountID(ctx context.Context, userID int64) int64 {
 }
 
 func smtpAccountSelectSQL() string {
-	return `SELECT id, user_id, label, host, port, username, encrypted_password, use_tls, created_at, updated_at FROM smtp_accounts`
+	return `SELECT id, user_id, label, host, port, username, encrypted_password, use_tls, auth_type, google_connection_id, created_at, updated_at FROM smtp_accounts`
 }
 
 func scanSMTPAccount(row rowScanner) (SMTPAccount, error) {
 	var a SMTPAccount
 	var useTLS int
 	var created, updated int64
-	err := row.Scan(&a.ID, &a.UserID, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &useTLS, &created, &updated)
+	err := row.Scan(&a.ID, &a.UserID, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &useTLS, &a.AuthType, &a.GoogleConnectionID, &created, &updated)
 	a.UseTLS = useTLS != 0
 	a.CreatedAt = unixTime(created)
 	a.UpdatedAt = unixTime(updated)

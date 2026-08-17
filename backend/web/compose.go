@@ -1162,6 +1162,10 @@ func smtpEnvelopeForIdentity(identity composeIdentity, account store.SMTPAccount
 		SMTPUsername:          account.Username,
 		EncryptedSMTPPassword: account.EncryptedPassword,
 		SMTPUseTLS:            account.UseTLS,
+		// Without these the sender would fall back to a password an OAuth
+		// server never stored, and every send would fail authentication.
+		AuthType:           account.AuthType,
+		GoogleConnectionID: account.GoogleConnectionID,
 	}
 }
 

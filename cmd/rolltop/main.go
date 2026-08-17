@@ -28,6 +28,7 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/buildinfo"
 	"rolltop/backend/config"
+	"rolltop/backend/googleauth"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
@@ -361,6 +362,15 @@ func run() (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Keep the newest log lines in memory from the first one onwards. A hosted
+	// operator reaches the admin database page but not the container log, so
+	// this is the only route by which the line behind a 500 reaches them.
+	//
+	// The recorder comes first because MultiWriter stops at the first writer
+	// that fails: with stderr leading, a full or closed pipe would silently
+	// take the in-memory tail down with it, exactly when it is needed most.
+	log.SetOutput(io.MultiWriter(logging.Recorder(), os.Stderr))
+
 	// Arm crash reporting before anything can fail. A port conflict or an
 	// unusable configuration is exactly the kind of fatal that crash-loops a
 	// container, and the container log may not survive the next restart.
@@ -628,13 +638,18 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 
 	startup.update("Services", "initializing sync and web services", 0, 1)
 	blobStore := blob.New(cfg.DataDir)
-	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey}
+	// One manager for the whole process: its refresh deduplication only holds
+	// while sync workers, the sender and the web routes share an instance.
+	googleAuth := googleauth.NewManager(
+		googleauth.New(cfg.Google.ClientID, cfg.Google.ClientSecret, cfg.Google.RedirectURLs, cfg.Google.Scopes),
+		db, cfg.MasterKey)
+	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
 	syncSvc := &syncer.Service{
 		Store:         db,
 		Blobs:         blobStore,
 		Search:        searchSvc,
 		Fetcher:       imapFetcher,
-		Sender:        &smtpclient.Sender{MasterKey: cfg.MasterKey},
+		Sender:        &smtpclient.Sender{MasterKey: cfg.MasterKey, Tokens: googleAuth},
 		BlobRetention: cfg.BlobRetention,
 		PluginDir:     cfg.PluginDir,
 		MasterKey:     cfg.MasterKey,
@@ -655,6 +670,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		CookieSecure:   cfg.CookieSecure,
 		WebhookToken:   cfg.WebhookToken,
 		Google:         cfg.Google,
+		GoogleAuth:     googleAuth,
 		RequestRestart: requestRestart,
 	})
 	if err != nil {

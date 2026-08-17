@@ -82,6 +82,8 @@ func (s *Service) ForwardMessage(ctx context.Context, userID, messageID int64, t
 		SMTPUsername:          smtpAccount.Username,
 		EncryptedSMTPPassword: smtpAccount.EncryptedPassword,
 		SMTPUseTLS:            smtpAccount.UseTLS,
+		AuthType:              smtpAccount.AuthType,
+		GoogleConnectionID:    smtpAccount.GoogleConnectionID,
 	}
 	_, err = s.Sender.Send(ctx, envelope, out)
 	return err

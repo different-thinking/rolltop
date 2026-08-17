@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap"
 
@@ -32,10 +33,10 @@ func (f *Fetcher) SnapshotMailboxUIDs(ctx context.Context, account store.MailAcc
 		return syncer.MailboxUIDSnapshot{}, err
 	}
 	defer terminateClientOnContext(ctx, c)()
-	return snapshotMailboxUIDs(ctx, c, mailbox)
+	return snapshotMailboxUIDs(ctx, c, mailbox, account.SyncStartAt)
 }
 
-func snapshotMailboxUIDs(ctx context.Context, c uidSnapshotClient, mailbox string) (syncer.MailboxUIDSnapshot, error) {
+func snapshotMailboxUIDs(ctx context.Context, c uidSnapshotClient, mailbox string, syncStartAt time.Time) (syncer.MailboxUIDSnapshot, error) {
 	if err := validateUIDSnapshotRequest(ctx, mailbox); err != nil {
 		return syncer.MailboxUIDSnapshot{}, err
 	}
@@ -63,11 +64,32 @@ func snapshotMailboxUIDs(ctx context.Context, c uidSnapshotClient, mailbox strin
 	if err := ctx.Err(); err != nil {
 		return syncer.MailboxUIDSnapshot{}, err
 	}
-	return syncer.MailboxUIDSnapshot{
+	snapshot := syncer.MailboxUIDSnapshot{
 		UIDs:        append([]uint32(nil), uids...),
 		UIDValidity: status.UidValidity,
 		UIDNext:     status.UidNext,
-	}, nil
+	}
+	// The cutoff is a second search on the session that is already open and
+	// selected, so it costs one command rather than another login. It stays a
+	// separate list because the full one above is what reconciliation compares
+	// against before deleting local rows.
+	if !syncStartAt.IsZero() {
+		limited := imap.NewSearchCriteria()
+		limited.Uid = new(imap.SeqSet)
+		limited.Uid.AddRange(1, status.UidNext-1)
+		limited.Since = syncStartAt
+		fetchable, err := c.UidSearch(limited)
+		if err != nil {
+			return syncer.MailboxUIDSnapshot{}, fmt.Errorf("search UIDs since the sync start date in mailbox %q: %w", mailbox, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return syncer.MailboxUIDSnapshot{}, err
+		}
+		// A server that returns nothing must still produce an empty list rather
+		// than nil, which the snapshot reads as "no cutoff configured".
+		snapshot.FetchableUIDs = append([]uint32{}, fetchable...)
+	}
+	return snapshot, nil
 }
 
 func validateUIDSnapshotRequest(ctx context.Context, mailbox string) error {

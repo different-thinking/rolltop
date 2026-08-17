@@ -2,10 +2,6 @@
 // live on the identity, so the folder the Archive action files mail into is
 // recorded next to them; the per-account swipe mapping stays as the fallback
 // for identities that leave it unset.
-//
-// Version 030 is deliberately skipped. It briefly named a withdrawn
-// sent_mailboxes table on a shared branch, and reusing the number would fail
-// the checksum guard for anyone who had already applied it.
 
 package store
 

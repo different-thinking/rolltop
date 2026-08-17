@@ -24,6 +24,7 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
+	"rolltop/backend/xoauth2"
 )
 
 const (
@@ -39,6 +40,11 @@ type Fetcher struct {
 	MasterKey []byte
 	Timeout   time.Duration
 	BatchSize uint32
+	// Tokens mints Google access tokens for accounts that authenticate with
+	// OAuth. It is an interface rather than the manager itself so this package
+	// stays independent of the OAuth implementation and can be tested without
+	// one. A nil value only fails accounts that actually need it.
+	Tokens xoauth2.TokenSource
 }
 
 // ServerCapabilities contains the authenticated IMAP extensions used by
@@ -508,6 +514,30 @@ func (f *Fetcher) UIDs(ctx context.Context, account store.MailAccount, mailbox s
 	return uids, nil
 }
 
+// limitToSyncStart drops messages delivered before the account's configured
+// start date from a search. Applying it at the server means a mailbox with
+// twenty years of history never sends the bodies at all, which is the whole
+// point: the alternative is downloading everything and discarding it here.
+//
+// SINCE compares INTERNALDATE at day granularity, so the boundary day is
+// included whole. Erring towards one extra day beats silently dropping mail
+// that arrived on the chosen date.
+//
+// This belongs only on searches that decide what to download. The searches that
+// decide what to delete or how to set flags must keep seeing the whole mailbox:
+// reconciliation removes local messages missing from the server's UID list, and
+// UpdateMailboxReadFlags marks every local message not in the seen list as
+// unread. Handing either a cutoff-limited list would delete or unread the mail
+// that was mirrored before the cutoff was set. Repair gets its own limited list
+// through MailboxUIDSnapshot.FetchableUIDs instead.
+func limitToSyncStart(criteria *imap.SearchCriteria, account store.MailAccount) *imap.SearchCriteria {
+	if account.SyncStartAt.IsZero() {
+		return criteria
+	}
+	criteria.Since = account.SyncStartAt
+	return criteria
+}
+
 // FetchMailbox is the incremental body fetch path. It selects read-only, searches
 // for UIDs greater than afterUID, fetches RFC822 bodies in batches, and streams each
 // result to the syncer callback instead of accumulating a mailbox in memory.
@@ -529,7 +559,7 @@ func (f *Fetcher) FetchMailbox(ctx context.Context, account store.MailAccount, m
 	criteria := imap.NewSearchCriteria()
 	criteria.Uid = new(imap.SeqSet)
 	criteria.Uid.AddRange(afterUID+1, 0)
-	uids, err := c.UidSearch(criteria)
+	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
 	if err != nil {
 		return fmt.Errorf("search new UIDs in mailbox %q after UID %d: %w", mailbox, afterUID, err)
 	}
@@ -1257,13 +1287,62 @@ func stopIdleSession(stop chan struct{}, done <-chan error, terminate func() err
 	}
 }
 
-// login decrypts the IMAP password at the last possible moment, opens TLS/plain
-// transport according to account settings, and returns an authenticated client.
+// login authenticates an account with whichever credential it is configured
+// for. Both paths obtain the secret at the last possible moment: a password is
+// decrypted here, and an access token is minted here, so neither sits in memory
+// while a connection is merely being considered.
 func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
+	if account.UsesGoogleOAuth() {
+		return f.loginWithGoogleToken(account)
+	}
 	password, err := mmcrypto.DecryptString(f.MasterKey, account.EncryptedPassword)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt IMAP password: %w", err)
 	}
+	return f.connectAndAuthenticate(account, func(c *client.Client) error {
+		return c.Login(account.Username, password)
+	})
+}
+
+// loginWithGoogleToken authenticates with a Google access token, letting the
+// shared helper own the refresh-and-retry policy the SMTP path uses too.
+func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Client, error) {
+	// login has no context of its own and runs inside a goroutine that
+	// loginByContext abandons on cancellation, so the token work is bounded by
+	// the same command timeout the connection uses.
+	ctx, cancel := context.WithTimeout(context.Background(), f.commandTimeout())
+	defer cancel()
+	var authenticated *client.Client
+	err := xoauth2.WithFreshToken(ctx, f.Tokens, account.UserID, account.GoogleConnectionID,
+		func(token string) error {
+			c, err := f.connectAndAuthenticate(account, authenticateXOAUTH2(account, token))
+			if err != nil {
+				return err
+			}
+			authenticated = c
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return authenticated, nil
+}
+
+func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client) error {
+	return func(c *client.Client) error {
+		supported, err := c.SupportAuth(xoauth2.Mechanism)
+		if err != nil {
+			return err
+		}
+		if !supported {
+			return fmt.Errorf("%w for %s", xoauth2.ErrUnsupported, account.Host)
+		}
+		return c.Authenticate(xoauth2.NewSASLClient(account.Username, token))
+	}
+}
+
+func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate func(*client.Client) error) (*client.Client, error) {
+	var err error
 	addr := net.JoinHostPort(account.Host, fmt.Sprintf("%d", account.Port))
 	timeout := f.commandTimeout()
 
@@ -1294,9 +1373,17 @@ func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
 		}
 	}
 	c.Timeout = timeout
-	if err := c.Login(account.Username, password); err != nil {
+	if err := authenticate(c); err != nil {
 		terminateClient(c)
-		return nil, fmt.Errorf("login to IMAP server %s: %w", addr, err)
+		wrapped := fmt.Errorf("login to IMAP server %s: %w", addr, err)
+		// A server that does not offer XOAUTH2 has not rejected the credential,
+		// so this must not look like a stale token: the retry would spend a real
+		// refresh at Google and open a second connection that fails identically,
+		// once per mailbox.
+		if errors.Is(err, xoauth2.ErrUnsupported) {
+			return nil, wrapped
+		}
+		return nil, xoauth2.AuthError{Err: wrapped}
 	}
 	return c, nil
 }

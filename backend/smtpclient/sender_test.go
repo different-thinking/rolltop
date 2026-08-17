@@ -82,7 +82,7 @@ func TestSendRawDoesNotWaitForQuitAfterDataAccepted(t *testing.T) {
 	err := sendRawOnConn(context.Background(), store.MailAccount{
 		Email:    "sender@example.test",
 		SMTPHost: "smtp.example.test",
-	}, "", []string{"recipient@example.test"},
+	}, nil, []string{"recipient@example.test"},
 		[]byte("From: sender@example.test\r\nTo: recipient@example.test\r\n\r\nbody\r\n"), conn)
 	if err != nil {
 		t.Fatalf("SendRaw after accepted DATA = %v, want success without waiting for QUIT", err)

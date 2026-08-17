@@ -23,6 +23,7 @@ import (
 	"rolltop/backend/buildinfo"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/xoauth2"
 )
 
 // Attachment is an outgoing MIME attachment or inline part prepared by compose.
@@ -68,6 +69,9 @@ type Message struct {
 type Sender struct {
 	MasterKey []byte
 	Timeout   time.Duration
+	// Tokens mints Google access tokens for accounts that authenticate with
+	// OAuth. Nil only fails accounts that actually need it.
+	Tokens xoauth2.TokenSource
 }
 
 type smtpIdleDeadlineConn struct {
@@ -113,10 +117,56 @@ func (s *Sender) SendRaw(ctx context.Context, account store.MailAccount, recipie
 	if len(recipients) == 0 {
 		return errors.New("message has no recipients")
 	}
+	if account.UsesGoogleOAuth() {
+		return s.sendWithGoogleToken(ctx, account, recipients, raw)
+	}
 	password, err := mmcrypto.DecryptString(s.MasterKey, account.EncryptedSMTPPassword)
 	if err != nil {
 		return fmt.Errorf("decrypt SMTP password: %w", err)
 	}
+	return s.dialAndSend(ctx, account, passwordAuth(account, password), recipients, raw)
+}
+
+// sendWithGoogleToken mirrors the IMAP path: one retry against a forcibly
+// refreshed token. Retrying is safe because authentication precedes MAIL FROM,
+// so a rejected login cannot have delivered anything.
+func (s *Sender) sendWithGoogleToken(ctx context.Context, account store.MailAccount, recipients []string, raw []byte) error {
+	username, err := smtpAuthUsername(account)
+	if err != nil {
+		return err
+	}
+	return xoauth2.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
+		func(token string) error {
+			return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(username, token), recipients, raw)
+		})
+}
+
+// passwordAuth returns nil for an account without a user name, which is how a
+// relay that takes no credentials has always been configured.
+func passwordAuth(account store.MailAccount, password string) smtp.Auth {
+	if strings.TrimSpace(account.SMTPUsername) == "" {
+		return nil
+	}
+	return smtp.PlainAuth("", account.SMTPUsername, password, account.SMTPHost)
+}
+
+// smtpAuthUsername is the connected Google mailbox, which the account handlers
+// copy out of the connection when the server is saved.
+//
+// There is deliberately no fallback to the envelope address: that is the
+// identity being sent as, which for a send-as alias is a different mailbox than
+// the one the token belongs to. Authenticating with a mismatched pair fails at
+// Google with a credentials error that names neither problem, so an empty name
+// is reported here instead.
+func smtpAuthUsername(account store.MailAccount) (string, error) {
+	name := strings.TrimSpace(account.SMTPUsername)
+	if name == "" {
+		return "", fmt.Errorf("google SMTP account %d has no connected mailbox to authenticate as", account.ID)
+	}
+	return name, nil
+}
+
+func (s *Sender) dialAndSend(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte) error {
 	timeout := s.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
@@ -139,10 +189,10 @@ func (s *Sender) SendRaw(ctx context.Context, account store.MailAccount, recipie
 		}
 		conn = tlsConn
 	}
-	return sendRawOnConn(ctx, account, password, recipients, raw, conn)
+	return sendRawOnConn(ctx, account, auth, recipients, raw, conn)
 }
 
-func sendRawOnConn(ctx context.Context, account store.MailAccount, password string, recipients []string, raw []byte, conn net.Conn) error {
+func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte, conn net.Conn) error {
 	defer conn.Close()
 	stopContext := watchSMTPContext(ctx, conn)
 	defer stopContext()
@@ -164,10 +214,9 @@ func sendRawOnConn(ctx context.Context, account store.MailAccount, password stri
 			return errors.New("SMTP server does not advertise STARTTLS")
 		}
 	}
-	if strings.TrimSpace(account.SMTPUsername) != "" {
-		auth := smtp.PlainAuth("", account.SMTPUsername, password, account.SMTPHost)
+	if auth != nil {
 		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("authenticate to SMTP server: %w", err)
+			return xoauth2.AuthError{Err: fmt.Errorf("authenticate to SMTP server: %w", err)}
 		}
 	}
 	fromAddr, err := firstAddress(account.Email)

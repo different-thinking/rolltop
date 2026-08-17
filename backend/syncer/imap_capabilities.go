@@ -133,6 +133,24 @@ type MailboxUIDSnapshot struct {
 	UIDs        []uint32
 	UIDValidity uint32
 	UIDNext     uint32
+	// FetchableUIDs is the subset of UIDs an account's sync start date allows
+	// this mirror to hold, or nil when no cutoff is configured.
+	//
+	// Two callers need opposite things from one snapshot, which is why both
+	// lists travel together. Reconciliation decides what to delete locally and
+	// must see every remote UID: a cutoff-limited list would make mail that was
+	// mirrored before the cutoff existed look deleted on the server and remove
+	// it. Repair decides what to download and must see only the allowed subset,
+	// or it re-fetches the entire pre-cutoff history the setting exists to skip.
+	FetchableUIDs []uint32
+}
+
+// Fetchable returns the UIDs repair is allowed to download.
+func (s MailboxUIDSnapshot) Fetchable() []uint32 {
+	if s.FetchableUIDs == nil {
+		return s.UIDs
+	}
+	return s.FetchableUIDs
 }
 
 // MailboxUIDSnapshotFetcher is an optional Fetcher capability used by

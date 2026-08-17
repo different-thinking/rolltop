@@ -12,8 +12,36 @@ import (
 
 const DefaultMailboxPattern = "*"
 
+// NormalizeAuthType keeps an unknown or empty value on the password path.
+// Treating anything unrecognized as OAuth would let a typo silently disable
+// password authentication for an account that still depends on it. It is
+// exported because the API layer normalizes the same field on the way in and
+// must not keep a second copy of this whitelist.
+func NormalizeAuthType(authType string) string {
+	if strings.TrimSpace(authType) == AuthTypeGoogleOAuth {
+		return AuthTypeGoogleOAuth
+	}
+	return AuthTypePassword
+}
+
 func prepareMailAccount(a MailAccount) (MailAccount, error) {
-	if a.UserID == 0 || strings.TrimSpace(a.Email) == "" || strings.TrimSpace(a.Host) == "" || strings.TrimSpace(a.Username) == "" || a.Port == 0 || a.EncryptedPassword == "" {
+	a.AuthType = NormalizeAuthType(a.AuthType)
+	if a.AuthType != AuthTypeGoogleOAuth {
+		a.GoogleConnectionID = 0
+	}
+	if a.UserID == 0 || strings.TrimSpace(a.Email) == "" || strings.TrimSpace(a.Host) == "" || strings.TrimSpace(a.Username) == "" || a.Port == 0 {
+		return MailAccount{}, errors.New("mail account fields are incomplete")
+	}
+	// An OAuth account has no password to store and must not be saved without the
+	// connection that replaces it, or it would fail at the next sync with nothing
+	// to point the user at.
+	if a.AuthType == AuthTypeGoogleOAuth {
+		if a.GoogleConnectionID <= 0 {
+			return MailAccount{}, errors.New("google account is missing its connection")
+		}
+		a.EncryptedPassword = ""
+		a.EncryptedSMTPPassword = ""
+	} else if a.EncryptedPassword == "" {
 		return MailAccount{}, errors.New("mail account fields are incomplete")
 	}
 	if strings.TrimSpace(a.Mailbox) == "" {
@@ -55,11 +83,12 @@ func (s *Store) CreateMailAccount(ctx context.Context, a MailAccount) (MailAccou
 	}
 	ts := nowUnix()
 	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO mail_accounts
-			(user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, auth_type, google_connection_id, sync_start_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.UserID, a.Email, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword,
 		boolInt(a.UseTLS), a.SMTPHost, a.SMTPPort, a.SMTPUsername, a.EncryptedSMTPPassword,
-		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes, ts, ts)
+		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes,
+		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), ts, ts)
 	if err != nil {
 		return MailAccount{}, err
 	}
@@ -86,10 +115,11 @@ func (s *Store) updateMailAccount(ctx context.Context, a MailAccount) (MailAccou
 		return MailAccount{}, err
 	}
 	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `UPDATE mail_accounts SET
-			email = ?, label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, smtp_host = ?, smtp_port = ?, smtp_username = ?, encrypted_smtp_password = ?, smtp_use_tls = ?, mailbox = ?, sync_interval_minutes = ?, updated_at = ?
+			email = ?, label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, smtp_host = ?, smtp_port = ?, smtp_username = ?, encrypted_smtp_password = ?, smtp_use_tls = ?, mailbox = ?, sync_interval_minutes = ?, auth_type = ?, google_connection_id = ?, sync_start_at = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`,
 		a.Email, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.SMTPHost, a.SMTPPort, a.SMTPUsername, a.EncryptedSMTPPassword,
-		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes, nowUnix(), a.UserID, a.ID)
+		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes,
+		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), nowUnix(), a.UserID, a.ID)
 	if err != nil {
 		return MailAccount{}, err
 	}
@@ -152,7 +182,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]MailAccount, error) {
 }
 
 func mailAccountSelectSQL() string {
-	return `SELECT id, user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, created_at, updated_at FROM mail_accounts`
+	return `SELECT id, user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, auth_type, google_connection_id, sync_start_at, created_at, updated_at FROM mail_accounts`
 }
 
 func scanMailAccounts(rows *sql.Rows) ([]MailAccount, error) {
@@ -169,8 +199,9 @@ func scanMailAccounts(rows *sql.Rows) ([]MailAccount, error) {
 
 func scanMailAccount(row rowScanner) (MailAccount, error) {
 	var a MailAccount
-	var created, updated int64
-	err := row.Scan(&a.ID, &a.UserID, &a.Email, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &a.UseTLS, &a.SMTPHost, &a.SMTPPort, &a.SMTPUsername, &a.EncryptedSMTPPassword, &a.SMTPUseTLS, &a.Mailbox, &a.SyncIntervalMinutes, &created, &updated)
+	var created, updated, syncStart int64
+	err := row.Scan(&a.ID, &a.UserID, &a.Email, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &a.UseTLS, &a.SMTPHost, &a.SMTPPort, &a.SMTPUsername, &a.EncryptedSMTPPassword, &a.SMTPUseTLS, &a.Mailbox, &a.SyncIntervalMinutes, &a.AuthType, &a.GoogleConnectionID, &syncStart, &created, &updated)
+	a.SyncStartAt = unixTime(syncStart)
 	a.CreatedAt = unixTime(created)
 	a.UpdatedAt = unixTime(updated)
 	a.applySMTPDefaults()
@@ -202,16 +233,24 @@ func (s *Store) GetOrCreateMailbox(ctx context.Context, userID, accountID int64,
 // assigned role. Duplicate special roles are also left untouched so one unusual
 // server response cannot make folder settings ambiguous.
 func (s *Store) GetOrCreateMailboxWithRole(ctx context.Context, userID, accountID int64, name, discoveredRole string) (Mailbox, error) {
+	return s.GetOrCreateMailboxFromDiscovery(ctx, userID, accountID, name, discoveredRole, nil)
+}
+
+// GetOrCreateMailboxFromDiscovery additionally takes the raw SPECIAL-USE
+// attributes the server advertised. They decide the default sync mode for
+// folders whose purpose has no role of its own, which is the only way to
+// recognize Gmail's label views on a localized account.
+func (s *Store) GetOrCreateMailboxFromDiscovery(ctx context.Context, userID, accountID int64, name, discoveredRole string, attributes []string) (Mailbox, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "INBOX"
 	}
 	ts := nowUnix()
-	syncMode := defaultMailboxSyncMode(name)
 	role := normalizeMailboxRole(discoveredRole)
 	if role == "" {
 		role = defaultMailboxRole(name)
 	}
+	syncMode := defaultMailboxSyncMode(name, role, attributes)
 	db := s.mustDataDB(ctx, userID)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -607,11 +646,54 @@ func normalizeMailboxIcon(icon string, name string, role string) string {
 	return defaultMailboxIcon(name, role)
 }
 
-func defaultMailboxSyncMode(name string) string {
+func defaultMailboxSyncMode(name, role string, attributes []string) string {
+	if isLabelViewMailbox(name, role, attributes) {
+		return "never"
+	}
 	if strings.EqualFold(strings.TrimSpace(name), "INBOX") {
 		return "auto"
 	}
 	return "manual"
+}
+
+// labelViewAttributes are the SPECIAL-USE attributes for folders that are views
+// over messages already stored elsewhere. \All and \Flagged are RFC 6154,
+// \Important is RFC 8457; Gmail advertises all three whatever language the
+// account is in.
+var labelViewAttributes = []string{"\\all", "\\flagged", "\\important"}
+
+// isLabelViewMailbox reports Gmail's virtual folders, which are views over
+// messages that already live in a real folder. This data model stores one
+// folder per message, so syncing them would mirror most of the mailbox a second
+// time and double the database for nothing.
+//
+// Attributes decide first because they are language independent: a German
+// account calls these folders "Alle Nachrichten", "Markiert" and "Wichtig", and
+// no list of English names will ever catch them. The names remain as a fallback
+// for servers that report no special-use metadata at all.
+func isLabelViewMailbox(name, role string, attributes []string) bool {
+	if role == "all" {
+		return true
+	}
+	for _, attribute := range attributes {
+		attribute = strings.ToLower(strings.TrimSpace(attribute))
+		for _, labelView := range labelViewAttributes {
+			if attribute == labelView {
+				return true
+			}
+		}
+	}
+	clean := strings.ToLower(strings.TrimSpace(name))
+	for _, prefix := range []string{"[gmail]/", "[google mail]/"} {
+		if !strings.HasPrefix(clean, prefix) {
+			continue
+		}
+		switch strings.TrimPrefix(clean, prefix) {
+		case "all mail", "important", "starred":
+			return true
+		}
+	}
+	return false
 }
 
 func defaultMailboxRole(name string) string {

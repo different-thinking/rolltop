@@ -140,7 +140,55 @@ func apiAccountFromStore(account store.MailAccount) apiAccount {
 		SMTPSameAsIMAP:      sameSMTPSettings(account),
 		Mailbox:             account.Mailbox,
 		SyncIntervalMinutes: account.SyncIntervalMinutes,
+		AuthType:            store.NormalizeAuthType(account.AuthType),
+		GoogleConnectionID:  account.GoogleConnectionID,
+		SyncStartAt:         apiSyncStartDate(account.SyncStartAt),
 	}
+}
+
+// apiSyncStartDate renders the cutoff as a plain calendar date, which is what
+// the form edits and what IMAP compares against.
+func apiSyncStartDate(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format("2006-01-02")
+}
+
+// apiAccountsWithGoogleIdentity labels OAuth accounts with the Google address
+// they authenticate as. Without it the settings list would show a mailbox whose
+// sign-in method is invisible, and there is no way to tell which of several
+// connected Google accounts it belongs to.
+//
+// A connection that no longer exists is left unnamed rather than reported as an
+// error: the account still needs to be visible so it can be repaired.
+func (s *Server) apiAccountsWithGoogleIdentity(ctx context.Context, userID int64, accounts []store.MailAccount) []apiAccount {
+	out := apiAccountsFromStore(accounts)
+	if s.googleAuth == nil {
+		return out
+	}
+	needed := false
+	for _, account := range out {
+		if account.GoogleConnectionID > 0 {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return out
+	}
+	connections, err := s.googleAuth.List(ctx, userID)
+	if err != nil {
+		return out
+	}
+	byID := make(map[int64]string, len(connections))
+	for _, connection := range connections {
+		byID[connection.ID] = connection.GoogleEmail
+	}
+	for index := range out {
+		out[index].GoogleEmail = byID[out[index].GoogleConnectionID]
+	}
+	return out
 }
 
 func apiAccountsFromStore(accounts []store.MailAccount) []apiAccount {
@@ -153,12 +201,14 @@ func apiAccountsFromStore(accounts []store.MailAccount) []apiAccount {
 
 func apiSMTPAccountFromStore(account store.SMTPAccount) apiSMTPAccount {
 	return apiSMTPAccount{
-		ID:       account.ID,
-		Label:    account.Label,
-		Host:     account.Host,
-		Port:     account.Port,
-		Username: account.Username,
-		UseTLS:   account.UseTLS,
+		ID:                 account.ID,
+		Label:              account.Label,
+		Host:               account.Host,
+		Port:               account.Port,
+		Username:           account.Username,
+		UseTLS:             account.UseTLS,
+		AuthType:           store.NormalizeAuthType(account.AuthType),
+		GoogleConnectionID: account.GoogleConnectionID,
 	}
 }
 
