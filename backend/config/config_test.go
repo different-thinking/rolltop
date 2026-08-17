@@ -3,6 +3,9 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
+
+	"rolltop/backend/memlimit"
 )
 
 const testMasterKey = "12345678901234567890123456789012"
@@ -194,5 +197,77 @@ func TestLoadValidatesStartupIntegrityCheck(t *testing.T) {
 	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "sometimes")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for unknown startup integrity check mode")
+	}
+}
+
+func TestLoadReadsMemoryLimit(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MemoryLimit != memlimit.DefaultRequest() {
+		t.Fatalf("default memory limit = %+v, want %+v", cfg.MemoryLimit, memlimit.DefaultRequest())
+	}
+
+	t.Setenv("ROLLTOP_MEMORY_LIMIT", "768MiB")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (memlimit.Request{Bytes: 768 << 20}); cfg.MemoryLimit != want {
+		t.Fatalf("configured memory limit = %+v, want %+v", cfg.MemoryLimit, want)
+	}
+
+	t.Setenv("ROLLTOP_MEMORY_LIMIT", "off")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MemoryLimit.Disabled {
+		t.Fatalf("disabled memory limit = %+v", cfg.MemoryLimit)
+	}
+
+	// A typo in a ceiling is a startup failure, not a silently unbounded heap.
+	t.Setenv("ROLLTOP_MEMORY_LIMIT", "lots")
+	if _, err := Load(); err == nil {
+		t.Fatal("unparsable memory limit was accepted")
+	}
+}
+
+func TestLoadReadsStartupLockWait(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 2*time.Minute {
+		t.Fatalf("default startup lock wait = %s, want 2m", cfg.StartupLockWait)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "45s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 45*time.Second {
+		t.Fatalf("configured startup lock wait = %s, want 45s", cfg.StartupLockWait)
+	}
+
+	// Zero is the old behavior: refuse a directory another process still owns.
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 0 {
+		t.Fatalf("disabled startup lock wait = %s, want 0", cfg.StartupLockWait)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "-30s")
+	if _, err := Load(); err == nil {
+		t.Fatal("negative startup lock wait was accepted")
 	}
 }

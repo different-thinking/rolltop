@@ -31,6 +31,7 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
+	"rolltop/backend/memlimit"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
@@ -417,18 +418,46 @@ func run() (runErr error) {
 		return err
 	}
 	logging.SetLevel(cfg.LogLevel)
+	// Install the heap ceiling before any service allocates. A first-time
+	// account sync is the heaviest thing this process does, and without a limit
+	// the collector lets the heap double past whatever the container allows,
+	// which ends the process mid-write instead of ending an allocation.
+	log.Printf("rolltop %s", memlimit.Apply(cfg.MemoryLimit).Description())
 	// Name the resolved storage paths before anything opens them, so a
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
 	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
-	lock, err := acquireInstanceLock(cfg.DataDir)
+	// A deployment that starts the replacement before stopping the process it
+	// replaces makes both want this directory for a few seconds. Waiting is what
+	// keeps the second process out of SQLite and the Bleve indexes without
+	// turning a routine rollout into a failed start. The listener is already up,
+	// so /api/startup answers throughout the wait and a health check sees a
+	// process that is starting rather than one that is gone.
+	lock, waited, err := waitForInstanceLock(ctx, cfg.DataDir, cfg.StartupLockWait, func(waited time.Duration, holder string) {
+		startup.update("Data directory", "waiting for the previous rolltop process to exit", 0, 1)
+		log.Printf("waiting for the previous rolltop process to release %s%s, %s so far",
+			cfg.DataDir, holder, waited.Round(time.Second))
+	})
 	if err != nil {
-		startup.fail(err)
+		// Being told to stop while waiting is not a failed start: this process
+		// opened nothing, so it has nothing to report and nothing to repair.
+		stoppedWhileWaiting := errors.Is(err, context.Canceled)
+		if stoppedWhileWaiting {
+			log.Printf("stopped while waiting for the previous rolltop process to release %s", cfg.DataDir)
+		} else {
+			startup.fail(err)
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 		<-serverErr
+		if stoppedWhileWaiting {
+			return nil
+		}
 		return err
+	}
+	if waited > 0 {
+		log.Printf("previous rolltop process released %s after %s", cfg.DataDir, waited.Round(time.Second))
 	}
 	defer lock.Close()
 	// Registered after the lock defer so it runs before the lock is released:
