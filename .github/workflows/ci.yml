@@ -65,39 +65,28 @@ jobs:
           npm ci
           npm run build:themes
 
+      # Deliberately no `-coverprofile`. Several tests compile a real backend
+      # plugin with `go build -buildmode=plugin` and load it via `plugin.Open`,
+      # which requires host and plugin to agree on the build fingerprint of
+      # every shared package. Coverage over `./...` instruments
+      # `plugins/client_side_pgp/schema` inside the test binary but not inside
+      # the plugin the test builds, so every such test failed with "plugin was
+      # built with a different version of package
+      # rolltop/plugins/client_side_pgp/schema". That broke 14 tests across
+      # backend/web and backend/syncer on every merge, which is why `main` was
+      # red while pull requests were green: `pr.yml` never asked for coverage.
+      # A merge gate that cannot run the suite is worth less than a coverage
+      # number nothing read.
       - name: Run Go Tests
         run: |
           mkdir -p test-results
-          # One instrumented run produces both the JSON report and the coverage
-          # profile, instead of executing the suite a second time to collect
-          # coverage. Measured at roughly 2m30s on a warm runner.
           set +e
-          go test -json -covermode=atomic -coverprofile=test-results/go-coverage.out ./... 2>&1 | tee test-results/go-test.json
+          go test -json ./... 2>&1 | tee test-results/go-test.json
           status=${PIPESTATUS[0]}
           set -e
 
           node .github/scripts/go-test-report.mjs test-results/go-test.json test-results
-
-          if [ "$status" -eq 0 ] && [ -s test-results/go-coverage.out ]; then
-            go tool cover -func=test-results/go-coverage.out > test-results/go-coverage.txt
-            go tool cover -html=test-results/go-coverage.out -o test-results/go-coverage.html
-          elif [ "$status" -ne 0 ]; then
-            echo "Go coverage skipped because tests failed." > test-results/go-coverage-run.log
-          else
-            echo "Go tests passed but no coverage profile was produced." > test-results/go-coverage-error.log
-          fi
-
           cat test-results/go-test-report.md >> "$GITHUB_STEP_SUMMARY"
-          if [ -s test-results/go-coverage.txt ]; then
-            {
-              echo
-              echo "### Go Coverage"
-              echo
-              echo "\`\`\`"
-              tail -n 1 test-results/go-coverage.txt
-              echo "\`\`\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
           exit "$status"
 

@@ -38,8 +38,17 @@ adding a new top-level area.
 `.github/workflows/ci.yml` has two jobs. `verify` runs on every push to `main`
 and answers the one question a pull request cannot: two changes that are each
 green alone may still be broken together. It builds the themes, runs the Go
-suite with coverage, links every plugin backend with `-buildmode=plugin`, and
-verifies the checked-in spam model. Keep it lean.
+suite, links every plugin backend with `-buildmode=plugin`, and verifies the
+checked-in spam model. Keep it lean.
+
+Do not add `-coverprofile` to that step. Tests in `backend/web` and
+`backend/syncer` build a real backend plugin and load it with `plugin.Open`,
+which demands an identical build fingerprint for every shared package. Coverage
+over `./...` instruments `plugins/client_side_pgp/schema` in the test binary but
+not in the plugin the test builds, so 14 tests fail with "plugin was built with
+a different version of package rolltop/plugins/client_side_pgp/schema". If
+coverage is ever wanted again, the plugin-loading tests have to be guarded with
+`testing.CoverMode()` first.
 
 `release` does the expensive packaging — Android APK, Docker image, GHCR push,
 binaries, godoc — and runs only for `v*` tags and manual dispatch. Deployments
