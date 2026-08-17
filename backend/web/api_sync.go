@@ -105,6 +105,10 @@ func (s *Server) syncEventPayload(ctx context.Context, userID int64) (map[string
 	if err != nil {
 		return nil, err
 	}
+	categories, categoriesPending, err := s.mailCategoryChrome(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	info := buildinfo.Current()
 	return map[string]any{
 		"mailboxes":                   apiMailboxes(data.Mailboxes),
@@ -115,6 +119,8 @@ func (s *Server) syncEventPayload(ctx context.Context, userID int64) (map[string
 		"mail_generation":             s.mailListGeneration(userID),
 		"swipe_preferences":           apiSwipePreferencesFromStore(swipePreferences),
 		"effective_archive_mailboxes": apiAccountMailboxChoices(archiveMailboxes),
+		"mail_categories":             categories,
+		"mail_categories_pending":     categoriesPending,
 		"server_started_at":           timeString(s.startedAt),
 		"server_uptime_seconds":       int(time.Since(s.startedAt).Seconds()),
 		"build_version":               info.Version,

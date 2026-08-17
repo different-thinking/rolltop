@@ -21,6 +21,7 @@ import {
   CaretLeft,
   CaretRight,
   ChartBar,
+  ChatsCircle,
   Clock,
   CreditCard,
   DotsThreeVertical,
@@ -67,6 +68,7 @@ import {
   TextAa,
   Trash,
   Tray,
+  User,
   Users,
   X
 } from "@phosphor-icons/react";
@@ -101,6 +103,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   file_text: FileText,
   flame: Flame,
   folder: Folder,
+  forum: ChatsCircle,
   format_color_text: TextAa,
   format_list_bulleted: ListBullets,
   format_list_numbered: ListNumbers,
@@ -125,6 +128,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   minimize: Minus,
   more_vert: DotsThreeVertical,
   newspaper: Newspaper,
+  person: User,
   notifications: Bell,
   receipt: Receipt,
   report: SealWarning,

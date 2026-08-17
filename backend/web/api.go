@@ -32,6 +32,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiMail(w, r)
 	case path == "snoozes":
 		s.apiSnoozes(w, r)
+	case path == "mail/category":
+		s.apiMessageCategory(w, r)
 	case path == "search":
 		s.apiSearch(w, r)
 	case path == "compose":

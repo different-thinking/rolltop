@@ -265,6 +265,10 @@ func (s *Server) resolveScopeMessages(ctx context.Context, user store.User, scop
 		messages, err := s.store.ListRoleMailScopeMessagesForUser(ctx, user.ID, role, scopeTrashMessageLimit+1)
 		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 	}
+	if category := scope.View.category(); category != "" {
+		messages, err := s.store.ListCategoryMailScopeMessagesForUser(ctx, user.ID, category, scopeTrashMessageLimit+1)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
+	}
 	if scope.View == mailViewUnarchived {
 		messages, err := s.store.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)
 		return trimScopeMessages(messages, scopeTrashMessageLimit, err)

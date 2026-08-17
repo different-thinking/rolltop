@@ -484,6 +484,16 @@ export const api = {
     form.append("file", file);
     return postForm<{ ok: boolean; imported: number; updated: number }>("/api/contacts/import", csrf, form);
   },
+  /**
+   * setMessageCategory files every message from one sender into a category and
+   * keeps future mail from that sender there. It is a correction about the
+   * sender, so it deliberately reaches beyond the message that prompted it.
+   */
+  setMessageCategory: (csrf: string, messageID: number, category: string) =>
+    postJSON<{ category: string; sender: string; moved: number }>("/api/mail/category", csrf, {
+      message_id: messageID,
+      category
+    }),
   addSenderContact: (csrf: string, id: number) =>
     postJSON<{ contact: Contact; created: boolean }>(`/api/messages/${id}/contacts/add-sender`, csrf),
   syncStatus: () => getJSON<{ running: boolean; latest: SyncRun | null }>("/api/sync/status"),

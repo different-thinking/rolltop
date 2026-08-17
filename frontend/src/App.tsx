@@ -697,7 +697,9 @@ export default function App() {
           public_site_url: chrome.public_site_url || current.public_site_url,
           mail_generation: chrome.mail_generation ?? current.mail_generation,
           swipe_preferences: chrome.swipe_preferences || current.swipe_preferences,
-          effective_archive_mailboxes: chrome.effective_archive_mailboxes || current.effective_archive_mailboxes
+          effective_archive_mailboxes: chrome.effective_archive_mailboxes || current.effective_archive_mailboxes,
+          mail_categories: chrome.mail_categories || current.mail_categories,
+          mail_categories_pending: chrome.mail_categories_pending ?? current.mail_categories_pending
         } : current);
         if (chrome.latest_sync_run) {
           const previous = lastNotify.current;
@@ -841,6 +843,8 @@ export default function App() {
         accountNotice={bootstrap.account_notice || ""}
         databaseUnavailable={Boolean(bootstrap.database_unavailable)}
         enabledPlugins={bootstrap.enabled_plugins || []}
+        mailCategories={bootstrap.mail_categories || []}
+        mailCategoriesPending={bootstrap.mail_categories_pending || 0}
         serverStartedAt={bootstrap.server_started_at || ""}
         serverUptimeSeconds={bootstrap.server_uptime_seconds || 0}
         buildVersion={bootstrap.build_version || ""}
@@ -870,6 +874,7 @@ export default function App() {
           mailGeneration={bootstrap.mail_generation || 0}
           swipePreferences={bootstrap.swipe_preferences || defaultSwipePreferences()}
           archiveMailboxes={bootstrap.effective_archive_mailboxes || []}
+          mailCategories={bootstrap.mail_categories || []}
           enabledPlugins={bootstrap.enabled_plugins || []}
           availableThemes={bootstrap.available_themes || []}
           location={location}

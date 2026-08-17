@@ -124,22 +124,26 @@ type apiMailIdentity struct {
 }
 
 type apiMessage struct {
-	ID             int64                  `json:"id"`
-	AccountID      int64                  `json:"account_id"`
-	MailboxID      int64                  `json:"mailbox_id"`
-	Subject        string                 `json:"subject"`
-	FromAddr       string                 `json:"from_addr"`
-	ToAddr         string                 `json:"to_addr"`
-	CCAddr         string                 `json:"cc_addr"`
-	Date           string                 `json:"date"`
-	DateShort      string                 `json:"date_short"`
-	IsRead         bool                   `json:"is_read"`
-	IsStarred      bool                   `json:"is_starred"`
-	HasAttachments bool                   `json:"has_attachments"`
-	IsEncrypted    bool                   `json:"is_encrypted"`
-	IsSigned       bool                   `json:"is_signed"`
-	Snippet        string                 `json:"snippet"`
-	Annotations    []apiMessageAnnotation `json:"annotations,omitempty"`
+	ID             int64  `json:"id"`
+	AccountID      int64  `json:"account_id"`
+	MailboxID      int64  `json:"mailbox_id"`
+	Subject        string `json:"subject"`
+	FromAddr       string `json:"from_addr"`
+	ToAddr         string `json:"to_addr"`
+	CCAddr         string `json:"cc_addr"`
+	Date           string `json:"date"`
+	DateShort      string `json:"date_short"`
+	IsRead         bool   `json:"is_read"`
+	IsStarred      bool   `json:"is_starred"`
+	HasAttachments bool   `json:"has_attachments"`
+	IsEncrypted    bool   `json:"is_encrypted"`
+	IsSigned       bool   `json:"is_signed"`
+	// Category is empty while the message is still waiting to be classified,
+	// which is why the browser treats it as "not filed yet" rather than as a
+	// category of its own.
+	Category    string                 `json:"category"`
+	Snippet     string                 `json:"snippet"`
+	Annotations []apiMessageAnnotation `json:"annotations,omitempty"`
 }
 
 type apiMessageAnnotation struct {

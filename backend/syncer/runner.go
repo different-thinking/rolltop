@@ -104,6 +104,7 @@ type Runner struct {
 	replayGenerationRecovery   func(generationRecoveryReplay)
 	refreshSenderStatsForUser  func(context.Context, int64) error
 	indexAttachmentsForUser    func(context.Context, int64, int) (int, error)
+	classifyCategoriesForUser  func(context.Context, int64, int) (int, error)
 }
 
 // NewRunner builds a process-lifetime scheduler using a background context. The
@@ -751,6 +752,13 @@ func (r *Runner) indexPendingAttachmentsForUser(ctx context.Context, userID int6
 		return r.indexAttachmentsForUser(ctx, userID, limit)
 	}
 	return r.Service.IndexPendingAttachmentsForUser(ctx, userID, limit)
+}
+
+func (r *Runner) classifyPendingCategoriesForUser(ctx context.Context, userID int64, limit int) (int, error) {
+	if r.classifyCategoriesForUser != nil {
+		return r.classifyCategoriesForUser(ctx, userID, limit)
+	}
+	return r.Service.ClassifyPendingCategoriesForUser(ctx, userID, limit)
 }
 
 func (r *Runner) runMailboxes(userID int64, mailboxes []string) bool {
@@ -1496,6 +1504,23 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 		if n > 0 {
 			log.Printf("attachment index user_id=%d processed=%d", userID, n)
 		}
+		// Category classification rides the same turn: it reads stored raw
+		// messages just as attachment indexing does, so it inherits the
+		// yielding, cancellation, and retry scheduling already built around
+		// this worker instead of competing with it for the user's database.
+		categorized, err := r.classifyPendingCategoriesForUser(ctx, userID, categoryBackfillBatchSize)
+		if err != nil {
+			indexFailed = true
+			if ctx.Err() == nil {
+				log.Printf("category backfill user_id=%d: %v", userID, r.noteStoreError(userID, err))
+			}
+			return
+		}
+		if categorized > 0 {
+			log.Printf("category backfill user_id=%d classified=%d", userID, categorized)
+			r.Service.notify(userID)
+		}
+		drainMore = drainMore || categorized == categoryBackfillBatchSize
 	}()
 	return true
 }

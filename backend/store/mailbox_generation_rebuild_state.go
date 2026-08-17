@@ -519,7 +519,7 @@ func (s *Store) ListMailboxGenerationArrivalCandidates(ctx context.Context, user
 		message.body_text, message.body_html, message.is_read, message.read_sync_pending,
 		message.is_starred, message.star_sync_pending, message.has_attachments,
 		message.is_encrypted, message.is_signed, message.attachment_indexed_at,
-		message.created_at, message.updated_at
+		message.created_at, message.updated_at, message.category
 		FROM messages message
 		JOIN mailboxes mailbox ON mailbox.user_id = message.user_id
 			AND mailbox.account_id = message.account_id AND mailbox.id = message.mailbox_id

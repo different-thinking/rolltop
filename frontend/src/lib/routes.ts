@@ -29,12 +29,25 @@ function decodePathSegment(value = ""): string {
 }
 
 /**
+ * MailCategory names a kind of mail decided from the message's own headers.
+ * The names are the server's stored values, so they are also the view names.
+ */
+export type MailCategory = "relevant" | "newsletters" | "forums" | "notifications";
+
+export const mailCategories: MailCategory[] = ["relevant", "newsletters", "forums", "notifications"];
+
+/**
  * MailView names a whole-account list. All Mail is the unnamed default; the
  * others live under /mail/<view> and never combine with a single mailbox.
  */
-export type MailView = "" | "unarchived" | "sent" | "drafts";
+export type MailView = "" | "unarchived" | "sent" | "drafts" | MailCategory;
 
-const mailViews: MailView[] = ["unarchived", "sent", "drafts"];
+const mailViews: MailView[] = ["unarchived", "sent", "drafts", ...mailCategories];
+
+/** mailViewCategory reports the category a view names, or "" for the rest. */
+export function mailViewCategory(view: MailView): MailCategory | "" {
+  return (mailCategories as string[]).includes(view) ? view as MailCategory : "";
+}
 
 /** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
 export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {

@@ -1,17 +1,19 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar, mobile
 // drawer, drag-to-folder handling, sync status, and the mobile compose affordance.
 
-import { useMemo, useState, useEffect, useRef } from "react";
+import { Fragment, useCallback, useMemo, useState, useEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { AppShellProps, LocationState, MessageTransferAction, MoveTarget, SecurityUnlockState } from "../../appTypes";
-import type { Bootstrap, Mailbox, SyncRun, User } from "../../types";
+import type { Bootstrap, Mailbox, MailCategorySummary, SyncRun, User } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/androidNative";
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import type { MailView } from "../../lib/routes";
+import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, saveCollapsedAccounts } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
@@ -39,6 +41,8 @@ export function AppShell({
   accountNotice,
   databaseUnavailable,
   enabledPlugins,
+  mailCategories,
+  mailCategoriesPending,
   location,
   navigate,
   onMoveMessages,
@@ -425,6 +429,8 @@ export function AppShell({
           buildDate={buildDate}
           buildLabel={buildLabel}
           buildCommit={buildCommit}
+          mailCategories={mailCategories}
+          mailCategoriesPending={mailCategoriesPending}
           currentPath={location.path}
           navigate={navigate}
           openCompose={openCompose}
@@ -805,6 +811,8 @@ function Sidebar({
   buildDate,
   buildLabel,
   buildCommit,
+  mailCategories,
+  mailCategoriesPending,
   currentPath,
   navigate,
   openCompose,
@@ -829,6 +837,8 @@ function Sidebar({
   buildDate: string;
   buildLabel: string;
   buildCommit: string;
+  mailCategories: MailCategorySummary[];
+  mailCategoriesPending: number;
   currentPath: string;
   navigate: (url: string) => void;
   openCompose: (query?: string) => void;
@@ -860,6 +870,31 @@ function Sidebar({
   const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
   const snoozedActive = currentPath === "/snoozes";
   const accountGroups = useMemo(() => sidebarAccountGroups(mailboxes), [mailboxes]);
+  // Stable across renders so the keyboard listener is not torn down and rebuilt
+  // on every chrome update while a chord is being held.
+  const openList = useCallback((url: string) => {
+    navigate(url);
+    onClose();
+  }, [navigate, onClose]);
+  // One ordered list drives both the links and their numbers, so a shortcut can
+  // never point at a different entry than the badge beside it claims.
+  const namedLists: NamedListEntry[] = [
+    { url: "/mail", label: "All Mail", icon: "mail", active: allMailActive, unread: 0, title: "Every folder that opts into All Mail" },
+    { url: "/mail/unarchived", label: "Unarchived", icon: "inbox", active: unarchivedActive, unread: 0, title: "All Mail without each account's Archive folder" },
+    { url: "/mail/sent", label: "Sent", icon: "send", active: sentActive, unread: 0, title: "Sent mail across every account" },
+    { url: "/mail/drafts", label: "Drafts", icon: "draft", active: draftsActive, unread: 0, title: "Drafts across every account" },
+    { url: "/snoozes", label: "Snoozed", icon: "clock", active: snoozedActive, unread: 0, title: "Threads waiting to come back" },
+    ...mailCategories.map((category, index) => ({
+      url: mailURL(null, 1, category.name as MailView),
+      label: category.label,
+      icon: category.icon || "label",
+      active: listRoute.view === category.name,
+      unread: category.unread,
+      title: `${category.label}: ${messageCountLabel(category.total)}, decided from each message's own headers and excluding archived mail`,
+      section: index === 0 ? "Categories" : undefined
+    }))
+  ];
+  const shortcutHintsVisible = useSidebarShortcuts(namedLists, openList);
   const advertiseAndroidApp = shouldAdvertiseAndroidApp();
 
   useEffect(() => {
@@ -874,8 +909,7 @@ function Sidebar({
 
   function open(event: MouseEvent, url: string) {
     event.preventDefault();
-    navigate(url);
-    onClose();
+    openList(url);
   }
 
   function canAcceptDraggedMessages(event: DragEvent) {
@@ -1059,44 +1093,32 @@ function Sidebar({
         Compose
       </a>
       <div className="sidebar-scroll">
-        <a
-          href="/mail"
-          className={`folder ${allMailActive ? "active" : ""}`}
-          onClick={(event) => open(event, "/mail")}
-        >
-          <span className="folder-name"><Icon name="mail" weight={allMailActive ? "bold" : undefined} />All Mail</span>
-        </a>
-        <a
-          href="/mail/unarchived"
-          className={`folder ${unarchivedActive ? "active" : ""}`}
-          title="All Mail without each account's Archive folder"
-          onClick={(event) => open(event, "/mail/unarchived")}
-        >
-          <span className="folder-name"><Icon name="inbox" weight={unarchivedActive ? "bold" : undefined} />Unarchived</span>
-        </a>
-        <a
-          href="/mail/sent"
-          className={`folder ${sentActive ? "active" : ""}`}
-          title="Sent mail across every account"
-          onClick={(event) => open(event, "/mail/sent")}
-        >
-          <span className="folder-name"><Icon name="send" weight={sentActive ? "bold" : undefined} />Sent</span>
-        </a>
-        <a
-          href="/mail/drafts"
-          className={`folder ${draftsActive ? "active" : ""}`}
-          title="Drafts across every account"
-          onClick={(event) => open(event, "/mail/drafts")}
-        >
-          <span className="folder-name"><Icon name="draft" weight={draftsActive ? "bold" : undefined} />Drafts</span>
-        </a>
-    <a
-      href="/snoozes"
-      className={`folder ${snoozedActive ? "active" : ""}`}
-      onClick={(event) => open(event, "/snoozes")}
-    >
-      <span className="folder-name"><Icon name="clock" weight={snoozedActive ? "bold" : undefined} />Snoozed</span>
-    </a>
+        {namedLists.map((entry, index) => (
+          <Fragment key={entry.url}>
+            {entry.section ? <div className="side-section">{entry.section}</div> : null}
+            <a
+              href={entry.url}
+              className={`folder ${entry.active ? "active" : ""}`}
+              title={entry.title}
+              onClick={(event) => open(event, entry.url)}
+            >
+              <span className="folder-name">
+                <Icon name={entry.icon} weight={entry.active ? "bold" : undefined} />
+                {entry.label}
+              </span>
+              {shortcutHintsVisible && index < maxSidebarShortcuts ? (
+                <span className="folder-shortcut" aria-hidden="true">{index + 1}</span>
+              ) : entry.unread > 0 ? (
+                <span className="folder-count">{entry.unread.toLocaleString()}</span>
+              ) : null}
+            </a>
+          </Fragment>
+        ))}
+        {mailCategoriesPending > 0 ? (
+          <div className="sidebar-note" title="Stored mail is still being read for its category headers">
+            Sorting {mailCategoriesPending.toLocaleString()} more {mailCategoriesPending === 1 ? "message" : "messages"} into categories
+          </div>
+        ) : null}
         <div className="side-section">Folders</div>
         {accountGroups.map((group) => {
           const collapsed = accountCollapsed(group);
@@ -1152,6 +1174,21 @@ function Sidebar({
     </aside>
   );
 }
+
+/**
+ * NamedListEntry is one of the sidebar's whole-account lists. They are numbered
+ * in the order they appear, so the array order is the shortcut order.
+ */
+type NamedListEntry = {
+  url: string;
+  label: string;
+  icon: string;
+  active: boolean;
+  unread: number;
+  title: string;
+  /** Section heading rendered above this entry, when it starts a new group. */
+  section?: string;
+};
 
 type SidebarAccountGroup = {
   key: string;

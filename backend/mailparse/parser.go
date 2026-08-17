@@ -119,6 +119,10 @@ type ParsedMessage struct {
 	Files       []Attachment
 	IsEncrypted bool
 	IsSigned    bool
+	// Category is decided from the list and automation headers while they are
+	// still in hand. Reading it back later means re-opening the raw message,
+	// which is what the backfill has to do for mail stored before categories.
+	Category string
 }
 
 // Parse is the indexing/parser entrypoint. It decodes headers, walks MIME parts,
@@ -140,6 +144,7 @@ func Parse(raw []byte) (ParsedMessage, error) {
 		To:         addressHeader(msg.Header.Get("To")),
 		CC:         addressHeader(msg.Header.Get("Cc")),
 	}
+	parsed.Category = Categorize(msg.Header, parsed.From)
 	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
 		parsed.Date = d.UTC()
 	}
