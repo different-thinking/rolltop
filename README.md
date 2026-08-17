@@ -63,7 +63,9 @@ Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
 startup. `auto` (the default) verifies them only after a run that did not shut
 down cleanly, `always` verifies on every start, `never` disables the check.
 Verification reads every page, so `always` costs startup time proportional to
-the size of the mirror.
+the size of the mirror. A database found damaged is reported and set aside, not
+repaired: startup continues so every other tenant keeps working and the admin
+Database page stays reachable to schedule the repair.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
@@ -149,7 +151,10 @@ docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
 `recover-db` copies every readable row into a freshly migrated database, steps
 over the damaged pages, repairs foreign key references the lost rows leave
 behind, moves the damaged file aside as
-`/data/users/<id>/rolltop.db.corrupt-<stamp>`, and installs the recovered file.
+`/data/users/<id>/rolltop.db.corrupt-<stamp>`, and installs the recovered file
+only after verifying it. A recovered database that fails that verification is
+discarded and the original is restored, so a failing disk under the destination
+cannot cost you the file you still had.
 It prints what survived per table. Mail that the IMAP server still holds is
 re-downloaded by the next sync; locally created state on lost pages (contacts,
 snoozes, identities, pending flag changes) is not recoverable. Because the row

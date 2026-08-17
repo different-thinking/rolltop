@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -71,6 +72,9 @@ func IsCorrupt(err error) bool {
 	}
 	var sqliteErr sqlite3.Error
 	if errors.As(err, &sqliteErr) {
+		// A typed driver error is authoritative in both directions: a busy or
+		// constraint failure must never be reclassified by the text fallback
+		// below just because it quotes a value containing one of the markers.
 		return sqliteErr.Code == sqlite3.ErrCorrupt || sqliteErr.Code == sqlite3.ErrNotADB
 	}
 	message := err.Error()
@@ -149,6 +153,19 @@ func (s *Store) latchCorruption(userID int64, path, detail string) {
 	}
 }
 
+// ClearCorruption releases a tenant that has since verified clean. Corruption
+// is latched from a single failing statement, so a full quick_check that finds
+// nothing is the evidence that overrules it; without this a false positive
+// would keep a healthy tenant out of service until the process restarts.
+func (s *Store) ClearCorruption(userID int64) {
+	if s == nil {
+		return
+	}
+	s.healthMu.Lock()
+	delete(s.health, userID)
+	s.healthMu.Unlock()
+}
+
 // DatabaseCorrupt reports whether this process has already seen corruption for
 // one tenant. Background loops use it to stop scheduling work that cannot
 // succeed until the database is repaired offline.
@@ -160,6 +177,17 @@ func (s *Store) DatabaseCorrupt(userID int64) bool {
 	defer s.healthMu.Unlock()
 	_, corrupt := s.health[userID]
 	return corrupt
+}
+
+// databaseHealth returns the latched record for one tenant.
+func (s *Store) databaseHealth(userID int64) (DatabaseHealth, bool) {
+	if s == nil {
+		return DatabaseHealth{}, false
+	}
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	record, corrupt := s.health[userID]
+	return record, corrupt
 }
 
 // CorruptDatabases returns every latched corruption record, for admin and
@@ -187,26 +215,20 @@ func (s *Store) DatabaseFileForUser(userID int64) string {
 	return filepath.Join(dir, databaseFilename)
 }
 
-// IntegrityCheck runs SQLite's quick_check against one tenant database and
-// returns the reported problems. An empty slice means the file verified clean.
-// quick_check reads every page, so this is an offline maintenance operation
-// rather than something to run on each startup.
-func (s *Store) IntegrityCheck(ctx context.Context, userID int64) ([]string, error) {
-	db, err := s.dataDB(ctx, userID)
-	if err != nil {
-		return nil, s.NoteError(userID, err)
-	}
-	problems, err := quickCheck(ctx, db)
-	if err != nil {
-		return nil, s.NoteError(userID, err)
-	}
-	return problems, nil
-}
+// ErrDatabaseFileMissing reports that a maintenance target does not exist.
+var ErrDatabaseFileMissing = errors.New("database file does not exist")
 
 // CheckDatabaseFile runs quick_check against a SQLite file without migrating
 // it. Offline maintenance uses it so inspecting a suspect database never writes
 // schema changes into a file that is about to be recovered.
+//
+// The file must already exist. SQLite opens with OPEN_CREATE by default, so
+// without this guard checking a missing tenant database would create an empty
+// one at the live path and then truthfully report it as intact.
 func CheckDatabaseFile(ctx context.Context, path string) ([]string, error) {
+	if err := requireDatabaseFile(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
 	if err != nil {
 		return nil, err
@@ -223,6 +245,25 @@ func CheckDatabaseFile(ctx context.Context, path string) ([]string, error) {
 		return problems, err
 	}
 	return problems, nil
+}
+
+// requireDatabaseFile rejects a maintenance target that is missing or is not a
+// regular file, before any SQLite handle can bring it into existence.
+func requireDatabaseFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("%w: no path given", ErrDatabaseFileMissing)
+	}
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("%w: %s", ErrDatabaseFileMissing, path)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return nil
 }
 
 // quickCheck reports the rows of PRAGMA quick_check other than the single "ok"

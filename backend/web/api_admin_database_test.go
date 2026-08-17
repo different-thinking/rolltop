@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,7 +202,7 @@ func TestAdminDatabaseRepairRefusesConcurrentJobSlot(t *testing.T) {
 	if _, ok := server.maintenance.start(maintenanceJobCheck, 0, time.Now()); !ok {
 		t.Fatal("first job did not take the slot")
 	}
-	if _, err := server.startBackup(0); err == nil {
+	if _, err := server.startBackup(maintenanceScopeAll, 0); err == nil {
 		t.Fatal("second job started while another was running")
 	}
 }
@@ -248,5 +249,104 @@ func TestDatabaseOverviewReportsScheduledRepairAndLastOutcome(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "users", "1")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdminDatabaseCheckRefusesMissingTenantFileWithoutCreatingIt(t *testing.T) {
+	server, admin, dataDir := newDatabaseAdminServer(t)
+	path := store.UserDatabaseFilePath(dataDir, admin.ID)
+	// Unlink the tenant file the way a moved-aside database would be gone. The
+	// installation database stays open so the user lookup still succeeds.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(path + suffix)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/check",
+		map[string]any{"scope": "user", "user_id": admin.ID}), "check")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	// SQLite opens with OPEN_CREATE, so a missing guard would leave an empty
+	// database here and then report it as intact.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("checking a missing tenant database created one: %v", err)
+	}
+}
+
+func TestAdminDatabaseSystemScopeChecksOnlyTheInstallationDatabase(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/check",
+		map[string]any{"scope": "system"}), "check")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	job := waitForMaintenanceJob(t, server)
+	for _, line := range job.Log {
+		if strings.Contains(line, "user ") {
+			t.Fatalf("system-scoped check touched a tenant database: %q", line)
+		}
+	}
+	if len(job.Log) == 0 || !strings.Contains(job.Log[0], "installation database") {
+		t.Fatalf("system-scoped check log = %v", job.Log)
+	}
+}
+
+func TestAdminDatabaseRepairRefusedWhileAJobIsRunning(t *testing.T) {
+	server, admin, dataDir := newDatabaseAdminServer(t)
+	server.requestRestart = func(int64, string) { t.Error("a restart was requested while a job was running") }
+	if _, ok := server.maintenance.start(maintenanceJobBackup, 0, time.Now()); !ok {
+		t.Fatal("could not reserve the job slot")
+	}
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/repair",
+		map[string]any{"user_id": admin.ID, "confirm": true}), "repair")
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	// A restart mid-backup would leave a truncated copy that later looks whole.
+	if _, found, err := store.UserDatabaseRepairRequest(dataDir, admin.ID); err != nil || found {
+		t.Fatalf("repair was scheduled during a running job: %v %v", found, err)
+	}
+}
+
+func TestMaintenanceJobSnapshotSerializesAnEmptyLogAsAnArray(t *testing.T) {
+	state := &maintenanceState{}
+	job, ok := state.start(maintenanceJobCheck, 0, time.Now())
+	if !ok {
+		t.Fatal("job did not start")
+	}
+	encoded, err := json.Marshal(map[string]any{"job": state.snapshot()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The frontend types this as string[] and reads .length on it.
+	if !strings.Contains(string(encoded), `"log":[]`) {
+		t.Fatalf("empty job log did not serialize as an array: %s", encoded)
+	}
+	state.finish(job.ID, "done", 0, nil)
+}
+
+func TestIntegrityCheckClearsALatchedTenantThatVerifiesClean(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+	if err := server.store.MarkCorrupt(admin.ID, "stale finding from a single failed statement"); err == nil {
+		t.Fatal("MarkCorrupt returned no error to report")
+	}
+	if !server.store.DatabaseCorrupt(admin.ID) {
+		t.Fatal("tenant was not latched")
+	}
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/check",
+		map[string]any{"scope": "user", "user_id": admin.ID}), "check")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	waitForMaintenanceJob(t, server)
+	if server.store.DatabaseCorrupt(admin.ID) {
+		t.Fatal("a clean full scan did not release the latched tenant")
 	}
 }

@@ -634,12 +634,12 @@ export type MailIdentity = {
 
 /** DatabaseSalvageTable is one table's outcome in a repair report. */
 export type DatabaseSalvageTable = {
-  Table: string;
-  Copied: number;
-  Skipped: number;
-  Dropped: number;
-  Gaps: number;
-  Failure?: string;
+  table: string;
+  copied: number;
+  skipped: number;
+  dropped: number;
+  gaps: number;
+  failure?: string;
 };
 
 /** DatabaseRepairOutcome is what a startup repair recovered for one tenant. */
@@ -651,14 +651,14 @@ export type DatabaseRepairOutcome = {
   error?: string;
   quarantine_path?: string;
   report: {
-    SourcePath: string;
-    DestPath: string;
-    Tables?: DatabaseSalvageTable[];
-    MissingTables?: string[];
-    RowsCopied: number;
-    RowsSkipped: number;
-    RowsDropped: number;
-    Gaps: number;
+    source_path: string;
+    dest_path: string;
+    tables?: DatabaseSalvageTable[];
+    missing_tables?: string[];
+    rows_copied: number;
+    rows_skipped: number;
+    rows_dropped: number;
+    gaps: number;
   };
 };
 

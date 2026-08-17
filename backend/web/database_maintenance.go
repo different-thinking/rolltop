@@ -10,6 +10,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,9 @@ const (
 	maintenanceJobLogLines = 200
 	backupDirectoryName    = "backups"
 )
+
+// errMaintenanceJobRunning reports the single job slot is taken.
+var errMaintenanceJobRunning = errors.New("another maintenance job is already running")
 
 // maintenanceJobKind names the long-running operations the UI can start.
 type maintenanceJobKind string
@@ -64,7 +68,9 @@ func (m *maintenanceState) snapshot() *maintenanceJob {
 		return nil
 	}
 	copied := *m.current
-	copied.Log = append([]string(nil), m.current.Log...)
+	// The frontend types this as string[] and reads .length, so an empty log
+	// must marshal as [] rather than null.
+	copied.Log = append(make([]string, 0, len(m.current.Log)), m.current.Log...)
 	return &copied
 }
 
@@ -178,6 +184,10 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 	if err != nil {
 		return overview, err
 	}
+	corrupt := make(map[int64]store.DatabaseHealth)
+	for _, record := range s.store.CorruptDatabases() {
+		corrupt[record.UserID] = record
+	}
 	for _, user := range users {
 		status := databaseStatus{
 			Scope:  "user",
@@ -186,12 +196,10 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 			Path:   store.UserDatabaseFilePath(s.dataDir, user.ID),
 		}
 		status.Bytes, status.WALBytes, status.Missing = sqliteFileSizes(status.Path)
-		for _, record := range s.store.CorruptDatabases() {
-			if record.UserID == user.ID {
-				status.Corrupt = true
-				status.CorruptDetail = record.Detail
-				status.CorruptDetected = record.DetectedAt
-			}
+		if record, damaged := corrupt[user.ID]; damaged {
+			status.Corrupt = true
+			status.CorruptDetail = record.Detail
+			status.CorruptDetected = record.DetectedAt
 		}
 		if request, found, err := store.UserDatabaseRepairRequest(s.dataDir, user.ID); err == nil && found {
 			status.RepairScheduled = true
@@ -207,6 +215,34 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 	return overview, nil
 }
 
+// backupSize is one measured backup directory. Sizing walks every file in the
+// directory, and the admin page polls, so a finished backup is measured once
+// and re-measured only if its directory changes.
+type backupSize struct {
+	modTime time.Time
+	bytes   int64
+}
+
+func (s *Server) backupDirectorySize(path string, name string, modTime time.Time) (int64, error) {
+	s.backupSizeMu.Lock()
+	cached, ok := s.backupSizes[name]
+	s.backupSizeMu.Unlock()
+	if ok && cached.modTime.Equal(modTime) {
+		return cached.bytes, nil
+	}
+	size, err := pathSize(path)
+	if err != nil {
+		return 0, err
+	}
+	s.backupSizeMu.Lock()
+	if s.backupSizes == nil {
+		s.backupSizes = make(map[string]backupSize)
+	}
+	s.backupSizes[name] = backupSize{modTime: modTime, bytes: size}
+	s.backupSizeMu.Unlock()
+	return size, nil
+}
+
 func (s *Server) listBackups() []backupEntry {
 	root := s.backupDirectory()
 	entries, err := os.ReadDir(root)
@@ -219,13 +255,13 @@ func (s *Server) listBackups() []backupEntry {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		size, err := pathSize(path)
-		if err != nil {
-			continue
-		}
 		created := time.Time{}
 		if info, err := entry.Info(); err == nil {
 			created = info.ModTime().UTC()
+		}
+		size, err := s.backupDirectorySize(path, entry.Name(), created)
+		if err != nil {
+			continue
 		}
 		backups = append(backups, backupEntry{Name: entry.Name(), Path: path, Bytes: size, CreatedAt: created})
 	}
@@ -235,19 +271,21 @@ func (s *Server) listBackups() []backupEntry {
 
 // startIntegrityCheck verifies every database, or one tenant, in the
 // background. quick_check only reads, so this is safe while the server serves.
-func (s *Server) startIntegrityCheck(userID int64) (*maintenanceJob, error) {
+func (s *Server) startIntegrityCheck(scope maintenanceScope, userID int64) (*maintenanceJob, error) {
+	// Targets are resolved before the slot is taken so an unknown or missing
+	// database answers the request instead of failing inside a job the caller
+	// has already been told started.
+	targets, err := s.maintenanceTargets(context.Background(), scope, userID)
+	if err != nil {
+		return nil, err
+	}
 	job, ok := s.maintenance.start(maintenanceJobCheck, userID, time.Now())
 	if !ok {
-		return nil, fmt.Errorf("another maintenance job is already running")
+		return nil, errMaintenanceJobRunning
 	}
 	go func() {
 		ctx := context.Background()
 		problems := 0
-		targets, err := s.maintenanceTargets(ctx, userID)
-		if err != nil {
-			s.maintenance.finish(job.ID, "failed", 0, err)
-			return
-		}
 		for _, target := range targets {
 			s.maintenance.appendLog(job.ID, fmt.Sprintf("checking %s", target.label))
 			found, err := store.CheckDatabaseFile(ctx, target.path)
@@ -257,6 +295,12 @@ func (s *Server) startIntegrityCheck(userID int64) (*maintenanceJob, error) {
 				continue
 			}
 			if len(found) == 0 {
+				// A full scan that finds nothing overrules a latch set from a
+				// single failing statement, so a tenant can come back into
+				// service without restarting the process.
+				if target.userID > 0 {
+					s.store.ClearCorruption(target.userID)
+				}
 				s.maintenance.appendLog(job.ID, fmt.Sprintf("%s: ok", target.label))
 				continue
 			}
@@ -279,19 +323,18 @@ func (s *Server) startIntegrityCheck(userID int64) (*maintenanceJob, error) {
 
 // startBackup writes a consistent copy of every database into a timestamped
 // directory under the data volume.
-func (s *Server) startBackup(userID int64) (*maintenanceJob, error) {
+func (s *Server) startBackup(scope maintenanceScope, userID int64) (*maintenanceJob, error) {
+	targets, err := s.maintenanceTargets(context.Background(), scope, userID)
+	if err != nil {
+		return nil, err
+	}
 	job, ok := s.maintenance.start(maintenanceJobBackup, userID, time.Now())
 	if !ok {
-		return nil, fmt.Errorf("another maintenance job is already running")
+		return nil, errMaintenanceJobRunning
 	}
 	destination := filepath.Join(s.backupDirectory(), time.Now().UTC().Format("20060102T150405Z"))
 	go func() {
 		ctx := context.Background()
-		targets, err := s.maintenanceTargets(ctx, userID)
-		if err != nil {
-			s.maintenance.finish(job.ID, "failed", 0, err)
-			return
-		}
 		if err := os.MkdirAll(destination, 0o700); err != nil {
 			s.maintenance.finish(job.ID, "failed", 0, err)
 			return
@@ -329,22 +372,42 @@ type maintenanceTarget struct {
 	userID int64
 }
 
+// maintenanceScope selects which files a job covers. Without an explicit scope
+// the installation-database row could only be checked by scanning every tenant
+// as well, which on a large mirror is a completely different operation.
+type maintenanceScope string
+
+const (
+	maintenanceScopeAll    maintenanceScope = ""
+	maintenanceScopeSystem maintenanceScope = "system"
+	maintenanceScopeUser   maintenanceScope = "user"
+)
+
 // maintenanceTargets resolves which files a job covers. Passing a user ID
 // limits the job to that tenant; zero covers the installation database and
 // every tenant.
-func (s *Server) maintenanceTargets(ctx context.Context, userID int64) ([]maintenanceTarget, error) {
-	if userID > 0 {
+func (s *Server) maintenanceTargets(ctx context.Context, scope maintenanceScope, userID int64) ([]maintenanceTarget, error) {
+	if scope == maintenanceScopeUser || userID > 0 {
 		user, err := s.store.GetUserByID(ctx, userID)
 		if err != nil {
 			return nil, err
 		}
+		path := store.UserDatabaseFilePath(s.dataDir, user.ID)
+		// Checking or backing up a file that is not there would otherwise let
+		// SQLite create an empty one at the live path and report it as intact.
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("user %d database %s: %w", user.ID, path, store.ErrDatabaseFileMissing)
+		}
 		return []maintenanceTarget{{
 			label:  fmt.Sprintf("user %d database (%s)", user.ID, user.Email),
-			path:   store.UserDatabaseFilePath(s.dataDir, user.ID),
+			path:   path,
 			userID: user.ID,
 		}}, nil
 	}
 	targets := []maintenanceTarget{{label: "installation database", path: s.databasePath}}
+	if scope == maintenanceScopeSystem {
+		return targets, nil
+	}
 	users, err := s.store.ListUsers(ctx)
 	if err != nil {
 		return nil, err
@@ -372,6 +435,12 @@ func (s *Server) scheduleDatabaseRepair(ctx context.Context, userID int64, reque
 	}
 	if _, err := s.store.GetUserByID(ctx, userID); err != nil {
 		return err
+	}
+	// The restart below kills whatever a running job is in the middle of, and a
+	// VACUUM INTO cut short leaves a partial file that later looks like a
+	// complete backup.
+	if job := s.maintenance.snapshot(); job != nil && job.Running {
+		return fmt.Errorf("%w: wait for the running %s to finish", errMaintenanceJobRunning, job.Kind)
 	}
 	if err := store.ScheduleUserDatabaseRepair(s.dataDir, userID, requestedBy, time.Now()); err != nil {
 		return err

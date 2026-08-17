@@ -82,7 +82,7 @@ func runBackupDatabase(ctx context.Context, args []string, stdout, stderr io.Wri
 		name := strconv.FormatInt(id, 10)
 		targets = append(targets, backupTarget{
 			label:  fmt.Sprintf("user %d database", id),
-			source: userDatabasePath(cfg.DataDir, id),
+			source: store.UserDatabaseFilePath(cfg.DataDir, id),
 			dest:   filepath.Join(*output, "users", name, "rolltop.db"),
 		})
 	}
@@ -116,7 +116,7 @@ func runBackupDatabase(ctx context.Context, args []string, stdout, stderr io.Wri
 // against a database the running server owns.
 func backupUserIDs(dataDir string, userID int64) ([]int64, error) {
 	if userID > 0 {
-		path := userDatabasePath(dataDir, userID)
+		path := store.UserDatabaseFilePath(dataDir, userID)
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("open user %d database %s: %w", userID, path, err)
 		}

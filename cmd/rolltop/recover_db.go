@@ -14,8 +14,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
-	"strconv"
 	"time"
 
 	"rolltop/backend/config"
@@ -90,7 +88,7 @@ func runCheckDatabase(ctx context.Context, args []string, stdout, stderr io.Writ
 		}
 	}
 	for _, id := range users {
-		path := userDatabasePath(cfg.DataDir, id)
+		path := store.UserDatabaseFilePath(cfg.DataDir, id)
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stdout, "user %d: no database at %s\n", id, path)
 			continue
@@ -224,23 +222,39 @@ func writeSalvageReport(stdout io.Writer, userID int64, report store.SalvageRepo
 // quarantineSQLiteFileSet moves a database and its WAL sidecars together. A
 // stale -wal left beside a replacement database would be applied to it, so a
 // sidecar that cannot be moved is deleted and, failing that, the whole move is
-// rolled back.
+// rolled back — including the parts that already succeeded, because a database
+// restored without the -wal that belongs to it has silently lost every
+// transaction still held in that log.
 func quarantineSQLiteFileSet(from, to string) error {
 	if err := os.Rename(from, to); err != nil {
 		return fmt.Errorf("quarantine %s: %w", from, err)
+	}
+	moved := []string{""}
+	rollback := func(cause error) error {
+		errs := []error{cause}
+		for _, suffix := range moved {
+			if err := os.Rename(to+suffix, from+suffix); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", from+suffix, err))
+			}
+		}
+		return errors.Join(errs...)
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		source := from + suffix
 		if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return errors.Join(fmt.Errorf("inspect %s: %w", source, err), os.Rename(to, from))
+			return rollback(fmt.Errorf("inspect %s: %w", source, err))
 		}
 		if err := os.Rename(source, to+suffix); err == nil {
+			moved = append(moved, suffix)
 			continue
 		}
+		// The -shm file is rebuilt from the -wal on the next open, so deleting
+		// it loses nothing; a -wal that can neither be moved nor removed does,
+		// which is why the whole set goes back.
 		if err := os.Remove(source); err != nil {
-			return errors.Join(fmt.Errorf("remove stale %s: %w", source, err), os.Rename(to, from))
+			return rollback(fmt.Errorf("remove stale %s: %w", source, err))
 		}
 	}
 	return nil
@@ -250,10 +264,6 @@ func removeSQLiteFileSet(path string) {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		_ = os.Remove(path + suffix)
 	}
-}
-
-func userDatabasePath(dataDir string, userID int64) string {
-	return filepath.Join(dataDir, "users", strconv.FormatInt(userID, 10), "rolltop.db")
 }
 
 // listMaintenanceUsers resolves which tenants a maintenance command covers. The

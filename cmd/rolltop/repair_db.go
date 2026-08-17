@@ -70,16 +70,39 @@ func repairUserDatabase(ctx context.Context, dataDir string, userID int64, manif
 	}
 	outcome.QuarantinePath = quarantinePath
 
+	// The recovered file is only kept if it verifies. Salvaging onto the same
+	// failing storage can produce a damaged copy, and installing that while
+	// telling the operator the original was preserved would be the worst of
+	// both: the live database is the bad one and nothing says so.
 	problems, err := store.CheckDatabaseFile(ctx, databasePath)
 	if err != nil {
-		return fail(fmt.Errorf("verify recovered user %d database: %w", userID, err))
+		return fail(restoreQuarantinedDatabase(quarantinePath, databasePath,
+			fmt.Errorf("verify recovered user %d database: %w", userID, err), &outcome))
 	}
 	if len(problems) > 0 {
-		return fail(fmt.Errorf("recovered database is still damaged (%s); the original is preserved at %s", problems[0], quarantinePath))
+		return fail(restoreQuarantinedDatabase(quarantinePath, databasePath,
+			fmt.Errorf("recovered user %d database is still damaged: %s", userID, problems[0]), &outcome))
 	}
 	outcome.FinishedAt = time.Now().UTC()
 	outcome.Succeeded = true
 	return outcome, nil
+}
+
+// restoreQuarantinedDatabase puts the original back after a failed recovery and
+// removes the rejected copy, so the tenant keeps the file the operator was told
+// is preserved. A rollback that cannot complete is reported rather than hidden.
+func restoreQuarantinedDatabase(quarantinePath, databasePath string, cause error, outcome *store.RepairOutcome) error {
+	rejectedPath := databasePath + ".rejected-" + filepath.Base(quarantinePath)
+	if err := quarantineSQLiteFileSet(databasePath, rejectedPath); err != nil {
+		return errors.Join(cause, fmt.Errorf("set the rejected recovery aside: %w", err))
+	}
+	if err := quarantineSQLiteFileSet(quarantinePath, databasePath); err != nil {
+		return errors.Join(cause, fmt.Errorf("restore the original database from %s: %w", quarantinePath, err))
+	}
+	// The original is back at its own path, so there is no quarantine to report.
+	outcome.QuarantinePath = ""
+	removeSQLiteFileSet(rejectedPath)
+	return errors.Join(cause, fmt.Errorf("the original database was restored and left in place at %s", databasePath))
 }
 
 // runScheduledDatabaseRepairs consumes the repair markers written by the admin

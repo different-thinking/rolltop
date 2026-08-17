@@ -93,6 +93,8 @@ type Server struct {
 	webhookToken              string
 	requestRestart            func(userID int64, reason string)
 	maintenance               maintenanceState
+	backupSizeMu              sync.Mutex
+	backupSizes               map[string]backupSize
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool

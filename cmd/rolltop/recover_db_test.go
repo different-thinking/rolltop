@@ -47,7 +47,7 @@ func TestRecoverDatabaseSalvagesCorruptUserDatabase(t *testing.T) {
 	ctx := context.Background()
 	userID := writeMaintenanceFixture(t, 4000)
 	dataDir := os.Getenv("ROLLTOP_DATA_DIR")
-	databasePath := userDatabasePath(dataDir, userID)
+	databasePath := store.UserDatabaseFilePath(dataDir, userID)
 	corruptDatabaseFile(t, databasePath)
 
 	var checkOut bytes.Buffer

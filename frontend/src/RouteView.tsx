@@ -99,7 +99,7 @@ export function RouteView({
     return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
   }
   if (location.path === "/admin/database" && user.is_admin) {
-    return <AdminDatabaseView csrf={csrf} addToast={addToast} />;
+    return <AdminDatabaseView csrf={csrf} datePrefs={user} addToast={addToast} />;
   }
   if (location.path.startsWith("/sync-runs/")) {
     return <SyncRunView csrf={csrf} location={location} navigate={navigate} datePrefs={user} />;

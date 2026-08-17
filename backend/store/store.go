@@ -10,6 +10,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -173,6 +174,14 @@ func (s *Store) PrepareUserStores(ctx context.Context, progress MigrationReporte
 	for i, user := range users {
 		reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d", user.ID), Done: i, Total: len(users)})
 		if _, err := s.userStore(ctx, user.ID, progress); err != nil {
+			// A corrupt tenant database must not keep the installation down.
+			// userStore has already latched it, so its own requests fail with
+			// the repair instructions while every other tenant is served — and
+			// the admin UI that schedules the repair stays reachable.
+			if IsCorrupt(err) {
+				reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d is damaged", user.ID), Done: i + 1, Total: len(users)})
+				continue
+			}
 			return err
 		}
 		reportMigration(progress, MigrationProgress{Scope: "user", Migration: "open user database", Step: fmt.Sprintf("user %d", user.ID), Done: i + 1, Total: len(users)})
@@ -238,19 +247,27 @@ func (s *Store) UserDB(ctx context.Context, userID int64) (*sql.DB, error) {
 
 // dataDB is the central tenant-routing helper. Any method that reads or writes
 // user-owned mail/contact/blob metadata should reach SQLite through this path.
+// A tenant already known to be corrupt fails here without touching the file, so
+// every caller stops retrying a database that cannot answer until it is
+// repaired offline.
 func (s *Store) dataDB(ctx context.Context, userID int64) (*sql.DB, error) {
 	if !s.split || userID == 0 {
 		return s.db, nil
+	}
+	if health, corrupt := s.databaseHealth(userID); corrupt {
+		return nil, newCorruptionError(userID, health.Path, errors.New(health.Detail))
 	}
 	return s.UserDB(ctx, userID)
 }
 
 // mustDataDB is used only in helpers that must satisfy database/sql callback
 // shapes and cannot return an error at the point they resolve the tenant DB.
+// It never panics: an unresolvable tenant yields a handle whose statements all
+// fail, which every caller already handles as a query error.
 func (s *Store) mustDataDB(ctx context.Context, userID int64) *sql.DB {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
-		panic(err)
+		return unavailableDB()
 	}
 	return db
 }

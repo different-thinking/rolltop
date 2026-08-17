@@ -53,7 +53,7 @@ func TestVerifyUserDatabasesLatchesDamagedTenant(t *testing.T) {
 	ctx := context.Background()
 	userID := writeMaintenanceFixture(t, 4000)
 	dataDir := os.Getenv("ROLLTOP_DATA_DIR")
-	corruptDatabaseFile(t, userDatabasePath(dataDir, userID))
+	corruptDatabaseFile(t, store.UserDatabaseFilePath(dataDir, userID))
 
 	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestVerifyUserDatabasesLatchesDamagedTenant(t *testing.T) {
 		t.Fatal("damaged tenant was not latched as corrupt")
 	}
 	records := db.CorruptDatabases()
-	if len(records) != 1 || records[0].Path != userDatabasePath(dataDir, userID) {
+	if len(records) != 1 || records[0].Path != store.UserDatabaseFilePath(dataDir, userID) {
 		t.Fatalf("corruption records = %+v", records)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -219,6 +220,11 @@ type appRuntime struct {
 	search          *search.Service
 	handler         http.Handler
 	restartRequired <-chan restartRequest
+	// markSearchRecovery durably schedules a rebuild of every tenant search
+	// index. It is called when the index close has to be abandoned, because the
+	// process then exits with a possibly half-written Bleve batch and nothing
+	// else would notice on the next start.
+	markSearchRecovery func()
 }
 
 // restartRequest is a controlled-restart request from a subsystem that cannot
@@ -262,7 +268,12 @@ func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 		closeWithBudget("plugin host", time.Until(deadline), a.pluginHost.Close)
 	}
 	if a.search != nil {
-		closeWithBudget("search index", time.Until(deadline), a.search.Close)
+		if !closeWithBudget("search index", time.Until(deadline), a.search.Close) && a.markSearchRecovery != nil {
+			// Only the stall handler writes recovery markers otherwise, so
+			// without this an abandoned close leaves an index that fails to
+			// open on the next start and is never rebuilt.
+			a.markSearchRecovery()
+		}
 	}
 	if a.db != nil {
 		// Deliberately unbounded: this is the write that decides whether the
@@ -273,10 +284,13 @@ func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 	}
 }
 
-func closeWithBudget(name string, budget time.Duration, closeFn func() error) {
+// closeWithBudget reports whether the subsystem finished closing. A false
+// return means the close was skipped or abandoned, and the caller has to assume
+// the subsystem's on-disk state is unfinished.
+func closeWithBudget(name string, budget time.Duration, closeFn func() error) bool {
 	if budget <= 0 {
 		log.Printf("skipping %s shutdown: shutdown budget already spent", name)
-		return
+		return false
 	}
 	done := make(chan error, 1)
 	go func() { done <- closeFn() }()
@@ -287,8 +301,10 @@ func closeWithBudget(name string, budget time.Duration, closeFn func() error) {
 		if err != nil {
 			log.Printf("close %s: %v", name, err)
 		}
+		return true
 	case <-timer.C:
 		log.Printf("%s did not close within %s; closing databases anyway", name, budget)
+		return false
 	}
 }
 
@@ -411,16 +427,18 @@ func run() error {
 		return err
 	}
 	restartShutdownOwnsClose := false
-	databasesClosed := false
+	// The restart path closes the app on a goroutine that outlives its own
+	// timeout, so this flag crosses goroutines and needs atomic access.
+	var databasesClosed atomic.Bool
 	defer func() {
 		if !restartShutdownOwnsClose {
 			app.close()
-			databasesClosed = true
+			databasesClosed.Store(true)
 		}
 		// The marker outlives any exit that did not get as far as closing
 		// SQLite, so the next start treats that exit as unclean and verifies
 		// the files before serving.
-		if databasesClosed {
+		if databasesClosed.Load() {
 			releaseRunningMarker(cfg.DataDir)
 		}
 	}()
@@ -447,7 +465,7 @@ func run() error {
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
 			shutdownErr := shutdownServingApp(app, server, serverErr)
 			app.close()
-			databasesClosed = true
+			databasesClosed.Store(true)
 			return shutdownErr
 		})
 		if cleanupErr != nil {
@@ -639,6 +657,13 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	return &appRuntime{
 		pluginHost: webServer, db: db, search: searchSvc, handler: webServer.Handler(),
 		restartRequired: restartRequired,
+		markSearchRecovery: func() {
+			for _, user := range users {
+				if err := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); err != nil {
+					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, err)
+				}
+			}
+		},
 	}, nil
 }
 

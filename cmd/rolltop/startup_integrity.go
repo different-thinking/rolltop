@@ -83,7 +83,7 @@ func verifyUserDatabases(ctx context.Context, db *store.Store, dataDir string, p
 		if progress != nil {
 			progress(i, len(users), fmt.Sprintf("checking user %d", user.ID))
 		}
-		path := userDatabasePath(dataDir, user.ID)
+		path := store.UserDatabaseFilePath(dataDir, user.ID)
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -99,7 +99,7 @@ func verifyUserDatabases(ctx context.Context, db *store.Store, dataDir string, p
 		}
 		damaged = append(damaged, user.ID)
 		log.Printf("startup integrity check user_id=%d: %v", user.ID, db.MarkCorrupt(user.ID, problems[0]))
-		for _, problem := range problems[1:maxLoggedIntegrityProblems(len(problems))] {
+		for _, problem := range problems[1:min(len(problems), maxLoggedIntegrityProblems)] {
 			log.Printf("startup integrity check user_id=%d detail: %s", user.ID, problem)
 		}
 	}
@@ -111,10 +111,4 @@ func verifyUserDatabases(ctx context.Context, db *store.Store, dataDir string, p
 
 // maxLoggedIntegrityProblems bounds how much of a quick_check report reaches
 // the log; a badly damaged file can report thousands of lines.
-func maxLoggedIntegrityProblems(total int) int {
-	const limit = 10
-	if total < limit {
-		return total
-	}
-	return limit
-}
+const maxLoggedIntegrityProblems = 10

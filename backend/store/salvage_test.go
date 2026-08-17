@@ -8,11 +8,14 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func TestSalvageUserDatabaseCopiesIntactDatabase(t *testing.T) {
@@ -274,4 +277,127 @@ func quickCheckPath(t *testing.T, path string) []string {
 		return []string{err.Error()}
 	}
 	return problems
+}
+
+func TestIsCorruptTrustsTheDriverCodeOverMessageText(t *testing.T) {
+	// A typed driver error must never be reclassified by the text fallback just
+	// because a value it quotes contains one of the markers.
+	busy := sqlite3.Error{Code: sqlite3.ErrBusy}
+	if IsCorrupt(fmt.Errorf("store subject %q: %w", "database disk image is malformed", busy)) {
+		t.Fatal("a busy error quoting the corruption text was classified as corruption")
+	}
+	corrupt := sqlite3.Error{Code: sqlite3.ErrCorrupt}
+	if !IsCorrupt(fmt.Errorf("store message: %w", corrupt)) {
+		t.Fatal("SQLITE_CORRUPT was not classified as corruption")
+	}
+}
+
+func TestClearCorruptionReleasesALatchedTenant(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.MarkCorrupt(1, "quick_check finding")
+	if !db.DatabaseCorrupt(1) {
+		t.Fatal("tenant was not latched")
+	}
+	db.ClearCorruption(1)
+	if db.DatabaseCorrupt(1) {
+		t.Fatal("tenant stayed latched after a clean verification")
+	}
+}
+
+func TestMustDataDBReturnsAFailingHandleInsteadOfPanicking(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "latched@example.test", "Latched", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.MarkCorrupt(user.ID, "quick_check finding")
+
+	// A background goroutine reaching a latched tenant must get an error, not
+	// take the whole process down with it.
+	handle := db.mustDataDB(ctx, user.ID)
+	if handle == nil {
+		t.Fatal("mustDataDB returned no handle")
+	}
+	if err := handle.PingContext(ctx); err == nil {
+		t.Fatal("the unavailable handle answered a ping")
+	}
+	if _, err := db.dataDB(ctx, user.ID); !IsCorrupt(err) {
+		t.Fatalf("dataDB for a latched tenant = %v, want a corruption error", err)
+	}
+}
+
+func TestPrepareUserStoresSkipsADamagedTenant(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	damaged, err := db.CreateUser(ctx, "damaged@example.test", "Damaged", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := db.CreateUser(ctx, "healthy@example.test", "Healthy", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace one tenant file with something SQLite cannot open at all.
+	if _, err := db.UserStore(ctx, damaged.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(UserDatabaseFilePath(dataDir, damaged.ID), []byte("this is not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	// One damaged tenant must not keep the installation from starting.
+	if err := reopened.PrepareUserStores(ctx, nil); err != nil {
+		t.Fatalf("PrepareUserStores failed for one damaged tenant: %v", err)
+	}
+	if !reopened.DatabaseCorrupt(damaged.ID) {
+		t.Fatal("the damaged tenant was not latched")
+	}
+	if reopened.DatabaseCorrupt(healthy.ID) {
+		t.Fatal("the healthy tenant was latched")
+	}
+	if _, err := reopened.UserStore(ctx, healthy.ID); err != nil {
+		t.Fatalf("healthy tenant is unusable: %v", err)
+	}
+}
+
+func TestSalvageReportSerializesWithStableFieldNames(t *testing.T) {
+	encoded, err := json.Marshal(SalvageReport{RowsCopied: 7, Tables: []TableSalvage{{Table: "messages", Copied: 7}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The admin UI and the persisted repair reports read these names, so they
+	// must not follow Go field renames.
+	for _, want := range []string{`"rows_copied":7`, `"table":"messages"`, `"copied":7`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("salvage report JSON %s does not contain %s", encoded, want)
+		}
+	}
 }

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,5 +100,112 @@ func TestScheduledRepairClearsMarkerWhenTheRepairFails(t *testing.T) {
 	report, found, err := store.UserDatabaseRepairReport(dataDir, 7)
 	if err != nil || !found || report.Succeeded {
 		t.Fatalf("failure was not recorded: %+v %v %v", report, found, err)
+	}
+}
+
+func TestRestoreQuarantinedDatabasePutsTheOriginalBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "rolltop.db")
+	quarantinePath := databasePath + ".corrupt-test"
+
+	// The state after a repair installed a copy that then failed verification:
+	// the original sits in quarantine, the rejected copy is live.
+	writeMinimalDatabase(t, quarantinePath)
+	original, err := os.ReadFile(quarantinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(databasePath, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome := store.RepairOutcome{QuarantinePath: quarantinePath}
+	cause := errors.New("recovered database is still damaged")
+	err = restoreQuarantinedDatabase(quarantinePath, databasePath, cause, &outcome)
+	if err == nil {
+		t.Fatal("rollback swallowed the failure that caused it")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("rollback error lost its cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("error does not say the original was restored: %v", err)
+	}
+
+	restored, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatalf("the original database is gone: %v", err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Fatal("the live database is not the original that was quarantined")
+	}
+	if outcome.QuarantinePath != "" {
+		t.Fatalf("outcome still points at a quarantine: %q", outcome.QuarantinePath)
+	}
+	if leftovers, err := filepath.Glob(databasePath + ".rejected-*"); err != nil || len(leftovers) != 0 {
+		t.Fatalf("the rejected recovery was left behind: %v %v", leftovers, err)
+	}
+	if problems, err := store.CheckDatabaseFile(ctx, databasePath); err != nil || len(problems) != 0 {
+		t.Fatalf("restored database is not sound: %v %v", problems, err)
+	}
+}
+
+// writeMinimalDatabase creates a small but genuinely valid SQLite file.
+func writeMinimalDatabase(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE kept (id INTEGER PRIMARY KEY, note TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kept (note) VALUES ('original')`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQuarantineRollbackKeepsTheDatabaseAndItsWALTogether(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "rolltop.db")
+	quarantinePath := filepath.Join(root, "rolltop.db.corrupt-test")
+	for suffix, content := range map[string]string{"": "database", "-wal": "write ahead log"} {
+		if err := os.WriteFile(databasePath+suffix, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Non-empty directories at both the source and target -shm paths make its
+	// rename fail (target not empty) and its removal fail (source not empty),
+	// which forces the rollback after the -wal has already moved.
+	for _, dir := range []string{databasePath + "-shm", quarantinePath + "-shm"} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "blocker"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := quarantineSQLiteFileSet(databasePath, quarantinePath); err == nil {
+		t.Fatal("quarantine reported success despite an unmovable sidecar")
+	}
+	// A database restored without its WAL has silently lost every transaction
+	// that log still held.
+	for suffix, want := range map[string]string{"": "database", "-wal": "write ahead log"} {
+		got, err := os.ReadFile(databasePath + suffix)
+		if err != nil {
+			t.Fatalf("rollback did not restore %s: %v", databasePath+suffix, err)
+		}
+		if string(got) != want {
+			t.Fatalf("restored %s = %q, want %q", databasePath+suffix, got, want)
+		}
+	}
+	if _, err := os.Stat(quarantinePath); !os.IsNotExist(err) {
+		t.Fatalf("rollback left the database at the quarantine path: %v", err)
+	}
+	if _, err := os.Stat(quarantinePath + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("rollback left the WAL at the quarantine path: %v", err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"rolltop/backend/plugins"
@@ -40,29 +41,29 @@ const (
 
 // TableSalvage is the per-table outcome of a recovery run.
 type TableSalvage struct {
-	Table   string
-	Copied  int64
-	Skipped int64
-	Dropped int64
+	Table   string `json:"table"`
+	Copied  int64  `json:"copied"`
+	Skipped int64  `json:"skipped"`
+	Dropped int64  `json:"dropped"`
 	// Gaps counts rowid ranges the scan stepped over because neither the rows
 	// nor the index entries around them could be read. Each gap can hide any
 	// number of lost rows.
-	Gaps int64
+	Gaps int64 `json:"gaps"`
 	// Failure is set when the table could not be read to the end. Rows counted
 	// in Copied are still present in the recovered database.
-	Failure string
+	Failure string `json:"failure,omitempty"`
 }
 
 // SalvageReport summarizes one recovery run for the operator.
 type SalvageReport struct {
-	SourcePath    string
-	DestPath      string
-	Tables        []TableSalvage
-	MissingTables []string
-	RowsCopied    int64
-	RowsSkipped   int64
-	RowsDropped   int64
-	Gaps          int64
+	SourcePath    string         `json:"source_path"`
+	DestPath      string         `json:"dest_path"`
+	Tables        []TableSalvage `json:"tables,omitempty"`
+	MissingTables []string       `json:"missing_tables,omitempty"`
+	RowsCopied    int64          `json:"rows_copied"`
+	RowsSkipped   int64          `json:"rows_skipped"`
+	RowsDropped   int64          `json:"rows_dropped"`
+	Gaps          int64          `json:"gaps"`
 }
 
 // Incomplete reports whether any row was lost, so callers can tell the operator
@@ -136,7 +137,7 @@ func SalvageUserDatabase(ctx context.Context, sourcePath, destPath string, manif
 		sourceHas[table] = true
 	}
 	for _, table := range sourceTables {
-		if !containsString(tables, table) {
+		if !slices.Contains(tables, table) {
 			report.MissingTables = append(report.MissingTables, table)
 		}
 	}
@@ -194,34 +195,82 @@ type salvageWriter struct {
 	conn    *sql.Conn
 	tx      *sql.Tx
 	pending int
+	// prepared caches the current transaction's statement for the table being
+	// copied. A multi-gigabyte table is millions of identical inserts, so
+	// re-parsing the statement per row would be a large share of the recovery.
+	prepared     *sql.Stmt
+	preparedText string
 }
 
+// exec runs a one-off statement. Row inserts go through execPrepared instead.
 func (w *salvageWriter) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if w.tx == nil {
-		tx, err := w.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, err
-		}
-		w.tx = tx
-		w.pending = 0
+	if err := w.begin(ctx); err != nil {
+		return nil, err
 	}
 	result, err := w.tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	w.pending++
-	if w.pending >= salvageCommitRows {
-		if err := w.commit(ctx); err != nil {
+	return result, w.countRow(ctx)
+}
+
+// execPrepared runs the same statement repeatedly, preparing it once per
+// transaction and re-preparing after each intermediate commit.
+func (w *salvageWriter) execPrepared(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if err := w.begin(ctx); err != nil {
+		return nil, err
+	}
+	if w.prepared == nil || w.preparedText != query {
+		w.closePrepared()
+		statement, err := w.tx.PrepareContext(ctx, query)
+		if err != nil {
 			return nil, err
 		}
+		w.prepared, w.preparedText = statement, query
 	}
-	return result, nil
+	result, err := w.prepared.ExecContext(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return result, w.countRow(ctx)
+}
+
+func (w *salvageWriter) begin(ctx context.Context) error {
+	if w.tx != nil {
+		return nil
+	}
+	tx, err := w.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	w.tx = tx
+	w.pending = 0
+	return nil
+}
+
+func (w *salvageWriter) countRow(ctx context.Context) error {
+	w.pending++
+	if w.pending < salvageCommitRows {
+		return nil
+	}
+	return w.commit(ctx)
+}
+
+// closePrepared releases the cached statement. It is bound to the transaction
+// that prepared it, so it cannot outlive a commit.
+func (w *salvageWriter) closePrepared() {
+	if w.prepared == nil {
+		return
+	}
+	_ = w.prepared.Close()
+	w.prepared, w.preparedText = nil, ""
 }
 
 func (w *salvageWriter) commit(ctx context.Context) error {
 	if w.tx == nil {
 		return nil
 	}
+	w.closePrepared()
 	tx := w.tx
 	w.tx = nil
 	w.pending = 0
@@ -384,7 +433,7 @@ func copyBatch(ctx context.Context, source *sql.DB, writer *salvageWriter, query
 }
 
 func insertRow(ctx context.Context, writer *salvageWriter, insert string, values []any, result *TableSalvage) error {
-	outcome, err := writer.exec(ctx, insert, values...)
+	outcome, err := writer.execPrepared(ctx, insert, values...)
 	if err != nil {
 		return err
 	}
@@ -467,7 +516,7 @@ func copySequenceCounters(ctx context.Context, source *sql.DB, writer *salvageWr
 		if err := rows.Scan(&item.name, &item.seq); err != nil {
 			return
 		}
-		if containsString(tables, item.name) {
+		if slices.Contains(tables, item.name) {
 			counters = append(counters, item)
 		}
 	}
@@ -634,15 +683,6 @@ func scanTargets(values []any) []any {
 
 func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func reportProgress(progress func(string), message string) {

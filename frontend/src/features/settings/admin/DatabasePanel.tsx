@@ -10,26 +10,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
-import type { Toast } from "../../../appTypes";
+import { displayDateTime, formatBytes } from "../../../lib/format";
+import type { DatePrefs, Toast } from "../../../appTypes";
 import type { DatabaseOverview, DatabaseStatus } from "../../../types";
 
 const JOB_POLL_MS = 1500;
 const IDLE_POLL_MS = 15000;
 
-function formatBytes(bytes: number): string {
-  const value = Number(bytes || 0);
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const exponent = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
-  const scaled = value / Math.pow(1024, exponent);
-  return `${scaled >= 100 || exponent === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[exponent]}`;
-}
-
-function formatTimestamp(value?: string): string {
+// Go zero times arrive as year 1; they mean "never happened", not a date.
+function formatTimestamp(value: string | undefined, datePrefs?: DatePrefs): string {
   if (!value) return "";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime()) || parsed.getFullYear() < 1980) return "";
-  return parsed.toLocaleString();
+  return displayDateTime(value, datePrefs);
 }
 
 function databaseLabel(database: DatabaseStatus): string {
@@ -50,9 +43,11 @@ function databaseState(database: DatabaseStatus): { label: string; tone: "ok" | 
  */
 export function AdminDatabaseView({
   csrf,
+  datePrefs,
   addToast
 }: {
   csrf: string;
+  datePrefs?: DatePrefs;
   addToast: (message: string, kind?: Toast["kind"]) => number;
 }) {
   const [overview, setOverview] = useState<DatabaseOverview | null>(null);
@@ -80,24 +75,40 @@ export function AdminDatabaseView({
   useEffect(() => {
     mounted.current = true;
     let timer: number | undefined;
-    const tick = async () => {
-      const data = await load();
+    // A running job only changes its own log, so the fast poll asks for the job
+    // alone; the full overview walks every backup directory and reads a marker
+    // per tenant and stays on the slow cadence.
+    const tick = async (jobOnly: boolean) => {
+      let running = false;
+      if (jobOnly) {
+        try {
+          const { job: current } = await api.databaseJob();
+          if (!mounted.current) return;
+          running = Boolean(current?.running);
+          setOverview((previous) => (previous ? { ...previous, job: current } : previous));
+        } catch {
+          running = false;
+        }
+        if (!running) await load();
+      } else {
+        const data = await load();
+        running = Boolean(data?.job?.running);
+      }
       if (!mounted.current) return;
-      const running = Boolean(data?.job?.running);
-      timer = window.setTimeout(() => void tick(), running ? JOB_POLL_MS : IDLE_POLL_MS);
+      timer = window.setTimeout(() => void tick(running), running ? JOB_POLL_MS : IDLE_POLL_MS);
     };
-    void tick();
+    void tick(false);
     return () => {
       mounted.current = false;
       if (timer) window.clearTimeout(timer);
     };
   }, [load]);
 
-  async function runCheck(userID: number) {
+  async function runCheck(scope: string, userID: number) {
     setBusy(true);
     try {
-      await api.checkDatabases(csrf, userID);
-      addToast(userID ? "Checking this database." : "Checking all databases.");
+      await api.checkDatabases(csrf, scope, userID);
+      addToast(scope ? "Checking this database." : "Checking all databases.");
       await load();
     } catch (err) {
       addToast(messageFromError(err), "error");
@@ -109,7 +120,7 @@ export function AdminDatabaseView({
   async function runBackup() {
     setBusy(true);
     try {
-      await api.backupDatabases(csrf, 0);
+      await api.backupDatabases(csrf);
       addToast("Backup started.");
       await load();
     } catch (err) {
@@ -173,7 +184,7 @@ export function AdminDatabaseView({
       {overview ? (
         <>
           <div className="database-toolbar">
-            <button type="button" className="secondary" disabled={busy || jobRunning} onClick={() => void runCheck(0)}>
+            <button type="button" className="secondary" disabled={busy || jobRunning} onClick={() => void runCheck("", 0)}>
               <Icon name="search" />
               Check all databases
             </button>
@@ -223,13 +234,13 @@ export function AdminDatabaseView({
                       {database.corrupt_detail ? <small className="database-detail">{database.corrupt_detail}</small> : null}
                       {database.repair_scheduled ? (
                         <small className="database-detail">
-                          Requested {formatTimestamp(database.repair_requested_at) || "recently"}; runs at the next start.
+                          Requested {formatTimestamp(database.repair_requested_at, datePrefs) || "recently"}; runs at the next start.
                         </small>
                       ) : null}
                       {database.last_repair ? (
                         <small className="database-detail">
                           {database.last_repair.succeeded
-                            ? `Last repair ${formatTimestamp(database.last_repair.finished_at)}: ${database.last_repair.report.RowsCopied} rows recovered, ${database.last_repair.report.RowsSkipped} unreadable, ${database.last_repair.report.Gaps} damaged range(s).`
+                            ? `Last repair ${formatTimestamp(database.last_repair.finished_at, datePrefs)}: ${database.last_repair.report.rows_copied} rows recovered, ${database.last_repair.report.rows_skipped} unreadable, ${database.last_repair.report.gaps} damaged range(s).`
                             : `Last repair failed: ${database.last_repair.error || "unknown error"}`}
                         </small>
                       ) : null}
@@ -239,7 +250,7 @@ export function AdminDatabaseView({
                         type="button"
                         className="secondary"
                         disabled={busy || jobRunning || database.missing}
-                        onClick={() => void runCheck(database.scope === "user" ? database.user_id : 0)}
+                        onClick={() => void runCheck(database.scope, database.user_id)}
                       >
                         Check
                       </button>
@@ -297,7 +308,7 @@ export function AdminDatabaseView({
                   <li key={backup.name}>
                     <strong>{backup.name}</strong>
                     <span>{formatBytes(backup.bytes)}</span>
-                    <small>{formatTimestamp(backup.created_at)}</small>
+                    <small>{formatTimestamp(backup.created_at, datePrefs)}</small>
                   </li>
                 ))}
               </ul>

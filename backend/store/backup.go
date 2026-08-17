@@ -27,6 +27,11 @@ func BackupDatabaseFile(ctx context.Context, sourcePath, destPath string) (int64
 	if sourcePath == destPath {
 		return 0, fmt.Errorf("backup destination must differ from the source database")
 	}
+	// The source must exist: SQLite would otherwise create it here and report an
+	// empty database as a successful backup.
+	if err := requireDatabaseFile(sourcePath); err != nil {
+		return 0, err
+	}
 	if _, err := os.Lstat(destPath); err == nil {
 		return 0, fmt.Errorf("backup destination already exists: %s", destPath)
 	} else if !os.IsNotExist(err) {
