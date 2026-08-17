@@ -68,6 +68,7 @@ export function MailView({
   datePrefs,
   location,
   navigate,
+  replaceRoute,
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
@@ -83,6 +84,8 @@ export function MailView({
   datePrefs: DatePrefs;
   location: LocationState;
   navigate: (url: string) => void;
+  /** Used for the empty-page bounce, which must not add a history entry. */
+  replaceRoute: (url: string) => void;
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
@@ -115,6 +118,16 @@ export function MailView({
   const page = route.page;
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
   const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
+  // The scope comes from the route, never from the folder lookup: a folder being
+  // deleted drops out of the chrome list while its page is still open, and
+  // falling back to 0 there would silently widen a delete to All Mail. When the
+  // route names a folder this view cannot see, no whole-folder scope is offered.
+  const scopeMailboxID = Number.parseInt(mailboxID || "0", 10) || 0;
+  const listScope = scopeMailboxID === 0
+    ? { mailboxID: 0, query: "", label: "All Mail", total: totalCount }
+    : mailbox
+      ? { mailboxID: scopeMailboxID, query: "", label: mailbox.name, total: mailbox.message_count }
+      : undefined;
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
   const listScopeKey = `${userID}:${mailboxID || "all"}`;
   const listKey = listScopeKey + ":" + page;
@@ -255,7 +268,7 @@ export function MailView({
         // Deleting a full page can leave a later page with nothing on it. The
         // rows did not vanish, they moved forward, so follow them back instead
         // of parking the user on an empty page.
-        if (data.conversations.length === 0 && page > 1) navigate(mailURL(mailboxID, page - 1));
+        if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1));
         if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1);
         if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1);
       })
@@ -404,7 +417,7 @@ export function MailView({
                 onReadStatesChange={updateReadStates}
                 onMessagesMoved={removeMovedConversations}
                 onListChanged={refreshList}
-                listScope={{ mailboxID: mailbox?.id || 0, query: "", label: mailbox?.name || "All Mail", total: totalCount }}
+                listScope={listScope}
                 emptyState={showRecoveryEmptyState && mailbox ? (
                   <MailboxRecoveryEmptyState mailbox={mailbox} activeRun={accountActiveRun} />
                 ) : undefined}
@@ -687,6 +700,7 @@ export function SearchView({
   csrf,
   location,
   navigate,
+  replaceRoute,
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
@@ -700,6 +714,8 @@ export function SearchView({
   csrf: string;
   location: LocationState;
   navigate: (url: string) => void;
+  /** Used for the empty-page bounce, which must not add a history entry. */
+  replaceRoute: (url: string) => void;
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
@@ -716,6 +732,7 @@ export function SearchView({
   const [hasPrev, setHasPrev] = useState(false);
   const [hasNext, setHasNext] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [staleResults, setStaleResults] = useState("");
   const loadedKey = useRef("");
   const route = searchRoute(location.path);
   const query = route.query;
@@ -740,6 +757,7 @@ export function SearchView({
       setHasNext(false);
     }
     setError("");
+    setStaleResults("");
     api
       .search(query, page)
       .then((data) => {
@@ -748,17 +766,23 @@ export function SearchView({
         setConversations(data.conversations);
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
-        if (data.conversations.length === 0 && page > 1) navigate(searchURL(query, page - 1));
+        if (data.conversations.length === 0 && page > 1) replaceRoute(searchURL(query, page - 1));
         if (data.has_next) api.prefetchSearch(query, page + 1);
       })
       .catch((err) => {
-        if (!cancelled) {
-          loadedKey.current = searchKey;
-          setConversations([]);
-          setHasPrev(false);
-          setHasNext(false);
-          setError(messageFromError(err));
+        if (cancelled) return;
+        // A failed background reload must not take the results away: keep the
+        // page that is already on screen and say it could not be refreshed. Only
+        // a first load for this query has nothing to fall back to.
+        if (loadedKey.current === searchKey) {
+          setStaleResults(`Showing earlier results. Refresh failed: ${messageFromError(err)}`);
+          return;
         }
+        loadedKey.current = searchKey;
+        setConversations([]);
+        setHasPrev(false);
+        setHasNext(false);
+        setError(messageFromError(err));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -829,6 +853,7 @@ export function SearchView({
       ) : null}
       {maintenanceRun ? <SearchMaintenanceNotice run={maintenanceRun} /> : null}
       {error ? <div className="error">{error}</div> : null}
+      {staleResults ? <div className="mail-cache-warning" role="status">{staleResults}</div> : null}
       {!error ? (
         <SlidingMessageListStage stageKey={searchKey} direction={slideDirection} pending={listPending} speed={listPending ? "slow" : "fast"}>
           {listPending ? (
@@ -1064,6 +1089,12 @@ const inlineMoveMessageLimit = 5;
 // anything beyond the quota would be rejected by the browser anyway.
 const keepaliveMoveChunkBudget = 6;
 
+// A queued move hides its rows until the background run has actually moved them.
+// The run is polled rather than assumed: a failed or interrupted run has to give
+// the rows back. The limit only bounds the hiding, not the run itself.
+const queuedMoveWatchIntervalMS = 5000;
+const queuedMoveWatchLimitMS = 10 * 60 * 1000;
+
 const messageSwipeMaxDistance = 112;
 const messageSwipeCommitDistance = 68;
 const messageSwipeCommitHoldMS = 170;
@@ -1178,6 +1209,9 @@ function MessageList({
   const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const swipeDismissTimers = useRef<Map<number, number>>(new Map());
   const keyboardIndexRef = useRef<number | null>(null);
+  // Set on unmount so the queued-move watch stops touching state after the view
+  // is gone; it outlives a single render by design.
+  const unmounted = useRef(false);
   const swipeSession = useRef<{ id: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean; blocked: boolean } | null>(null);
   const suppressRowClickUntil = useRef(0);
   // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
@@ -1207,6 +1241,7 @@ function MessageList({
 
   useEffect(() => {
     return () => {
+      unmounted.current = true;
       moveOutTimers.current.forEach((timer) => window.clearTimeout(timer));
       moveOutTimers.current.clear();
       swipeDismissTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -1522,6 +1557,7 @@ function MessageList({
     }
     const movedMessageIDs: number[] = [];
     const stillQueuedIDs = new Set<number>();
+    const queuedRunIDs: number[] = [];
     const movedRowIDs: number[] = [];
     const restoreIDs: number[] = [];
     const reselectRowIDs: number[] = [];
@@ -1530,9 +1566,10 @@ function MessageList({
     setTrashOps((count) => count + 1);
     try {
       await Promise.all(entries.map(async (entry) => {
-        const { movedIDs, queuedIDs, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive);
+        const { movedIDs, queuedIDs, queuedRunIDs: runIDs, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive);
         if (error !== undefined && firstError === undefined) firstError = error;
         queuedIDs.forEach((id) => stillQueuedIDs.add(id));
+        queuedRunIDs.push(...runIDs);
         queuedMessages += queuedCount;
         movedMessageIDs.push(...movedIDs);
         const movedSet = new Set(movedIDs);
@@ -1565,12 +1602,15 @@ function MessageList({
     // The rows are gone from this page; reload it so the following messages move
     // up instead of leaving the page short, or empty after a full-page delete.
     if (movedMessageIDs.length > 0) onListChanged?.();
+    if (!keepalive && stillQueuedIDs.size > 0) {
+      void watchQueuedMove(queuedRunIDs, Array.from(stillQueuedIDs), destLabel);
+    }
   }
 
   // executeMailboxMove pushes messageIDs into the target mailbox and reports
   // which messages moved (or were queued as a background run) so callers can
   // reconcile rows without guessing. Shared by swipe moves and bulk delete.
-  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedIDs: number[]; queuedCount: number; error?: unknown }> {
+  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedIDs: number[]; queuedRunIDs: number[]; queuedCount: number; error?: unknown }> {
     if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
       // Chunk here (within the backend's batch cap) so each chunk's outcome is
       // tracked independently: one failed chunk must not discard the moved IDs
@@ -1584,6 +1624,7 @@ function MessageList({
         api.bulkMoveMessages(csrf, chunk, target.id, keepalive ? { keepalive: true } : undefined)));
       const movedIDs: number[] = [];
       const queuedIDs: number[] = [];
+      const queuedRunIDs: number[] = [];
       let queuedCount = 0;
       let error: unknown;
       results.forEach((result, index) => {
@@ -1591,13 +1632,14 @@ function MessageList({
           movedIDs.push(...dispatched[index]);
           if (result.value.queued) {
             queuedIDs.push(...dispatched[index]);
+            queuedRunIDs.push(...result.value.run_ids);
             queuedCount += dispatched[index].length;
           }
         } else if (error === undefined) {
           error = result.reason;
         }
       });
-      return { movedIDs, queuedIDs, queuedCount, error };
+      return { movedIDs, queuedIDs, queuedRunIDs, queuedCount, error };
     }
     const movedIDs: number[] = [];
     let error: unknown;
@@ -1609,7 +1651,7 @@ function MessageList({
         if (error === undefined) error = err;
       }
     }
-    return { movedIDs, queuedIDs: [], queuedCount: 0, error };
+    return { movedIDs, queuedIDs: [], queuedRunIDs: [], queuedCount: 0, error };
   }
 
   function optimisticallyDismiss(ids: number[]) {
@@ -1681,6 +1723,45 @@ function MessageList({
       swipeDismissTimers.current.delete(messageID);
       settleSwipeRow(messageID);
     }
+  }
+
+  /**
+   * watchQueuedMove keeps queued rows hidden while their background runs work
+   * through them, then either lets them go (the messages left the folder) or
+   * puts them back and reports why they are still there.
+   */
+  async function watchQueuedMove(runIDs: number[], ids: number[], destLabel: string) {
+    if (ids.length === 0) return;
+    if (runIDs.length === 0) {
+      removePendingSwipeMoveIDs(ids);
+      return;
+    }
+    const deadline = Date.now() + queuedMoveWatchLimitMS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, queuedMoveWatchIntervalMS));
+      if (unmounted.current) return;
+      let runs: SyncRun[];
+      try {
+        runs = (await Promise.all(runIDs.map((runID) => api.syncRun(String(runID))))).map((data) => data.sync_run);
+      } catch {
+        // A failed status request says nothing about the move: try again.
+        continue;
+      }
+      if (unmounted.current) return;
+      if (runs.some((run) => run.status === "running")) continue;
+      removePendingSwipeMoveIDs(ids);
+      const failed = runs.find((run) => run.status !== "ok");
+      if (failed) {
+        restoreDismissed(ids);
+        addToast(`Move to ${destLabel} did not finish: ${failed.error || failed.status}.`, "error");
+      }
+      onListChanged?.();
+      return;
+    }
+    // Past the watch window the rows stop being hidden on trust: show whatever
+    // the folder still holds rather than keeping them invisible for the session.
+    removePendingSwipeMoveIDs(ids);
+    onListChanged?.();
   }
 
   function removePendingSwipeMoveIDs(ids: number[]) {
@@ -1907,9 +1988,12 @@ function MessageList({
         restoreDismissed(dismissedIDs);
       },
       async (keepalive) => {
-        const { movedIDs, queuedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
+        const { movedIDs, queuedIDs, queuedRunIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
         const queued = new Set(queuedIDs);
         removePendingSwipeMoveIDs(dismissedIDs.filter((id) => !queued.has(id)));
+        if (!keepalive && queuedIDs.length > 0) {
+          void watchQueuedMove(queuedRunIDs, queuedIDs, target.name);
+        }
         if (error === undefined) {
           onMessagesMoved(messageIDs);
           onListChanged?.();

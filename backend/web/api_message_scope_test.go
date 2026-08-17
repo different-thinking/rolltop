@@ -199,6 +199,53 @@ func TestScopeTrashPlanResolvesSearchFilter(t *testing.T) {
 	}
 }
 
+// A search scope has to page the whole hit list. One batch is all a plain
+// "ask for everything" would ever get, which would quietly cap a whole-filter
+// delete at one page worth of messages.
+func TestScopeTrashPlanPagesBeyondOneSearchBatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	searchService, err := search.Open(filepath.Join(dir, "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchService.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-search-paging@example.test")
+	const total = scopeSearchHitBatch + 30
+	documents := make([]search.MessageIndexDocument, 0, total)
+	for i := 0; i < total; i++ {
+		message := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, uint32(2000+i), "Newsletter weekly digest")
+		stored, err := db.GetMessageForUser(ctx, tenant.user.ID, message.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documents = append(documents, search.MessageIndexDocument{Message: stored})
+	}
+	if err := searchService.IndexMessages(ctx, documents); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: db, search: searchService, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{Query: "newsletter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Matched != total {
+		t.Fatalf("matched = %d, want all %d matches across batches", plan.Matched, total)
+	}
+	if plan.Truncated {
+		t.Fatalf("plan reported truncation for %d matches", total)
+	}
+	if ids := planMessageIDs(plan); len(ids) != total {
+		t.Fatalf("planned ids = %d, want %d", len(ids), total)
+	}
+}
+
 func TestScopeTrashPlanIsUserScoped(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))

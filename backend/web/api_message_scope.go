@@ -21,8 +21,15 @@ const (
 	// more matches is trashed in repeated passes: the response reports that it
 	// was cut short so the browser can say so and offer another pass.
 	scopeTrashMessageLimit = 20000
-	// scopeSearchHitBatch pages Bleve while a search scope is being resolved.
-	scopeSearchHitBatch = 500
+	// scopeSearchMessageLimit is lower because a search scope is paged out of
+	// Bleve rather than read in one query, and deep offsets get progressively
+	// more expensive. Moved messages leave the index, so the next pass starts
+	// from the front again.
+	scopeSearchMessageLimit = 5000
+	// scopeSearchHitBatch pages Bleve while a search scope is being resolved. It
+	// must stay within the search service's own per-request ceiling: a larger
+	// value is silently clamped, and a short batch is what ends the paging loop.
+	scopeSearchHitBatch = 100
 )
 
 // scopeSelection mirrors the list view the user is looking at. A query wins over
@@ -243,10 +250,10 @@ func (s *Server) resolveScopeMessages(ctx context.Context, user store.User, scop
 			return nil, false, err
 		}
 		messages, err := s.store.ListMailboxScopeMessagesForUser(ctx, user.ID, scope.MailboxID, scopeTrashMessageLimit+1)
-		return trimScopeMessages(messages, err)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 	}
 	messages, err := s.store.ListAllMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)
-	return trimScopeMessages(messages, err)
+	return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 }
 
 // resolveSearchScopeMessages walks the whole hit list for a search scope. Only
@@ -261,7 +268,7 @@ func (s *Server) resolveSearchScopeMessages(ctx context.Context, user store.User
 	if strings.TrimSpace(searchQuery) == "" && !mailboxFilter.enabled && starFilter == nil {
 		// A search box holding only whitespace lists All Mail, so it selects it too.
 		messages, err := s.store.ListAllMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)
-		return trimScopeMessages(messages, err)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 	}
 	if s.search == nil {
 		return nil, false, errors.New("full-text search is not configured")
@@ -274,7 +281,7 @@ func (s *Server) resolveSearchScopeMessages(ctx context.Context, user store.User
 	opts := s.searchOptionsWithRankingBoosts(ctx, user)
 	out := make([]store.ScopeMessage, 0, 256)
 	offset := 0
-	for len(out) <= scopeTrashMessageLimit {
+	for len(out) <= scopeSearchMessageLimit {
 		hits, err := s.search.SearchHitsWithOptions(ctx, user.ID, searchQuery, scopeSearchHitBatch, offset, opts)
 		if err != nil {
 			return nil, false, err
@@ -298,7 +305,7 @@ func (s *Server) resolveSearchScopeMessages(ctx context.Context, user store.User
 				continue
 			}
 			out = append(out, store.ScopeMessage{ID: message.ID, AccountID: message.AccountID, MailboxID: message.MailboxID})
-			if len(out) > scopeTrashMessageLimit {
+			if len(out) > scopeSearchMessageLimit {
 				break
 			}
 		}
@@ -307,15 +314,17 @@ func (s *Server) resolveSearchScopeMessages(ctx context.Context, user store.User
 			break
 		}
 	}
-	return trimScopeMessages(out, nil)
+	return trimScopeMessages(out, scopeSearchMessageLimit, nil)
 }
 
-func trimScopeMessages(messages []store.ScopeMessage, err error) ([]store.ScopeMessage, bool, error) {
+// trimScopeMessages cuts an over-fetched selection back to its limit. Callers
+// fetch one more than they can use, so a full slice is how truncation is known.
+func trimScopeMessages(messages []store.ScopeMessage, limit int, err error) ([]store.ScopeMessage, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if len(messages) > scopeTrashMessageLimit {
-		return messages[:scopeTrashMessageLimit], true, nil
+	if len(messages) > limit {
+		return messages[:limit], true, nil
 	}
 	return messages, false, nil
 }

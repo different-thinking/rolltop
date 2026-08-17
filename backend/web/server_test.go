@@ -367,8 +367,20 @@ func TestWarmMailFirstPageInvalidatesOnUserChange(t *testing.T) {
 }
 
 func TestAPISearchCachedETagShortCircuitsBeforeSearch(t *testing.T) {
-	user := store.User{ID: 43, Email: "search-cache.test", Name: "Search Cache"}
-	server := &Server{mailListCache: newMailListCache()}
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The folder lookup behind the default Trash exclusion runs before the ETag
+	// check, so this needs a real tenant. Leaving search unset keeps the point of
+	// the test: a revalidated page must not reach the index.
+	user, err := db.CreateUser(ctx, "search-cache@example.test", "Search Cache", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: db, mailListCache: newMailListCache()}
 	key := mailListCacheKey{UserID: user.ID, Page: 2, Search: true, Query: "needle"}
 	etag := `"cached-search-page"`
 	server.rememberMailListETag(key, etag, server.mailListGeneration(user.ID))
