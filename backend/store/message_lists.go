@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -218,8 +219,30 @@ func (s *Store) ListRecentSearchEnabledMessagesForUser(ctx context.Context, user
 	return scanMessages(rows)
 }
 
+// ThreadListOrder selects the date direction of a conversation list page. Mail
+// lists default to newest first; the reversed order lets a reader walk a folder
+// forward from its oldest locally stored message.
+type ThreadListOrder string
+
+const (
+	ThreadListNewestFirst ThreadListOrder = "newest"
+	ThreadListOldestFirst ThreadListOrder = "oldest"
+)
+
+// sortDirection maps a list order onto a SQL keyword. Anything unrecognized
+// falls back to newest first, so a caller can hand this a raw request value
+// without the query ever taking text from the URL.
+func (o ThreadListOrder) sortDirection() string {
+	if o == ThreadListOldestFirst {
+		return "ASC"
+	}
+	return "DESC"
+}
+
 // ListLatestThreadMessagesForUser returns one latest message per thread for all-mail list rendering.
-func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int) ([]MessageRecord, error) {
+// A thread is always represented by its newest message; order only decides where
+// that thread lands in the page.
+func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -227,9 +250,10 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := db.QueryContext(ctx, `WITH keyed AS (
+	direction := order.sortDirection()
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`WITH keyed AS (
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
-				MAX(printf('%020d:%020d',
+				MAX(printf('%%020d:%%020d',
 					CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END,
 					m.id)) AS latest_key
 			FROM messages m
@@ -238,12 +262,12 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
 			WHERE m.user_id = ? AND mb.show_in_all_mail = 1 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 			GROUP BY thread_group
-			ORDER BY latest_key DESC LIMIT ? OFFSET ?
+			ORDER BY latest_key %[1]s LIMIT ? OFFSET ?
 		)
 		SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
 			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
 		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
-		ORDER BY k.latest_key DESC`, userID, nowUnix(), limit, offset)
+		ORDER BY k.latest_key %[1]s`, direction), userID, nowUnix(), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +276,7 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 }
 
 // ListLatestThreadMessagesForMailbox returns one latest message per thread within a mailbox.
-func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, mailboxID int64, limit, offset int) ([]MessageRecord, error) {
+func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, mailboxID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -260,9 +284,10 @@ func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, 
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := db.QueryContext(ctx, `WITH keyed AS (
+	direction := order.sortDirection()
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`WITH keyed AS (
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
-				MAX(printf('%020d:%020d',
+				MAX(printf('%%020d:%%020d',
 					CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END,
 					m.id)) AS latest_key
 			FROM messages m
@@ -270,12 +295,12 @@ func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, 
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
 			WHERE m.user_id = ? AND m.mailbox_id = ? AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 			GROUP BY thread_group
-			ORDER BY latest_key DESC LIMIT ? OFFSET ?
+			ORDER BY latest_key %[1]s LIMIT ? OFFSET ?
 		)
 		SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
 			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
 		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
-		ORDER BY k.latest_key DESC`, userID, mailboxID, nowUnix(), limit, offset)
+		ORDER BY k.latest_key %[1]s`, direction), userID, mailboxID, nowUnix(), limit, offset)
 	if err != nil {
 		return nil, err
 	}

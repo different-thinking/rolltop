@@ -1,5 +1,44 @@
 @use "mixins/components" as *;
 
+.mail-sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    padding: 3px 9px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: none;
+
+    .icon {
+      width: 15px;
+      height: 15px;
+    }
+
+    &:hover {
+      color: var(--accent-strong);
+    }
+
+    &.active {
+      background: var(--active);
+      color: var(--text);
+    }
+  }
+}
+
 .mail-cache-warning {
   padding: 7px 14px;
   border-bottom: 1px solid var(--border);

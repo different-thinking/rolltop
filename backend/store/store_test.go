@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -423,7 +424,7 @@ func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0)
+	messages, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,6 +435,76 @@ func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T)
 	want := []int64{newThread.ID, tieNewerID.ID, tieOlderID.ID}
 	if !slices.Equal(got, want) {
 		t.Fatalf("latest thread ids = %v, want %v; old thread message id was %d", got, want, oldThread.ID)
+	}
+
+	oldestFirst, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListOldestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversed := make([]int64, 0, len(oldestFirst))
+	for _, msg := range oldestFirst {
+		reversed = append(reversed, msg.ID)
+	}
+	// Oldest first only flips where a thread lands. Each thread is still
+	// represented by its newest message, so the reply still stands in for the
+	// thread its root started.
+	wantReversed := []int64{tieOlderID.ID, tieNewerID.ID, newThread.ID}
+	if !slices.Equal(reversed, wantReversed) {
+		t.Fatalf("oldest-first thread ids = %v, want %v", reversed, wantReversed)
+	}
+
+	mailboxOldest, err := db.ListLatestThreadMessagesForMailbox(ctx, user.ID, mailbox.ID, 10, 0, ThreadListOldestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxIDs := make([]int64, 0, len(mailboxOldest))
+	for _, msg := range mailboxOldest {
+		mailboxIDs = append(mailboxIDs, msg.ID)
+	}
+	if !slices.Equal(mailboxIDs, wantReversed) {
+		t.Fatalf("oldest-first mailbox thread ids = %v, want %v", mailboxIDs, wantReversed)
+	}
+}
+
+func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, mailbox, blob := testMailbox(t, ctx, db)
+	base := time.Unix(1700000000, 0)
+	ids := make([]int64, 0, 4)
+	for index := 0; index < 4; index++ {
+		msg, err := db.CreateMessage(ctx, CreateMessage{
+			UserID:          user.ID,
+			AccountID:       account.ID,
+			MailboxID:       mailbox.ID,
+			BlobID:          blob.ID,
+			MessageIDHeader: fmt.Sprintf("<page-%d@example.test>", index),
+			Subject:         fmt.Sprintf("Page %d", index),
+			Date:            base.Add(time.Duration(index) * time.Hour),
+			UID:             uint32(index + 1),
+			BlobPath:        blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, msg.ID)
+	}
+	// The second oldest-first page continues past the first instead of
+	// restarting, which is what a reader walking a folder forward expects.
+	second, err := db.ListLatestThreadMessagesForMailbox(ctx, user.ID, mailbox.ID, 2, 2, ThreadListOldestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]int64, 0, len(second))
+	for _, msg := range second {
+		got = append(got, msg.ID)
+	}
+	if want := []int64{ids[2], ids[3]}; !slices.Equal(got, want) {
+		t.Fatalf("oldest-first page 2 = %v, want %v", got, want)
 	}
 }
 

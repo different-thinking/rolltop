@@ -47,7 +47,7 @@ func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 		t.Fatal("another user snoozed the owner's message")
 	}
 
-	visible, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0)
+	visible, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0, ThreadListNewestFirst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 	if messageSliceContains(searchVisible, snoozedMessage.ID) || !messageSliceContains(searchVisible, normalMessage.ID) {
 		t.Fatalf("owner search-visible messages = %v", messageRecordIDs(searchVisible))
 	}
-	otherVisible, err := db.ListLatestThreadMessagesForUser(ctx, other.ID, 20, 0)
+	otherVisible, err := db.ListLatestThreadMessagesForUser(ctx, other.ID, 20, 0, ThreadListNewestFirst)
 	if err != nil || len(otherVisible) != 1 || otherVisible[0].ID != otherMessage.ID {
 		t.Fatalf("other visible messages = %v err=%v", messageRecordIDs(otherVisible), err)
 	}
@@ -99,7 +99,7 @@ func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 	if err != nil || otherCount != 0 || len(otherReminders) != 0 {
 		t.Fatalf("other reminders = %+v count=%d err=%v", otherReminders, otherCount, err)
 	}
-	resurfaced, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0)
+	resurfaced, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0, ThreadListNewestFirst)
 	if err != nil || len(resurfaced) < 2 || resurfaced[0].ID != snoozedMessage.ID {
 		t.Fatalf("resurfaced order = %v err=%v", messageRecordIDs(resurfaced), err)
 	}
@@ -110,7 +110,7 @@ func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 	if err != nil || !acknowledged {
 		t.Fatalf("owner acknowledgment = %t err=%v", acknowledged, err)
 	}
-	afterAck, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0)
+	afterAck, err := db.ListLatestThreadMessagesForUser(ctx, owner.ID, 20, 0, ThreadListNewestFirst)
 	if err != nil || len(afterAck) < 2 || afterAck[0].ID != normalMessage.ID {
 		t.Fatalf("post-ack order = %v err=%v", messageRecordIDs(afterAck), err)
 	}
@@ -139,7 +139,7 @@ func TestSnoozeEmptyStoredThreadKeyMatchesListQueries(t *testing.T) {
 	if _, err := db.SnoozeMessage(ctx, user.ID, message.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	visible, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0)
+	visible, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
 	if err != nil {
 		t.Fatal(err)
 	}
