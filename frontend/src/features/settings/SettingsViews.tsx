@@ -248,12 +248,19 @@ function IdentityMailboxFields({
 }) {
   const sentChoices = identityMailboxChoices(identity, "sent", mailboxes, accounts, smtpAccounts);
   const draftsChoices = identityMailboxChoices(identity, "drafts", mailboxes, accounts, smtpAccounts);
+  // Archive has no folder role of its own, so the choices are the same ordinary
+  // folders the swipe setting offers, limited to this identity's IMAP account.
+  const archiveChoices = mailboxes
+    .filter((mailbox) => isArchiveMailboxChoice(mailbox) &&
+      (identity.imap_account_id ? mailbox.account_id === identity.imap_account_id : true))
+    .sort((left, right) => left.name.localeCompare(right.name));
 
   function changeIMAPAccount(accountID: number) {
     updateIdentity(identity.id, {
       imap_account_id: accountID,
       sent_mailbox_id: accountID ? firstMailboxIDForAccountRole(mailboxes, accountID, "sent") : 0,
-      drafts_mailbox_id: accountID ? firstMailboxIDForAccountRole(mailboxes, accountID, "drafts") : 0
+      drafts_mailbox_id: accountID ? firstMailboxIDForAccountRole(mailboxes, accountID, "drafts") : 0,
+      archive_mailbox_id: 0
     });
   }
 
@@ -278,6 +285,13 @@ function IdentityMailboxFields({
         <select value={identity.drafts_mailbox_id || 0} onChange={(event) => updateIdentity(identity.id, { drafts_mailbox_id: Number(event.target.value) })}>
           <option value={0}>Automatic</option>
           {draftsChoices.map((mailbox) => <option key={mailbox.id} value={mailbox.id}>{mailboxChoiceLabel(mailbox, accounts)}</option>)}
+        </select>
+      </div>
+      <div>
+        <label>Archive folder</label>
+        <select value={identity.archive_mailbox_id || 0} onChange={(event) => updateIdentity(identity.id, { archive_mailbox_id: Number(event.target.value) })}>
+          <option value={0}>From swipe settings</option>
+          {archiveChoices.map((mailbox) => <option key={mailbox.id} value={mailbox.id}>{mailboxChoiceLabel(mailbox, accounts)}</option>)}
         </select>
       </div>
     </div>
@@ -411,6 +425,7 @@ function blankMailIdentity(user: User, identities: MailIdentity[] = []): MailIde
     imap_account_id: 0,
     sent_mailbox_id: 0,
     drafts_mailbox_id: 0,
+    archive_mailbox_id: 0,
     email: "",
     display_name: user.name || "",
     signature: "",
@@ -2126,7 +2141,10 @@ export function SettingsView({
         {imapAccounts.length > 0 ? (
           <section className="swipe-archive-settings">
             <h3>Archive folders</h3>
-            <p className="swipe-archive-hint">Used by the Archive swipe action and by the Archive button on message rows.</p>
+            <p className="swipe-archive-hint">
+              Used by the Archive swipe action and by the Archive button on message rows.
+              An identity that names its own Archive folder overrides this for its account.
+            </p>
             <div className="swipe-archive-grid">
               {imapAccounts.map((account) => {
                 const choices = archiveChoices(account.id);

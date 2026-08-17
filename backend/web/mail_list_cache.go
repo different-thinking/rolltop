@@ -25,6 +25,10 @@ type mailListCacheKey struct {
 	Sort      string
 	Search    bool
 	Query     string
+	// View names the whole-account list a page belongs to and stays empty for
+	// All Mail, so a named view never revalidates against All Mail entries and
+	// the warmed All Mail first page keeps its existing key.
+	View string
 }
 
 type mailListCacheEntry struct {
@@ -266,7 +270,7 @@ func (s *Server) warmAllMailFirstPage(ctx context.Context, userID int64) error {
 	if err != nil {
 		return err
 	}
-	response, err := s.mailPageResponse(ctx, user, 0, 1, store.ThreadListNewestFirst, newSearchTiming())
+	response, err := s.mailPageResponse(ctx, user, 0, mailViewAll, 1, store.ThreadListNewestFirst, newSearchTiming())
 	if err != nil {
 		return err
 	}

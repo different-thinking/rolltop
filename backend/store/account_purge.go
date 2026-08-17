@@ -133,15 +133,16 @@ func (s *Store) PurgeAccountMessageBatch(ctx context.Context, userID, accountID 
 	return refs, len(ids), nil
 }
 
-// ClearIdentityMailboxRefsForAccount drops Sent/Drafts folder pointers that will
-// become invalid when the account's mailboxes are deleted.
+// ClearIdentityMailboxRefsForAccount drops Sent/Drafts/Archive folder pointers
+// that will become invalid when the account's mailboxes are deleted.
 func (s *Store) ClearIdentityMailboxRefsForAccount(ctx context.Context, userID, accountID int64) error {
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE mail_identities
 		SET imap_account_id = CASE WHEN imap_account_id = ? THEN 0 ELSE imap_account_id END,
 			sent_mailbox_id = CASE WHEN sent_mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ? AND account_id = ?) THEN 0 ELSE sent_mailbox_id END,
 			drafts_mailbox_id = CASE WHEN drafts_mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ? AND account_id = ?) THEN 0 ELSE drafts_mailbox_id END,
+			archive_mailbox_id = CASE WHEN archive_mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ? AND account_id = ?) THEN 0 ELSE archive_mailbox_id END,
 			updated_at = ?
-		WHERE user_id = ?`, accountID, userID, accountID, userID, accountID, nowUnix(), userID)
+		WHERE user_id = ?`, accountID, userID, accountID, userID, accountID, userID, accountID, nowUnix(), userID)
 	return err
 }
 
