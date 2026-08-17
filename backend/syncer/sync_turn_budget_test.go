@@ -33,6 +33,10 @@ type backfillFetcher struct {
 	// stall spends the whole turn without emitting a message, the way an IMAP
 	// server that stops answering does.
 	stall bool
+	// blockAfter emits this many messages and then goes quiet until the turn's
+	// hard deadline fires, which is how a single slow message makes a turn end
+	// inside an IMAP command instead of at the cooperative pause point.
+	blockAfter int
 }
 
 func newBackfillFetcher(count uint32) *backfillFetcher {
@@ -72,7 +76,7 @@ func (f *backfillFetcher) message(mailbox string, uid uint32) FetchedMessage {
 	}
 }
 
-func (f *backfillFetcher) FetchMailbox(_ context.Context, _ store.MailAccount, mailbox string,
+func (f *backfillFetcher) FetchMailbox(ctx context.Context, _ store.MailAccount, mailbox string,
 	afterUID uint32, handle func(FetchedMessage) error,
 ) error {
 	f.turns.Add(1)
@@ -91,6 +95,10 @@ func (f *backfillFetcher) FetchMailbox(_ context.Context, _ store.MailAccount, m
 		if f.stopAfter > 0 && emitted >= f.stopAfter {
 			return fmt.Errorf("fetch mailbox %q UID batch %d: %w", mailbox, uid, errSyncTurnBudgetSpent)
 		}
+		if f.blockAfter > 0 && emitted >= f.blockAfter {
+			<-ctx.Done()
+			return fmt.Errorf("fetch mailbox %q UID batch %d: %w", mailbox, uid+1, ctx.Err())
+		}
 	}
 	return nil
 }
@@ -104,7 +112,7 @@ func (f *backfillFetcher) FetchMailboxWithUIDValidity(ctx context.Context, accou
 	return f.FetchMailbox(ctx, account, mailbox, afterUID, handle)
 }
 
-func (f *backfillFetcher) FetchUIDs(_ context.Context, _ store.MailAccount, mailbox string, uids []uint32,
+func (f *backfillFetcher) FetchUIDs(ctx context.Context, _ store.MailAccount, mailbox string, uids []uint32,
 	handle func(FetchedMessage) error,
 ) error {
 	f.turns.Add(1)
@@ -119,6 +127,10 @@ func (f *backfillFetcher) FetchUIDs(_ context.Context, _ store.MailAccount, mail
 		emitted++
 		if f.stopAfter > 0 && emitted >= f.stopAfter {
 			return fmt.Errorf("fetch mailbox %q UID batch %d: %w", mailbox, uid, errSyncTurnBudgetSpent)
+		}
+		if f.blockAfter > 0 && emitted >= f.blockAfter {
+			<-ctx.Done()
+			return fmt.Errorf("fetch mailbox %q UID batch %d: %w", mailbox, uid, ctx.Err())
 		}
 	}
 	return nil
@@ -351,6 +363,90 @@ func TestPausedInboxTurnResumesWithoutWaitingForTheNextPoll(t *testing.T) {
 	}
 }
 
+// deadlineTurnContext bounds a turn that will be cut off inside its fetch, the
+// case the cooperative pause point cannot catch.
+func deadlineTurnContext(t *testing.T, parent context.Context) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(parent, 300*time.Millisecond)
+	t.Cleanup(cancel)
+	return withSyncTurnBudget(ctx)
+}
+
+func TestTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, mailbox := createRunnerMailboxFixture(t, ctx, db, "deadline-mid-fetch@example.test")
+	const remoteCount = 4
+	if err := db.UpdateMailboxRemoteStatus(ctx, user.ID, mailbox.ID, 0, 0, remoteCount+1, 7); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := newBackfillFetcher(remoteCount)
+	fetcher.blockAfter = 1
+	service := &Service{Store: db, Blobs: blob.New(t.TempDir()), Fetcher: fetcher}
+
+	_, err = service.syncUserWithOptions(deadlineTurnContext(t, ctx), user.ID, nil, syncAccountOptions{})
+	if !errors.Is(err, ErrSyncTurnPaused) {
+		t.Fatalf("turn cut off mid-fetch error = %v, want ErrSyncTurnPaused", err)
+	}
+	// The commit of a paused turn must not run on the deadline that ended it, or
+	// the message it already stored stays incomplete and is downloaded again.
+	exists, err := db.MessageExistsByUIDForGeneration(ctx, user.ID, account.ID, mailbox.ID, 1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("turn cut off mid-fetch dropped the import completion of the message it stored")
+	}
+	lastUIDs, err := db.LastUIDs(ctx, user.ID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lastUIDs[mailbox.Name] != 1 {
+		t.Fatalf("turn cut off mid-fetch left checkpoint=%d, want 1", lastUIDs[mailbox.Name])
+	}
+	run := latestSyncRun(t, ctx, db, user.ID)
+	if run.Status != "ok" || run.Error != "" {
+		t.Fatalf("turn cut off mid-fetch run status=%q error=%q, want ok without an error", run.Status, run.Error)
+	}
+}
+
+func TestRepairTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, mailbox := createRunnerMailboxFixture(t, ctx, db, "deadline-repair@example.test")
+	const remoteCount = 4
+	if err := db.UpdateMailboxRemoteStatus(ctx, user.ID, mailbox.ID, 0, 0, remoteCount+1, 7); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := newBackfillFetcher(remoteCount)
+	fetcher.blockAfter = 1
+	service := &Service{Store: db, Blobs: blob.New(t.TempDir()), Fetcher: fetcher}
+
+	_, err = service.syncUserAccountMailboxes(deadlineTurnContext(t, ctx), user.ID, account.ID,
+		[]string{mailbox.Name}, syncAccountOptions{})
+	if !errors.Is(err, ErrSyncTurnPaused) {
+		t.Fatalf("repair cut off mid-fetch error = %v, want ErrSyncTurnPaused", err)
+	}
+	exists, err := db.MessageExistsByUIDForGeneration(ctx, user.ID, account.ID, mailbox.ID, 1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("repair cut off mid-fetch dropped the import completion of the message it stored")
+	}
+	if run := latestSyncRun(t, ctx, db, user.ID); run.Status != "ok" || run.Error != "" {
+		t.Fatalf("repair cut off mid-fetch run status=%q error=%q, want ok without an error", run.Status, run.Error)
+	}
+}
+
 func TestBoundedTurnThatMirrorsNothingStillReportsFailure(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
@@ -409,6 +505,59 @@ func TestPausedFolderEarnsLongerTurnsAndGivesThemBackWhenItCatchesUp(t *testing.
 	}
 	if len(runner.mailboxTurnBudgets) != 0 {
 		t.Fatalf("completed folder left %d earned budgets behind", len(runner.mailboxTurnBudgets))
+	}
+}
+
+func TestSharedMailboxJobLeavesEarnedTurnBudgetsAlone(t *testing.T) {
+	runner := &Runner{mailboxTurnBudgets: map[string]time.Duration{}}
+	backfilling := accountMailboxKeys(1, 1, []string{"INBOX"})
+	runner.escalateMailboxTurnBudget(backfilling, liveInboxSyncTurnTimeout)
+	earned := runner.mailboxTurnTimeout(backfilling, liveInboxSyncTurnTimeout)
+	if earned <= liveInboxSyncTurnTimeout {
+		t.Fatalf("backfilling folder timeout=%s did not grow", earned)
+	}
+
+	// A job that reserved several folders shares one timeout, so its outcome
+	// cannot be attributed to any of them.
+	shared := accountMailboxKeys(1, 1, []string{"INBOX", "Sent"})
+	if got := runner.mailboxTurnTimeout(shared, liveInboxSyncTurnTimeout); got != liveInboxSyncTurnTimeout {
+		t.Fatalf("shared job timeout=%s, want the freshness budget %s", got, liveInboxSyncTurnTimeout)
+	}
+	runner.escalateMailboxTurnBudget(shared, ordinaryMailboxSyncTurnTimeout)
+	sent := accountMailboxKeys(1, 1, []string{"Sent"})
+	if got := runner.mailboxTurnTimeout(sent, liveInboxSyncTurnTimeout); got != liveInboxSyncTurnTimeout {
+		t.Fatalf("healthy sibling inherited a timeout of %s from a shared job", got)
+	}
+	runner.clearMailboxTurnBudget(shared)
+	if got := runner.mailboxTurnTimeout(backfilling, liveInboxSyncTurnTimeout); got != earned {
+		t.Fatalf("shared job wiped the backfilling folder's earned timeout: %s, want %s", got, earned)
+	}
+}
+
+func TestTurnThatNeverRanReturnsTheFolderToItsFreshnessBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, mailbox := createRunnerMailboxFixture(t, ctx, db, "abandoned-turn@example.test")
+	runner := NewRunnerWithContext(ctx, &Service{Store: db, Fetcher: newBackfillFetcher(4)})
+	keys, ok := runner.reserveAccountMailboxes(user.ID, account.ID, []string{mailbox.Name})
+	if !ok {
+		t.Fatal("Inbox reservation was refused")
+	}
+	runner.escalateMailboxTurnBudget(keys, liveInboxSyncTurnTimeout)
+
+	// Shutting the runner down ends the turn before it syncs anything, which must
+	// not leave a multi-minute turn attached to a folder that did no work.
+	cancel()
+	if err := runner.runReservedAccountMailboxes(user.ID, account.ID, []string{mailbox.Name}, keys); err == nil {
+		t.Fatal("turn on a canceled runner reported success")
+	}
+	if got := runner.mailboxTurnTimeout(keys, liveInboxSyncTurnTimeout); got != liveInboxSyncTurnTimeout {
+		t.Fatalf("abandoned turn left timeout=%s, want the freshness budget %s", got, liveInboxSyncTurnTimeout)
 	}
 }
 

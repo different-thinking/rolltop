@@ -667,9 +667,9 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				// set instead of recording a failed sync.
 				paused = true
 				progress.CurrentUID = repairedPlan.LastUID
-				if ctx.Err() == nil {
-					s.updateSyncProgress(ctx, userID, run.ID, progress)
-				}
+				progressCtx, cancelProgress := finishPausedTurnContext(ctx)
+				s.updateSyncProgress(progressCtx, userID, run.ID, progress)
+				cancelProgress()
 				log.Printf("sync user_id=%d account_id=%d mailbox=%q paused on its turn budget during folder repair: seen=%d stored=%d last_uid=%d",
 					userID, account.ID, mailboxName, progress.MessagesSeen, progress.MessagesStored, repairedPlan.LastUID)
 				return run, ErrSyncTurnPaused
@@ -983,9 +983,10 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 			return pauseSyncTurnIfBudgetSpent(ctx, progress)
 		}
 		// finishMailboxTurn performs the durable bookkeeping a folder turn owes
-		// after its fetch stops, whether the folder completed or the turn paused
-		// with budget left for exactly this work.
-		finishMailboxTurn := func() error {
+		// after its fetch stops, whether the folder completed or the turn ran out
+		// of time. A paused turn passes a context that outlives its budget, so the
+		// work it already did survives; the completing turn uses its own.
+		finishMailboxTurn := func(ctx context.Context) error {
 			if err := searchBatch.Flush(ctx); err != nil {
 				return err
 			}
@@ -1049,27 +1050,28 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				errText = err.Error()
 				return run, err
 			}
-			// The turn ran out of time, not out of health. Everything fetched so
-			// far is stored and checkpointed; report a pause so the caller resumes
-			// this folder instead of recording a failed sync.
+			// The turn ran out of time, not out of health. Commit what it mirrored
+			// on a context that outlives the spent budget, then report a pause so
+			// the caller resumes this folder instead of recording a failed sync.
 			paused = true
-			if ctx.Err() == nil {
-				if finishErr := finishMailboxTurn(); finishErr != nil {
-					paused = false
-					status = "failed"
-					errText = finishErr.Error()
-					return run, finishErr
-				}
-				progress.CurrentMailbox = mailboxName
-				progress.CurrentUID = lastUIDs[mailboxName]
-				s.updateSyncProgress(ctx, userID, run.ID, progress)
+			finishCtx, cancelFinish := finishPausedTurnContext(ctx)
+			if finishErr := finishMailboxTurn(finishCtx); finishErr != nil {
+				cancelFinish()
+				paused = false
+				status = "failed"
+				errText = finishErr.Error()
+				return run, finishErr
 			}
+			progress.CurrentMailbox = mailboxName
+			progress.CurrentUID = lastUIDs[mailboxName]
+			s.updateSyncProgress(finishCtx, userID, run.ID, progress)
+			cancelFinish()
 			log.Printf("sync user_id=%d account_id=%d mailbox=%q paused on its turn budget: seen=%d stored=%d skipped=%d checkpoint_uid=%d cancelled_mid_fetch=%t",
 				userID, account.ID, mailboxName, progress.MessagesSeen, progress.MessagesStored,
 				progress.MessagesSkipped, lastUIDs[mailboxName], ctx.Err() != nil)
 			return run, ErrSyncTurnPaused
 		}
-		if err := finishMailboxTurn(); err != nil {
+		if err := finishMailboxTurn(ctx); err != nil {
 			status = "failed"
 			errText = err.Error()
 			return run, err
@@ -1354,7 +1356,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		}
 		return nil
 	}
-	finishRepairBatches := func() error {
+	finishRepairBatches := func(ctx context.Context) error {
 		if err := searchBatch.Flush(ctx); err != nil {
 			return err
 		}
@@ -1365,18 +1367,19 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		return completionBatch.Flush(ctx)
 	}
 	// handleRepairFetchError commits what a bounded turn mirrored before it ran
-	// out of time. Committing the batches is what makes those messages count as
-	// mirrored, so the next turn skips them instead of downloading them again. A
-	// turn that mirrored nothing has nothing to keep and reports its failure
-	// unchanged rather than asking to be rescheduled at once.
+	// out of time, on a context that outlives the spent budget. Committing the
+	// batches is what makes those messages count as mirrored, so the next turn
+	// skips them instead of downloading them again. A turn that mirrored nothing
+	// has nothing to keep and reports its failure unchanged rather than asking to
+	// be rescheduled at once.
 	handleRepairFetchError := func(fetchErr error) (MailboxPlan, bool, error) {
 		if repairHandled == 0 || !syncTurnPaused(ctx, fetchErr) {
 			return plan, false, fetchErr
 		}
-		if ctx.Err() == nil {
-			if err := finishRepairBatches(); err != nil {
-				return plan, false, err
-			}
+		finishCtx, cancelFinish := finishPausedTurnContext(ctx)
+		defer cancelFinish()
+		if err := finishRepairBatches(finishCtx); err != nil {
+			return plan, false, err
 		}
 		log.Printf("repair incomplete mailbox paused user_id=%d account_id=%d mailbox=%s handled=%d missing=%d last_uid=%d cancelled_mid_fetch=%t",
 			userID, account.ID, mailbox.Name, repairHandled, len(missing), plan.LastUID, ctx.Err() != nil)
@@ -1401,7 +1404,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 			}
 		}
 	}
-	if err := finishRepairBatches(); err != nil {
+	if err := finishRepairBatches(ctx); err != nil {
 		return plan, false, err
 	}
 	if highestRemoteUID > plan.LastUID {

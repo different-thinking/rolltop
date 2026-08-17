@@ -29,6 +29,21 @@ var errSyncTurnBudgetSpent = errors.New("sync turn budget spent")
 // discards the in-flight batch and tears down the connection.
 const syncTurnBudgetReserve = 5 * time.Second
 
+// syncTurnFinishTimeout bounds the commit of a paused turn's durable state. The
+// messages are already in SQLite by then, so this covers only the Bleve batch,
+// the import-completion marks, the UID checkpoint, and the progress row.
+const syncTurnFinishTimeout = 30 * time.Second
+
+// finishPausedTurnContext detaches that commit from the deadline that just ended
+// the turn. Running it on the expired turn context is how a paused turn loses
+// exactly the work it is supposed to keep: a Bleve flush that outlasts the
+// reserve, or a deadline that already fired inside an IMAP command, would drop a
+// batch of search documents and completion marks and force the next turn to
+// download those messages again.
+func finishPausedTurnContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), syncTurnFinishTimeout)
+}
+
 type syncTurnBudgetKey struct{}
 
 type syncTurnBudget struct {
