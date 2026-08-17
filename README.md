@@ -19,6 +19,7 @@ rolltop is a single-container Go app that mirrors multiple IMAP inboxes per loca
 - POST routes require CSRF tokens.
 - App passwords are hashed with Argon2id.
 - IMAP passwords are encrypted at rest with `ROLLTOP_MASTER_KEY`.
+- Google OAuth refresh and access tokens are encrypted at rest with the same key and are never returned by the API.
 - Admins can create users, but V1 does not give admins access to other users' mail.
 - Message sending uses the configured SMTP server.
 - Mailbox moves are explicit user actions and are mirrored to IMAP.
@@ -72,6 +73,56 @@ lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
 include them. Failures are written as `error ...` lines and are never hidden,
 whatever the level is set to; each names the request that produced it, for
 example `error server error GET /api/mail: database is locked`.
+
+### Google accounts
+
+Connecting Google accounts is optional. Leave these unset and the Google
+settings section reports the server as unconfigured; nothing else changes.
+
+```sh
+export ROLLTOP_GOOGLE_CLIENT_ID="1234567890-example.apps.googleusercontent.com"
+export ROLLTOP_GOOGLE_CLIENT_SECRET="GOCSPX-example"
+export ROLLTOP_GOOGLE_REDIRECT_URLS="https://mail.example.com/api/google/callback"
+export ROLLTOP_GOOGLE_SCOPES=""
+```
+
+`ROLLTOP_GOOGLE_REDIRECT_URLS` accepts several entries separated by commas or
+whitespace, so one deployment can serve both a production host and
+`http://localhost:8080` for development. Every entry must be an absolute
+`http` or `https` URL ending in `/api/google/callback`, must be registered
+byte for byte in the Google Cloud console, and with more than one configured
+the request origin decides which is used. `ROLLTOP_GOOGLE_SCOPES` is optional
+and replaces the default `openid email https://mail.google.com/` entirely.
+
+These are validated during startup: half a credential, an unusable redirect
+URL, or credentials without any redirect URL stop the process rather than
+surfacing as a failed consent much later. Connecting also needs a usable
+`ROLLTOP_MASTER_KEY`, because the tokens are stored encrypted.
+
+In the Google Cloud console, create a **Web application** OAuth client and
+register the same redirect URLs. Signing in over IMAP and SMTP needs the scope
+granted but no API enabled; the People and Calendar APIs become relevant only
+when those integrations land. Google requires `https` for redirect URLs, except
+for `http://localhost` and `http://127.0.0.1` — an instance reachable only over
+plain HTTP on a LAN address cannot complete a consent round trip.
+`redirect_uri_mismatch` on a first attempt is almost always a character
+difference between the console entry and `ROLLTOP_GOOGLE_REDIRECT_URLS`.
+
+`https://mail.google.com/` is a restricted scope, and how the consent screen is
+published decides how often accounts have to be reconnected:
+
+- **Testing** works without any review, but refresh tokens issued in this state
+  expire after seven days, so connections need `Reauthorize` about weekly.
+- **Internal**, available only on a Google Workspace domain, has neither
+  restriction and is the least troublesome option where it applies.
+- **In production** keeps refresh tokens valid indefinitely. An unverified app
+  shows an "unverified app" interstitial that the operator confirms once and is
+  limited to 100 users. Formal verification of a restricted scope requires a
+  recurring third-party security assessment, which self-hosted installs are not
+  expected to undergo.
+
+Whichever state applies, an expired or revoked grant is detected and the
+connection is marked as needing reauthorization rather than failing silently.
 
 ## Run Locally
 
