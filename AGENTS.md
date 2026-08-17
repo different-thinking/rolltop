@@ -30,6 +30,12 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- One data directory belongs to one process, and the instance lock is taken
+  before anything opens SQLite, Bleve, or the blob store. A serving start waits
+  for the lock (`ROLLTOP_STARTUP_LOCK_WAIT`) because deployments overlap the old
+  and new container; offline maintenance commands keep failing immediately. Do
+  not move any open ahead of the lock, and do not make the maintenance commands
+  wait.
 - Keep sync bounded in memory as well as in time. Anything that accumulates
   message content between commits - IMAP fetch batches, the search-index batch -
   must be bounded in **bytes**, not only in message count: mail sizes span four

@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"rolltop/backend/memlimit"
 )
@@ -232,5 +233,41 @@ func TestLoadReadsMemoryLimit(t *testing.T) {
 	t.Setenv("ROLLTOP_MEMORY_LIMIT", "lots")
 	if _, err := Load(); err == nil {
 		t.Fatal("unparsable memory limit was accepted")
+	}
+}
+
+func TestLoadReadsStartupLockWait(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 2*time.Minute {
+		t.Fatalf("default startup lock wait = %s, want 2m", cfg.StartupLockWait)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "45s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 45*time.Second {
+		t.Fatalf("configured startup lock wait = %s, want 45s", cfg.StartupLockWait)
+	}
+
+	// Zero is the old behavior: refuse a directory another process still owns.
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupLockWait != 0 {
+		t.Fatalf("disabled startup lock wait = %s, want 0", cfg.StartupLockWait)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "-30s")
+	if _, err := Load(); err == nil {
+		t.Fatal("negative startup lock wait was accepted")
 	}
 }

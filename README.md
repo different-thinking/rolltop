@@ -57,6 +57,7 @@ export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
 export ROLLTOP_MEMORY_LIMIT="80%"
+export ROLLTOP_STARTUP_LOCK_WAIT="2m"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
@@ -311,6 +312,46 @@ Without it, `docker stop` sends SIGKILL after its default 10 seconds. That does
 not corrupt the database, but it leaves a hot WAL that the next start has to
 replay, and the next start then treats the run as unclean and verifies the
 tenant files before serving (see `ROLLTOP_STARTUP_INTEGRITY_CHECK`).
+
+### Overlapping Deployments
+
+One data directory belongs to one Rolltop process. That is enforced with an
+`flock` on `/data/.rolltop-instance.lock`, taken before anything opens SQLite,
+the Bleve indexes, or the blob store, and held until the process exits.
+
+Platforms that deploy without downtime start the replacement container before
+stopping the one it replaces, so for a few seconds two processes want the same
+directory. The starting process waits for the lock instead of refusing it, for
+up to `ROLLTOP_STARTUP_LOCK_WAIT` (default `2m`), which covers the previous
+process draining HTTP, closing its plugins and index, and checkpointing SQLite.
+The wait is visible in the log and on the startup page:
+
+```text
+waiting for the previous rolltop process to release /data (held by pid 1), 5s so far
+previous rolltop process released /data after 7s
+```
+
+The HTTP listener is up throughout the wait, the same as during migrations: a
+TCP check connects, `/api/startup` answers `200` with the current phase, and a
+page request gets the startup page. A platform that stops the old container once
+the new one looks healthy therefore gets its healthy answer, and the wait ends. Set the value to `0` to
+refuse a directory another process still owns, which is what earlier versions
+always did. A wait that runs out is reported with the process that holds the
+lock and how long it was given.
+
+Offline maintenance (`repair-db`, `recover-db`, `reset-search`, `backup-db`)
+keeps failing immediately instead of waiting, because the answer there is to
+stop the server rather than to wait for it.
+
+Two notes on what this does and does not protect:
+
+- SQLite itself does allow several processes on one database file; that is what
+  its locking and `busy_timeout` are for. What it cannot survive is a
+  filesystem where locking is unreliable, which is the case on NFS and SMB
+  volumes. Keep `/data` on a local volume. The Bleve indexes are the stricter
+  constraint: a second process cannot open them at all.
+- The lock only works if `flock` works on the volume. If the log shows two
+  processes serving the same directory at once, that is what to check first.
 
 ### Backups
 
