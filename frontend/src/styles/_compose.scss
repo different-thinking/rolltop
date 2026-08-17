@@ -115,18 +115,23 @@
   background: var(--surface-raised);
   box-shadow: var(--shadow);
 
-  // The composer takes at most 60% of the viewport so the message it answers
-  // stays reachable behind it, and so Send is never pushed off the bottom: the
-  // recipients, the toolbar and the send bar all keep their height and the
-  // writing area is what gives way. Below a window of about 530px, 60% no
-  // longer holds a usable composer at all — the fixed rows alone eat it — so
-  // the floor takes over and the writing area stops shrinking instead.
-  max-height: max(60dvh, 320px);
+  // The composer takes at most 60% of the window, so the message it answers
+  // stays reachable behind it and Send is never pushed off the bottom. dvh keeps
+  // counting the strip an Android keyboard covers, so the visible height the
+  // composer publishes caps it as well — not at 60% of that strip, which would
+  // leave a sliver exactly while someone is typing, but at all of it: enough to
+  // keep the send bar off the keyboard once the composer is scrolled to.
+  max-height: min(60dvh, var(--compose-visible-height, 100dvh));
 
+  // Everything above the toolbar scrolls when it has to. The writing area below
+  // absorbs the shrinking on its own, so this only takes over once the rows
+  // around it — recipients, a recovery banner, a stack of attachments — no
+  // longer fit either. Without it they would render straight through the send
+  // bar and out of the card.
   > .compose-scroll-region {
     flex: 1 1 auto;
     min-height: 0;
-    overflow: visible;
+    overflow-y: auto;
     gap: 12px;
   }
 
@@ -139,6 +144,10 @@
     flex: 1 1 auto;
     min-height: 72px;
     overflow-y: auto;
+    // The popover contains its scrolling because it floats over the page. This
+    // one is part of the page, and a composer covering 60% of it must not be a
+    // dead zone for the wheel: at either end the thread scrolls on.
+    overscroll-behavior: auto;
     padding: 0;
     color: var(--text);
     border: 1px solid var(--border);
