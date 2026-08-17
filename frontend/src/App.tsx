@@ -825,6 +825,7 @@ export default function App() {
         syncRunning={Boolean(bootstrap.sync_running)}
         accountNeedsPassword={Boolean(bootstrap.account_needs_password)}
         accountNotice={bootstrap.account_notice || ""}
+        databaseUnavailable={Boolean(bootstrap.database_unavailable)}
         enabledPlugins={bootstrap.enabled_plugins || []}
         serverStartedAt={bootstrap.server_started_at || ""}
         serverUptimeSeconds={bootstrap.server_uptime_seconds || 0}

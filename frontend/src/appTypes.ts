@@ -77,6 +77,7 @@ export type AppShellProps = {
   syncRunning: boolean;
   accountNeedsPassword: boolean;
   accountNotice: string;
+  databaseUnavailable: boolean;
   enabledPlugins: string[];
   serverStartedAt: string;
   serverUptimeSeconds: number;

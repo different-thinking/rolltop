@@ -36,6 +36,7 @@ export function AppShell({
   buildCommit,
   accountNeedsPassword,
   accountNotice,
+  databaseUnavailable,
   enabledPlugins,
   location,
   navigate,
@@ -434,6 +435,7 @@ export function AppShell({
           onClose={closeMobileSidebar}
         />
         <main className="content">
+          {databaseUnavailable ? <DatabaseUnavailableBanner isAdmin={Boolean(user.is_admin)} navigate={navigate} /> : null}
           {accountNeedsPassword ? <AccountCredentialBanner notice={accountNotice} navigate={navigate} /> : null}
           {children}
         </main>
@@ -536,6 +538,22 @@ function touchPreviewAt(x: number, y: number, count: number): TouchDragPreview {
 
 // This banner is intentionally high in the shell so a broken master key or
 // undecryptable IMAP password is visible on every authenticated page.
+function DatabaseUnavailableBanner({ isAdmin, navigate }: { isAdmin: boolean; navigate: (url: string) => void }) {
+  return (
+    <section className="account-alert" role="alert">
+      <Icon name="report" weight="duotone" />
+      <div>
+        <strong>Mail database unavailable</strong>
+        <span>
+          This account's database is damaged, so no mail can be shown. Nothing has been deleted: messages are
+          restored from the mail server once the database is repaired.
+        </span>
+      </div>
+      {isAdmin ? <button type="button" onClick={() => navigate("/admin/database")}>Repair database</button> : null}
+    </section>
+  );
+}
+
 function AccountCredentialBanner({ notice, navigate }: { notice: string; navigate: (url: string) => void }) {
   return (
     <section className="account-alert" role="alert">

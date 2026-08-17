@@ -148,9 +148,27 @@ func (s *Store) latchCorruption(userID int64, path, detail string) {
 	s.health[userID] = DatabaseHealth{
 		UserID:     userID,
 		Path:       path,
-		Detail:     detail,
+		Detail:     summarizeProblem(detail),
 		DetectedAt: time.Now().UTC(),
 	}
+}
+
+// summarizeProblem collapses a multi-line SQLite report to its first line plus
+// a count of what was dropped.
+//
+// quick_check on a badly damaged file returns its whole page-by-page report as
+// a single string. Latching and logging that verbatim buried the one line that
+// tells an operator what to do — the file and the repair command — under a
+// hundred lines of page numbers, three times over, because every layer that
+// reported the tenant repeated the same block.
+func summarizeProblem(text string) string {
+	trimmed := strings.TrimSpace(text)
+	first, rest, found := strings.Cut(trimmed, "\n")
+	if !found {
+		return trimmed
+	}
+	dropped := len(strings.Split(strings.TrimRight(rest, "\n"), "\n"))
+	return fmt.Sprintf("%s (+%d more lines; run \"rolltop check-db\" for the full report)", strings.TrimSpace(first), dropped)
 }
 
 // ClearCorruption releases a tenant that has since verified clean. Corruption
@@ -272,7 +290,7 @@ func CheckDatabaseFile(ctx context.Context, path string) ([]string, error) {
 		if IsCorrupt(err) {
 			// A file too damaged to scan reports the failure itself as the
 			// problem rather than pretending the check did not run.
-			return append(problems, err.Error()), nil
+			return append(problems, summarizeProblem(err.Error())), nil
 		}
 		return problems, err
 	}
