@@ -239,14 +239,21 @@ type ContactListFilter struct {
 	// GoogleConnectionID restricts to contacts owned by one connected account.
 	// It is only meaningful together with a Google source.
 	GoogleConnectionID int64
-	Limit              int
+	// Limit caps the answer. Zero means the default page; any positive value is
+	// honoured as asked, because the caller knows what it is doing with the
+	// result -- the vCard export wants the whole address book, and rounding
+	// that down to a page would silently write an incomplete backup.
+	Limit int
 }
+
+// defaultContactListLimit is the page an unspecified listing gets.
+const defaultContactListLimit = 200
 
 // ListContactsForUser returns contacts matching the optional address-book query.
 func (s *Store) ListContactsForUser(ctx context.Context, userID int64, filter ContactListFilter) ([]Contact, error) {
 	limit := filter.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 200
+	if limit <= 0 {
+		limit = defaultContactListLimit
 	}
 	where := []string{"user_id = ?"}
 	args := []any{userID}

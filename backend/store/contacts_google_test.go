@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -77,6 +78,35 @@ func TestListContactsFiltersBySourceInsideTheLimit(t *testing.T) {
 	// The filter has to compose with the search box rather than replace it.
 	if got := names(ContactListFilter{Source: ContactSourceGoogle, Query: "charlie"}); len(got) != 1 || got[0] != "Charlie Other" {
 		t.Fatalf("google + query = %v, want the single match", got)
+	}
+}
+
+// The vCard export asks for the whole address book. Clamping its limit down to
+// a page wrote a backup that silently stopped at 200 contacts, which is the
+// kind of incompleteness nobody notices until they need the file.
+func TestListContactsHonoursALimitAboveThePageSize(t *testing.T) {
+	db, user := openContactStore(t)
+	ctx := context.Background()
+	const total = defaultContactListLimit + 5
+	for i := 0; i < total; i++ {
+		addContact(t, db, user.ID,
+			fmt.Sprintf("Person %03d", i), fmt.Sprintf("person%03d@example.test", i), 0, "")
+	}
+
+	exported, err := db.ListContactsForUser(ctx, user.ID, ContactListFilter{Limit: 10000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != total {
+		t.Fatalf("export returned %d contacts, want all %d", len(exported), total)
+	}
+	// An unspecified limit still gets a page rather than the whole book.
+	paged, err := db.ListContactsForUser(ctx, user.ID, ContactListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged) != defaultContactListLimit {
+		t.Fatalf("default listing returned %d contacts, want %d", len(paged), defaultContactListLimit)
 	}
 }
 
