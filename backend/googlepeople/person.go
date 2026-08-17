@@ -379,44 +379,90 @@ func isPrimary(meta *FieldMetadata) bool {
 	return meta != nil && meta.Primary
 }
 
-// contactLabel prefers the label Google already formatted for display, falls
-// back to the machine type, and only then to a generic word, so a custom label
-// the user typed at Google survives the round trip.
-func contactLabel(formatted, machine, fallback string) string {
-	if label := strings.TrimSpace(formatted); label != "" {
-		return label
-	}
-	if label := strings.TrimSpace(machine); label != "" {
-		return strings.ToUpper(label[:1]) + label[1:]
-	}
-	return fallback
+// predefinedType pairs one of Google's known type values with the label Rolltop
+// shows for it.
+type predefinedType struct {
+	apiValue string
+	label    string
 }
 
-// genericLabels are the words contactLabel invents when Google supplied no type
+// predefinedTypes covers the values the People API documents for emails,
+// phones, addresses and URLs. Keys are normalized so both Google's own spelling
+// ("homeFax") and its formatted English rendering ("Home fax") find the entry.
+var predefinedTypes = map[string]predefinedType{
+	"home":           {"home", "Home"},
+	"work":           {"work", "Work"},
+	"other":          {"other", "Other"},
+	"mobile":         {"mobile", "Mobile"},
+	"homefax":        {"homeFax", "Home fax"},
+	"workfax":        {"workFax", "Work fax"},
+	"otherfax":       {"otherFax", "Other fax"},
+	"pager":          {"pager", "Pager"},
+	"workmobile":     {"workMobile", "Work mobile"},
+	"workpager":      {"workPager", "Work pager"},
+	"main":           {"main", "Main"},
+	"googlevoice":    {"googleVoice", "Google Voice"},
+	"blog":           {"blog", "Blog"},
+	"profile":        {"profile", "Profile"},
+	"homepage":       {"homePage", "Home page"},
+	"ftp":            {"ftp", "FTP"},
+	"reservations":   {"reservations", "Reservations"},
+	"appinstallpage": {"appInstallPage", "App install page"},
+}
+
+// typeAliases are words a user might type here that mean one of Google's own
+// values. They only affect the way out.
+var typeAliases = map[string]string{"office": "work", "cell": "mobile"}
+
+// genericLabels are the words contactLabel invents when Google supplied nothing
 // at all. Sending one back would turn "no label" into a custom label reading
 // "Email" on every address the contact has.
 var genericLabels = map[string]bool{"email": true, "phone": true, "address": true, "website": true}
 
-// googleType maps a Rolltop label onto a People API type. Google's own values
-// are matched case-insensitively so a round trip does not rewrite them, and
-// anything else travels as-is: the type field accepts a custom string, and
-// dropping it would silently delete a label the user typed at Google -- an
-// "School" address would come back unlabelled after an unrelated edit.
+// normalizeTypeKey folds a label or type down to its lookup key. Spaces go so
+// that Google's machine value and its formatted rendering land on one entry.
+func normalizeTypeKey(value string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), " ", "")
+}
+
+// contactLabel derives the stored label for one detail row.
+//
+// The machine type decides, not the formatted one: formattedType is output-only
+// and localized to the account's language, so on a German account "home" arrives
+// as "Privat". Storing that and sending it back would replace Google's own type
+// with a custom label -- in the user's language, on every contact they touch.
+// A type Google does not predefine *is* the custom label, so it is kept as-is,
+// and the formatted value is used only when there is no type at all.
+func contactLabel(formatted, machine, fallback string) string {
+	if trimmed := strings.TrimSpace(machine); trimmed != "" {
+		if known, ok := predefinedTypes[normalizeTypeKey(trimmed)]; ok {
+			return known.label
+		}
+		return trimmed
+	}
+	if label := strings.TrimSpace(formatted); label != "" {
+		return label
+	}
+	return fallback
+}
+
+// googleType maps a stored label back onto a People API type. A predefined type
+// travels in Google's own spelling so a round trip does not turn it into a
+// custom label; anything else travels verbatim, because the type field accepts
+// a custom string and dropping it would silently delete a label the user typed
+// at Google -- a "School" address would come back unlabelled after an unrelated
+// edit.
 func googleType(label string) string {
 	trimmed := strings.TrimSpace(label)
-	switch lowered := strings.ToLower(trimmed); {
-	case lowered == "":
+	key := normalizeTypeKey(trimmed)
+	if key == "" || genericLabels[key] {
 		return ""
-	case genericLabels[lowered]:
-		return ""
-	case lowered == "home":
-		return "home"
-	case lowered == "work", lowered == "office":
-		return "work"
-	case lowered == "mobile", lowered == "cell":
-		return "mobile"
-	case lowered == "other":
-		return "other"
+	}
+	if alias, ok := typeAliases[key]; ok {
+		key = alias
+	}
+	if known, ok := predefinedTypes[key]; ok {
+		return known.apiValue
 	}
 	return trimmed
 }

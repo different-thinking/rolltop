@@ -77,8 +77,11 @@ func TestUpdateRemoteContactAdoptsTheAcceptedVersion(t *testing.T) {
 	if updated.ETag != "etag-updated" {
 		t.Fatalf("etag = %q, want the one Google answered with", updated.ETag)
 	}
-	if fake.updates != 1 {
-		t.Fatalf("update calls = %d, want exactly one", fake.updates)
+	fake.mu.Lock()
+	updates := fake.updates
+	fake.mu.Unlock()
+	if updates != 1 {
+		t.Fatalf("update calls = %d, want exactly one", updates)
 	}
 }
 

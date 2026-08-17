@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -18,11 +19,18 @@ import (
 	"rolltop/backend/store"
 )
 
-// fakePeopleAPI records what the routes actually asked Google to do.
+// fakePeopleAPI records what the routes actually asked Google to do. Requests
+// are told apart by their action suffix, not merely by path prefix: counting a
+// read or an update as a delete would let the delete assertions pass for the
+// wrong call.
 type fakePeopleAPI struct {
 	mu      sync.Mutex
 	deleted []string
 	listed  int
+	// updateConflict makes the next update fail as a stale etag.
+	updateConflict bool
+	// remote is what a conflict-resolving read answers with.
+	remote map[string]any
 }
 
 func (f *fakePeopleAPI) handler() http.Handler {
@@ -35,9 +43,30 @@ func (f *fakePeopleAPI) handler() http.Handler {
 	})
 	mux.HandleFunc("/v1/people/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		f.deleted = append(f.deleted, r.URL.Path)
-		f.mu.Unlock()
-		_, _ = w.Write([]byte(`{}`))
+		defer f.mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":deleteContact"):
+			f.deleted = append(f.deleted, r.URL.Path)
+			_, _ = w.Write([]byte(`{}`))
+		case strings.HasSuffix(r.URL.Path, ":updateContact"):
+			if f.updateConflict {
+				f.updateConflict = false
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"status": "FAILED_PRECONDITION"},
+				})
+				return
+			}
+			var incoming map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&incoming)
+			incoming["resourceName"] = strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/"), ":updateContact")
+			incoming["etag"] = "etag-updated"
+			_ = json.NewEncoder(w).Encode(incoming)
+		default:
+			// A read, which resolves a conflict. Anything the tests have not
+			// registered is answered as the person Google still holds.
+			_ = json.NewEncoder(w).Encode(f.remote)
+		}
 	})
 	return mux
 }
@@ -315,6 +344,53 @@ func TestContactListFilterTravelsToTheStore(t *testing.T) {
 	// the whole address book.
 	if response := env.send(t, env.owner, http.MethodGet, "/api/contacts?source=nonsense", nil); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown source status=%d, want 400", response.Code)
+	}
+}
+
+// A rejected edit answers 409 with the version that won at Google. The editor
+// shows that body instead of the values the user submitted, so the payload is a
+// contract and not just an error string.
+func TestUpdatingAMirroredContactAnswersAConflictWithGooglesVersion(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	fake := &fakePeopleAPI{
+		updateConflict: true,
+		remote: map[string]any{
+			"resourceName": "people/c1",
+			"etag":         "etag-remote",
+			"names":        []map[string]any{{"displayName": "Ada Lovelace", "givenName": "Ada"}},
+			"organizations": []map[string]any{
+				{"title": "Analyst"},
+			},
+		},
+	}
+	withContactSync(t, env, fake, true)
+	contact := linkedContact(t, env, env.owner, connection.ID, "mirrored@example.test")
+
+	body, err := json.Marshal(apiContact{DisplayName: "Renamed Here", JobTitle: "Countess"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := env.send(t, env.owner, http.MethodPut,
+		"/api/contacts/"+strconv.FormatInt(contact.ID, 10), body)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Error   string     `json:"error"`
+		Contact apiContact `json:"contact"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error == "" {
+		t.Fatal("the conflict carried no explanation")
+	}
+	if payload.Contact.ID != contact.ID || payload.Contact.JobTitle != "Analyst" {
+		t.Fatalf("conflict contact = %+v, want Google's version of the same row", payload.Contact)
+	}
+	if payload.Contact.DisplayName == "Renamed Here" {
+		t.Fatal("the rejected edit was handed back as though it had been saved")
 	}
 }
 

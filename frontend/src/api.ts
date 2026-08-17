@@ -487,7 +487,7 @@ export const api = {
   importContacts: (csrf: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return postForm<{ ok: boolean; imported: number; updated: number }>("/api/contacts/import", csrf, form);
+    return postForm<{ ok: boolean; imported: number; updated: number; failed: number }>("/api/contacts/import", csrf, form);
   },
   addSenderContact: (csrf: string, id: number) =>
     postJSON<{ contact: Contact; created: boolean }>(`/api/messages/${id}/contacts/add-sender`, csrf),

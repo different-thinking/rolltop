@@ -131,7 +131,17 @@ func (s *Store) DemoteGoogleContactsForConnection(ctx context.Context, userID, c
 	if userID <= 0 || connectionID <= 0 {
 		return 0, nil
 	}
-	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+	return demoteGoogleContacts(ctx, s.mustDataDB(ctx, userID), userID, connectionID)
+}
+
+// execer is the slice of *sql.DB and *sql.Tx a plain statement needs, so the
+// same write can run standalone or inside the disconnect transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func demoteGoogleContacts(ctx context.Context, db execer, userID, connectionID int64) (int64, error) {
+	res, err := db.ExecContext(ctx,
 		`UPDATE contacts SET source = ?, google_connection_id = 0, external_id = '', etag = '', remote_updated_at = 0, updated_at = ?
 			WHERE user_id = ? AND google_connection_id = ?`,
 		ContactSourceLocal, nowUnix(), userID, connectionID)

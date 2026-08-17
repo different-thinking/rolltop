@@ -79,9 +79,7 @@ func (s *Syncer) CreateRemoteContact(ctx context.Context, userID, connectionID i
 	if err != nil {
 		return store.Contact{}, err
 	}
-	if err := s.importPhoto(ctx, userID, saved.ID, created); err != nil {
-		return store.Contact{}, err
-	}
+	s.importPhoto(ctx, userID, saved.ID, created)
 	return s.Store.GetContactForUser(ctx, userID, saved.ID)
 }
 
@@ -148,11 +146,13 @@ func (s *Syncer) UpdateRemoteContact(ctx context.Context, userID int64, existing
 	return s.Store.GetContactForUser(ctx, userID, existing.ID)
 }
 
-// DeleteRemoteContact removes a contact at Google and locally.
+// DeleteRemoteContact removes a contact at Google. Removing the local mirror is
+// the caller's job, once this has returned without error.
 //
-// Google goes first: a delete that only succeeded here would come back on the
-// next sync, and a user who confirmed "delete this everywhere" would watch the
-// contact reappear. A Google failure leaves both copies intact.
+// The order is the point: a delete that only succeeded locally would come back
+// on the next sync, and a user who confirmed "delete this everywhere" would
+// watch the contact reappear. A Google failure therefore leaves both copies
+// intact, and the caller must not go on to delete its own.
 func (s *Syncer) DeleteRemoteContact(ctx context.Context, userID int64, contact store.Contact) error {
 	if err := s.ready(); err != nil {
 		return err

@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"log"
 	"net/mail"
 	"sort"
 	"strings"
@@ -292,10 +293,8 @@ func (s *Store) ListContactsForUser(ctx context.Context, userID int64, filter Co
 	if err != nil {
 		return nil, err
 	}
-	for i := range contacts {
-		if err := s.loadContactDetails(ctx, userID, &contacts[i]); err != nil {
-			return nil, err
-		}
+	if err := s.loadContactDetailsForAll(ctx, userID, contacts); err != nil {
+		return nil, err
 	}
 	return contacts, nil
 }
@@ -536,10 +535,8 @@ func (s *Store) ListMeContactsForUser(ctx context.Context, userID int64) ([]Cont
 	if err != nil {
 		return nil, err
 	}
-	for i := range contacts {
-		if err := s.loadContactDetails(ctx, userID, &contacts[i]); err != nil {
-			return nil, err
-		}
+	if err := s.loadContactDetailsForAll(ctx, userID, contacts); err != nil {
+		return nil, err
 	}
 	return contacts, nil
 }
@@ -577,6 +574,11 @@ func (s *Store) SetContactIcon(ctx context.Context, userID, contactID, blobID in
 	if err != nil {
 		return ContactIcon{}, err
 	}
+	// The row this upsert is about to overwrite owns a blob nothing else will
+	// reference afterwards. Contact sync re-imports a photo every time it
+	// changes at Google, so without this the replaced files accumulate for the
+	// life of the account.
+	replaced := s.currentContactIconBlobID(ctx, userID, contactID)
 	ts := nowUnix()
 	_, err = s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO contact_icons (user_id, contact_id, blob_id, content_type, filename, size, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -585,7 +587,35 @@ func (s *Store) SetContactIcon(ctx context.Context, userID, contactID, blobID in
 	if err != nil {
 		return ContactIcon{}, err
 	}
+	s.releaseReplacedContactIcon(ctx, userID, replaced, blob.ID)
 	return s.GetContactIconForUser(ctx, userID, contactID)
+}
+
+// currentContactIconBlobID reads the blob a contact's icon points at, or 0 when
+// it has none. A read failure is reported as "no previous icon": the caller
+// uses this only to release a superseded blob, and skipping that leaks a file
+// rather than losing one still in use.
+func (s *Store) currentContactIconBlobID(ctx context.Context, userID, contactID int64) int64 {
+	var blobID int64
+	if err := s.mustDataDB(ctx, userID).QueryRowContext(ctx,
+		`SELECT blob_id FROM contact_icons WHERE user_id = ? AND contact_id = ?`,
+		userID, contactID).Scan(&blobID); err != nil {
+		return 0
+	}
+	return blobID
+}
+
+// releaseReplacedContactIcon queues the superseded blob for cleanup. It is
+// best-effort by design: the queue only accepts a blob nothing references, and
+// a failure here costs disk rather than correctness, so it must not fail the
+// icon write that already succeeded.
+func (s *Store) releaseReplacedContactIcon(ctx context.Context, userID, replaced, current int64) {
+	if replaced <= 0 || replaced == current {
+		return
+	}
+	if _, _, err := s.QueueBlobCleanupIfUnreferenced(ctx, userID, replaced); err != nil {
+		log.Printf("queue replaced contact icon blob user_id=%d blob_id=%d: %v", userID, replaced, err)
+	}
 }
 
 // GetContactIconForUser loads icon metadata for one user-owned contact.
@@ -686,6 +716,7 @@ func (s *Store) ListContactIconsByEmailsForUser(ctx context.Context, userID int6
 
 // DeleteContactIconForUser removes icon metadata from a user-owned contact.
 func (s *Store) DeleteContactIconForUser(ctx context.Context, userID, contactID int64) error {
+	removed := s.currentContactIconBlobID(ctx, userID, contactID)
 	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `DELETE FROM contact_icons WHERE user_id = ? AND contact_id = ?`, userID, contactID)
 	if err != nil {
 		return err
@@ -697,6 +728,7 @@ func (s *Store) DeleteContactIconForUser(ctx context.Context, userID, contactID 
 	if n == 0 {
 		return ErrNotFound
 	}
+	s.releaseReplacedContactIcon(ctx, userID, removed, 0)
 	return nil
 }
 
@@ -762,53 +794,77 @@ func (s *Store) loadContactDetails(ctx context.Context, userID int64, c *Contact
 	return nil
 }
 
+// replaceContactChildren rewrites a contact's detail rows.
+//
+// The primary flag is stored as given, with one exception: a list where nothing
+// was marked promotes the first row that actually gets stored. Promoting by
+// index instead would mark row zero even when a later row is the marked one,
+// which is how a merged contact ended up with two primary emails.
 func replaceContactChildren(ctx context.Context, tx *sql.Tx, userID, contactID int64, c Contact, ts int64) error {
 	for _, table := range []string{"contact_emails", "contact_phones", "contact_addresses", "contact_urls"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE user_id = ? AND contact_id = ?`, userID, contactID); err != nil {
 			return err
 		}
 	}
-	for i, email := range c.Emails {
+	emailNeedsPrimary := !anyPrimary(c.Emails, func(item ContactEmail) bool { return item.IsPrimary })
+	for _, email := range c.Emails {
 		email.Email = strings.TrimSpace(email.Email)
 		email.NormalizedEmail = NormalizeContactEmail(email.Email)
 		if email.Email == "" || email.NormalizedEmail == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_emails (user_id, contact_id, label, email, normalized_email, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(email.Label), email.Email, email.NormalizedEmail, boolInt(email.IsPrimary || i == 0), ts, ts); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(email.Label), email.Email, email.NormalizedEmail, boolInt(email.IsPrimary || emailNeedsPrimary), ts, ts); err != nil {
 			return err
 		}
+		emailNeedsPrimary = false
 	}
-	for i, phone := range c.Phones {
+	phoneNeedsPrimary := !anyPrimary(c.Phones, func(item ContactPhone) bool { return item.IsPrimary })
+	for _, phone := range c.Phones {
 		phone.Number = strings.TrimSpace(phone.Number)
 		if phone.Number == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_phones (user_id, contact_id, label, number, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(phone.Label), phone.Number, boolInt(phone.IsPrimary || i == 0), ts, ts); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(phone.Label), phone.Number, boolInt(phone.IsPrimary || phoneNeedsPrimary), ts, ts); err != nil {
 			return err
 		}
+		phoneNeedsPrimary = false
 	}
-	for i, addr := range c.Addresses {
+	addressNeedsPrimary := !anyPrimary(c.Addresses, func(item ContactAddress) bool { return item.IsPrimary })
+	for _, addr := range c.Addresses {
 		if strings.TrimSpace(addr.Street+addr.Locality+addr.Region+addr.PostalCode+addr.Country) == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_addresses (user_id, contact_id, label, street, locality, region, postal_code, country, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(addr.Label), strings.TrimSpace(addr.Street), strings.TrimSpace(addr.Locality), strings.TrimSpace(addr.Region), strings.TrimSpace(addr.PostalCode), strings.TrimSpace(addr.Country), boolInt(addr.IsPrimary || i == 0), ts, ts); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(addr.Label), strings.TrimSpace(addr.Street), strings.TrimSpace(addr.Locality), strings.TrimSpace(addr.Region), strings.TrimSpace(addr.PostalCode), strings.TrimSpace(addr.Country), boolInt(addr.IsPrimary || addressNeedsPrimary), ts, ts); err != nil {
 			return err
 		}
+		addressNeedsPrimary = false
 	}
-	for i, u := range c.URLs {
+	urlNeedsPrimary := !anyPrimary(c.URLs, func(item ContactURL) bool { return item.IsPrimary })
+	for _, u := range c.URLs {
 		u.URL = strings.TrimSpace(u.URL)
 		if u.URL == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_urls (user_id, contact_id, label, url, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(u.Label), u.URL, boolInt(u.IsPrimary || i == 0), ts, ts); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(u.Label), u.URL, boolInt(u.IsPrimary || urlNeedsPrimary), ts, ts); err != nil {
 			return err
 		}
+		urlNeedsPrimary = false
 	}
 	return nil
+}
+
+// anyPrimary reports whether a detail list already names one entry primary.
+func anyPrimary[T any](items []T, primary func(T) bool) bool {
+	for _, item := range items {
+		if primary(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) listContactEmails(ctx context.Context, userID, contactID int64) ([]ContactEmail, error) {
@@ -927,12 +983,39 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 	if c.DisplayName == "" {
 		c.DisplayName = strings.TrimSpace(c.Organization)
 	}
+	// Exactly one primary per detail list. Merging two versions of a person --
+	// a vCard import, a Google sync -- appends entries that were each primary
+	// on their own side, and replaceContactChildren stores every one of them as
+	// primary. Two primaries is a state nothing downstream is prepared for.
+	keepSinglePrimary(c.Emails, func(item *ContactEmail) *bool { return &item.IsPrimary })
+	keepSinglePrimary(c.Phones, func(item *ContactPhone) *bool { return &item.IsPrimary })
+	keepSinglePrimary(c.Addresses, func(item *ContactAddress) *bool { return &item.IsPrimary })
+	keepSinglePrimary(c.URLs, func(item *ContactURL) *bool { return &item.IsPrimary })
 	c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag = normalizeContactProvenance(
 		c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag)
 	if c.Source == ContactSourceLocal {
 		c.RemoteUpdatedAt = time.Time{}
 	}
 	return c
+}
+
+// keepSinglePrimary leaves the first entry marked primary and clears the rest,
+// promoting the first when none was marked. That last part matches what
+// replaceContactChildren writes anyway, so the stored rows and the struct the
+// caller handed in no longer disagree about which entry is the primary one.
+func keepSinglePrimary[T any](items []T, primary func(*T) *bool) {
+	found := false
+	for i := range items {
+		flag := primary(&items[i])
+		if *flag && !found {
+			found = true
+			continue
+		}
+		*flag = false
+	}
+	if !found && len(items) > 0 {
+		*primary(&items[0]) = true
+	}
 }
 
 func contactName(display, given, family string) string {

@@ -186,7 +186,15 @@ export function ContactsView({
     if (!file) return;
     try {
       const data = await api.importContacts(csrf, file);
-      addToast(`Imported ${data.imported}, updated ${data.updated}.`);
+      // A contact whose merge could not reach Google is reported rather than
+      // rolled into "updated": the file was applied in part, and silence there
+      // would leave the user believing the whole import landed.
+      const summary = `Imported ${data.imported}, updated ${data.updated}.`;
+      if (data.failed > 0) {
+        addToast(`${summary} ${data.failed} could not be saved to Google.`, "error");
+      } else {
+        addToast(summary);
+      }
       await load();
     } catch (err) {
       addToast(messageFromError(err), "error");

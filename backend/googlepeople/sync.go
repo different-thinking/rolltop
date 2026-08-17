@@ -63,6 +63,26 @@ type ConnectionLister interface {
 	Get(ctx context.Context, userID, connectionID int64) (store.GoogleConnection, error)
 }
 
+// NewSyncer wires a syncer for production use. The process builds one in main
+// and the web server builds one when it owns its own auth manager; a struct
+// literal at each site would let a field added here reach only one of them.
+//
+// scope is passed in rather than imported so this package stays independent of
+// the OAuth configuration, which is what lets its tests grant or withhold
+// contact access without a consent flow.
+func NewSyncer(db *store.Store, blobs *blob.Store, tokens googletoken.TokenSource, connections ConnectionLister, scope string) *Syncer {
+	return &Syncer{
+		Store:       db,
+		Blobs:       blobs,
+		Client:      NewClient(),
+		Tokens:      tokens,
+		Connections: connections,
+		ScopeGranted: func(connection store.GoogleConnection) bool {
+			return connection.HasScope(scope)
+		},
+	}
+}
+
 func (s *Syncer) ready() error {
 	if s == nil || s.Store == nil || s.Tokens == nil || s.Connections == nil {
 		return errors.New("google contact sync is not configured")
@@ -146,6 +166,7 @@ func (s *Syncer) run(ctx context.Context, userID, connectionID int64) (Result, e
 		return Result{}, err
 	}
 	result, nextToken, err := s.pull(ctx, userID, connectionID, state.SyncToken)
+	recovered := false
 	if errors.Is(err, ErrSyncTokenExpired) && state.SyncToken != "" {
 		// Google drops a cursor after about a week, and after a password change
 		// or a bulk edit. The only recovery is to read everything again, and
@@ -153,6 +174,7 @@ func (s *Syncer) run(ctx context.Context, userID, connectionID int64) (Result, e
 		// mirror from surviving a whole interval.
 		log.Printf("google contact sync user_id=%d connection_id=%d sync token expired, falling back to a full sync", userID, connectionID)
 		result, nextToken, err = s.pull(ctx, userID, connectionID, "")
+		recovered = true
 	}
 	if err != nil {
 		return result, err
@@ -160,7 +182,11 @@ func (s *Syncer) run(ctx context.Context, userID, connectionID int64) (Result, e
 	// Google is asked for a cursor on every call, so an empty one here means it
 	// answered without the field. Storing that would discard a cursor that is
 	// still usable and turn the next poll into a full read for nothing.
-	if nextToken == "" {
+	//
+	// Not after a recovery, though: there the stored cursor is the very token
+	// Google just rejected, and putting it back would make the next poll fail
+	// the same way and re-read the whole address book on every interval.
+	if nextToken == "" && !recovered {
 		nextToken = state.SyncToken
 	}
 	if err := s.Store.SaveGooglePeopleSync(ctx, store.GooglePeopleSync{
@@ -304,7 +330,8 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 	if err != nil {
 		return outcomeUnchanged, err
 	}
-	return outcomeCreated, s.importPhoto(ctx, userID, created.ID, person)
+	s.importPhoto(ctx, userID, created.ID, person)
+	return outcomeCreated, nil
 }
 
 // mergePolicy says what happens to the version already stored locally.
@@ -341,7 +368,8 @@ func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming
 	}); err != nil {
 		return err
 	}
-	return s.importPhoto(ctx, userID, existing.ID, person)
+	s.importPhoto(ctx, userID, existing.ID, person)
+	return nil
 }
 
 // findLocalMatch looks for an existing contact with one of the incoming
@@ -379,32 +407,37 @@ func (s *Syncer) removeMirror(ctx context.Context, userID, connectionID int64, r
 	return true, nil
 }
 
-// importPhoto stores Google's contact picture as the contact icon. A failure
-// here is logged and swallowed: a missing avatar is not a reason to fail a
-// sync that has already applied the contact's actual data.
-func (s *Syncer) importPhoto(ctx context.Context, userID, contactID int64, person Person) error {
+// importPhoto stores Google's contact picture as the contact icon.
+//
+// Every failure here is logged and swallowed, including the metadata writes: an
+// avatar is not worth abandoning a page of contacts whose actual data has
+// already been applied, and a sync that stops on one unreadable photo never
+// reaches the people after it. A blob whose metadata write failed is deleted
+// again rather than left on disk with nothing pointing at it.
+func (s *Syncer) importPhoto(ctx context.Context, userID, contactID int64, person Person) {
 	if s.Blobs == nil {
-		return nil
+		return
 	}
 	photoURL := PrimaryPhotoURL(person)
 	if photoURL == "" {
-		return nil
+		return
 	}
 	data, err := s.client().FetchPhoto(ctx, photoURL)
-	if err != nil || len(data) == 0 || len(data) > maxPhotoBytes {
-		if err != nil {
-			log.Printf("google contact photo user_id=%d contact_id=%d: %v", userID, contactID, err)
-		}
-		return nil
+	if err != nil {
+		log.Printf("google contact photo user_id=%d contact_id=%d: %v", userID, contactID, err)
+		return
+	}
+	if len(data) == 0 {
+		return
 	}
 	contentType := detectPhotoType(data)
 	if contentType == "" {
-		return nil
+		return
 	}
 	saved, err := s.Blobs.SaveContactIcon(userID, contactID, "google-contact-photo", data)
 	if err != nil {
 		log.Printf("google contact photo user_id=%d contact_id=%d: %v", userID, contactID, err)
-		return nil
+		return
 	}
 	record, err := s.Store.CreateBlob(ctx, store.BlobRecord{
 		UserID: userID,
@@ -414,12 +447,32 @@ func (s *Syncer) importPhoto(ctx context.Context, userID, contactID int64, perso
 		Size:   saved.Size,
 	})
 	if err != nil {
-		return err
+		log.Printf("google contact photo user_id=%d contact_id=%d record blob: %v", userID, contactID, err)
+		s.discardPhotoFile(userID, saved.Path)
+		return
 	}
-	if _, err := s.Store.SetContactIcon(ctx, userID, contactID, record.ID, contentType, "google-contact-photo", saved.Size); err != nil && !store.IsNotFound(err) {
-		return err
+	if _, err := s.Store.SetContactIcon(ctx, userID, contactID, record.ID, contentType, "google-contact-photo", saved.Size); err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("google contact photo user_id=%d contact_id=%d set icon: %v", userID, contactID, err)
+		}
+		// The blob row exists but nothing references it, which is exactly the
+		// state the cleanup queue is for.
+		if _, _, queueErr := s.Store.QueueBlobCleanupIfUnreferenced(ctx, userID, record.ID); queueErr != nil {
+			log.Printf("google contact photo user_id=%d contact_id=%d queue cleanup: %v", userID, contactID, queueErr)
+		}
 	}
-	return nil
+}
+
+// discardPhotoFile removes a saved photo whose metadata never landed. Without a
+// blob row the cleanup queue cannot see it, so this is the only chance to take
+// the file back.
+func (s *Syncer) discardPhotoFile(userID int64, path string) {
+	if s.Blobs == nil || path == "" {
+		return
+	}
+	if err := s.Blobs.DeleteUserBlob(userID, path); err != nil {
+		log.Printf("google contact photo user_id=%d discard orphan blob: %v", userID, err)
+	}
 }
 
 // detectPhotoType accepts only the formats the contact icon route accepts, so

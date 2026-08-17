@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/mail"
@@ -515,6 +516,10 @@ func (s *Server) apiImportContacts(w http.ResponseWriter, r *http.Request, cu cu
 	}
 	imported := 0
 	updated := 0
+	// A vCard holds many people, and one of them failing at Google is not a
+	// reason to throw away the ones already imported. Failures are counted and
+	// reported so the user knows the file was applied in part.
+	failed := 0
 	for _, contact := range contacts {
 		if len(contact.Emails) == 0 && strings.TrimSpace(contact.DisplayName+contact.GivenName+contact.FamilyName+contact.Organization) == "" {
 			continue
@@ -528,10 +533,15 @@ func (s *Server) apiImportContacts(w http.ResponseWriter, r *http.Request, cu cu
 			merged := store.MergeContacts(existing, contact)
 			// Merging into a mirrored contact has to travel to Google, or the
 			// next sync would quietly undo the import.
-			if existing.IsGoogleContact() && s.googleContacts != nil {
-				if _, err := s.googleContacts.UpdateRemoteContact(r.Context(), cu.User.ID, existing, merged); err != nil {
-					s.writeGoogleContactsError(w, r, err)
+			if existing.IsGoogleContact() {
+				if s.googleContacts == nil {
+					writeAPIError(w, http.StatusServiceUnavailable, "Contact sync is not available on this server.")
 					return
+				}
+				if _, err := s.googleContacts.UpdateRemoteContact(r.Context(), cu.User.ID, existing, merged); err != nil {
+					log.Printf("import contact into google user_id=%d contact_id=%d: %v", cu.User.ID, existing.ID, err)
+					failed++
+					continue
 				}
 				updated++
 				continue
@@ -552,7 +562,7 @@ func (s *Server) apiImportContacts(w http.ResponseWriter, r *http.Request, cu cu
 	if imported > 0 || updated > 0 {
 		s.clearComposeIdentityCache(cu.User.ID)
 	}
-	writeJSON(w, map[string]any{"ok": true, "imported": imported, "updated": updated})
+	writeJSON(w, map[string]any{"ok": true, "imported": imported, "updated": updated, "failed": failed})
 }
 
 func (s *Server) apiExportContacts(w http.ResponseWriter, r *http.Request, cu currentUser) {

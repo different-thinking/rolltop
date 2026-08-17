@@ -87,23 +87,20 @@ func TestBirthdayRoundTripsWithAndWithoutAYear(t *testing.T) {
 // phone number" mean the same thing at Google as it does here.
 func TestFromContactEmitsEveryWritableFieldEvenWhenEmpty(t *testing.T) {
 	person := FromContact(store.Contact{DisplayName: "Nobody"})
-	for name, list := range map[string]int{
-		"names":       len(person.Names),
-		"nicknames":   len(person.Nicknames),
-		"emails":      len(person.Emails),
-		"phones":      len(person.Phones),
-		"addresses":   len(person.Addresses),
-		"orgs":        len(person.Orgs),
-		"biographies": len(person.Biographies),
-		"birthdays":   len(person.Birthdays),
-		"urls":        len(person.URLs),
+	for name, isNil := range map[string]bool{
+		"names":       person.Names == nil,
+		"nicknames":   person.Nicknames == nil,
+		"emails":      person.Emails == nil,
+		"phones":      person.Phones == nil,
+		"addresses":   person.Addresses == nil,
+		"orgs":        person.Orgs == nil,
+		"biographies": person.Biographies == nil,
+		"birthdays":   person.Birthdays == nil,
+		"urls":        person.URLs == nil,
 	} {
-		if list < 0 {
-			t.Fatalf("%s is negative", name)
+		if isNil {
+			t.Fatalf("%s is nil, want an empty slice so the JSON clears the field at Google", name)
 		}
-	}
-	if person.Emails == nil || person.Phones == nil || person.Addresses == nil || person.URLs == nil {
-		t.Fatalf("person = %+v, want empty slices rather than nil so the JSON clears the field", person)
 	}
 	// A contact with only a display name has no structured name to send, and
 	// Google rejects displayName as an input.

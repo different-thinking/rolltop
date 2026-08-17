@@ -293,16 +293,8 @@ func New(opts Options) (*Server, error) {
 		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey, Tokens: opts.GoogleAuth}
 	}
 	if opts.GoogleContacts == nil && opts.GoogleAuth != nil && opts.Store != nil {
-		opts.GoogleContacts = &googlepeople.Syncer{
-			Store:       opts.Store,
-			Blobs:       opts.Blobs,
-			Client:      googlepeople.NewClient(),
-			Tokens:      opts.GoogleAuth,
-			Connections: opts.GoogleAuth,
-			ScopeGranted: func(connection store.GoogleConnection) bool {
-				return connection.HasScope(googleauth.ScopeContacts)
-			},
-		}
+		opts.GoogleContacts = googlepeople.NewSyncer(
+			opts.Store, opts.Blobs, opts.GoogleAuth, opts.GoogleAuth, googleauth.ScopeContacts)
 	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {

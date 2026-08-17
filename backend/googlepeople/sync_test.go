@@ -509,7 +509,10 @@ func TestSyncRefusesAConnectionWithoutTheContactsScope(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "contacts") {
 		t.Fatalf("error = %v, want it to name the missing contacts access", err)
 	}
-	if fake.calls != 0 {
-		t.Fatalf("called Google %d times without the scope, want none", fake.calls)
+	fake.mu.Lock()
+	calls := fake.calls
+	fake.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("called Google %d times without the scope, want none", calls)
 	}
 }

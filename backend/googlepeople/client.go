@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -80,6 +81,10 @@ type Client struct {
 	// RetryDelay maps a zero-based attempt number to a wait. Tests override it
 	// to keep backoff assertions instant.
 	RetryDelay func(attempt int) time.Duration
+	// PhotoHostAllowed decides which hosts a contact photo may be fetched from.
+	// It is a field for the same reason BaseURL is: a test serves its fixtures
+	// from localhost, and production must not.
+	PhotoHostAllowed func(host string) bool
 }
 
 // NewClient builds a client with Rolltop's default timeout and backoff.
@@ -105,6 +110,13 @@ func (c *Client) baseURL() string {
 		return DefaultBaseURL
 	}
 	return strings.TrimRight(c.BaseURL, "/")
+}
+
+func (c *Client) photoHostAllowed(host string) bool {
+	if c.PhotoHostAllowed != nil {
+		return c.PhotoHostAllowed(host)
+	}
+	return isGooglePhotoHost(host)
 }
 
 func (c *Client) retryDelay(attempt int) time.Duration {
@@ -249,6 +261,13 @@ func (c *Client) FetchPhoto(ctx context.Context, photoURL string) ([]byte, error
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, fmt.Errorf("%w: unusable photo URL", ErrUpstream)
 	}
+	if !c.photoHostAllowed(parsed.Host) {
+		// The URL is read out of an API response, so this is not expected to
+		// trigger. Pinning the host anyway removes the ability to make this
+		// server issue a request anywhere at all, which is worth more than the
+		// avatar it could cost.
+		return nil, fmt.Errorf("%w: photo URL is not a Google host", ErrUpstream)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, err
@@ -374,6 +393,23 @@ func statusError(status int, body []byte) error {
 		return fmt.Errorf("%w: HTTP 400 %s", ErrUpstream, orUnknown(reason))
 	}
 	return fmt.Errorf("%w: HTTP %d %s", ErrUpstream, status, orUnknown(reason))
+}
+
+// googlePhotoHosts are the domains contact photos are served from. Matching is
+// on the registrable suffix because the subdomain varies per shard (lh3, lh4).
+var googlePhotoHosts = []string{"googleusercontent.com", "google.com"}
+
+func isGooglePhotoHost(host string) bool {
+	host = strings.ToLower(host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	for _, suffix := range googlePhotoHosts {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func orUnknown(reason string) string {

@@ -637,16 +637,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		db, cfg.MasterKey)
 	// The People API offers no push, so contacts are polled. It shares the one
 	// manager with mail so a refresh is deduplicated across both.
-	googleContacts := &googlepeople.Syncer{
-		Store:       db,
-		Blobs:       blobStore,
-		Client:      googlepeople.NewClient(),
-		Tokens:      googleAuth,
-		Connections: googleAuth,
-		ScopeGranted: func(connection store.GoogleConnection) bool {
-			return connection.HasScope(googleauth.ScopeContacts)
-		},
-	}
+	googleContacts := googlepeople.NewSyncer(db, blobStore, googleAuth, googleAuth, googleauth.ScopeContacts)
 	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
 	syncSvc := &syncer.Service{
 		Store:         db,
@@ -992,36 +983,51 @@ func inboxMailbox(ctx context.Context, db *store.Store, userID int64, account st
 // that a delta call per connection is negligible against Google's quota.
 const googleContactPollInterval = 15 * time.Minute
 
-// googleContactPoll syncs every user's Google contacts on a timer. It runs
-// sequentially: contact syncs are short, and a burst of parallel People API
-// calls across all users would be the one thing capable of hitting the quota.
-func googleContactPoll(ctx context.Context, db *store.Store, syncer *googlepeople.Syncer, interval time.Duration) {
-	if db == nil || syncer == nil || interval <= 0 {
+// googleContactPoll syncs every user's Google contacts on a timer.
+//
+// The first pass runs immediately rather than one interval after boot, matching
+// what the mail scheduler does: nothing else notices a change made in Google's
+// own UI, so waiting would leave every address book stale for a quarter of an
+// hour after each restart.
+//
+// The parameter is named contacts, not syncer: this file imports a package by
+// that name, and shadowing it here would make a later reference to it fail to
+// compile for a reason that reads like nonsense.
+func googleContactPoll(ctx context.Context, db *store.Store, contacts *googlepeople.Syncer, interval time.Duration) {
+	if db == nil || contacts == nil || interval <= 0 {
 		return
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	syncEveryUsersContacts(ctx, db, contacts)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			users, err := db.ServiceableUsers(ctx)
-			if err != nil {
-				log.Printf("google contact poll list users: %v", err)
-				continue
-			}
-			for _, user := range users {
-				if ctx.Err() != nil {
-					return
-				}
-				// SyncUser already skips connections that cannot sync and
-				// records each failure against its own connection, so one
-				// broken account does not stop the others.
-				if _, err := syncer.SyncUser(ctx, user.ID); err != nil {
-					log.Printf("google contact poll user_id=%d: %v", user.ID, err)
-				}
-			}
+			syncEveryUsersContacts(ctx, db, contacts)
+		}
+	}
+}
+
+// syncEveryUsersContacts runs one pass over every serviceable user. It is
+// sequential: contact syncs are short, and a burst of parallel People API calls
+// across all users would be the one thing capable of hitting the quota.
+func syncEveryUsersContacts(ctx context.Context, db *store.Store, contacts *googlepeople.Syncer) {
+	users, err := db.ServiceableUsers(ctx)
+	if err != nil {
+		log.Printf("google contact poll list users: %v", err)
+		return
+	}
+	for _, user := range users {
+		if ctx.Err() != nil {
+			return
+		}
+		// SyncUser already skips connections that cannot sync and records each
+		// failure against its own connection, so one broken account does not
+		// stop the others.
+		if _, err := contacts.SyncUser(ctx, user.ID); err != nil {
+			log.Printf("google contact poll user_id=%d: %v", user.ID, err)
 		}
 	}
 }

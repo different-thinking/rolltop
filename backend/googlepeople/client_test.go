@@ -118,6 +118,9 @@ func TestFetchPhotoRejectsAnOversizedImageInsteadOfTruncatingIt(t *testing.T) {
 		client := NewClient()
 		client.HTTPClient = server.Client()
 		client.BaseURL = server.URL
+		// The fixture is served from localhost, which production must never
+		// fetch from; the size behaviour under test is independent of the host.
+		client.PhotoHostAllowed = func(string) bool { return true }
 		return client
 	}
 	oversized := photoHost(maxPhotoBytes + 64)
@@ -131,14 +134,26 @@ func TestFetchPhotoRejectsAnOversizedImageInsteadOfTruncatingIt(t *testing.T) {
 	}
 }
 
-// The access token is the one thing that must never travel to a host that did
-// not need it, and a contact photo is served from a public static host.
-func TestFetchPhotoRefusesAnythingButHTTPS(t *testing.T) {
+// A photo URL arrives inside an API response, so it is not attacker-supplied
+// today. Pinning scheme and host anyway means this server cannot be made to
+// issue a request to an arbitrary address even if that ever changes.
+func TestFetchPhotoOnlyFetchesFromGoogleOverHTTPS(t *testing.T) {
 	client := NewClient()
-	if _, err := client.FetchPhoto(context.Background(), "http://example.test/photo.jpg"); err == nil {
-		t.Fatal("a plaintext photo URL was accepted")
+	for _, target := range []string{
+		"http://lh3.googleusercontent.com/photo.jpg",
+		"https://evil.example.test/photo.jpg",
+		"https://notgoogleusercontent.com/photo.jpg",
+		"https://127.0.0.1:9000/photo.jpg",
+		"not a url",
+	} {
+		if _, err := client.FetchPhoto(context.Background(), target); err == nil {
+			t.Fatalf("photo URL %q was accepted", target)
+		}
 	}
-	if _, err := client.FetchPhoto(context.Background(), "not a url"); err == nil {
-		t.Fatal("an unparseable photo URL was accepted")
+	// The shard subdomain varies, so the check has to be on the suffix.
+	for _, host := range []string{"lh3.googleusercontent.com", "googleusercontent.com", "LH5.GoogleUserContent.com"} {
+		if !isGooglePhotoHost(host) {
+			t.Fatalf("host %q was rejected, want it allowed", host)
+		}
 	}
 }
