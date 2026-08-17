@@ -30,8 +30,26 @@ stats the theme CSS a plugin manifest declares, so the Go suite fails on a clean
 checkout without it.
 
 Pull request CI (`.github/workflows/pr.yml`) only runs the checks the changed
-paths require: Go (`gofmt`, `go vet`, `go test`), frontend (`typecheck`, Vite
-builds), Android (unit tests and lint), and a Docker build when the image
-definition changes. Keep the path filters in that workflow's `changes` job in
-sync when adding a new top-level area. The full packaging and publishing
-pipeline lives in `.github/workflows/ci.yml` and runs on `main` and tags only.
+paths require: Go (`gofmt`, `go test`), frontend (`typecheck`, Vite builds),
+Android (unit tests and lint), and a Docker build when the image definition
+changes. Keep the path filters in that workflow's `changes` job in sync when
+adding a new top-level area.
+
+`.github/workflows/ci.yml` has two jobs. `verify` runs on every push to `main`
+and answers the one question a pull request cannot: two changes that are each
+green alone may still be broken together. It builds the themes, runs the Go
+suite with coverage, links every plugin backend with `-buildmode=plugin`, and
+verifies the checked-in spam model. Keep it lean.
+
+`release` does the expensive packaging — Android APK, Docker image, GHCR push,
+binaries, godoc — and runs only for `v*` tags and manual dispatch. Deployments
+build the `Dockerfile` from source and self-hosters pull the upstream image, so
+nothing consumes a per-merge `latest`. Do not move packaging back onto `main`
+without a consumer that needs it.
+
+Two ordering constraints in `release` must survive any refactor: the Android
+step writes `frontend/public/android/{rolltop.apk,latest.json}`, which the
+Docker frontend stage copies into the image, so it has to stay ahead of the
+Docker build; and neither the workflow nor the `Dockerfile` may go back to a
+hand-maintained plugin list — both derive the set from `plugins/*/backend`,
+because the hardcoded lists had already drifted apart.

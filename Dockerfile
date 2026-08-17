@@ -19,11 +19,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w -X rolltop/backend/buildinfo.Version=${ROLLTOP_VERSION} -X rolltop/backend/buildinfo.BuildDate=${ROLLTOP_BUILD_DATE} -X rolltop/backend/buildinfo.Commit=${ROLLTOP_COMMIT}" -o /out/rolltop ./cmd/rolltop
+# Derived from the directories in the build context, not a hand-maintained
+# list, so a new plugin backend cannot be silently left out of the image.
 RUN set -eu; \
-	plugins='attachment_preview bimi_brand_icons experimental_spam_filter gravatar_sender_icons language_search mail_filters oidc one_click_unsubscribe remote_image_blocklist remote_imap_sync trusted_image_sources client_side_pgp mail_mcp'; \
-	for plugin in $plugins; do \
+	for backend in plugins/*/backend; do \
+		plugin="$(basename "$(dirname "$backend")")"; \
 		mkdir -p "/out/plugins/${plugin}/backend"; \
-		CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -trimpath -ldflags="-s -w" -o "/out/plugins/${plugin}/backend/${plugin}.so" "./plugins/${plugin}/backend"; \
+		CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -trimpath -ldflags="-s -w" -o "/out/plugins/${plugin}/backend/${plugin}.so" "./${backend}"; \
 	done
 
 FROM alpine:3.22
