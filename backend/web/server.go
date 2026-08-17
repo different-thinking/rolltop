@@ -66,6 +66,10 @@ type Options struct {
 	// GoogleAuth overrides the manager built from Google. Tests set it to point
 	// the OAuth flow at a fake Google.
 	GoogleAuth *googleauth.Manager
+	// RequestRestart asks the process supervisor for a controlled restart. The
+	// admin database repair needs one, because a tenant database can only be
+	// replaced while nothing holds a handle on it. Nil disables the action.
+	RequestRestart func(userID int64, reason string)
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -96,6 +100,10 @@ type Server struct {
 	cookieSecure              bool
 	webhookToken              string
 	googleAuth                *googleauth.Manager
+	requestRestart            func(userID int64, reason string)
+	maintenance               maintenanceState
+	backupSizeMu              sync.Mutex
+	backupSizes               map[string]backupSize
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -317,6 +325,7 @@ func New(opts Options) (*Server, error) {
 		cookieSecure:          opts.CookieSecure,
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
 		googleAuth:            opts.GoogleAuth,
+		requestRestart:        opts.RequestRestart,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},

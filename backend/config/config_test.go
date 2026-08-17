@@ -118,6 +118,7 @@ func TestLoadReadsGoogleSettings(t *testing.T) {
 func TestLoadRejectsHalfAGoogleCredential(t *testing.T) {
 	// A typo in one of the two variables otherwise stays invisible until a user
 	// clicks Connect and gets a 503.
+	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "")
@@ -166,5 +167,32 @@ func TestLoadLeavesGoogleUnconfiguredByDefault(t *testing.T) {
 	}
 	if cfg.Google.Configured() {
 		t.Fatalf("google reported as configured without credentials: %+v", cfg.Google)
+	}
+}
+
+func TestLoadValidatesStartupIntegrityCheck(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupIntegrityCheck != IntegrityCheckAuto {
+		t.Fatalf("default startup integrity check = %q", cfg.StartupIntegrityCheck)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "Always")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartupIntegrityCheck != IntegrityCheckAlways {
+		t.Fatalf("startup integrity check = %q", cfg.StartupIntegrityCheck)
+	}
+
+	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "sometimes")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for unknown startup integrity check mode")
 	}
 }

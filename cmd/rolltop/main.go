@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -226,25 +227,92 @@ type appRuntime struct {
 	db              *store.Store
 	search          *search.Service
 	handler         http.Handler
-	restartRequired <-chan int64
+	restartRequired <-chan restartRequest
+	// markSearchRecovery durably schedules a rebuild of every tenant search
+	// index. It is called when the index close has to be abandoned, because the
+	// process then exits with a possibly half-written Bleve batch and nothing
+	// else would notice on the next start.
+	markSearchRecovery func()
+}
+
+// restartRequest is a controlled-restart request from a subsystem that cannot
+// finish its work inside the running process: a stalled search index writer, or
+// an admin-scheduled database repair that needs the tenant file closed.
+type restartRequest struct {
+	UserID int64
+	Reason string
 }
 
 const searchWriterRestartShutdownTimeout = 15 * time.Second
 
+// The whole shutdown has to finish inside the container runtime's grace period
+// — ten seconds by default for "docker stop" — because the step that matters
+// most, closing SQLite so its WAL is checkpointed, comes last. These budgets
+// leave room for that close instead of letting a slow HTTP drain or a stuck
+// index writer consume the grace period and turn every restart into a SIGKILL.
+const (
+	httpDrainTimeout          = 3 * time.Second
+	interruptedSyncRunTimeout = 2 * time.Second
+	derivedCloseTimeout       = 3 * time.Second
+)
+
 var errSearchWriterRestartShutdownTimeout = errors.New("search writer restart cleanup timed out")
 
 func (a *appRuntime) close() {
+	a.closeWithin(derivedCloseTimeout)
+}
+
+// closeWithin releases the runtime in dependency order but gives the derived
+// subsystems only a bounded share of the shutdown budget. Whatever has not
+// finished by then is abandoned so the database close still runs: an abandoned
+// writer can only fail its own statement, while a skipped database close leaves
+// a hot WAL behind on every restart.
+func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 	if a == nil {
 		return
 	}
+	deadline := time.Now().Add(derivedBudget)
 	if a.pluginHost != nil {
-		_ = a.pluginHost.Close()
+		closeWithBudget("plugin host", time.Until(deadline), a.pluginHost.Close)
 	}
 	if a.search != nil {
-		_ = a.search.Close()
+		if !closeWithBudget("search index", time.Until(deadline), a.search.Close) && a.markSearchRecovery != nil {
+			// Only the stall handler writes recovery markers otherwise, so
+			// without this an abandoned close leaves an index that fails to
+			// open on the next start and is never rebuilt.
+			a.markSearchRecovery()
+		}
 	}
 	if a.db != nil {
-		_ = a.db.Close()
+		// Deliberately unbounded: this is the write that decides whether the
+		// next start opens a checkpointed database or replays a WAL.
+		if err := a.db.Close(); err != nil {
+			log.Printf("close databases: %v", err)
+		}
+	}
+}
+
+// closeWithBudget reports whether the subsystem finished closing. A false
+// return means the close was skipped or abandoned, and the caller has to assume
+// the subsystem's on-disk state is unfinished.
+func closeWithBudget(name string, budget time.Duration, closeFn func() error) bool {
+	if budget <= 0 {
+		log.Printf("skipping %s shutdown: shutdown budget already spent", name)
+		return false
+	}
+	done := make(chan error, 1)
+	go func() { done <- closeFn() }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("close %s: %v", name, err)
+		}
+		return true
+	case <-timer.C:
+		log.Printf("%s did not close within %s; closing databases anyway", name, budget)
+		return false
 	}
 }
 
@@ -265,17 +333,23 @@ func runSearchWriterRestartShutdown(timeout time.Duration, shutdown func() error
 }
 
 func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan error) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+	err := <-serverErr
+	// Recorded after the drain: no handler can start a new sync run once the
+	// listener is closed, and the write cannot eat the drain budget. Startup
+	// repeats this cleanup, so a shutdown too short to finish it loses nothing.
 	if app.db != nil {
-		if n, err := app.db.MarkRunningSyncRunsInterrupted(context.Background()); err != nil {
-			log.Printf("mark interrupted sync runs during shutdown: %v", err)
+		markCtx, cancelMark := context.WithTimeout(context.Background(), interruptedSyncRunTimeout)
+		defer cancelMark()
+		if n, markErr := app.db.MarkRunningSyncRunsInterrupted(markCtx); markErr != nil {
+			log.Printf("mark interrupted sync runs during shutdown: %v", markErr)
 		} else if n > 0 {
 			log.Printf("marked interrupted sync runs during shutdown: %d", n)
 		}
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
-	return <-serverErr
+	return err
 }
 
 // run starts the HTTP listener before backend initialization. That lets slow
@@ -351,9 +425,16 @@ func run() (runErr error) {
 	defer func() { crash.finish(runErr) }()
 	crash.beginRun(buildinfo.Version)
 
+	// The marker is claimed after the instance lock, so only the process that
+	// owns the data directory can decide what the previous run's exit means.
+	uncleanShutdown := claimRunningMarker(cfg.DataDir)
+	if uncleanShutdown {
+		log.Printf("previous rolltop run did not shut down cleanly")
+	}
+
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
-	app, err := startApp(appCtx, cfg, startup)
+	app, err := startApp(appCtx, cfg, startup, uncleanShutdown)
 	if err != nil {
 		startup.fail(err)
 		log.Printf("rolltop startup failed: %v", err)
@@ -368,20 +449,30 @@ func run() (runErr error) {
 		return err
 	}
 	restartShutdownOwnsClose := false
+	// The restart path closes the app on a goroutine that outlives its own
+	// timeout, so this flag crosses goroutines and needs atomic access.
+	var databasesClosed atomic.Bool
 	defer func() {
 		if !restartShutdownOwnsClose {
 			app.close()
+			databasesClosed.Store(true)
+		}
+		// The marker outlives any exit that did not get as far as closing
+		// SQLite, so the next start treats that exit as unclean and verifies
+		// the files before serving.
+		if databasesClosed.Load() {
+			releaseRunningMarker(cfg.DataDir)
 		}
 	}()
 	gate.setHandler(app.handler)
 	startup.ready()
 	log.Printf("rolltop ready on %s", cfg.Addr)
 
-	restartUserID := int64(0)
+	restart := restartRequest{}
 	select {
 	case <-ctx.Done():
-	case restartUserID = <-app.restartRequired:
-		log.Printf("search writer restart requested user_id=%d", restartUserID)
+	case restart = <-app.restartRequired:
+		log.Printf("controlled restart requested user_id=%d reason=%q", restart.UserID, restart.Reason)
 		cancelApp()
 	case err := <-serverErr:
 		if err != nil {
@@ -390,12 +481,16 @@ func run() (runErr error) {
 		return nil
 	}
 
-	if restartUserID > 0 {
+	if restart.UserID > 0 {
 		restartShutdownOwnsClose = true
-		restartErr := fmt.Errorf("search index writer stalled for user %d; %w", restartUserID, errRestartForRecovery)
+		// The reason now names either a stalled index writer or an admin's
+		// scheduled repair; either way the sentinel keeps this exit out of the
+		// crash report, because it is a planned restart.
+		restartErr := fmt.Errorf("%s; %w", restart.Reason, errRestartForRecovery)
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
 			shutdownErr := shutdownServingApp(app, server, serverErr)
 			app.close()
+			databasesClosed.Store(true)
 			return shutdownErr
 		})
 		if cleanupErr != nil {
@@ -403,7 +498,7 @@ func run() (runErr error) {
 			// planned, but a cleanup that did not complete is a real failure and
 			// has to be recorded as one.
 			log.Printf("search writer restart cleanup: %v", cleanupErr)
-			return fmt.Errorf("search index writer stalled for user %d; restart cleanup failed: %w", restartUserID, cleanupErr)
+			return fmt.Errorf("%s; restart cleanup failed: %w", restart.Reason, cleanupErr)
 		}
 		return restartErr
 	}
@@ -415,7 +510,7 @@ func run() (runErr error) {
 
 // startApp performs the blocking startup work in dependency order: schema,
 // user stores, interrupted sync cleanup, search indexes, then web/sync services.
-func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*appRuntime, error) {
+func startApp(ctx context.Context, cfg config.Config, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
 	startup.update("System database", "opening", 0, 1)
 	pluginManifests, err := plugins.LoadManifests(cfg.PluginDir)
 	if err != nil {
@@ -448,6 +543,29 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 			_ = db.Close()
 		}
 	}()
+
+	// Repairs scheduled from the admin UI run here, while the tenant databases
+	// still have no open handles. Failures are recorded per tenant and do not
+	// stop the other tenants from starting.
+	startup.update("User databases", "checking scheduled repairs", 0, 1)
+	if _, err := runScheduledDatabaseRepairs(ctx, cfg.DataDir, pluginManifests, time.Now(), func(done, total int, detail string) {
+		startup.update("User databases", detail, done, total)
+	}); err != nil {
+		return nil, err
+	}
+
+	if startupIntegrityCheckRequired(cfg.StartupIntegrityCheck, uncleanShutdown) {
+		startup.update("User databases", "verifying after unclean shutdown", 0, 1)
+		damaged, err := verifyUserDatabases(ctx, db, cfg.DataDir, func(done, total int, detail string) {
+			startup.update("User databases", detail, done, total)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(damaged) > 0 {
+			log.Printf("startup integrity check found %d damaged user database(s); repair them with rolltop recover-db", len(damaged))
+		}
+	}
 
 	startup.update("User databases", "opening per-user stores", 0, 1)
 	if err := db.PrepareUserStores(ctx, reporter); err != nil {
@@ -492,12 +610,15 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users, time.Now()); err != nil {
 		return nil, err
 	}
-	restartRequired := make(chan int64, 1)
-	searchSvc.SetActiveWriterStallHandler(func(userID int64) {
+	restartRequired := make(chan restartRequest, 1)
+	requestRestart := func(userID int64, reason string) {
 		select {
-		case restartRequired <- userID:
+		case restartRequired <- restartRequest{UserID: userID, Reason: reason}:
 		default:
 		}
+	}
+	searchSvc.SetActiveWriterStallHandler(func(userID int64) {
+		requestRestart(userID, fmt.Sprintf("search index writer stalled for user %d", userID))
 	})
 
 	startup.update("Services", "initializing sync and web services", 0, 1)
@@ -515,20 +636,21 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	}
 	syncRunner := syncer.NewRunnerWithContext(ctx, syncSvc)
 	webServer, err := web.New(web.Options{
-		Store:        db,
-		Blobs:        blobStore,
-		Search:       searchSvc,
-		Syncer:       syncSvc,
-		SyncRunner:   syncRunner,
-		MasterKey:    cfg.MasterKey,
-		DataDir:      cfg.DataDir,
-		DatabasePath: cfg.DatabasePath,
-		IndexPath:    cfg.IndexPath,
-		PluginDir:    cfg.PluginDir,
-		SessionTTL:   cfg.SessionTTL,
-		CookieSecure: cfg.CookieSecure,
-		WebhookToken: cfg.WebhookToken,
-		Google:       cfg.Google,
+		Store:          db,
+		Blobs:          blobStore,
+		Search:         searchSvc,
+		Syncer:         syncSvc,
+		SyncRunner:     syncRunner,
+		MasterKey:      cfg.MasterKey,
+		DataDir:        cfg.DataDir,
+		DatabasePath:   cfg.DatabasePath,
+		IndexPath:      cfg.IndexPath,
+		PluginDir:      cfg.PluginDir,
+		SessionTTL:     cfg.SessionTTL,
+		CookieSecure:   cfg.CookieSecure,
+		WebhookToken:   cfg.WebhookToken,
+		Google:         cfg.Google,
+		RequestRestart: requestRestart,
 	})
 	if err != nil {
 		return nil, err
@@ -564,6 +686,21 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	return &appRuntime{
 		pluginHost: webServer, db: db, search: searchSvc, handler: webServer.Handler(),
 		restartRequired: restartRequired,
+		markSearchRecovery: func() {
+			// Read the list at call time: a tenant created after startup is not
+			// in the startup snapshot, and its index needs the marker just as
+			// much. This runs before db.Close().
+			current, err := db.ListUsers(context.Background())
+			if err != nil {
+				log.Printf("list users for search recovery markers: %v", err)
+				current = users
+			}
+			for _, user := range current {
+				if markErr := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); markErr != nil {
+					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, markErr)
+				}
+			}
+		},
 	}, nil
 }
 

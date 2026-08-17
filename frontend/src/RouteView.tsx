@@ -8,6 +8,7 @@ import { ThreadView } from "./features/mail/ThreadView";
 import { ComposePage } from "./features/compose/ComposeViews";
 import { ContactsView } from "./features/contacts/ContactsView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
+import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
 import type { RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
@@ -98,6 +99,9 @@ export function RouteView({
   }
   if (location.path === "/admin/users" && user.is_admin) {
     return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
+  }
+  if (location.path === "/admin/database" && user.is_admin) {
+    return <AdminDatabaseView csrf={csrf} datePrefs={user} addToast={addToast} />;
   }
   if (location.path.startsWith("/sync-runs/")) {
     return <SyncRunView csrf={csrf} location={location} navigate={navigate} datePrefs={user} />;

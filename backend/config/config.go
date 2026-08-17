@@ -36,7 +36,18 @@ type Config struct {
 	WebhookToken      string
 	LogLevel          string
 	Google            GoogleConfig
+
+	// StartupIntegrityCheck selects when SQLite files are verified during
+	// startup: after an unclean shutdown, on every start, or never.
+	StartupIntegrityCheck string
 }
+
+// Values accepted by ROLLTOP_STARTUP_INTEGRITY_CHECK.
+const (
+	IntegrityCheckAuto   = "auto"
+	IntegrityCheckAlways = "always"
+	IntegrityCheckNever  = "never"
+)
 
 const defaultDataDir = "/data"
 
@@ -93,6 +104,15 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// quick_check reads every page, so the default only pays that cost when the
+	// previous run did not shut down cleanly and the files may be damaged.
+	integrityCheck := strings.ToLower(env("ROLLTOP_STARTUP_INTEGRITY_CHECK", IntegrityCheckAuto))
+	switch integrityCheck {
+	case IntegrityCheckAuto, IntegrityCheckAlways, IntegrityCheckNever:
+	default:
+		return Config{}, fmt.Errorf("ROLLTOP_STARTUP_INTEGRITY_CHECK must be %q, %q, or %q, got %q",
+			IntegrityCheckAuto, IntegrityCheckAlways, IntegrityCheckNever, integrityCheck)
+	}
 
 	return Config{
 		Addr:              env("ROLLTOP_ADDR", ":8080"),
@@ -109,6 +129,8 @@ func Load() (Config, error) {
 		WebhookToken:      os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
 		LogLevel:          logLevel,
 		Google:            google,
+
+		StartupIntegrityCheck: integrityCheck,
 	}, nil
 }
 
