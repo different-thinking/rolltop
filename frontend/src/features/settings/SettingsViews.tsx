@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { DatePrefs, LocationState, Toast } from "../../appTypes";
-import type { Account, AccountPurgeEstimate, Bootstrap, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
+import type { Account, AccountPurgeEstimate, Bootstrap, DuplicateCopyReport, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
 import { Icon } from "../../components/Icon";
 import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm, suggestedSyncStart, AUTH_GOOGLE, AUTH_PASSWORD } from "../../lib/accountForm";
@@ -751,6 +751,10 @@ export function SettingsView({
     action: "rebuild" | "purge-index" | "purge-references";
   } | null>(null);
   const [accountSearchRebuildID, setAccountSearchRebuildID] = useState<number | null>(null);
+  const [duplicates, setDuplicates] = useState<DuplicateCopyReport | null>(null);
+  const [duplicateBusy, setDuplicateBusy] = useState<"scan" | "trash" | null>(null);
+  const [duplicateNotice, setDuplicateNotice] = useState("");
+  const [duplicateError, setDuplicateError] = useState("");
   const [folderRunRefreshAccounts, setFolderRunRefreshAccounts] = useState<Set<number>>(() => new Set());
   const [savingIdentity, setSavingIdentity] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -781,6 +785,15 @@ export function SettingsView({
       setStorageError(messageFromError(err));
     } finally {
       setStorageLoading(false);
+    }
+  }, []);
+
+  const loadDuplicates = useCallback(async () => {
+    try {
+      setDuplicates(await api.duplicateCopies());
+      setDuplicateError("");
+    } catch (err) {
+      setDuplicateError(messageFromError(err));
     }
   }, []);
 
@@ -946,6 +959,12 @@ export function SettingsView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The duplicate report is its own request: it runs one grouping query the
+  // account payload has no reason to carry, and it is only read on this page.
+  useEffect(() => {
+    void loadDuplicates();
+  }, [loadDuplicates]);
 
   useEffect(() => {
     const runningAccountIDs = new Set(folders.filter((folder) => folder.is_running).map((folder) => folder.mailbox.account_id));
@@ -1536,6 +1555,30 @@ export function SettingsView({
       "This removes rolltop's local message references, raw-message cache, and full-text search documents for this folder.",
       "It does not delete messages from your IMAP server.",
       "The next sync will refetch this folder from IMAP and rebuild the local full-text index."
+    ].join("\n");
+  }
+
+  function duplicateScanNotice(hidden: number, newlyHidden: number, revealed: number, truncated: boolean) {
+    const parts: string[] = [];
+    parts.push(hidden === 0
+      ? "No duplicate copies found."
+      : `${hidden.toLocaleString()} ${hidden === 1 ? "copy is" : "copies are"} hidden.`);
+    if (newlyHidden > 0) parts.push(`${newlyHidden.toLocaleString()} newly hidden.`);
+    if (revealed > 0) parts.push(`${revealed.toLocaleString()} brought back into view.`);
+    if (truncated) parts.push("The mailbox is large enough that the scan stopped early; run it again to cover the rest.");
+    return parts.join(" ");
+  }
+
+  function duplicateTrashConfirmMessage(report: DuplicateCopyReport | null) {
+    const hidden = report?.hidden || 0;
+    const accounts = (report?.accounts || []).map((account) => `${account.label || account.email}: ${account.hidden.toLocaleString()}`);
+    return [
+      `Move ${hidden.toLocaleString()} duplicate ${hidden === 1 ? "copy" : "copies"} to Trash?`,
+      "",
+      ...(accounts.length > 0 ? [...accounts, ""] : []),
+      "Each copy is moved into the Trash folder of the account currently holding it.",
+      "The copy in the account the message was addressed to is not touched.",
+      "Nothing is deleted outright, so anything moved by mistake can be moved back from Trash."
     ].join("\n");
   }
 
@@ -2382,6 +2425,80 @@ export function SettingsView({
     );
   }
 
+  async function rescanDuplicates() {
+    setDuplicateBusy("scan");
+    setDuplicateNotice("");
+    setDuplicateError("");
+    try {
+      const result = await api.rescanDuplicateCopies(csrf);
+      setDuplicates({ ok: result.ok, hidden: result.hidden, accounts: result.accounts });
+      setDuplicateNotice(duplicateScanNotice(result.hidden, result.newly_hidden, result.revealed, result.truncated));
+    } catch (err) {
+      setDuplicateError(messageFromError(err));
+    } finally {
+      setDuplicateBusy(null);
+    }
+  }
+
+  async function trashDuplicates() {
+    const hidden = duplicates?.hidden || 0;
+    if (!hidden) return;
+    if (!window.confirm(duplicateTrashConfirmMessage(duplicates))) return;
+    setDuplicateBusy("trash");
+    setDuplicateNotice("");
+    setDuplicateError("");
+    try {
+      const result = await api.trashDuplicateCopies(csrf);
+      const moved = result.queued_messages || 0;
+      setDuplicateNotice(result.queued
+        ? `Moving ${moved.toLocaleString()} ${moved === 1 ? "copy" : "copies"} to Trash.${result.truncated ? " More remain; run the cleanup again once this pass finishes." : ""}${result.partial_error ? ` ${result.partial_error}` : ""}`
+        : "Nothing to move: every hidden copy already sits in its account's Trash.");
+      await loadDuplicates();
+    } catch (err) {
+      setDuplicateError(messageFromError(err));
+    } finally {
+      setDuplicateBusy(null);
+    }
+  }
+
+  function renderDuplicateCopies() {
+    const hidden = duplicates?.hidden || 0;
+    const accounts = duplicates?.accounts || [];
+    return (
+      <section className="panel">
+        <h2>Duplicate copies</h2>
+        <p className="muted">
+          An account that collects mail from your other accounts - Gmail fetching POP3 mail, or a
+          forward - delivers a second copy of a message the addressed account already holds. Those
+          copies are hidden from lists, threads, and unread counts. Moving them to that account's
+          Trash stops the server from sending them again; the addressed account's mail is untouched.
+        </p>
+        {hidden > 0 ? (
+          <ul className="duplicate-account-list">
+            {accounts.map((account) => (
+              <li key={account.account_id}>
+                <span>{account.label || account.email}</span>
+                <span className="muted">{account.hidden.toLocaleString()} hidden</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">No duplicate copies are hidden right now.</p>
+        )}
+        {duplicateNotice ? <div className="notice">{duplicateNotice}</div> : null}
+        {duplicateError ? <div className="error">{duplicateError}</div> : null}
+        <div className="actions split-actions">
+          <button className="secondary" type="button" disabled={duplicateBusy !== null} onClick={rescanDuplicates}>
+            <Icon name="search" />{duplicateBusy === "scan" ? "Scanning..." : "Scan for duplicates"}
+          </button>
+          <button className="danger secondary" type="button" disabled={duplicateBusy !== null || hidden === 0} onClick={trashDuplicates}>
+            <Icon name="delete" />{duplicateBusy === "trash" ? "Moving..." : "Move copies to Trash"}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   function renderFolderSettings() {
     return (
       <>
@@ -2602,6 +2719,7 @@ export function SettingsView({
           </div>
         </form>
         {route.isNew ? null : renderFolderSettings()}
+        {route.isNew ? null : renderDuplicateCopies()}
         {route.isNew ? null : renderRecentRuns()}
       </SettingsPage>
     );

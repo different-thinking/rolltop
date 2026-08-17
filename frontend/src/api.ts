@@ -9,6 +9,7 @@ import type {
   ContactAutocomplete,
   DatabaseMaintenanceJob,
   DatabaseOverview,
+  DuplicateCopyReport,
   ComposeAttachmentUpload,
   ComposeForm,
   ComposeIdentity,
@@ -545,6 +546,13 @@ export const api = {
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/search-index/purge`, csrf),
   purgeFolderLocalReferences: (csrf: string, id: number) =>
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/local-references/purge`, csrf),
+  duplicateCopies: () => getJSON<DuplicateCopyReport>("/api/account/duplicates"),
+  rescanDuplicateCopies: (csrf: string) =>
+    postJSON<DuplicateCopyReport & { groups: number; newly_hidden: number; revealed: number; truncated: boolean }>(
+      "/api/account/duplicates/rescan", csrf),
+  trashDuplicateCopies: (csrf: string) =>
+    postJSON<{ ok: boolean; queued: boolean; matched: number; skipped: number; queued_messages?: number; truncated: boolean; partial_error?: string }>(
+      "/api/account/duplicates/trash", csrf),
   users: () => getJSON<{ users: User[]; password_reset_from_address?: string }>("/api/admin/users"),
   createUser: (csrf: string, body: { email: string; name: string; password: string; is_admin: boolean }) =>
     postJSON<{ ok: boolean }>("/api/admin/users", csrf, body),

@@ -1121,7 +1121,28 @@
   gap: 5px;
   min-width: 0;
 
-  .sync-percent {
+  // One row per account holding hidden duplicate copies. The count sits opposite
+// the account name so a glance down the column compares them.
+.duplicate-account-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+
+  li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+}
+
+.sync-percent {
     // Keep all meter fills the same width even when their right-hand labels
     // have different lengths.
     grid-template-columns: minmax(0, 1fr) 156px;

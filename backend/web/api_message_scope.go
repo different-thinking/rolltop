@@ -7,6 +7,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -117,46 +118,12 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	finishForeground := func() {}
-	if s.syncRunner != nil {
-		finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the delete", err)
+	runs, queued, startErr := s.startTrashPlan(r.Context(), cu.User.ID, plan)
+	if len(runs) == 0 {
+		if errors.Is(startErr, errForegroundBusy) {
+			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the delete", startErr)
 			return
 		}
-	}
-	// One reservation covers every account's run: release it when the last one
-	// reports back, so a second foreground writer cannot interleave with a
-	// half-finished multi-account delete.
-	pending := int64(len(plan.Groups))
-	release := func() {
-		if atomic.AddInt64(&pending, -1) <= 0 {
-			finishForeground()
-		}
-	}
-	runs := make([]map[string]any, 0, len(plan.Groups))
-	queued := 0
-	var startErr error
-	for _, group := range plan.Groups {
-		group := group
-		run, err := s.syncer.StartMoveMessages(r.Context(), cu.User.ID, group.MessageIDs, group.Target.ID, func() {
-			s.startMoveRefresh(cu.User.ID, group.Target.AccountID, group.RefreshMailboxes)
-			release()
-		})
-		if err != nil {
-			if startErr == nil {
-				startErr = err
-			}
-			release()
-			continue
-		}
-		queued += len(group.MessageIDs)
-		runs = append(runs, map[string]any{
-			"run_id": run.ID, "account_id": group.AccountID,
-			"mailbox": group.Target.Name, "messages": len(group.MessageIDs),
-		})
-	}
-	if len(runs) == 0 {
 		if store.IsNotFound(startErr) {
 			http.NotFound(w, r)
 			return
@@ -174,15 +141,76 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, response)
 }
 
+// errForegroundBusy separates "another writer holds the tenant" from a failure
+// inside a move, because only the former is worth retrying unchanged.
+var errForegroundBusy = errors.New("foreground operation unavailable")
+
+// startTrashPlan runs one move per account under a single foreground
+// reservation. It reports the runs it managed to start plus the first failure,
+// so a partly started multi-account delete is still visible to the caller.
+func (s *Server) startTrashPlan(ctx context.Context, userID int64, plan scopeTrashPlan) ([]map[string]any, int, error) {
+	finishForeground := func() {}
+	if s.syncRunner != nil {
+		reserved, err := s.syncRunner.BeginForegroundOperation(ctx, userID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: %w", errForegroundBusy, err)
+		}
+		finishForeground = reserved
+	}
+	// One reservation covers every account's run: release it when the last one
+	// reports back, so a second foreground writer cannot interleave with a
+	// half-finished multi-account delete.
+	pending := int64(len(plan.Groups))
+	release := func() {
+		if atomic.AddInt64(&pending, -1) <= 0 {
+			finishForeground()
+		}
+	}
+	runs := make([]map[string]any, 0, len(plan.Groups))
+	queued := 0
+	var startErr error
+	for _, group := range plan.Groups {
+		group := group
+		run, err := s.syncer.StartMoveMessages(ctx, userID, group.MessageIDs, group.Target.ID, func() {
+			s.startMoveRefresh(userID, group.Target.AccountID, group.RefreshMailboxes)
+			release()
+		})
+		if err != nil {
+			if startErr == nil {
+				startErr = err
+			}
+			release()
+			continue
+		}
+		queued += len(group.MessageIDs)
+		runs = append(runs, map[string]any{
+			"run_id": run.ID, "account_id": group.AccountID,
+			"mailbox": group.Target.Name, "messages": len(group.MessageIDs),
+		})
+	}
+	return runs, queued, startErr
+}
+
 // scopeTrashPlan resolves a scope into one move per account, skipping messages
 // that already sit in the Trash folder they would be moved to.
 func (s *Server) scopeTrashPlan(ctx context.Context, user store.User, scope scopeSelection) (scopeTrashPlan, error) {
-	var plan scopeTrashPlan
 	messages, truncated, err := s.resolveScopeMessages(ctx, user, scope)
 	if err != nil {
-		return plan, err
+		return scopeTrashPlan{}, err
+	}
+	plan, err := s.trashPlanForMessages(ctx, user, messages)
+	if err != nil {
+		return scopeTrashPlan{}, err
 	}
 	plan.Truncated = truncated
+	return plan, nil
+}
+
+// trashPlanForMessages groups an already resolved selection into one move per
+// account. Every caller that deletes more than a page of mail shares it, because
+// Trash belongs to an account and a selection rarely does.
+func (s *Server) trashPlanForMessages(ctx context.Context, user store.User, messages []store.ScopeMessage) (scopeTrashPlan, error) {
+	var plan scopeTrashPlan
 	plan.Matched = len(messages)
 	if len(messages) == 0 {
 		return plan, nil

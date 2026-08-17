@@ -974,6 +974,16 @@ func matchExpungedFingerprintTx(ctx context.Context, tx *sql.Tx, arrival inboxAr
 }
 
 func insertNewMailEventTx(ctx context.Context, tx *sql.Tx, userID int64, msg MessageRecord, now int64) (NewMailEvent, bool, error) {
+	// A copy an aggregating account fetched is not a second delivery. The
+	// original's own arrival already produced this notification, so announcing the
+	// copy would ring the phone twice for one message.
+	duplicate, err := messageIsDuplicateCopyTx(ctx, tx, userID, msg.ID)
+	if err != nil {
+		return NewMailEvent{}, false, err
+	}
+	if duplicate {
+		return NewMailEvent{}, false, nil
+	}
 	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO new_mail_events
 		(user_id, message_id, from_addr, subject, created_at) VALUES (?, ?, ?, ?, ?)`,
 		userID, msg.ID, msg.FromAddr, msg.Subject, now)

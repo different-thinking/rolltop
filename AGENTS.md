@@ -29,6 +29,15 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   list, and read/star sync marks every local message outside the returned set as
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
+- A cross-account duplicate copy is hidden behind a pointer to the row that stays
+  visible, and that pointer is only safe while it resolves. Deletes clear it in a
+  SQLite trigger rather than in Go, because reconciliation, folder purges, account
+  deletion, and generation rebuilds all delete message rows through different
+  paths and a stale pointer in any of them hides mail that has no visible twin.
+  Detection itself stays narrow on purpose: it hides a copy only when exactly one
+  account in the group was addressed in `To` or `Cc`, and never hides Sent,
+  Drafts, or Trash copies. Showing a message twice is recoverable; hiding the only
+  copy is not.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens SQLite, Bleve, or the blob store. A serving start waits
