@@ -408,9 +408,18 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 		if err == nil && cookie.Value != "" {
 			hash := mmcrypto.TokenHash(cookie.Value)
 			sess, user, err := s.store.GetSessionUser(r.Context(), hash)
-			if err == nil {
+			switch {
+			case err == nil:
 				cu := currentUser{User: user, SessionHash: sess.TokenHash, SessionToken: cookie.Value}
 				r = r.WithContext(context.WithValue(r.Context(), userContextKey, cu))
+			case !store.IsNotFound(err):
+				// Only a missing/expired session row means signed out. A store
+				// failure (busy database under heavy sync, disk pressure) must
+				// not demote a valid session to anonymous: that turns every
+				// route into 401 "login required" and forces a spurious logout.
+				log.Printf("session lookup failed: %v", err)
+				http.Error(w, "session lookup temporarily unavailable", http.StatusServiceUnavailable)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -431,7 +440,12 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if !s.usersExist(r.Context()) {
+	usersExist, err := s.usersExist(r.Context())
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if !usersExist {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return
 	}
@@ -959,7 +973,12 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request, userID int64)
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
-	if !s.usersExist(r.Context()) {
+	usersExist, err := s.usersExist(r.Context())
+	if err != nil {
+		s.serverError(w, err)
+		return currentUser{}, false
+	}
+	if !usersExist {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return currentUser{}, false
 	}
@@ -983,9 +1002,16 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (currentUs
 	return cu, true
 }
 
-func (s *Server) usersExist(ctx context.Context) bool {
+// usersExist reports whether at least one local user account exists. Callers
+// must treat an error as "unknown", never as "no users": claiming no users on
+// a transient store failure sends signed-in browsers back to the first-run
+// admin setup screen and would let /api/setup mint a fresh admin account.
+func (s *Server) usersExist(ctx context.Context) (bool, error) {
 	n, err := s.store.CountUsers(ctx)
-	return err == nil && n > 0
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *Server) csrfToken(w http.ResponseWriter, r *http.Request) string {

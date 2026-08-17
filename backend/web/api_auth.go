@@ -28,9 +28,13 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bootstrapPayload(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	usersExist, err := s.usersExist(r.Context())
+	if err != nil {
+		return nil, err
+	}
 	info := buildinfo.Current()
 	resp := map[string]any{
-		"users_exist":           s.usersExist(r.Context()),
+		"users_exist":           usersExist,
 		"csrf":                  s.csrfToken(w, r),
 		"server_started_at":     timeString(s.startedAt),
 		"server_uptime_seconds": int(time.Since(s.startedAt).Seconds()),
@@ -135,7 +139,12 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if s.usersExist(r.Context()) {
+	usersExist, err := s.usersExist(r.Context())
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if usersExist {
 		writeAPIError(w, http.StatusConflict, "setup is already complete")
 		return
 	}
@@ -180,7 +189,12 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if !s.usersExist(r.Context()) {
+	usersExist, err := s.usersExist(r.Context())
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if !usersExist {
 		writeAPIError(w, http.StatusPreconditionRequired, "setup is required")
 		return
 	}
