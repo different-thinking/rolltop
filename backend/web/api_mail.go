@@ -154,6 +154,9 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "Language search is disabled.")
 		return
 	}
+	// The index repair has to run before the ETag check, not after it: repairing a
+	// missing document is what invalidates the cached result set, so a revalidated
+	// request would otherwise keep serving the incomplete answer forever.
 	if strings.TrimSpace(searchQuery) != "" {
 		if _, err := s.ensureRecentSearchDocuments(r.Context(), cu.User.ID); err != nil {
 			s.serverError(w, r, err)

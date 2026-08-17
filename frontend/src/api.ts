@@ -21,6 +21,7 @@ import type {
   MessageOriginalSource,
   PluginSetting,
   SMTPAccount,
+  ScopeTrashResponse,
   SearchExplanation,
   StorageStats,
   SwipePreferences,
@@ -372,14 +373,26 @@ export const api = {
         message_ids: chunk,
         mailbox_id: mailboxID
       }, options)));
-    return results.reduce((merged, data) => ({
+    // run_ids collects every background run this move started, so a caller that
+    // hides the moved rows can wait for all of them, not just the last answer.
+    return results.reduce<{ ok: boolean; queued: boolean; moved?: number; run_id?: number; run_ids: number[]; mailbox: string }>((merged, data) => ({
       ok: merged.ok && data.ok,
       queued: merged.queued || data.queued,
       moved: (merged.moved || 0) + (data.moved || 0),
       run_id: data.run_id ?? merged.run_id,
+      run_ids: data.run_id ? [...merged.run_ids, data.run_id] : merged.run_ids,
       mailbox: data.mailbox || merged.mailbox
-    }));
+    }), { ok: true, queued: false, moved: 0, run_ids: [], mailbox: "" });
   },
+  // The scope endpoint takes the filter rather than message IDs, so a delete is
+  // not limited to the IDs one page happens to have loaded. The server resolves
+  // the matches, groups them per account Trash, and answers with the runs it
+  // started; progress arrives through the normal sync-run events.
+  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string }) =>
+    postJSON<ScopeTrashResponse>("/api/messages/scope-trash", csrf, {
+      scope_mailbox_id: scope.mailboxID,
+      scope_query: scope.query
+    }),
   bulkCopyMessages: async (csrf: string, ids: number[], mailboxID: number) => {
     const results = await Promise.all(chunkMessageIDs(ids).map((chunk) =>
       postJSON<{ ok: boolean; queued: boolean; copied?: number; run_id?: number; mailbox: string }>("/api/messages/bulk-copy", csrf, {

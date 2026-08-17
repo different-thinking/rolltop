@@ -69,6 +69,11 @@
   margin-bottom: 8px;
 }
 
+.search-result-actions .search-scope-hint {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .selection-action-bar {
   min-height: 48px;
   display: flex;
@@ -142,6 +147,31 @@
 
   span {
     color: inherit;
+  }
+}
+
+// The whole-filter controls reach past the loaded page, so they are marked as
+// the accent action next to the neutral page-selection controls.
+.selection-action-bar .selection-scope-button {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+
+  &:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  }
+}
+
+.selection-action-bar .selection-scope-count {
+  color: var(--accent);
+
+  .icon {
+    width: 17px;
+    height: 17px;
+  }
+
+  strong {
+    color: var(--accent);
   }
 }
 
