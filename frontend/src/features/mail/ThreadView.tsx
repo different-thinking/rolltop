@@ -1689,8 +1689,15 @@ export function ThreadView({
     try {
       await api.bulkMoveMessages(csrf, ids, target.id, { keepalive });
     } catch (err) {
+      // A failed move may still have relocated part of the conversation: the
+      // small-move path moves message by message and reports only the first
+      // error. Restoring the rows is the honest default — the conversation does
+      // still have messages in this folder — but the cached list can no longer
+      // be trusted about which, so it is dropped and reloaded from the server.
       setMessagesHidden(ids, false);
+      api.clearMailCache(userID);
       addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}`, "error");
+      if (!keepalive) void refreshChrome().catch(() => undefined);
       return;
     }
     if (snoozedMessageID > 0 && !keepalive) {
@@ -1708,16 +1715,16 @@ export function ThreadView({
     setMarkUnreadBusy(true);
     try {
       await api.bulkRead(csrf, ids, false);
+      addToast(`Marked ${messageCountLabel(ids.length)} unread.`);
+      void refreshChrome().catch(() => undefined);
+      // Opening a conversation marks it read again, so returning to the list is
+      // part of the action rather than a convenience.
+      navigate(backURL);
     } catch (err) {
       addToast(`Mark unread failed: ${messageFromError(err)}`, "error");
+    } finally {
       setMarkUnreadBusy(false);
-      return;
     }
-    addToast(`Marked ${messageCountLabel(ids.length)} unread.`);
-    void refreshChrome().catch(() => undefined);
-    // Opening a conversation marks it read again, so returning to the list is
-    // part of the action rather than a convenience.
-    navigate(backURL);
   }
 
   const archiveState = headerMoveState(headerArchiveMailbox, "Archive", "Choose an Archive folder for this account in swipe settings");
