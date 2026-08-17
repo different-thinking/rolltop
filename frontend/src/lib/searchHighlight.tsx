@@ -1,6 +1,8 @@
 // File overview: Search highlighting helpers for both React text nodes and sandboxed email iframes.
 // They combine the original query with Bleve-reported match terms from the API.
 
+import { plainTextDocumentClass } from "./emailDocumentTheme";
+
 /**
  * Turn a user query plus Bleve-reported terms into safe highlight needles.
  * Operators that filter rather than match text are skipped, and longer terms are
@@ -127,10 +129,12 @@ const lightHighlight = "mark.rolltop-search-hit{background:rgba(229,169,40,.26);
 const darkHighlight = (scope: string) => `${scope} mark.rolltop-search-hit{background:rgba(224,182,77,.28);color:#f5f2ec}`
   + `${scope} img.rolltop-search-image-hit{outline-color:rgba(224,182,77,.95)!important;box-shadow:0 0 0 4px rgba(224,182,77,.22)!important}`;
 
+// Scoped to plain-text documents for the same reason the body theme is: an HTML
+// message keeps its own light ground, so a dark highlight would be unreadable.
 const emailHighlightCSS = lightHighlight
-  + darkHighlight('html[data-rolltop-theme="classic_dark"]')
-  + darkHighlight('html[data-rolltop-theme="matrix"]')
-  + `@media (prefers-color-scheme:dark){${darkHighlight("html:not([data-rolltop-theme])")}}`;
+  + darkHighlight(`html.${plainTextDocumentClass}[data-rolltop-theme="classic_dark"]`)
+  + darkHighlight(`html.${plainTextDocumentClass}[data-rolltop-theme="matrix"]`)
+  + `@media (prefers-color-scheme:dark){${darkHighlight(`html.${plainTextDocumentClass}:not([data-rolltop-theme])`)}}`;
 
 /** Highlight search terms inside a sandboxed email iframe after it has loaded. */
 export function highlightEmailDocument(doc: Document | null | undefined, query: string, terms: string[] = []) {

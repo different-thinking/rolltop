@@ -1,6 +1,7 @@
 // File overview: Browser PGP helpers. Heavy crypto/sanitizer libraries are
 // dynamically imported so they are emitted as lazy chunks when the plugin is used.
 
+import { plainTextDocumentClass } from "../../../../frontend/src/lib/emailDocumentTheme";
 import type { SecurityUnlockState, UnlockedSecurityKey } from "../../../../frontend/src/appTypes";
 import type { ContactPGPKey, IdentityPGPPrivateKey } from "../../../../frontend/src/types";
 
@@ -564,9 +565,13 @@ export async function decryptedHTMLDoc(content: string, attachments: DecryptedMI
   const decoded = decodedMIMEEntityForDisplay(content);
   const cidURLs = cidURLMap(attachments);
   const display = decoded.html ? replaceCIDReferences(decoded.html, cidURLs) : decoded.text || content;
-  const html = (decoded.html || looksLikeHTML(display)) ? await sanitizeHTML(display) : `<div class="plaintext">${plainTextToHTML(display)}</div>`;
+  const isHTML = Boolean(decoded.html) || looksLikeHTML(display);
+  const html = isHTML ? await sanitizeHTML(display) : `<div class="plaintext">${plainTextToHTML(display)}</div>`;
+  // Marks a body Rolltop rendered from plain text, which is the only case the
+  // dark theme paints over; see frontend/src/lib/emailDocumentTheme.ts.
+  const documentClass = isHTML ? "" : ` class="${plainTextDocumentClass}"`;
   const csp = "default-src 'none'; img-src 'self' data: blob: cid:; media-src 'self' data: blob: cid:; style-src 'unsafe-inline'; font-src data:";
-  return `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:#fff;color:#1f2328;font:14px/1.55 Arial,sans-serif;overflow:hidden}body{padding:18px}a{color:#245f80;text-decoration:none;border-bottom:1px solid #9cc5d8}.plaintext{white-space:pre-wrap;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}</style></head><body>${html}</body></html>`;
+  return `<!doctype html><html${documentClass}><head><meta charset="utf-8"><base target="_blank"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:#fff;color:#1f2328;font:14px/1.55 Arial,sans-serif;overflow:hidden}body{padding:18px}a{color:#245f80;text-decoration:none;border-bottom:1px solid #9cc5d8}.plaintext{white-space:pre-wrap;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}</style></head><body>${html}</body></html>`;
 }
 
 export function decryptedPlainText(content: string): string {
