@@ -641,6 +641,23 @@ func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
 	}); err == nil {
 		t.Fatal("an identity was allowed to archive into the Inbox")
 	}
+
+	// Leaving the IMAP server on Automatic is the default, and settings accepts
+	// an Archive folder alongside it, so the choice has to keep counting: the
+	// folder itself names the account it belongs to.
+	if _, err := db.UpdateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		ID: identity.ID, IMAPAccountID: 0, ArchiveMailboxID: identityTarget.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	automatic, err := db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(automatic) != 1 || automatic[0].AccountID != account.ID || automatic[0].MailboxID != identityTarget.ID {
+		t.Fatalf("resolved archive with an Automatic IMAP server = %+v, want account %d folder %d",
+			automatic, account.ID, identityTarget.ID)
+	}
 }
 
 func messageIDsOf(messages []MessageRecord) []int64 {

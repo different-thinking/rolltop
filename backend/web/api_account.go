@@ -843,6 +843,12 @@ func (s *Server) apiMailIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearComposeIdentityCache(cu.User.ID)
+	// An identity carries this account's Archive folder, which is what the
+	// Unarchived list hides, so its cached pages have to be rebuilt.
+	s.noteMailListChanged(cu.User.ID)
+	if s.events != nil {
+		s.events.Notify(cu.User.ID)
+	}
 	identities, err := s.store.ListMailIdentitiesForUser(r.Context(), cu.User.ID)
 	if err != nil {
 		s.serverError(w, r, err)

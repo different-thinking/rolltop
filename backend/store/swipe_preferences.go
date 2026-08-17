@@ -67,12 +67,15 @@ func (s *Store) ArchiveMailboxesForUser(ctx context.Context, userID int64) ([]Sw
 		return nil, err
 	}
 	byAccount := map[int64]int64{}
-	identityRows, err := db.QueryContext(ctx, `SELECT i.imap_account_id, i.archive_mailbox_id
+	// The account comes from the chosen folder, not from the identity's IMAP
+	// server field: that field may be left on Automatic, and a choice that named
+	// a real folder would otherwise be stored and then silently ignored.
+	identityRows, err := db.QueryContext(ctx, `SELECT mb.account_id, i.archive_mailbox_id
 		FROM mail_identities i
 		JOIN mailboxes mb ON mb.user_id = i.user_id AND mb.id = i.archive_mailbox_id
-			AND mb.account_id = i.imap_account_id
+			AND (i.imap_account_id = 0 OR mb.account_id = i.imap_account_id)
 			AND mb.role NOT IN ('inbox', 'sent', 'drafts', 'trash', 'junk')
-		WHERE i.user_id = ? AND i.imap_account_id > 0 AND i.archive_mailbox_id > 0
+		WHERE i.user_id = ? AND i.archive_mailbox_id > 0
 		ORDER BY i.is_primary DESC, i.id ASC`, userID)
 	if err != nil {
 		return nil, err

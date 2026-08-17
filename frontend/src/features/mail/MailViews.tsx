@@ -519,6 +519,7 @@ export function SnoozedView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   mailGeneration,
   messageSecurityPlugins = [],
   addToast
@@ -530,6 +531,7 @@ export function SnoozedView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   mailGeneration: number;
   messageSecurityPlugins?: RuntimePlugin[];
   addToast: AddToast;
@@ -620,6 +622,7 @@ export function SnoozedView({
               hiddenMessageIDs={hiddenMessageIDs}
               mailboxes={mailboxes}
               swipePreferences={swipePreferences}
+              archiveMailboxes={archiveMailboxes}
               datePrefs={datePrefs}
               returnURL={routeWithSearch(location.path, location.search)}
               navigate={navigate}
@@ -792,6 +795,7 @@ export function SearchView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   datePrefs,
   activeSyncRuns,
   mailGeneration,
@@ -807,6 +811,7 @@ export function SearchView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   datePrefs: DatePrefs;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -956,6 +961,7 @@ export function SearchView({
               hiddenMessageIDs={hiddenMessageIDs}
               mailboxes={mailboxes}
               swipePreferences={swipePreferences}
+              archiveMailboxes={archiveMailboxes}
               navigate={navigate}
               searchQuery={query}
               datePrefs={datePrefs}
