@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -206,6 +207,12 @@ func (s *Server) apiScopeArchiveMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	scope.Filter.ExcludeMailboxIDs = protected
+	// Viewing one of those folders and archiving it would resolve to nothing at
+	// all, so say that rather than answering with an empty, successful pass.
+	if scope.MailboxID > 0 && slices.Contains(protected, scope.MailboxID) {
+		writeAPIError(w, http.StatusBadRequest, "Sent, Drafts, Trash, and Junk are left where they are by archiving.")
+		return
+	}
 	plan, err := s.scopeArchivePlan(r.Context(), cu.User, scope)
 	if err != nil {
 		s.writeScopePlanError(w, r, err)

@@ -323,18 +323,18 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
-	cutoff, cutoffArgs := filter.sql()
-	args := make([]any, 0, len(exclusionArgs)+len(cutoffArgs)+3)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(exclusionArgs)+len(filterArgs)+3)
 	args = append(args, userID)
 	args = append(args, exclusionArgs...)
-	args = append(args, cutoffArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+cutoff+` AND m.duplicate_of_message_id = 0
+		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+filterSQL+` AND m.duplicate_of_message_id = 0
 			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
@@ -353,16 +353,16 @@ func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mai
 	if err != nil {
 		return nil, err
 	}
-	cutoff, cutoffArgs := filter.sql()
-	args := make([]any, 0, len(cutoffArgs)+4)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(filterArgs)+4)
 	args = append(args, userID, mailboxID)
-	args = append(args, cutoffArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id = ?`+cutoff+` AND m.duplicate_of_message_id = 0
+		WHERE m.user_id = ? AND m.mailbox_id = ?`+filterSQL+` AND m.duplicate_of_message_id = 0
 			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
@@ -415,17 +415,17 @@ func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int
 		return nil, err
 	}
 	placeholders, idArgs := int64ListPlaceholders(mailboxIDs)
-	cutoff, cutoffArgs := filter.sql()
-	args := make([]any, 0, len(idArgs)+len(cutoffArgs)+3)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(idArgs)+len(filterArgs)+3)
 	args = append(args, userID)
 	args = append(args, idArgs...)
-	args = append(args, cutoffArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`)`+cutoff+` AND m.duplicate_of_message_id = 0
+		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`)`+filterSQL+` AND m.duplicate_of_message_id = 0
 			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)

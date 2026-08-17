@@ -67,6 +67,11 @@
   &.destructive:hover:not(:disabled) {
     color: var(--danger);
   }
+
+  &:disabled {
+    opacity: .45;
+    cursor: default;
+  }
 }
 
 // The cutoff row of the archive-by-date dialog: presets first, then the exact day.

@@ -411,6 +411,10 @@ export function MailView({
             <MailSortToggle order={sortOrder} onChange={changeSortOrder} />
             {mailbox?.role === "trash" ? (
               <EmptyTrashControl
+                // The list header survives a route change, so an open
+                // confirmation would otherwise retarget itself at whichever
+                // Trash folder the reader navigated to next.
+                key={mailbox.id}
                 csrf={csrf}
                 mailboxID={mailbox.id}
                 mailboxName={mailbox.name}

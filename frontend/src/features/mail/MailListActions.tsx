@@ -91,6 +91,7 @@ export function ArchiveBeforeControl({
   const [cutoff, setCutoff] = useState(() => dateInputValue(monthsAgo(12)));
   const trigger = useRef<HTMLButtonElement | null>(null);
   const dateField = useRef<HTMLInputElement | null>(null);
+  const dialogBody = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (open) dateField.current?.focus();
@@ -102,10 +103,30 @@ export function ArchiveBeforeControl({
     trigger.current?.focus();
   }
 
+  // The confirmation owns the keyboard while it is open: Escape backs out, and
+  // Tab cycles inside the dialog rather than wandering onto the list behind the
+  // backdrop while an irreversible action is being confirmed.
   function handleKeys(event: KeyboardEvent<HTMLElement>) {
-    if (event.key !== "Escape") return;
-    event.stopPropagation();
-    close();
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      dialogBody.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled)") || []
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    }
   }
 
   // Like the whole-filter delete, this cannot hide behind an undo toast: the
@@ -141,6 +162,7 @@ export function ArchiveBeforeControl({
   const dialog = open && typeof document !== "undefined" ? createPortal(
     <div className="confirm-backdrop" role="presentation" onClick={close}>
       <section
+        ref={dialogBody}
         className="confirm-dialog"
         role="dialog"
         aria-modal="true"

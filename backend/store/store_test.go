@@ -2311,6 +2311,10 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 	}
 	defer db.Close()
 	user, account, inbox, blob := testMailbox(t, ctx, db)
+	sent, err := db.GetOrCreateMailboxWithRole(ctx, user.ID, account.ID, "Sent", "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cutoff := time.Unix(1700000000, 0).UTC()
 	oldest, err := db.CreateMessage(ctx, CreateMessage{
 		UserID: user.ID, AccountID: account.ID, MailboxID: inbox.ID, BlobID: blob.ID,
@@ -2329,17 +2333,38 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The role scope binds a placeholder list of its own, so it is covered here
+	// too: a cutoff argument appended in the wrong order would filter by mailbox.
+	oldestSent, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: sent.ID, BlobID: blob.ID,
+		MessageIDHeader: "<cutoff-old-sent@example.test>", Subject: "Old sent",
+		Date: cutoff.Add(-72 * time.Hour), UID: 20, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: sent.ID, BlobID: blob.ID,
+		MessageIDHeader: "<cutoff-new-sent@example.test>", Subject: "New sent",
+		Date: cutoff.Add(24 * time.Hour), UID: 21, BlobPath: blob.Path,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	filter := ScopeFilter{Before: cutoff}
 
 	for _, tt := range []struct {
 		name string
+		want int64
 		list func() ([]ScopeMessage, error)
 	}{
-		{"all mail", func() ([]ScopeMessage, error) {
+		{"all mail", oldest.ID, func() ([]ScopeMessage, error) {
 			return db.ListAllMailScopeMessagesForUser(ctx, user.ID, filter, 1)
 		}},
-		{"mailbox", func() ([]ScopeMessage, error) {
+		{"mailbox", oldest.ID, func() ([]ScopeMessage, error) {
 			return db.ListMailboxScopeMessagesForUser(ctx, user.ID, inbox.ID, filter, 1)
+		}},
+		{"role", oldestSent.ID, func() ([]ScopeMessage, error) {
+			return db.ListRoleMailScopeMessagesForUser(ctx, user.ID, "sent", filter, 1)
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2347,8 +2372,8 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(scope) != 1 || scope[0].ID != oldest.ID {
-				t.Fatalf("scope = %+v, want only the message older than the cutoff %d", scope, oldest.ID)
+			if len(scope) != 1 || scope[0].ID != tt.want {
+				t.Fatalf("scope = %+v, want only the message older than the cutoff %d", scope, tt.want)
 			}
 		})
 	}
@@ -2357,18 +2382,18 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(unfiltered) != 4 {
+	if len(unfiltered) != 6 {
 		t.Fatalf("unfiltered scope = %d rows, want every message", len(unfiltered))
 	}
 
 	// An excluded folder drops out of the same selection, which is how an archive
 	// pass leaves Sent, Drafts, Trash, and Junk where they are.
-	excluded, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{ExcludeMailboxIDs: []int64{inbox.ID}}, 10)
+	excluded, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{ExcludeMailboxIDs: []int64{inbox.ID, sent.ID}}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(excluded) != 0 {
-		t.Fatalf("scope excluding the only folder = %+v, want nothing", excluded)
+		t.Fatalf("scope excluding every folder = %+v, want nothing", excluded)
 	}
 	if !(ScopeFilter{}).Matches(MessageRecord{MailboxID: inbox.ID, Date: cutoff}) {
 		t.Fatal("the zero filter rejected a message")

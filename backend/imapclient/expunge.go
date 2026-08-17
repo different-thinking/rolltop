@@ -93,15 +93,18 @@ func expungeMessages(ctx context.Context, c expungeCommandClient, mailbox string
 	for _, uid := range uids {
 		seqset.AddNum(uid)
 	}
+	// Ask which expunge is available before flagging anything: a message left
+	// carrying \Deleted with nothing to remove it is a message the next plain
+	// EXPUNGE from any client deletes without anyone confirming it.
+	uidPlus, err := c.Support("UIDPLUS")
+	if err != nil {
+		return nil, fmt.Errorf("check IMAP UIDPLUS support: %w", err)
+	}
 	if err := c.UidStore(seqset, imap.FormatFlagsOp(imap.AddFlags, true), []any{imap.DeletedFlag}, nil); err != nil {
 		return nil, fmt.Errorf("flag mailbox %q messages deleted: %w", mailbox, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	uidPlus, err := c.Support("UIDPLUS")
-	if err != nil {
-		return nil, fmt.Errorf("check IMAP UIDPLUS support: %w", err)
 	}
 	if uidPlus {
 		// UID EXPUNGE removes exactly the named messages. Without UIDPLUS the

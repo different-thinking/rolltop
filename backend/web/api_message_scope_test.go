@@ -647,6 +647,84 @@ func TestScopeArchiveLeavesTheUsersOwnFoldersAlone(t *testing.T) {
 	}
 }
 
+// An archive pass is resolved from the signed-in user's own rows, so another
+// tenant's old mail can never enter the plan even when both users have the
+// same folder layout.
+func TestScopeArchivePlanStaysInsideOneTenant(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner := newScopeTestTenant(t, ctx, db, "scope-archive-owner@example.test")
+	other := newScopeTestTenant(t, ctx, db, "scope-archive-other@example.test")
+	cutoff := time.Date(2024, time.May, 1, 0, 0, 0, 0, time.UTC)
+	for _, tenant := range []scopeTestTenant{owner, other} {
+		archive, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Archive")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.SaveSwipePreferences(ctx, store.SwipePreferences{
+			UserID:     tenant.user.ID,
+			LeftAction: store.SwipeActionSnooze, LeftSnoozePreset: store.SwipeSnoozeTomorrow,
+			RightAction: store.SwipeActionMarkRead, RightSnoozePreset: store.SwipeSnoozeTomorrow,
+			ArchiveMailboxes: []store.SwipeArchiveMailbox{{AccountID: tenant.accountID, MailboxID: archive.ID}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownerMessage := createScopeTestMessageDated(t, ctx, db, owner, owner.inbox, 931, "Owner", cutoff.Add(-48*time.Hour))
+	otherMessage := createScopeTestMessageDated(t, ctx, db, other, other.inbox, 932, "Other", cutoff.Add(-48*time.Hour))
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeArchivePlan(ctx, owner.user, scopeSelection{Filter: store.ScopeFilter{Before: cutoff}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	if len(ids) != 1 || ids[0] != ownerMessage.ID {
+		t.Fatalf("planned ids = %v, want only the owner's message %d", ids, ownerMessage.ID)
+	}
+	if slices.Contains(ids, otherMessage.ID) {
+		t.Fatalf("planned ids = %v, must not reach the other tenant's message %d", ids, otherMessage.ID)
+	}
+	// A folder the other tenant owns is not a folder this scope can name.
+	if _, err := server.scopeArchivePlan(ctx, owner.user, scopeSelection{
+		MailboxID: other.inbox.ID, Filter: store.ScopeFilter{Before: cutoff},
+	}); !store.IsNotFound(err) {
+		t.Fatalf("cross-tenant mailbox scope error = %v, want not found", err)
+	}
+}
+
+// The folders an archive pass protects cannot be archived by naming them
+// directly either, and saying so beats a successful pass that moved nothing.
+func TestScopeArchiveRefusesAProtectedFolder(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-archive-protected@example.test")
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012"), syncer: &syncer.Service{}}
+
+	payload, err := json.Marshal(map[string]any{"scope_mailbox_id": tenant.trash.ID, "before": "2024-03-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/scope-archive", bytes.NewReader(payload))
+	req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: tenant.user}))
+	csrfBase := "scope-archive-protected-csrf"
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfBase})
+	req.Header.Set("X-CSRF-Token", server.csrfForBase(csrfBase))
+	res := httptest.NewRecorder()
+	server.apiScopeArchiveMessages(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for archiving the Trash folder", res.Code)
+	}
+}
+
 func TestScopeArchivePlanReportsAccountsWithoutAnArchiveFolder(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
