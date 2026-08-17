@@ -3,10 +3,8 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +12,8 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+
+	"rolltop/internal/testlog"
 )
 
 type moveTestCall struct {
@@ -331,16 +331,7 @@ func (o *moveTestObserver) ObserveMessageMove(context.Context, plugins.BackendHo
 }
 
 func TestDispatchMessageMoveObserversIsolatesAndSafelyLogsFailures(t *testing.T) {
-	var logs bytes.Buffer
-	previousWriter, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
-	})
+	logs := testlog.Capture(t)
 
 	failing := &moveTestObserver{
 		NoopBackendPlugin: plugins.NoopBackendPlugin{PluginID: "failing-observer"},

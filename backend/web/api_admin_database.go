@@ -24,7 +24,7 @@ func (s *Server) apiAdminDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	overview, err := s.databaseOverview(r.Context())
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	writeJSON(w, overview)
@@ -80,14 +80,14 @@ func (s *Server) apiAdminDatabaseAction(w http.ResponseWriter, r *http.Request, 
 	case "check":
 		job, err := s.startIntegrityCheck(scope, in.UserID)
 		if err != nil {
-			s.writeMaintenanceStartError(w, err)
+			s.writeMaintenanceStartError(w, r, err)
 			return
 		}
 		writeJSON(w, map[string]any{"job": job})
 	case "backup":
 		job, err := s.startBackup(scope, in.UserID)
 		if err != nil {
-			s.writeMaintenanceStartError(w, err)
+			s.writeMaintenanceStartError(w, r, err)
 			return
 		}
 		writeJSON(w, map[string]any{"job": job})
@@ -111,7 +111,7 @@ func (s *Server) apiAdminDatabaseAction(w http.ResponseWriter, r *http.Request, 
 				writeAPIError(w, http.StatusConflict, err.Error())
 				return
 			}
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "restarting": s.requestRestart != nil})
@@ -121,7 +121,7 @@ func (s *Server) apiAdminDatabaseAction(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if err := store.ClearUserDatabaseRepair(s.dataDir, in.UserID); err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
@@ -147,7 +147,7 @@ func maintenanceScopeFromRequest(raw string, userID int64) (maintenanceScope, bo
 
 // writeMaintenanceStartError separates "the slot is taken" from a target that
 // cannot be read at all, so the UI can say which happened.
-func (s *Server) writeMaintenanceStartError(w http.ResponseWriter, err error) {
+func (s *Server) writeMaintenanceStartError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrDatabaseFileMissing) {
 		writeAPIError(w, http.StatusNotFound, err.Error())
 		return

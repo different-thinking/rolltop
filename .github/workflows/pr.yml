@@ -1,0 +1,327 @@
+name: PR Checks
+
+# Lean, change-scoped verification for pull requests.
+#
+# Minute budget rules for this workflow:
+# - Every job is gated on the paths a pull request actually touches.
+# - Nothing is packaged, published, or uploaded here; that is `ci.yml`'s job
+#   on `main` and tags. Pull requests only answer "is this correct?".
+# - Superseded runs are cancelled, and every job has a hard timeout.
+
+on:
+  pull_request:
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      plugin_backends: ${{ steps.filter.outputs.plugin_backends }}
+      spam_model: ${{ steps.filter.outputs.spam_model }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      plugin_frontend: ${{ steps.filter.outputs.plugin_frontend }}
+      android: ${{ steps.filter.outputs.android }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Filter Changed Paths
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          keys='go plugin_backends spam_model frontend plugin_frontend android docker'
+
+          run_everything() {
+            for key in $keys; do
+              echo "${key}=true" >> "$GITHUB_OUTPUT"
+            done
+            {
+              echo "### Changed Paths"
+              echo
+              echo "Running all checks: $1"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            run_everything "base commit \`${BASE_SHA}\` is unavailable"
+            exit 0
+          fi
+
+          git diff --name-only "$BASE_SHA" HEAD > changed-files.txt
+          echo "Changed files:"
+          cat changed-files.txt
+
+          matches() {
+            grep -qE "$1" changed-files.txt
+          }
+
+          # A change to CI itself has to be validated by CI itself.
+          if matches '^\.github/(workflows|scripts)/'; then
+            run_everything "the workflow definitions changed"
+            exit 0
+          fi
+
+          emit() {
+            if matches "$2"; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+              echo "| \`$1\` | yes |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "| \`$1\` | no |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          {
+            echo "### Changed Paths"
+            echo
+            echo "| Area | Checked |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          emit go '\.go$|^go\.mod$|^go\.sum$'
+          emit plugin_backends '^plugins/[^/]+/backend/|^go\.mod$|^go\.sum$'
+          emit spam_model '^plugins/experimental_spam_filter/(model|training)/'
+          emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^plugins/[^/]+/(frontend|themes)/'
+          emit plugin_frontend '^plugins/[^/]+/(frontend|themes)/|^vite\.plugins\.config\.ts$|^package\.json$|^package-lock\.json$'
+          emit android '^android/'
+          emit docker '^Dockerfile$|^\.dockerignore$'
+
+  go:
+    name: Go
+    needs: changes
+    if: >-
+      needs.changes.outputs.go == 'true' ||
+      needs.changes.outputs.plugin_backends == 'true' ||
+      needs.changes.outputs.spam_model == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      - name: Set Up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check Formatting
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            {
+              echo "### Go Formatting"
+              echo
+              echo "Status: fail"
+              echo
+              echo "Run \`gofmt -w\` on:"
+              echo
+              echo "$unformatted" | sed 's/^/- `/;s/$/`/'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      # There is deliberately no `go vet ./...` step. It currently reports 14
+      # pre-existing findings (copylocks in the client_side_pgp and mail_filters
+      # backends, lostcancel in backend/web/server.go, copylocks in
+      # backend/syncer/move_notification_test.go), so it cannot be a blocking
+      # gate until those are fixed. `go test` still runs vet's high-signal
+      # subset — printf, atomic, errorsas, ifaceassert, and friends — on every
+      # package it builds.
+
+      # `plugins.LoadManifests` stats the theme CSS a manifest declares, so the
+      # Go suite needs the compiled themes. Build only those, not the full
+      # frontend bundle.
+      - name: Set Up Node
+        if: needs.changes.outputs.go == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Build Theme Assets
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          npm ci
+          npm run build:themes
+
+      - name: Run Go Tests
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          mkdir -p test-results
+          set +e
+          go test -json ./... 2>&1 | tee test-results/go-test.json
+          status=${PIPESTATUS[0]}
+          set -e
+
+          node .github/scripts/go-test-report.mjs test-results/go-test.json test-results
+          cat test-results/go-test-report.md >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$status"
+
+      # `go test` compiles every package, but not with `-buildmode=plugin`.
+      # Only re-link the shared objects when plugin backends actually change.
+      - name: Build Plugin Backends
+        if: needs.changes.outputs.plugin_backends == 'true'
+        run: |
+          set -euo pipefail
+          for backend in plugins/*/backend; do
+            plugin="$(basename "$(dirname "$backend")")"
+            CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -o "/tmp/${plugin}.so" "./${backend}"
+          done
+
+      - name: Verify Checked-In Spam Model
+        if: needs.changes.outputs.spam_model == 'true'
+        run: |
+          go run ./plugins/experimental_spam_filter/training/cmd/spamtrain verify \
+            --model plugins/experimental_spam_filter/model/model.bin \
+            --metadata plugins/experimental_spam_filter/model/model.json \
+            --report plugins/experimental_spam_filter/model/benchmark.json
+
+      - name: Upload Go Test Results
+        if: failure() && needs.changes.outputs.go == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: pr-go-test-results
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      - name: Set Up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Run TypeScript Checks
+        run: |
+          mkdir -p test-results
+          start=$(date +%s)
+          set +e
+          npm run typecheck 2>&1 | tee test-results/typescript-typecheck.log
+          status=${PIPESTATUS[0]}
+          set -e
+          elapsed=$(($(date +%s) - start))
+
+          node .github/scripts/typescript-test-report.mjs "$status" "$elapsed" test-results/typescript-typecheck.log test-results
+          cat test-results/typescript-test-report.md >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$status"
+
+      - name: Build Frontend
+        run: npm run build:vite
+
+      - name: Build Plugin Frontends
+        if: needs.changes.outputs.plugin_frontend == 'true'
+        run: npm run build:plugins
+
+  android:
+    name: Android
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      - name: Set Up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set Up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      # Unit tests and lint already compile the debug variant, so assembling an
+      # APK on a pull request would only repeat work `ci.yml` does on `main`.
+      - name: Run Android Unit Tests And Lint
+        run: ./android/gradlew -p android :app:testDebugUnitTest :app:lintDebug
+
+      - name: Upload Android Reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: pr-android-reports
+          path: |
+            android/app/build/reports
+            android/app/build/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  docker:
+    name: Docker Image
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      # Only runs when the image definition itself changes; the published image
+      # is still built and pushed by `ci.yml` on `main` and tags.
+      - name: Build Docker Image
+        run: docker build -t rolltop:pr-${{ github.event.pull_request.number }} .
+
+  gate:
+    name: PR Checks
+    needs: [changes, go, frontend, android, docker]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collect Results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### PR Check Results"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            jq -r 'to_entries[] | "| `\(.key)` | \(.value.result) |"' <<< "$RESULTS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed="$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key' <<< "$RESULTS")"
+          if [ -n "$failed" ]; then
+            echo "Failed or cancelled jobs:" >&2
+            echo "$failed" >&2
+            exit 1
+          fi
+          echo "All required pull request checks passed or were skipped as unaffected."

@@ -69,7 +69,9 @@ Database page stays reachable to schedule the repair.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
-include them.
+include them. Failures are written as `error ...` lines and are never hidden,
+whatever the level is set to; each names the request that produced it, for
+example `error server error GET /api/mail: database is locked`.
 
 ## Run Locally
 
@@ -107,6 +109,33 @@ docker run -d --name rolltop --restart unless-stopped -p 8080:8080 \
 ```
 
 Keep `.env.rolltop` with the same care as the Docker volume. Changing or losing `ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable.
+
+### Logs and crash reports
+
+All application logs go to **stderr**. `docker logs rolltop` shows them, but
+anything that pipes or redirects only stdout (`docker logs rolltop | grep …`,
+`docker logs rolltop > out.log`) silently drops every log line — use
+`docker logs rolltop 2>&1 | grep …` instead.
+
+Crashes are additionally persisted in the data volume so they survive
+container recreation. Unhandled panics and fatal errors are **appended** to
+`/data/crash.log`, which Rolltop never truncates — each start adds a
+`=== rolltop <version> started at <time> pid=<n> ===` line, so every report is
+attributable to a run. The next start reports in the container log that it
+found one. Only when the file grows past 1 MiB is it rotated to
+`/data/crash.log.prev`; if that rename fails, Rolltop keeps appending rather
+than lose what is already there.
+
+If the process is killed without any chance to report (kernel OOM kill,
+SIGKILL), no crash report can exist. The next start detects the unclean
+shutdown and says so — then check
+`docker inspect rolltop --format '{{.State.ExitCode}} {{.State.OOMKilled}}'`
+and the kernel log (`dmesg | grep -i oom`).
+
+Crash reporting is armed before the listener binds and before the
+configuration is read, so a port conflict or an unusable `ROLLTOP_MASTER_KEY`
+also lands in `/data/crash.log`. The deliberate restart for search index
+recovery (below) is not a crash and is not recorded as one.
 
 ### Corrupt SQLite Databases
 
@@ -323,3 +352,30 @@ npm run build:plugins
 go test ./...
 docker build -t rolltop:dev .
 ```
+
+## Continuous Integration
+
+CI is split into two workflows so that pull requests only pay for the checks
+their changes can actually break.
+
+`.github/workflows/pr.yml` runs on every pull request. A first job diffs the
+pull request against its base and turns the changed paths into per-area flags;
+each following job is gated on those flags:
+
+| Job | Runs when | What it does |
+| --- | --- | --- |
+| `Go` | `*.go`, `go.mod`, `go.sum`, spam model or training data changed | `gofmt` check, `go vet ./...`, `go test ./...`, `-buildmode=plugin` link check for changed plugin backends, checked-in spam model verification |
+| `Frontend` | `frontend/`, `plugins/*/frontend/`, `plugins/*/themes/`, `tsconfig.json`, `package*.json`, `vite.*.config.ts` changed | `npm run typecheck`, `npm run build:vite`, plus `npm run build:plugins` when a plugin frontend changed |
+| `Android` | `android/` changed | `:app:testDebugUnitTest` and `:app:lintDebug` (both compile the debug variant, so no separate APK assembly) |
+| `Docker Image` | `Dockerfile` or `.dockerignore` changed | `docker build` without pushing |
+| `PR Checks` | always | Aggregates the results; use this one as the required status check |
+
+Anything under `.github/workflows/` or `.github/scripts/` forces every job to
+run. A documentation-only pull request skips all of them and only pays for the
+two coordination jobs. Superseded runs are cancelled automatically, and every
+job has a hard timeout.
+
+`.github/workflows/ci.yml` runs on pushes to `main`, on `v*` tags, and on
+manual dispatch. It is the packaging pipeline: Go tests with coverage, frontend
+and plugin builds, the signed Android APK, plugin shared objects, godoc, build
+artifacts, and the GHCR image push. None of that runs per pull request.
