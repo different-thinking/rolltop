@@ -1,7 +1,8 @@
 // File overview: Minimal leveled logging on top of the standard log package.
 // Debugf lines are suppressed unless the debug level is selected, so production
 // logs carry only operational messages while development keeps the verbose
-// plugin and unsubscribe traces.
+// plugin and unsubscribe traces. Errorf is the counterpart for failures and is
+// always written: no log level may hide why something went wrong.
 //
 // This package owns what a log level means. Nothing here reads the environment:
 // config.Load validates the operator's setting through ParseLevel and the
@@ -67,9 +68,21 @@ func Debugf(format string, args ...any) {
 	if !DebugEnabled() {
 		return
 	}
-	message := fmt.Sprintf(format, args...)
-	if strings.ContainsAny(message, "\r\n") {
-		message = strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(message)
+	log.Printf("debug %s", escapeLineSeparators(fmt.Sprintf(format, args...)))
+}
+
+// Errorf logs an operational failure with an "error " prefix. Unlike Debugf it
+// is always written: a failure the operator cannot see is the problem this
+// package exists to prevent, so there is no level that hides it. Line
+// separators are escaped for the same reason as in Debugf, which matters more
+// here because error messages carry request paths and remote server replies.
+func Errorf(format string, args ...any) {
+	log.Printf("error %s", escapeLineSeparators(fmt.Sprintf(format, args...)))
+}
+
+func escapeLineSeparators(message string) string {
+	if !strings.ContainsAny(message, "\r\n") {
+		return message
 	}
-	log.Printf("debug %s", message)
+	return strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(message)
 }

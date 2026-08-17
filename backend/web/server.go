@@ -26,6 +26,7 @@ import (
 	"rolltop/backend/config"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/googleauth"
+	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
@@ -508,7 +509,7 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	userIDs, err := s.store.ListUserIDsWithAccounts(r.Context())
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	type result struct {
@@ -577,7 +578,7 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if strings.TrimSpace(att.BlobPath) != "" {
@@ -599,7 +600,7 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	raw, err := s.rawMessageBytes(r.Context(), cu.User.ID, msg)
@@ -663,7 +664,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	file, err := s.blobs.OpenUserBlob(cu.User.ID, blobRec.Path)
@@ -678,7 +679,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		raw, err := s.rawMessageBytes(r.Context(), cu.User.ID, msg)
@@ -1040,7 +1041,7 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (currentUse
 	}
 	usersExist, err := s.usersExist(r.Context())
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return currentUser{}, false
 	}
 	if !usersExist {
@@ -1128,12 +1129,46 @@ func (s *Server) csrfForBase(base string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) serverError(w http.ResponseWriter, err error) {
-	if errors.Is(err, context.Canceled) {
+// serverError answers a handler failure and records its cause. Every internal
+// failure funnels through here, so this is the one place that decides what the
+// operator gets to see.
+func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) {
+	if isClientDisconnect(err) {
 		http.Error(w, "request canceled", http.StatusRequestTimeout)
 		return
 	}
+	logHandlerError(r, err)
 	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
+
+// apiError answers with a JSON API error and records the cause behind it. A
+// handler that maps a backend failure onto a status must use this rather than
+// writeAPIError, which knows only the message the client sees.
+func (s *Server) apiError(w http.ResponseWriter, r *http.Request, status int, message string, err error) {
+	logHandlerError(r, err)
+	writeAPIError(w, status, message)
+}
+
+// isClientDisconnect reports whether err is the ordinary result of a client
+// abandoning a request rather than a server-side failure. withCurrentUser
+// classifies session lookups the same way: a closed tab must not read like a
+// store failure in the operator log.
+func isClientDisconnect(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// logHandlerError records a handler failure together with the request that
+// produced it, so a single line names both the fault and the endpoint. Only the
+// path is logged: query strings carry search terms, which are mail content.
+func logHandlerError(r *http.Request, err error) {
+	if err == nil || isClientDisconnect(err) {
+		return
+	}
+	if r == nil {
+		logging.Errorf("server error: %v", err)
+		return
+	}
+	logging.Errorf("server error %s %s: %v", r.Method, r.URL.Path, err)
 }
 
 func methodNotAllowed(w http.ResponseWriter) {

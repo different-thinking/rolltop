@@ -1,11 +1,9 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +12,8 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+
+	"rolltop/internal/testlog"
 )
 
 type searchRepairBatchFetcher struct {
@@ -140,16 +140,7 @@ func TestRepairMailboxSearchIndexBatchFailureTripsRunBreaker(t *testing.T) {
 	fixture.service.Blobs = blob.New(dir)
 	fixture.service.Fetcher = fetcher
 
-	var logs bytes.Buffer
-	previousWriter, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
-	})
+	logs := testlog.Capture(t)
 
 	indexed, err := fixture.service.RepairMailboxSearchIndex(ctx, fixture.userID, fixture.source, 0, nil)
 	if err != nil {

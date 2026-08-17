@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -961,8 +962,11 @@ func TestSenderStatsRefreshPreservesNewGenerationRecoveryRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
+	// The runner legitimately re-runs the refresh once a newer generation
+	// recovery request lands, so the stub has to tolerate repeat calls.
+	var startOnce sync.Once
 	r.refreshSenderStatsForUser = func(context.Context, int64) error {
-		close(started)
+		startOnce.Do(func() { close(started) })
 		<-release
 		return nil
 	}

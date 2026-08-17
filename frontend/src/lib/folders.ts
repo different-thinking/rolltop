@@ -78,8 +78,32 @@ export function folderSortKey(mailbox: Mailbox): string {
   return `10:${mailbox.name}`;
 }
 
+/** folderTreeUnreadCount totals unread mail across folder subtrees, skipping junk and trash. */
+export function folderTreeUnreadCount(nodes: FolderNode[]): number {
+  let total = 0;
+  for (const node of nodes) {
+    if (node.mailbox.role === "junk" || node.mailbox.role === "trash") continue;
+    total += Math.max(0, node.mailbox.unread_count) + folderTreeUnreadCount(node.children);
+  }
+  return total;
+}
+
 /** nodeContainsMailbox checks whether a tree node contains the active mailbox ID. */
 export function nodeContainsMailbox(node: FolderNode, id: string | null): boolean {
   if (!id) return false;
   return String(node.mailbox.id) === id || node.children.some((child) => nodeContainsMailbox(child, id));
+}
+
+/** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */
+export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
+  return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");
+}
+
+/** trashMailboxesByAccount indexes each account's Trash-role mailbox by account ID. */
+export function trashMailboxesByAccount(mailboxes: Mailbox[]): Map<number, Mailbox> {
+  const byAccount = new Map<number, Mailbox>();
+  for (const mailbox of mailboxes) {
+    if (mailbox.role === "trash" && !byAccount.has(mailbox.account_id)) byAccount.set(mailbox.account_id, mailbox);
+  }
+  return byAccount;
 }
