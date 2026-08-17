@@ -852,6 +852,7 @@ function Sidebar({
   const activeMailbox = listRoute.mailboxID;
   const unarchivedActive = listRoute.view === "unarchived";
   const sentActive = listRoute.view === "sent";
+  const draftsActive = listRoute.view === "drafts";
   const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
   const snoozedActive = currentPath === "/snoozes";
   const accountGroups = useMemo(() => sidebarAccountGroups(mailboxes), [mailboxes]);
@@ -1076,6 +1077,14 @@ function Sidebar({
           onClick={(event) => open(event, "/mail/sent")}
         >
           <span className="folder-name"><Icon name="send" weight={sentActive ? "bold" : undefined} />Sent</span>
+        </a>
+        <a
+          href="/mail/drafts"
+          className={`folder ${draftsActive ? "active" : ""}`}
+          title="Drafts across every account"
+          onClick={(event) => open(event, "/mail/drafts")}
+        >
+          <span className="folder-name"><Icon name="draft" weight={draftsActive ? "bold" : undefined} />Drafts</span>
         </a>
     <a
       href="/snoozes"

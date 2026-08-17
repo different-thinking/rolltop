@@ -69,7 +69,7 @@ func TestSwipePreferencesAPIIsUserScopedAndValidatesArchiveFolders(t *testing.T)
 	valid := apiSwipePreferences{
 		LeftAction: "archive", LeftSnoozePreset: "later_today",
 		RightAction: "mark_unread", RightSnoozePreset: "next_week",
-		ArchiveMailboxes: []apiAccountMailboxChoice{{AccountID: ownerAccount.ID, MailboxID: ownerArchive.ID}},
+		ArchiveMailboxes: []apiSwipeArchiveMailbox{{AccountID: ownerAccount.ID, MailboxID: ownerArchive.ID}},
 	}
 	validBody, _ := json.Marshal(valid)
 	missingCSRF := httptest.NewRequest(http.MethodPost, "/api/profile/swipes", bytes.NewReader(validBody))
@@ -87,7 +87,7 @@ func TestSwipePreferencesAPIIsUserScopedAndValidatesArchiveFolders(t *testing.T)
 	}
 
 	foreign := valid
-	foreign.ArchiveMailboxes = []apiAccountMailboxChoice{{AccountID: otherAccount.ID, MailboxID: otherArchive.ID}}
+	foreign.ArchiveMailboxes = []apiSwipeArchiveMailbox{{AccountID: otherAccount.ID, MailboxID: otherArchive.ID}}
 	foreignBody, _ := json.Marshal(foreign)
 	foreignResponse := httptest.NewRecorder()
 	server.apiSwipePreferences(foreignResponse, authenticatedSwipePreferencesRequest(t, server, owner, http.MethodPost, foreignBody))

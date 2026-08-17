@@ -25,22 +25,17 @@ export type SwipeAction = "trash" | "archive" | "snooze" | "mark_read" | "mark_u
 
 export type SwipeSnoozePreset = "later_today" | "tomorrow" | "next_week";
 
-/** AccountMailboxChoice is one account's pick for a folder role the app assigns. */
-export type AccountMailboxChoice = {
+export type SwipeArchiveMailbox = {
   account_id: number;
   mailbox_id: number;
 };
-
-export type SwipeArchiveMailbox = AccountMailboxChoice;
 
 export type SwipePreferences = {
   left_action: SwipeAction;
   left_snooze_preset: SwipeSnoozePreset;
   right_action: SwipeAction;
   right_snooze_preset: SwipeSnoozePreset;
-  archive_mailboxes: AccountMailboxChoice[];
-  /** Per-account Sent folders; an account without one uses its detected Sent folder. */
-  sent_mailboxes: AccountMailboxChoice[];
+  archive_mailboxes: SwipeArchiveMailbox[];
 };
 
 /** Mailbox mirrors a folder summary row including sync, visibility, and indexing counters. */

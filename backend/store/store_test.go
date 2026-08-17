@@ -549,7 +549,15 @@ func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 	}
 }
 
-func TestSentViewFallsBackToRoleAndHonorsExplicitChoice(t *testing.T) {
+func messageIDsOf(messages []MessageRecord) []int64 {
+	ids := make([]int64, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	return ids
+}
+
+func TestRoleViewsReadTheFoldersCarryingThatRole(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
 	if err != nil {
@@ -557,23 +565,23 @@ func TestSentViewFallsBackToRoleAndHonorsExplicitChoice(t *testing.T) {
 	}
 	defer db.Close()
 	user, account, inbox, blob := testMailbox(t, ctx, db)
-	detected, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Sent")
+	sent, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Sent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detected.Role != "sent" {
-		t.Fatalf("Sent mailbox role = %q, want sent", detected.Role)
-	}
-	custom, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Gesendete Elemente")
+	drafts, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Drafts")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if sent.Role != "sent" || drafts.Role != "drafts" {
+		t.Fatalf("roles = %q/%q, want sent/drafts", sent.Role, drafts.Role)
 	}
 	base := time.Unix(1700000000, 0)
 	create := func(mailbox Mailbox, uid uint32, subject string) MessageRecord {
 		t.Helper()
 		message, err := db.CreateMessage(ctx, CreateMessage{
 			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
-			MessageIDHeader: fmt.Sprintf("<sent-%d@example.test>", uid), Subject: subject,
+			MessageIDHeader: fmt.Sprintf("<role-%d@example.test>", uid), Subject: subject,
 			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
 		})
 		if err != nil {
@@ -581,77 +589,56 @@ func TestSentViewFallsBackToRoleAndHonorsExplicitChoice(t *testing.T) {
 		}
 		return message
 	}
-	inboxMessage := create(inbox, 1, "Received")
-	detectedMessage := create(detected, 2, "Sent from detected folder")
-	customMessage := create(custom, 3, "Sent from custom folder")
+	received := create(inbox, 1, "Received")
+	sentMessage := create(sent, 2, "Sent")
+	draftMessage := create(drafts, 3, "Draft")
 
-	// No explicit choice: the folder sync recognized as Sent carries the view.
-	fallback, err := db.ListSentLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fallback) != 1 || fallback[0].ID != detectedMessage.ID {
-		t.Fatalf("fallback sent rows = %v, want only %d; inbox message was %d",
-			messageIDsOf(fallback), detectedMessage.ID, inboxMessage.ID)
+	for _, tt := range []struct {
+		role string
+		want int64
+	}{{role: "sent", want: sentMessage.ID}, {role: "drafts", want: draftMessage.ID}} {
+		t.Run(tt.role, func(t *testing.T) {
+			messages, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, tt.role, 10, 0, ThreadListNewestFirst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 || messages[0].ID != tt.want {
+				t.Fatalf("%s rows = %v, want only %d; the inbox message was %d",
+					tt.role, messageIDsOf(messages), tt.want, received.ID)
+			}
+			scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, tt.role, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scope) != 1 || scope[0].ID != tt.want {
+				t.Fatalf("%s scope = %+v, want only %d", tt.role, scope, tt.want)
+			}
+		})
 	}
 
-	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
-		UserID:     user.ID,
-		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
-		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
-		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: custom.ID}},
+	// Reassigning the role moves the view with it: the folder carries the role,
+	// so there is no second place where a stale choice could linger.
+	if err := db.UpdateMailboxSettings(ctx, user.ID, sent.ID, MailboxSettings{
+		SyncMode: sent.SyncMode, Role: "", Icon: "folder", ShowInSidebar: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	// An explicit choice replaces the detected folder rather than adding to it.
-	chosen, err := db.ListSentLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chosen) != 1 || chosen[0].ID != customMessage.ID {
-		t.Fatalf("chosen sent rows = %v, want only %d", messageIDsOf(chosen), customMessage.ID)
-	}
-	scope, err := db.ListSentMailScopeMessagesForUser(ctx, user.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(scope) != 1 || scope[0].ID != customMessage.ID {
-		t.Fatalf("sent scope = %+v, want only %d", scope, customMessage.ID)
-	}
-
-	// The saved choice round-trips, and the Sent folder stays a legal pick.
-	saved, err := db.GetSwipePreferences(ctx, user.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(saved.SentMailboxes) != 1 || saved.SentMailboxes[0].MailboxID != custom.ID {
-		t.Fatalf("saved sent mailboxes = %+v, want the custom folder %d", saved.SentMailboxes, custom.ID)
-	}
-	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
-		UserID:     user.ID,
-		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
-		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
-		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: detected.ID}},
+	if err := db.UpdateMailboxSettings(ctx, user.ID, inbox.ID, MailboxSettings{
+		SyncMode: inbox.SyncMode, Role: "sent", Icon: "send", ShowInSidebar: true,
 	}); err != nil {
-		t.Fatalf("choosing the detected Sent folder must stay valid: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
-		UserID:     user.ID,
-		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
-		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
-		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: inbox.ID}},
-	}); !errors.Is(err, ErrInvalidSwipePreferences) {
-		t.Fatalf("choosing the Inbox as Sent = %v, want ErrInvalidSwipePreferences", err)
+	moved, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, "sent", 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
+	if len(moved) != 1 || moved[0].ID != received.ID {
+		t.Fatalf("sent rows after reassigning the role = %v, want only %d", messageIDsOf(moved), received.ID)
+	}
 
-func messageIDsOf(messages []MessageRecord) []int64 {
-	ids := make([]int64, 0, len(messages))
-	for _, msg := range messages {
-		ids = append(ids, msg.ID)
+	if _, err := db.RoleMailboxIDsForUser(ctx, user.ID, "nonsense"); err == nil {
+		t.Fatal("an unsupported role must not resolve to a folder set")
 	}
-	return ids
 }
 
 func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {

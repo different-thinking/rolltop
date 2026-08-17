@@ -313,24 +313,21 @@ func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mai
 	return scanScopeMessages(rows)
 }
 
-// SentMailboxIDsForUser resolves the folders the global Sent view reads. An
-// account's explicitly chosen Sent folder wins; an account without a usable
-// choice falls back to the folder sync gave the sent role, so the view is
-// populated before anyone opens settings. A choice whose folder has since taken
-// on another role stops counting and the account falls back with it.
-func (s *Store) SentMailboxIDsForUser(ctx context.Context, userID int64) ([]int64, error) {
+// RoleMailboxIDsForUser lists every folder carrying one mailbox role across all
+// of a user's accounts. A role is unique per account and is set on the folder
+// itself, so this is the configured answer to which folder holds an account's
+// sent mail or drafts rather than a guess made per view.
+func (s *Store) RoleMailboxIDsForUser(ctx context.Context, userID int64, role string) ([]int64, error) {
+	normalized := normalizeMailboxRole(role)
+	if normalized == "" {
+		return nil, fmt.Errorf("list role mailboxes: unsupported role %q", role)
+	}
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT mb.id
-		FROM mailboxes mb
-		LEFT JOIN sent_mailboxes sm ON sm.user_id = mb.user_id AND sm.account_id = mb.account_id
-		LEFT JOIN mailboxes chosen ON chosen.user_id = sm.user_id AND chosen.id = sm.mailbox_id
-			AND chosen.role IN ('sent', '')
-		WHERE mb.user_id = ?
-			AND CASE WHEN chosen.id IS NULL THEN mb.role = 'sent' ELSE mb.id = chosen.id END
-		ORDER BY mb.id`, userID)
+	rows, err := db.QueryContext(ctx, `SELECT id FROM mailboxes
+		WHERE user_id = ? AND role = ? ORDER BY id`, userID, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -346,10 +343,10 @@ func (s *Store) SentMailboxIDsForUser(ctx context.Context, userID int64) ([]int6
 	return ids, rows.Err()
 }
 
-// ListSentMailScopeMessagesForUser lists what a Sent selection covers, so a
-// whole-view delete from the Sent list reaches exactly the rows it shows.
-func (s *Store) ListSentMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
-	mailboxIDs, err := s.SentMailboxIDsForUser(ctx, userID)
+// ListRoleMailScopeMessagesForUser lists what a whole-view selection over a
+// role covers, so a delete from a role view reaches exactly the rows it shows.
+func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int64, role string, limit int) ([]ScopeMessage, error) {
+	mailboxIDs, err := s.RoleMailboxIDsForUser(ctx, userID, role)
 	if err != nil || len(mailboxIDs) == 0 {
 		return nil, err
 	}
@@ -508,12 +505,12 @@ func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, 
 	return scanMessages(rows)
 }
 
-// ListSentLatestThreadMessagesForUser renders the global Sent view: one row per
-// conversation across every account's Sent folder. Unlike All Mail it ignores
-// show_in_all_mail, because hiding Sent from the combined list is not a reason
-// to empty the list built specifically from it.
-func (s *Store) ListSentLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
-	mailboxIDs, err := s.SentMailboxIDsForUser(ctx, userID)
+// ListRoleLatestThreadMessagesForUser renders a global role view such as Sent
+// or Drafts: one row per conversation across every account's folder for that
+// role. Unlike All Mail it ignores show_in_all_mail, because keeping a folder
+// out of the combined list is no reason to empty the list made from it.
+func (s *Store) ListRoleLatestThreadMessagesForUser(ctx context.Context, userID int64, role string, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
+	mailboxIDs, err := s.RoleMailboxIDsForUser(ctx, userID, role)
 	if err != nil || len(mailboxIDs) == 0 {
 		return nil, err
 	}

@@ -57,7 +57,6 @@ func TestSwipePreferencesDefaultsAndRoundTrip(t *testing.T) {
 			{AccountID: firstAccount.ID, MailboxID: firstArchive.ID},
 			{AccountID: secondAccount.ID, MailboxID: secondArchive.ID},
 		},
-		SentMailboxes: []SentMailbox{},
 	}
 	if !reflect.DeepEqual(saved, want) {
 		t.Fatalf("saved swipe preferences = %+v, want %+v", saved, want)

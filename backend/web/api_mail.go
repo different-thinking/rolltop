@@ -21,14 +21,28 @@ const (
 	mailViewAll        mailView = ""
 	mailViewUnarchived mailView = "unarchived"
 	mailViewSent       mailView = "sent"
+	mailViewDrafts     mailView = "drafts"
 )
+
+// role maps the views that are simply "every folder carrying this role" onto
+// that role. An empty result means the view is built some other way.
+func (v mailView) role() string {
+	switch v {
+	case mailViewSent:
+		return "sent"
+	case mailViewDrafts:
+		return "drafts"
+	default:
+		return ""
+	}
+}
 
 // parseMailView resolves a view name. The bool reports whether the value names
 // a list this server can render: an unknown name is a request for a view that
 // does not exist rather than a silent fall back to All Mail.
 func parseMailView(raw string) (mailView, bool) {
 	switch view := mailView(strings.ToLower(strings.TrimSpace(raw))); view {
-	case mailViewAll, mailViewUnarchived, mailViewSent:
+	case mailViewAll, mailViewUnarchived, mailViewSent, mailViewDrafts:
 		return view, true
 	default:
 		return mailViewAll, false
@@ -135,11 +149,11 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		hydrateDone()
 	} else {
 		hydrateDone := timing.measure(&timing.hydrate)
-		switch view {
-		case mailViewUnarchived:
+		switch role := view.role(); {
+		case role != "":
+			messages, err = s.store.ListRoleLatestThreadMessagesForUser(ctx, user.ID, role, fetchLimit, offset, order)
+		case view == mailViewUnarchived:
 			messages, err = s.store.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
-		case mailViewSent:
-			messages, err = s.store.ListSentLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		default:
 			messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		}

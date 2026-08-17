@@ -190,30 +190,49 @@ func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 	}
 }
 
-func TestScopeTrashPlanSentCoversOnlySentFolders(t *testing.T) {
+func TestScopeTrashPlanRoleViewsCoverOnlyTheirRoleFolders(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	tenant := newScopeTestTenant(t, ctx, db, "scope-sent@example.test")
+	tenant := newScopeTestTenant(t, ctx, db, "scope-roles@example.test")
 	sent, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Sent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	received := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, 701, "")
-	sentMessage := createScopeTestMessage(t, ctx, db, tenant, sent, 702, "")
-	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
-
-	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: mailViewSent})
+	drafts, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Drafts")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := planMessageIDs(plan)
-	if plan.Matched != 1 || len(ids) != 1 || ids[0] != sentMessage.ID {
-		t.Fatalf("sent plan = matched %d ids %v, want only the sent message %d; inbox message was %d",
-			plan.Matched, ids, sentMessage.ID, received.ID)
+	if sent.Role != "sent" || drafts.Role != "drafts" {
+		t.Fatalf("roles = %q/%q, want sent/drafts", sent.Role, drafts.Role)
+	}
+	received := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, 701, "")
+	sentMessage := createScopeTestMessage(t, ctx, db, tenant, sent, 702, "")
+	draftMessage := createScopeTestMessage(t, ctx, db, tenant, drafts, 703, "")
+
+	for _, tt := range []struct {
+		name string
+		view mailView
+		want int64
+	}{
+		{name: "sent", view: mailViewSent, want: sentMessage.ID},
+		{name: "drafts", view: mailViewDrafts, want: draftMessage.ID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+			plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: tt.view})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := planMessageIDs(plan)
+			if plan.Matched != 1 || len(ids) != 1 || ids[0] != tt.want {
+				t.Fatalf("%s plan = matched %d ids %v, want only %d; the inbox message was %d",
+					tt.name, plan.Matched, ids, tt.want, received.ID)
+			}
+		})
 	}
 }
 

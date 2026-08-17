@@ -12,7 +12,7 @@ import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { isArchiveMailboxChoice, sentMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
+import { isArchiveMailboxChoice, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -130,23 +130,24 @@ export function MailView({
     setSortOrder(loadMailSortOrder(userID));
   }
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
-  // Each named view counts the folders it actually reads: Unarchived is All Mail
-  // minus every account's chosen Archive folder, and Sent counts only the
-  // folders resolved as Sent, mirroring how the server builds each list.
+  // Each named view counts the folders it actually reads, mirroring how the
+  // server builds it: Sent and Drafts are the folders carrying that role, and
+  // Unarchived is All Mail minus every account's chosen Archive folder.
   const archiveMailboxIDs = new Set(swipePreferences.archive_mailboxes.map((item) => item.mailbox_id));
-  const sentMailboxIDSet = useMemo(
-    () => sentMailboxIDs(mailboxes, swipePreferences.sent_mailboxes || []),
-    [mailboxes, swipePreferences.sent_mailboxes]
+  const viewRole = view === "sent" ? "sent" : view === "drafts" ? "drafts" : "";
+  const roleMailboxIDSet = useMemo(
+    () => viewRole ? roleMailboxIDs(mailboxes, viewRole) : new Set<number>(),
+    [mailboxes, viewRole]
   );
   const viewMailboxes = mailboxes.filter((item) => {
-    if (view === "sent") return sentMailboxIDSet.has(item.id);
+    if (viewRole) return roleMailboxIDSet.has(item.id);
     if (item.show_in_all_mail === false) return false;
     return view !== "unarchived" || !archiveMailboxIDs.has(item.id);
   });
   const totalCount = mailbox
     ? mailbox.message_count
     : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
-  const viewLabel = view === "unarchived" ? "Unarchived" : view === "sent" ? "Sent" : "All Mail";
+  const viewLabel = view === "unarchived" ? "Unarchived" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the
@@ -445,8 +446,8 @@ export function MailView({
                 currentMailboxID={mailbox?.id || 0}
                 swipePreferences={swipePreferences}
                 highlightMessageIDs={newMessageIDs}
-                showRecipients={view === "sent" || mailbox?.role === "sent" || mailbox?.role === "drafts"}
-                openAsDraft={mailbox?.role === "drafts"}
+                showRecipients={Boolean(viewRole) || mailbox?.role === "sent" || mailbox?.role === "drafts"}
+                openAsDraft={view === "drafts" || mailbox?.role === "drafts"}
                 datePrefs={datePrefs}
                 returnURL={mailURL(mailboxID, page, view)}
                 navigate={navigate}

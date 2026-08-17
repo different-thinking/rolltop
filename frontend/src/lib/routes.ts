@@ -32,9 +32,9 @@ function decodePathSegment(value = ""): string {
  * MailView names a whole-account list. All Mail is the unnamed default; the
  * others live under /mail/<view> and never combine with a single mailbox.
  */
-export type MailView = "" | "unarchived" | "sent";
+export type MailView = "" | "unarchived" | "sent" | "drafts";
 
-const mailViews: MailView[] = ["unarchived", "sent"];
+const mailViews: MailView[] = ["unarchived", "sent", "drafts"];
 
 /** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
 export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {
