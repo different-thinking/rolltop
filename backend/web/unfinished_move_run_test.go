@@ -4,6 +4,9 @@
 package web
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,77 +14,144 @@ import (
 	"rolltop/backend/syncer"
 )
 
-func moveRun(id int64, status, errText string, age time.Duration) store.SyncRun {
+func moveRun(status, errText string, age time.Duration) store.SyncRun {
 	return store.SyncRun{
-		ID: id, Status: status, Error: errText,
+		ID: 7, Status: status, Error: errText,
 		LatestNewFrom: syncer.MoveSyncRunMarker,
 		UpdatedAt:     time.Now().Add(-age),
 	}
 }
 
-func mirrorRun(id int64, status string, age time.Duration) store.SyncRun {
-	return store.SyncRun{ID: id, Status: status, CurrentMailbox: "INBOX", UpdatedAt: time.Now().Add(-age)}
-}
-
-func TestNewestUnfinishedMoveRun(t *testing.T) {
-	failed := moveRun(7, "failed", "Moved 0 of 3700 messages; 1 could not be moved.", time.Minute)
-
+func TestUnfinishedMoveRun(t *testing.T) {
 	for name, testCase := range map[string]struct {
-		// ListSyncRunsForUser orders running runs first and then by updated_at
-		// descending, so the input order deliberately does not match age.
-		runs []store.SyncRun
-		want int64
+		run    store.SyncRun
+		report bool
 	}{
-		// A finished move queues the mailbox refresh that supersedes it, so the
-		// newest run is never the failed move by the time anyone looks.
-		"refresh run supersedes the failed move": {
-			runs: []store.SyncRun{mirrorRun(8, "ok", time.Second), failed},
-			want: 7,
+		"a move that left messages behind": {
+			run:    moveRun("failed", "Moved 0 of 3700 messages; 1 could not be moved.", time.Minute),
+			report: true,
 		},
-		"running refresh sorts ahead of the failed move": {
-			runs: []store.SyncRun{mirrorRun(9, "running", 5*time.Minute), failed},
-			want: 7,
+		"an interrupted move that says what it left": {
+			run:    moveRun("interrupted", "Server stopped before this move finished.", time.Minute),
+			report: true,
 		},
-		"failed move alone": {
-			runs: []store.SyncRun{failed},
-			want: 7,
-		},
-		"a later successful move clears it": {
-			runs: []store.SyncRun{moveRun(8, "ok", "", time.Second), failed},
-			want: 0,
+		"a move that succeeded": {
+			run:    moveRun("ok", "", time.Second),
+			report: false,
 		},
 		"a move still running reports itself through progress": {
-			runs: []store.SyncRun{moveRun(8, "running", "", 0), failed},
-			want: 0,
+			run:    moveRun("running", "", 0),
+			report: false,
 		},
 		"a stale failure is no longer worth reporting": {
-			runs: []store.SyncRun{moveRun(8, "failed", "left behind", 48*time.Hour)},
-			want: 0,
+			run:    moveRun("failed", "left behind", 48*time.Hour),
+			report: false,
 		},
-		"an interrupted move without detail says nothing useful": {
-			runs: []store.SyncRun{moveRun(8, "interrupted", "  ", time.Minute)},
-			want: 0,
-		},
-		"no moves at all": {
-			runs: []store.SyncRun{mirrorRun(8, "ok", time.Second), mirrorRun(9, "failed", time.Minute)},
-			want: 0,
-		},
-		"no runs at all": {
-			runs: nil,
-			want: 0,
+		"a failure without detail says nothing useful": {
+			run:    moveRun("failed", "  ", time.Minute),
+			report: false,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := newestUnfinishedMoveRun(testCase.runs)
-			if testCase.want == 0 {
-				if got != nil {
-					t.Fatalf("reported run %d, want none", got.ID)
-				}
-				return
-			}
-			if got == nil || got.ID != testCase.want {
-				t.Fatalf("reported run = %v, want %d", got, testCase.want)
+			got := unfinishedMoveRun(testCase.run)
+			if testCase.report != (got != nil) {
+				t.Fatalf("reported = %v, want reported = %t", got, testCase.report)
 			}
 		})
+	}
+}
+
+// The recent-activity feed is bounded and collapses runs, so the move cannot be
+// picked out of it: a busy account outruns that window well inside the day this
+// notice covers, and the delete the user is waiting on would quietly stop being
+// reported.
+func TestUnfinishedMoveRunSurvivesLaterSyncActivity(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "unfinished-move@example.test", "Unfinished Move", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Email: "unfinished-move@example.test", Host: "imap.example.test", Port: 993,
+		Username: "unfinished-move", EncryptedPassword: "encrypted-test-value", UseTLS: true,
+		Mailbox: store.DefaultMailboxPattern,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := db.CreateSyncRun(ctx, user.ID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishSyncRun(ctx, user.ID, failed.ID, "failed", store.SyncProgress{
+		MessagesTotal: 3700, MessagesSeen: 3700, MessagesStored: 3699, MessagesSkipped: 1,
+		LatestNewFrom: syncer.MoveSyncRunMarker, LatestNewSubject: "Moving messages",
+	}, "Moved 3699 of 3700 messages; 1 could not be moved."); err != nil {
+		t.Fatal(err)
+	}
+
+	// Far more ordinary sync activity than the recent feed keeps.
+	for i := 0; i < 60; i++ {
+		run, err := db.CreateSyncRun(ctx, user.ID, account.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.FinishSyncRun(ctx, user.ID, run.ID, "ok", store.SyncProgress{
+			MessagesStored: 1, NewMessages: 1, CurrentMailbox: fmt.Sprintf("Folder %d", i),
+		}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newest, err := db.LatestSyncRunWithMarkerForUser(ctx, user.ID, syncer.MoveSyncRunMarker)
+	if err != nil {
+		t.Fatalf("newest move run: %v", err)
+	}
+	if newest.ID != failed.ID {
+		t.Fatalf("newest move run = %d, want the failed move %d", newest.ID, failed.ID)
+	}
+	if unfinishedMoveRun(newest) == nil {
+		t.Fatal("the failed move stopped being reported once other sync activity buried it")
+	}
+
+	// A later move that succeeded is what clears it, not unrelated activity.
+	done, err := db.CreateSyncRun(ctx, user.ID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishSyncRun(ctx, user.ID, done.ID, "ok", store.SyncProgress{
+		MessagesTotal: 4, MessagesSeen: 4, MessagesStored: 4, LatestNewFrom: syncer.MoveSyncRunMarker,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	newest, err = db.LatestSyncRunWithMarkerForUser(ctx, user.ID, syncer.MoveSyncRunMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unfinishedMoveRun(newest) != nil {
+		t.Fatal("a later successful move did not clear the notice")
+	}
+}
+
+// A user who has never moved anything has nothing to report rather than an error.
+func TestUnfinishedMoveRunWithoutAnyMoves(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "no-moves@example.test", "No Moves", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.LatestSyncRunWithMarkerForUser(ctx, user.ID, syncer.MoveSyncRunMarker); !store.IsNotFound(err) {
+		t.Fatalf("newest move run error = %v, want not found", err)
 	}
 }

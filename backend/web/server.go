@@ -780,7 +780,12 @@ func (s *Server) loadMailboxChrome(ctx context.Context, userID int64, data *view
 				data.ActiveSyncRuns = append(data.ActiveSyncRuns, run)
 			}
 		}
-		data.UnfinishedMoveRun = newestUnfinishedMoveRun(runs)
+	}
+	// Looked up on its own rather than picked out of the bounded feed above: a
+	// busy account produces more than that feed holds within the day this notice
+	// covers, and the run would silently drop out of it.
+	if run, err := s.store.LatestSyncRunWithMarkerForUser(ctx, userID, syncer.MoveSyncRunMarker); err == nil {
+		data.UnfinishedMoveRun = unfinishedMoveRun(run)
 	}
 	if s.syncRunner != nil {
 		data.SyncRunning = s.syncRunner.IsRunning(userID)
@@ -792,31 +797,18 @@ func (s *Server) loadMailboxChrome(ctx context.Context, userID int64, data *view
 // for a delete the user has long since dealt with is just noise.
 const unfinishedMoveRunMaxAge = 24 * time.Hour
 
-// newestUnfinishedMoveRun picks the move run to tell the user about: the most
-// recent one, and only when it ended having left messages behind. A move still
-// running reports itself through the ordinary progress display, and a later move
-// that succeeded means there is nothing outstanding to report.
-func newestUnfinishedMoveRun(runs []store.SyncRun) *store.SyncRun {
-	var newest *store.SyncRun
-	for i := range runs {
-		run := runs[i]
-		if strings.TrimSpace(run.LatestNewFrom) != syncer.MoveSyncRunMarker {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(run.Status), "running") {
-			return nil
-		}
-		if newest == nil || run.UpdatedAt.After(newest.UpdatedAt) {
-			newest = &runs[i]
-		}
-	}
-	if newest == nil || strings.EqualFold(strings.TrimSpace(newest.Status), "ok") {
+// unfinishedMoveRun decides whether the newest move is worth telling the user
+// about. A move still running reports itself through the ordinary progress
+// display, and a newest move that succeeded means nothing is outstanding.
+func unfinishedMoveRun(run store.SyncRun) *store.SyncRun {
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	if status == "running" || status == "ok" {
 		return nil
 	}
-	if strings.TrimSpace(newest.Error) == "" || time.Since(newest.UpdatedAt) > unfinishedMoveRunMaxAge {
+	if strings.TrimSpace(run.Error) == "" || time.Since(run.UpdatedAt) > unfinishedMoveRunMaxAge {
 		return nil
 	}
-	return newest
+	return &run
 }
 
 func (s *Server) maybeRefreshMailboxStatuses(userID int64, boxes []store.MailboxSummary) {

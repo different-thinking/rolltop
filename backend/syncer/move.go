@@ -97,8 +97,12 @@ func (s *Service) StartMoveMessages(ctx context.Context, userID int64, messageID
 func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, executor *moveSessionExecutor, onDone func()) {
 	status := "ok"
 	errText := ""
-	defer executor.close()
 	defer func() {
+		// Give the held connection back before the run reports completion.
+		// Finishing releases the caller's foreground reservation and queues the
+		// destination refresh, and neither should open a second connection to
+		// this account while this run still owns one.
+		executor.close()
 		if ctx.Err() != nil && status == "ok" {
 			status = "interrupted"
 			errText = "Server stopped before this move finished."
