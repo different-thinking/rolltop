@@ -26,4 +26,16 @@ func TestUser031IsLatestRegisteredUserMigration(t *testing.T) {
 		}
 		seen[set.Version] = true
 	}
+	// The legacy fixture applies a frozen prefix of this list to build a v21
+	// database. If it ever stops being a prefix, the upgrade tests would be
+	// migrating from a schema the app never actually shipped.
+	legacy := legacyUserMigrationSetsThroughV21()
+	if len(legacy) > len(sets) {
+		t.Fatalf("legacy prefix has %d sets, more than the %d registered", len(legacy), len(sets))
+	}
+	for i, set := range legacy {
+		if sets[i].Version != set.Version {
+			t.Fatalf("registered migration %d = %q, want the legacy prefix entry %q", i, sets[i].Version, set.Version)
+		}
+	}
 }

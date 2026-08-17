@@ -696,7 +696,8 @@ export default function App() {
           build_commit: chrome.build_commit ?? current.build_commit,
           public_site_url: chrome.public_site_url || current.public_site_url,
           mail_generation: chrome.mail_generation ?? current.mail_generation,
-          swipe_preferences: chrome.swipe_preferences || current.swipe_preferences
+          swipe_preferences: chrome.swipe_preferences || current.swipe_preferences,
+          effective_archive_mailboxes: chrome.effective_archive_mailboxes || current.effective_archive_mailboxes
         } : current);
         if (chrome.latest_sync_run) {
           const previous = lastNotify.current;

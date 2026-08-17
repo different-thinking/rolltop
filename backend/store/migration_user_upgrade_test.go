@@ -524,20 +524,11 @@ func legacyUserMigrationSetsThroughV21() []migrationSet {
 	}
 }
 
+// currentUserMigrationSetsForUpgradeTest returns the registrations migrate()
+// actually applies, so the upgrade assertions cover every user migration
+// without a second list that can drift out of step with it.
 func currentUserMigrationSetsForUpgradeTest() []migrationSet {
-	sets := legacyUserMigrationSetsThroughV21()
-	return append(sets,
-		userInboxArrivalClassificationMigrationSet(),
-		userMailboxGenerationArrivalJournalMigrationSet(),
-		userTransferDispatchRecoveryMigrationSet(),
-		userBlobCleanupQueueMigrationSet(),
-		userMailboxGenerationArrivalFloorMigrationSet(),
-		userMessageImportCompletionMigrationSet(),
-		userSearchProgressIndexMigrationSet(),
-		userGoogleConnectionMigrationSet(),
-		userGoogleMailAccountMigrationSet(),
-		userIdentityArchiveMailboxMigrationSet(),
-	)
+	return userMigrationSets()
 }
 
 func currentSystemMigrationSetsForUpgradeTest() []migrationSet {

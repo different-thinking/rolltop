@@ -660,6 +660,82 @@ func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
 	}
 }
 
+// A role view spans every account the user owns, and never another user's.
+func TestRoleViewsSpanAccountsAndStayTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, firstAccount, _, blob := testMailbox(t, ctx, db)
+	secondAccount, err := db.UpsertMailAccount(ctx, MailAccount{
+		UserID: user.ID, Email: "second@example.test", Host: "imap.example.test", Port: 993,
+		Username: "second", EncryptedPassword: "secret", UseTLS: true, Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1700000000, 0)
+	sendFrom := func(accountID int64, uid uint32) MessageRecord {
+		t.Helper()
+		mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, accountID, "Sent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: accountID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<span-%d@example.test>", uid), Subject: "Sent",
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	first := sendFrom(firstAccount.ID, 1)
+	second := sendFrom(secondAccount.ID, 2)
+
+	rows, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, "sent", 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := messageIDsOf(rows)
+	if len(got) != 2 || !slices.Contains(got, first.ID) || !slices.Contains(got, second.ID) {
+		t.Fatalf("sent rows = %v, want both accounts: %d and %d", got, first.ID, second.ID)
+	}
+	scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, "sent", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 2 {
+		t.Fatalf("sent scope = %+v, want both accounts' messages", scope)
+	}
+
+	other, err := db.CreateUser(ctx, "role-other@example.test", "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAccount, err := db.UpsertMailAccount(ctx, MailAccount{
+		UserID: other.ID, Email: "role-other@example.test", Host: "imap.example.test", Port: 993,
+		Username: "other", EncryptedPassword: "secret", UseTLS: true, Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSent, err := db.GetOrCreateMailbox(ctx, other.ID, otherAccount.ID, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := db.RoleMailboxIDsForUser(ctx, user.ID, "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(ids, otherSent.ID) {
+		t.Fatalf("sent folders = %v, must not include another tenant's folder %d", ids, otherSent.ID)
+	}
+}
+
 func messageIDsOf(messages []MessageRecord) []int64 {
 	ids := make([]int64, 0, len(messages))
 	for _, msg := range messages {

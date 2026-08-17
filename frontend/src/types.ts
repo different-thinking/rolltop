@@ -545,6 +545,7 @@ export type ChromeEvent = {
   sync_running: boolean;
   mail_generation: number;
   swipe_preferences?: SwipePreferences;
+  effective_archive_mailboxes?: AccountMailboxChoice[];
   server_started_at?: string;
   server_uptime_seconds?: number;
   build_version?: string;

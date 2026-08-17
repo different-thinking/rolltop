@@ -97,18 +97,11 @@ type migrationStep struct {
 	Run   func(context.Context, *Store) error
 }
 
-// migrate chooses the schema family for this SQLite handle. Split server
-// stores run only system migrations; user stores run only user migrations; unit
-// tests using Open run both against a single database for convenience.
-func (s *Store) migrate(ctx context.Context, kind schemaKind, progress MigrationReporter) error {
-	sets := make([]migrationSet, 0, 2)
-	systemSets := []migrationSet{
-		systemMigrationSet(),
-		systemUserSearchPreferencesMigrationSet(),
-		systemUserSearchRankingMigrationSet(),
-		systemPasswordResetMigrationSet(),
-	}
-	userSets := []migrationSet{
+// userMigrationSets is the single registration list for the per-user schema.
+// The upgrade test asserts against this same slice, so a migration added here
+// cannot quietly escape the checks that cover the upgrade path.
+func userMigrationSets() []migrationSet {
+	return []migrationSet{
 		userMigrationSet(),
 		userBackupEmailMigrationSet(),
 		userSearchPreferencesMigrationSet(),
@@ -138,6 +131,20 @@ func (s *Store) migrate(ctx context.Context, kind schemaKind, progress Migration
 		userGoogleMailAccountMigrationSet(),
 		userIdentityArchiveMailboxMigrationSet(),
 	}
+}
+
+// migrate chooses the schema family for this SQLite handle. Split server
+// stores run only system migrations; user stores run only user migrations; unit
+// tests using Open run both against a single database for convenience.
+func (s *Store) migrate(ctx context.Context, kind schemaKind, progress MigrationReporter) error {
+	sets := make([]migrationSet, 0, 2)
+	systemSets := []migrationSet{
+		systemMigrationSet(),
+		systemUserSearchPreferencesMigrationSet(),
+		systemUserSearchRankingMigrationSet(),
+		systemPasswordResetMigrationSet(),
+	}
+	userSets := userMigrationSets()
 	switch kind {
 	case schemaSystem:
 		sets = append(sets, systemSets...)
