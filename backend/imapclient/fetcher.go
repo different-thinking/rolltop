@@ -24,6 +24,7 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
+	"rolltop/backend/xoauth2"
 )
 
 const (
@@ -39,6 +40,18 @@ type Fetcher struct {
 	MasterKey []byte
 	Timeout   time.Duration
 	BatchSize uint32
+	// Tokens mints Google access tokens for accounts that authenticate with
+	// OAuth. It is an interface rather than the manager itself so this package
+	// stays independent of the OAuth implementation and can be tested without
+	// one. A nil value only fails accounts that actually need it.
+	Tokens TokenSource
+}
+
+// TokenSource is the slice of the Google manager that IMAP authentication
+// needs.
+type TokenSource interface {
+	AccessToken(ctx context.Context, userID, connectionID int64) (string, error)
+	ForceRefresh(ctx context.Context, userID, connectionID int64) (string, error)
 }
 
 // ServerCapabilities contains the authenticated IMAP extensions used by
@@ -1257,13 +1270,85 @@ func stopIdleSession(stop chan struct{}, done <-chan error, terminate func() err
 	}
 }
 
-// login decrypts the IMAP password at the last possible moment, opens TLS/plain
-// transport according to account settings, and returns an authenticated client.
+// login authenticates an account with whichever credential it is configured
+// for. Both paths obtain the secret at the last possible moment: a password is
+// decrypted here, and an access token is minted here, so neither sits in memory
+// while a connection is merely being considered.
 func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
+	if account.UsesGoogleOAuth() {
+		return f.loginWithGoogleToken(account)
+	}
 	password, err := mmcrypto.DecryptString(f.MasterKey, account.EncryptedPassword)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt IMAP password: %w", err)
 	}
+	return f.connectAndAuthenticate(account, func(c *client.Client) error {
+		return c.Login(account.Username, password)
+	})
+}
+
+// loginWithGoogleToken retries once against a forcibly refreshed token. The
+// stored token can be rejected while still looking valid here — a revoked scope,
+// a password change, or plain clock skew all produce a token this side believes
+// in and Google does not — and one extra round trip is cheaper than failing a
+// whole sync run.
+func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Client, error) {
+	if f.Tokens == nil {
+		return nil, fmt.Errorf("%w: account %d", ErrNoTokenSource, account.ID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), f.commandTimeout())
+	defer cancel()
+	token, err := f.Tokens.AccessToken(ctx, account.UserID, account.GoogleConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("obtain google access token: %w", err)
+	}
+	c, err := f.connectAndAuthenticate(account, authenticateXOAUTH2(account, token))
+	if err == nil {
+		return c, nil
+	}
+	var authFailure authenticationError
+	if !errors.As(err, &authFailure) {
+		return nil, err
+	}
+	refreshed, refreshErr := f.Tokens.ForceRefresh(ctx, account.UserID, account.GoogleConnectionID)
+	if refreshErr != nil {
+		// The original rejection describes the account better than a refresh
+		// failure that is itself only a symptom of it.
+		return nil, err
+	}
+	if refreshed == token {
+		return nil, err
+	}
+	return f.connectAndAuthenticate(account, authenticateXOAUTH2(account, refreshed))
+}
+
+func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client) error {
+	return func(c *client.Client) error {
+		supported, err := c.SupportAuth(xoauth2.Mechanism)
+		if err != nil {
+			return err
+		}
+		if !supported {
+			return fmt.Errorf("%w for %s", xoauth2.ErrUnsupported, account.Host)
+		}
+		return c.Authenticate(xoauth2.NewSASLClient(account.Username, token))
+	}
+}
+
+// ErrNoTokenSource reports that an OAuth account was reached by a fetcher that
+// was never wired to the Google manager. That is a wiring mistake, not a user
+// error, so it is named rather than reported as a login failure.
+var ErrNoTokenSource = errors.New("this fetcher cannot mint Google access tokens")
+
+// authenticationError marks the credential exchange specifically, so a retry
+// with a fresh token is not spent on a server that was simply unreachable.
+type authenticationError struct{ err error }
+
+func (e authenticationError) Error() string { return e.err.Error() }
+func (e authenticationError) Unwrap() error { return e.err }
+
+func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate func(*client.Client) error) (*client.Client, error) {
+	var err error
 	addr := net.JoinHostPort(account.Host, fmt.Sprintf("%d", account.Port))
 	timeout := f.commandTimeout()
 
@@ -1294,9 +1379,9 @@ func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
 		}
 	}
 	c.Timeout = timeout
-	if err := c.Login(account.Username, password); err != nil {
+	if err := authenticate(c); err != nil {
 		terminateClient(c)
-		return nil, fmt.Errorf("login to IMAP server %s: %w", addr, err)
+		return nil, authenticationError{fmt.Errorf("login to IMAP server %s: %w", addr, err)}
 	}
 	return c, nil
 }

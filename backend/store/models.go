@@ -55,22 +55,50 @@ type MailAccount struct {
 	SMTPUseTLS            bool
 	Mailbox               string
 	SyncIntervalMinutes   int
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	// AuthType selects between a stored password and a token minted from
+	// GoogleConnectionID. It is not derived from the host, because a Gmail
+	// address can legitimately still be reached with an app password.
+	AuthType           string
+	GoogleConnectionID int64
+	// SyncStartAt drops messages delivered before this instant from every fetch.
+	// The zero time mirrors whatever the server offers, which is what every
+	// account created before this field existed does.
+	SyncStartAt time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// Authentication methods a mail or SMTP account can use.
+const (
+	AuthTypePassword    = "password"
+	AuthTypeGoogleOAuth = "google_oauth"
+)
+
+// UsesGoogleOAuth reports whether this account authenticates with a token from a
+// Google connection rather than a stored password.
+func (a MailAccount) UsesGoogleOAuth() bool {
+	return a.AuthType == AuthTypeGoogleOAuth && a.GoogleConnectionID > 0
+}
+
+// UsesGoogleOAuth reports whether outgoing mail authenticates with a token.
+func (a SMTPAccount) UsesGoogleOAuth() bool {
+	return a.AuthType == AuthTypeGoogleOAuth && a.GoogleConnectionID > 0
 }
 
 // SMTPAccount is one outgoing server that identities can use for composed mail.
 type SMTPAccount struct {
-	ID                int64
-	UserID            int64
-	Label             string
-	Host              string
-	Port              int
-	Username          string
-	EncryptedPassword string
-	UseTLS            bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                 int64
+	UserID             int64
+	Label              string
+	Host               string
+	Port               int
+	Username           string
+	EncryptedPassword  string
+	UseTLS             bool
+	AuthType           string
+	GoogleConnectionID int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // MailIdentity links a Me contact email to an SMTP server, display name, and signature.

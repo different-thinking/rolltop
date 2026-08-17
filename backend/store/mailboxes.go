@@ -12,8 +12,34 @@ import (
 
 const DefaultMailboxPattern = "*"
 
+// normalizedAuthType keeps an unknown or empty value on the password path.
+// Treating anything unrecognized as OAuth would let a typo silently disable
+// password authentication for an account that still depends on it.
+func normalizedAuthType(authType string) string {
+	if strings.TrimSpace(authType) == AuthTypeGoogleOAuth {
+		return AuthTypeGoogleOAuth
+	}
+	return AuthTypePassword
+}
+
 func prepareMailAccount(a MailAccount) (MailAccount, error) {
-	if a.UserID == 0 || strings.TrimSpace(a.Email) == "" || strings.TrimSpace(a.Host) == "" || strings.TrimSpace(a.Username) == "" || a.Port == 0 || a.EncryptedPassword == "" {
+	a.AuthType = normalizedAuthType(a.AuthType)
+	if a.AuthType != AuthTypeGoogleOAuth {
+		a.GoogleConnectionID = 0
+	}
+	if a.UserID == 0 || strings.TrimSpace(a.Email) == "" || strings.TrimSpace(a.Host) == "" || strings.TrimSpace(a.Username) == "" || a.Port == 0 {
+		return MailAccount{}, errors.New("mail account fields are incomplete")
+	}
+	// An OAuth account has no password to store and must not be saved without the
+	// connection that replaces it, or it would fail at the next sync with nothing
+	// to point the user at.
+	if a.AuthType == AuthTypeGoogleOAuth {
+		if a.GoogleConnectionID <= 0 {
+			return MailAccount{}, errors.New("google account is missing its connection")
+		}
+		a.EncryptedPassword = ""
+		a.EncryptedSMTPPassword = ""
+	} else if a.EncryptedPassword == "" {
 		return MailAccount{}, errors.New("mail account fields are incomplete")
 	}
 	if strings.TrimSpace(a.Mailbox) == "" {
@@ -55,11 +81,12 @@ func (s *Store) CreateMailAccount(ctx context.Context, a MailAccount) (MailAccou
 	}
 	ts := nowUnix()
 	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO mail_accounts
-			(user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, auth_type, google_connection_id, sync_start_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.UserID, a.Email, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword,
 		boolInt(a.UseTLS), a.SMTPHost, a.SMTPPort, a.SMTPUsername, a.EncryptedSMTPPassword,
-		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes, ts, ts)
+		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes,
+		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), ts, ts)
 	if err != nil {
 		return MailAccount{}, err
 	}
@@ -86,10 +113,11 @@ func (s *Store) updateMailAccount(ctx context.Context, a MailAccount) (MailAccou
 		return MailAccount{}, err
 	}
 	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `UPDATE mail_accounts SET
-			email = ?, label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, smtp_host = ?, smtp_port = ?, smtp_username = ?, encrypted_smtp_password = ?, smtp_use_tls = ?, mailbox = ?, sync_interval_minutes = ?, updated_at = ?
+			email = ?, label = ?, host = ?, port = ?, username = ?, encrypted_password = ?, use_tls = ?, smtp_host = ?, smtp_port = ?, smtp_username = ?, encrypted_smtp_password = ?, smtp_use_tls = ?, mailbox = ?, sync_interval_minutes = ?, auth_type = ?, google_connection_id = ?, sync_start_at = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`,
 		a.Email, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.SMTPHost, a.SMTPPort, a.SMTPUsername, a.EncryptedSMTPPassword,
-		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes, nowUnix(), a.UserID, a.ID)
+		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes,
+		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), nowUnix(), a.UserID, a.ID)
 	if err != nil {
 		return MailAccount{}, err
 	}
@@ -152,7 +180,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]MailAccount, error) {
 }
 
 func mailAccountSelectSQL() string {
-	return `SELECT id, user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, created_at, updated_at FROM mail_accounts`
+	return `SELECT id, user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, auth_type, google_connection_id, sync_start_at, created_at, updated_at FROM mail_accounts`
 }
 
 func scanMailAccounts(rows *sql.Rows) ([]MailAccount, error) {
@@ -169,8 +197,9 @@ func scanMailAccounts(rows *sql.Rows) ([]MailAccount, error) {
 
 func scanMailAccount(row rowScanner) (MailAccount, error) {
 	var a MailAccount
-	var created, updated int64
-	err := row.Scan(&a.ID, &a.UserID, &a.Email, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &a.UseTLS, &a.SMTPHost, &a.SMTPPort, &a.SMTPUsername, &a.EncryptedSMTPPassword, &a.SMTPUseTLS, &a.Mailbox, &a.SyncIntervalMinutes, &created, &updated)
+	var created, updated, syncStart int64
+	err := row.Scan(&a.ID, &a.UserID, &a.Email, &a.Label, &a.Host, &a.Port, &a.Username, &a.EncryptedPassword, &a.UseTLS, &a.SMTPHost, &a.SMTPPort, &a.SMTPUsername, &a.EncryptedSMTPPassword, &a.SMTPUseTLS, &a.Mailbox, &a.SyncIntervalMinutes, &a.AuthType, &a.GoogleConnectionID, &syncStart, &created, &updated)
+	a.SyncStartAt = unixTime(syncStart)
 	a.CreatedAt = unixTime(created)
 	a.UpdatedAt = unixTime(updated)
 	a.applySMTPDefaults()
