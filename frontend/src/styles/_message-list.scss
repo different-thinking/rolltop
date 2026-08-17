@@ -109,7 +109,6 @@
   &:hover:not(:disabled) {
     border-color: var(--danger);
     background: color-mix(in srgb, var(--danger) 10%, var(--surface));
-    color: var(--danger);
   }
 }
 

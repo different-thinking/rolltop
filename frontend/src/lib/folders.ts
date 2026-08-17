@@ -83,3 +83,8 @@ export function nodeContainsMailbox(node: FolderNode, id: string | null): boolea
   if (!id) return false;
   return String(node.mailbox.id) === id || node.children.some((child) => nodeContainsMailbox(child, id));
 }
+
+/** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */
+export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
+  return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");
+}

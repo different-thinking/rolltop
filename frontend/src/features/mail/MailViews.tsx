@@ -11,7 +11,8 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
-import { displaySnoozeUntil, displayTime } from "../../lib/format";
+import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
+import { trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -975,6 +976,17 @@ type ConversationReadState = {
   read: boolean;
 };
 
+/** TrashMoveGroup collects the selected rows headed for one Trash mailbox. */
+type TrashMoveGroup = {
+  target: Mailbox;
+  items: { rowID: number; messageIDs: number[] }[];
+};
+
+// The backend rejects bulk-move batches above 1000 message IDs and queues a
+// background run above 5, where partial progress is no longer reported.
+const bulkMoveChunkLimit = 1000;
+const inlineMoveMessageLimit = 5;
+
 const messageSwipeMaxDistance = 112;
 const messageSwipeCommitDistance = 68;
 const messageSwipeCommitHoldMS = 170;
@@ -1074,6 +1086,9 @@ function MessageList({
   const keyboardIndexRef = useRef<number | null>(null);
   const swipeSession = useRef<{ id: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean; blocked: boolean } | null>(null);
   const suppressRowClickUntil = useRef(0);
+  // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
+  // so concurrent moves cannot race each other on the same rows.
+  const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || trashBusy;
   const visible = conversations
     .filter((conversation) => !dismissedIDs.has(conversation.message.id))
     .map((conversation) => {
@@ -1260,7 +1275,7 @@ function MessageList({
   async function markSelectedRead(read: boolean) {
     const selected = visible.filter((conversation) => selectedIDs.has(conversation.message.id));
     const messageIDs = uniquePositiveIDs(selected.flatMap(conversationTransferMessageIDs));
-    if (messageIDs.length === 0 || readStateBusy || snoozeBusy || swipeActionBusy || trashBusy) return;
+    if (messageIDs.length === 0 || selectionBusy) return;
     const previous = selected.map((conversation) => ({ id: conversation.message.id, read: conversation.is_read }));
     onReadStatesChange(selected.map((conversation) => ({ id: conversation.message.id, read })));
     setReadStateBusy(true);
@@ -1275,11 +1290,15 @@ function MessageList({
   }
 
   // Deleting moves the selection into each account's Trash mailbox through the
-  // bulk-move endpoint, so the move is mirrored to IMAP like drag and swipe.
-  async function deleteSelected() {
+  // same IMAP-mirrored move APIs as drag and swipe. The mutation is deferred
+  // behind an undo toast; the commit tracks per-message progress so a partial
+  // failure only restores rows whose messages did not move.
+  function deleteSelected() {
     const selected = visible.filter((conversation) => selectedIDs.has(conversation.message.id));
-    if (selected.length === 0 || readStateBusy || snoozeBusy || swipeActionBusy || trashBusy) return;
-    const groups = new Map<number, { targetID: number; rowIDs: number[]; messageIDs: number[] }>();
+    if (selected.length === 0 || selectionBusy) return;
+    const trashByAccount = new Map<number, Mailbox | undefined>();
+    const groups = new Map<number, TrashMoveGroup>();
+    const skippedNames = new Set<string>();
     let alreadyInTrash = 0;
     for (const conversation of selected) {
       const accountIDs = conversationTransferAccountIDs(conversation);
@@ -1287,48 +1306,103 @@ function MessageList({
         addToast("Cannot delete a conversation containing messages from multiple accounts.", "error");
         return;
       }
-      const target = mailboxes.find((mailbox) => mailbox.account_id === accountIDs[0] && mailbox.role === "trash");
+      if (!trashByAccount.has(accountIDs[0])) trashByAccount.set(accountIDs[0], trashMailboxForAccount(mailboxes, accountIDs[0]));
+      const target = trashByAccount.get(accountIDs[0]);
       if (!target) {
         addToast("Choose a Trash folder for this account before deleting messages.", "error");
         return;
       }
-      if (conversation.message.mailbox_id === target.id) {
+      const messageIDs = conversationTransferMessageIDs(conversation);
+      if (messageIDs.length === 1 && conversation.message.mailbox_id === target.id) {
         alreadyInTrash++;
+        skippedNames.add(target.name);
         continue;
       }
-      const group = groups.get(target.id) || { targetID: target.id, rowIDs: [], messageIDs: [] };
-      group.rowIDs.push(conversation.message.id);
-      group.messageIDs.push(...conversationTransferMessageIDs(conversation));
+      const group = groups.get(target.id) || { target, items: [] };
+      group.items.push({ rowID: conversation.message.id, messageIDs });
       groups.set(target.id, group);
     }
+    const skippedLabel = skippedNames.size === 1 ? Array.from(skippedNames)[0] : "Trash";
     if (groups.size === 0) {
-      addToast(alreadyInTrash === 1 ? "Message is already in Trash." : "Messages are already in Trash.");
+      addToast(alreadyInTrash === 1 ? `Message is already in ${skippedLabel}.` : `Messages are already in ${skippedLabel}.`);
       return;
     }
-    const entries = Array.from(groups.values()).map((group) => ({ ...group, messageIDs: uniquePositiveIDs(group.messageIDs) }));
-    optimisticallyDismiss(entries.flatMap((entry) => entry.rowIDs));
+    const entries = Array.from(groups.values());
+    const destLabel = entries.length === 1 ? entries[0].target.name : "Trash";
+    const rowIDs = entries.flatMap((entry) => entry.items.map((item) => item.rowID));
+    const totalMessages = entries.reduce((sum, entry) => sum + uniquePositiveIDs(entry.items.flatMap((item) => item.messageIDs)).length, 0);
+    const registered = deferSwipeMutation(
+      rowIDs[0],
+      `Moved ${messageCountLabel(totalMessages)} to ${destLabel}.`,
+      () => {
+        removePendingSwipeMoveIDs(rowIDs);
+        restoreDismissed(rowIDs);
+        setSelectedIDs((current) => new Set([...current, ...rowIDs]));
+      },
+      (keepalive) => commitTrashMove(entries, rowIDs, destLabel, keepalive)
+    );
+    if (!registered) return;
+    if (alreadyInTrash > 0) {
+      addToast(alreadyInTrash === 1
+        ? `Skipped 1 message already in ${skippedLabel}.`
+        : `Skipped ${alreadyInTrash.toLocaleString()} messages already in ${skippedLabel}.`);
+    }
+    setPendingSwipeMoveIDs((current) => new Set([...current, ...rowIDs]));
+    optimisticallyDismiss(rowIDs);
     clearSelection();
+  }
+
+  async function commitTrashMove(entries: TrashMoveGroup[], rowIDs: number[], destLabel: string, keepalive: boolean) {
+    const movedMessageIDs: number[] = [];
+    const restoreRowIDs: number[] = [];
+    let queuedMessages = 0;
+    let firstError: unknown;
     setTrashBusy(true);
     try {
-      const results = await Promise.allSettled(entries.map((entry) => api.bulkMoveMessages(csrf, entry.messageIDs, entry.targetID)));
-      let moved = 0;
-      results.forEach((result, index) => {
-        const entry = entries[index];
-        if (result.status === "fulfilled") {
-          moved += entry.messageIDs.length;
-          onMessagesMoved(entry.messageIDs);
-        } else {
-          restoreDismissed(entry.rowIDs);
+      await Promise.all(entries.map(async (entry) => {
+        const messageIDs = uniquePositiveIDs(entry.items.flatMap((item) => item.messageIDs));
+        const movedIDs: number[] = [];
+        let queued = false;
+        try {
+          if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
+            for (let start = 0; start < messageIDs.length; start += bulkMoveChunkLimit) {
+              const chunk = messageIDs.slice(start, start + bulkMoveChunkLimit);
+              const data = await api.bulkMoveMessages(csrf, chunk, entry.target.id, keepalive ? { keepalive: true } : undefined);
+              if (data.queued) queued = true;
+              movedIDs.push(...chunk);
+            }
+          } else {
+            for (const messageID of messageIDs) {
+              await api.moveMessage(csrf, messageID, entry.target.id);
+              movedIDs.push(messageID);
+            }
+          }
+        } catch (err) {
+          if (firstError === undefined) firstError = err;
         }
-      });
-      if (moved > 0) addToast(`Moved ${moved === 1 ? "message" : `${moved.toLocaleString()} messages`} to Trash.`);
-      const firstFailure = results.find((result) => result.status === "rejected");
-      if (firstFailure?.status === "rejected") {
-        addToast(`Delete failed: ${messageFromError(firstFailure.reason)}`, "error");
-      }
+        if (queued) queuedMessages += movedIDs.length;
+        movedMessageIDs.push(...movedIDs);
+        const movedSet = new Set(movedIDs);
+        for (const item of entry.items) {
+          if (!item.messageIDs.some((id) => movedSet.has(id))) restoreRowIDs.push(item.rowID);
+        }
+        if (snoozedView && movedIDs.length > 0) {
+          await Promise.allSettled(entry.items
+            .filter((item) => item.messageIDs.some((id) => movedSet.has(id)))
+            .map((item) => api.unsnoozeMessage(csrf, item.rowID)));
+        }
+      }));
     } finally {
       setTrashBusy(false);
     }
+    if (movedMessageIDs.length > 0) onMessagesMoved(movedMessageIDs);
+    removePendingSwipeMoveIDs(rowIDs);
+    if (restoreRowIDs.length > 0) {
+      restoreDismissed(restoreRowIDs);
+      setSelectedIDs((current) => new Set([...current, ...restoreRowIDs]));
+    }
+    if (queuedMessages > 0) addToast(`Move to ${destLabel} started for ${messageCountLabel(queuedMessages)}.`);
+    if (firstError !== undefined) addToast(`Delete failed: ${messageFromError(firstError)}`, "error");
   }
 
   function optimisticallyDismiss(ids: number[]) {
@@ -1456,7 +1530,7 @@ function MessageList({
 
   async function snoozeConversations(items: Conversation[], until: Date) {
     const ids = uniquePositiveIDs(items.map((conversation) => conversation.message.id));
-    if (ids.length === 0 || snoozeBusy) return;
+    if (ids.length === 0 || selectionBusy) return;
     if (!snoozedView) optimisticallyDismiss(ids);
     clearSelection();
     setSnoozeBusy(true);
@@ -1479,7 +1553,7 @@ function MessageList({
 
   async function unsnoozeConversations(items: Conversation[]) {
     const ids = uniquePositiveIDs(items.map((conversation) => conversation.message.id));
-    if (ids.length === 0 || snoozeBusy) return;
+    if (ids.length === 0 || selectionBusy) return;
     optimisticallyDismiss(ids);
     clearSelection();
     setSnoozeBusy(true);
@@ -1580,7 +1654,7 @@ function MessageList({
     }
     const accountID = accountIDs[0];
     const target = action === "trash"
-      ? mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash")
+      ? trashMailboxForAccount(mailboxes, accountID)
       : (() => {
           const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
           return preference
@@ -1604,7 +1678,7 @@ function MessageList({
     const dismissedIDs = messageIDs;
     const registered = deferSwipeMutation(
       conversation.message.id,
-      `Moved ${messageIDs.length === 1 ? "message" : `${messageIDs.length.toLocaleString()} messages`} to ${target.name}.`,
+      `Moved ${messageCountLabel(messageIDs.length)} to ${target.name}.`,
       () => {
         cancelSwipeDismiss(conversation.message.id);
         removePendingSwipeMoveIDs(dismissedIDs);
@@ -1648,7 +1722,7 @@ function MessageList({
     snoozePreset: SwipePreferences["left_snooze_preset"],
     direction: "start" | "end"
   ): Promise<boolean> {
-    if (readStateBusy || snoozeBusy || swipeActionBusy || pendingSwipeActionIDs.current.has(conversation.message.id)) return false;
+    if (selectionBusy || pendingSwipeActionIDs.current.has(conversation.message.id)) return false;
     setSwipeActionBusy(true);
     try {
       switch (action) {
@@ -1671,7 +1745,7 @@ function MessageList({
   }
 
   function startRowSwipe(event: TouchEvent<HTMLDivElement>, conversation: Conversation) {
-    if (readStateBusy || snoozeBusy || swipeActionBusy || swipeState || pendingSwipeActionIDs.current.has(conversation.message.id) || !nativeTouchDrag || event.touches.length !== 1 || (event.target as HTMLElement).closest("button,input,label")) return;
+    if (selectionBusy || swipeState || pendingSwipeActionIDs.current.has(conversation.message.id) || !nativeTouchDrag || event.touches.length !== 1 || (event.target as HTMLElement).closest("button,input,label")) return;
     const touch = event.touches[0];
     swipeSession.current = { id: conversation.message.id, startX: touch.clientX, startY: touch.clientY, lastX: touch.clientX, lastY: touch.clientY, active: false, blocked: false };
   }
@@ -1803,7 +1877,7 @@ function MessageList({
   return (
     <div className={`message-table ${arrivalActive ? "mail-arrival-shift" : ""}`}>
       {selectedConversations.length > 0 ? (
-        <div className="selection-action-bar" role="toolbar" aria-label="Selected message actions" aria-busy={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy}>
+        <div className="selection-action-bar" role="toolbar" aria-label="Selected message actions" aria-busy={selectionBusy}>
           <div className="selection-action-summary">
             <button className="selection-clear" type="button" onClick={clearSelection} title="Clear selection" aria-label="Clear selection">
               <Icon name="close" />
@@ -1819,7 +1893,7 @@ function MessageList({
                 className="selection-page-button"
                 type="button"
                 onClick={selectAllOnPage}
-                disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy}
+                disabled={selectionBusy}
                 title={`Select all ${visible.length.toLocaleString()} messages on this page`}
                 aria-label={`Select all ${visible.length.toLocaleString()} messages on this page`}
               >
@@ -1829,23 +1903,23 @@ function MessageList({
             )}
           </div>
           <div className="selection-actions">
-            <button type="button" disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy || !canMarkRead} onClick={() => void markSelectedRead(true)} title="Mark selected messages read">
+            <button type="button" disabled={selectionBusy || !canMarkRead} onClick={() => void markSelectedRead(true)} title="Mark selected messages read">
               <Icon name="mail_open" />
               <span>Mark read</span>
             </button>
-            <button type="button" disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy || !canMarkUnread} onClick={() => void markSelectedRead(false)} title="Mark selected messages unread">
+            <button type="button" disabled={selectionBusy || !canMarkUnread} onClick={() => void markSelectedRead(false)} title="Mark selected messages unread">
               <Icon name="mail" />
               <span>Mark unread</span>
             </button>
       {snoozedView ? (
-        <button type="button" disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy} onClick={() => void unsnoozeConversations(selectedConversations)} title="Unsnooze selected messages">
+        <button type="button" disabled={selectionBusy} onClick={() => void unsnoozeConversations(selectedConversations)} title="Unsnooze selected messages">
           <Icon name="clock" />
           <span>Unsnooze</span>
         </button>
       ) : (
-        <SnoozeControl datePrefs={datePrefs} disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy} onSnooze={(until) => snoozeConversations(selectedConversations, until)} />
+        <SnoozeControl datePrefs={datePrefs} disabled={selectionBusy} onSnooze={(until) => snoozeConversations(selectedConversations, until)} />
       )}
-            <button type="button" className="selection-delete" disabled={readStateBusy || snoozeBusy || swipeActionBusy || trashBusy} onClick={() => void deleteSelected()} title="Move selected messages to Trash">
+            <button type="button" className="selection-delete" disabled={selectionBusy} onClick={() => void deleteSelected()} title="Move selected messages to Trash">
               <Icon name="delete" />
               <span>Delete</span>
             </button>
@@ -1972,7 +2046,7 @@ function MessageList({
             </span>
       <span className={`date ${snoozedView ? "snoozed-date" : ""}`}>
         {snoozedView ? (
-          <button className="snooze-row-action" type="button" disabled={snoozeBusy} onClick={() => void unsnoozeConversations([conversation])} title="Unsnooze" aria-label="Unsnooze">
+          <button className="snooze-row-action" type="button" disabled={selectionBusy} onClick={() => void unsnoozeConversations([conversation])} title="Unsnooze" aria-label="Unsnooze">
             <Icon name="clock" />
           </button>
         ) : null}
