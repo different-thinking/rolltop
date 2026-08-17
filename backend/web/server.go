@@ -23,7 +23,9 @@ import (
 	"rolltop/backend/auth"
 	"rolltop/backend/blob"
 	"rolltop/backend/buildinfo"
+	"rolltop/backend/config"
 	mmcrypto "rolltop/backend/crypto"
+	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
@@ -59,6 +61,11 @@ type Options struct {
 	SessionTTL   time.Duration
 	CookieSecure bool
 	WebhookToken string
+	// Google carries the validated OAuth client settings from config.Load.
+	Google config.GoogleConfig
+	// GoogleAuth overrides the manager built from Google. Tests set it to point
+	// the OAuth flow at a fake Google.
+	GoogleAuth *googleauth.Manager
 	// RequestRestart asks the process supervisor for a controlled restart. The
 	// admin database repair needs one, because a tenant database can only be
 	// replaced while nothing holds a handle on it. Nil disables the action.
@@ -92,6 +99,7 @@ type Server struct {
 	sessionTTL                time.Duration
 	cookieSecure              bool
 	webhookToken              string
+	googleAuth                *googleauth.Manager
 	requestRestart            func(userID int64, reason string)
 	maintenance               maintenanceState
 	backupSizeMu              sync.Mutex
@@ -268,6 +276,14 @@ func New(opts Options) (*Server, error) {
 	if strings.TrimSpace(opts.PluginDir) == "" {
 		opts.PluginDir = "plugins"
 	}
+	// Without a usable master key the tokens could not be encrypted, so no
+	// manager is built and the Google routes report the server as unconfigured
+	// rather than failing at the first click with an internal error.
+	if opts.GoogleAuth == nil && opts.Store != nil && len(opts.MasterKey) == 32 {
+		opts.GoogleAuth = googleauth.NewManager(
+			googleauth.New(opts.Google.ClientID, opts.Google.ClientSecret, opts.Google.RedirectURLs, opts.Google.Scopes),
+			opts.Store, opts.MasterKey)
+	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
 		return nil, err
@@ -308,6 +324,7 @@ func New(opts Options) (*Server, error) {
 		sessionTTL:            opts.SessionTTL,
 		cookieSecure:          opts.CookieSecure,
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
+		googleAuth:            opts.GoogleAuth,
 		requestRestart:        opts.RequestRestart,
 		events:                events,
 
@@ -384,28 +401,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/android/latest.json", s.handleAndroidLatest)
 	mux.HandleFunc("/android/rolltop.apk", s.handleAndroidAPK)
 	mux.HandleFunc("/android/", s.handleFrontendAsset)
-	mux.HandleFunc("/setup", s.handleApp)
-	mux.HandleFunc("/login", s.handleApp)
-	mux.HandleFunc("/mail", s.handleApp)
-	mux.HandleFunc("/mail/", s.handleApp)
-	mux.HandleFunc("/snoozes", s.handleApp)
-	mux.HandleFunc("/mailbox/", s.handleApp)
-	mux.HandleFunc("/search", s.handleApp)
-	mux.HandleFunc("/search/", s.handleApp)
-	mux.HandleFunc("/compose", s.handleApp)
-	mux.HandleFunc("/contacts", s.handleApp)
+	// Every client-side route comes from the one declaration in spa.go, so a
+	// page cannot be served without also being recognized by isAppRoute.
+	for _, route := range spaRoutes {
+		if route.exact {
+			mux.HandleFunc(route.path, s.handleApp)
+		}
+		if route.prefix && !route.ownPrefixHandler {
+			mux.HandleFunc(route.path+"/", s.handleApp)
+		}
+	}
 	mux.HandleFunc("/contacts/", s.handleContactOrApp)
 	mux.HandleFunc("/webhooks/sync", s.handleSyncWebhook)
-	mux.HandleFunc("/messages/", s.handleApp)
 	mux.HandleFunc("/attachments/", s.handleAttachment)
 	mux.HandleFunc("/blobs/", s.handleBlob)
 	mux.HandleFunc("/remote-images/", s.handleRemoteImage)
 	mux.HandleFunc("/brand-icons/", s.handleBrandIcon)
 	mux.HandleFunc("/plugins/", s.handlePluginRoute)
-	mux.HandleFunc("/sync-runs/", s.handleApp)
-	mux.HandleFunc("/settings/account", s.handleApp)
-	mux.HandleFunc("/settings/account/", s.handleApp)
-	mux.HandleFunc("/admin/users", s.handleApp)
 	return s.securityHeaders(s.withCurrentUser(mux))
 }
 
@@ -442,10 +454,9 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 				r = r.WithContext(context.WithValue(r.Context(), userContextKey, cu))
 			case store.IsNotFound(err):
 				// Missing or expired session row: genuinely signed out.
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				// The client abandoned the request mid-lookup; stay anonymous
-				// without logging so ordinary tab closes do not read like
-				// store failures.
+			case clientAbandonedRequest(r.Context()):
+				// Stay anonymous without logging so ordinary tab closes do not
+				// read like store failures.
 			default:
 				// A store failure (busy database under heavy sync, disk
 				// pressure) must not demote a valid session to anonymous:
@@ -458,6 +469,19 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clientAbandonedRequest reports whether the browser gave up on this request.
+//
+// The request context is the only trustworthy signal. Classifying by the error
+// the store returned would be wrong: a deadline the store or SQLite driver
+// applies internally under lock contention also surfaces as
+// context.DeadlineExceeded while the browser is still waiting for an answer,
+// and treating that as an abandoned request demotes a valid session to
+// anonymous, which is the spurious logout the caller's default branch exists
+// to prevent.
+func clientAbandonedRequest(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 func current(r *http.Request) (currentUser, bool) {
@@ -1006,6 +1030,23 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request, userID int64)
 	})
 	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
 	return nil
+}
+
+// requireResourceAuth resolves the user for asset routes that hide their
+// existence from anonymous callers by answering 404. A session the store could
+// not check answers 503 instead: a 404 there reads to the browser as "this
+// icon does not exist" and gets cached for the rest of the session, long after
+// the store recovered.
+func (s *Server) requireResourceAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
+	if cu, ok := current(r); ok {
+		return cu, true
+	}
+	if sessionLookupFailed(r) {
+		sessionUnavailable(w)
+		return currentUser{}, false
+	}
+	http.NotFound(w, r)
+	return currentUser{}, false
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {

@@ -262,9 +262,8 @@ func (s *Server) handleContactIcon(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	cu, ok := current(r)
+	cu, ok := s.requireResourceAuth(w, r)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/contacts/"), "/"), "/")

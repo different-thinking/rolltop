@@ -330,6 +330,27 @@
     padding: 11px 10px;
   }
 
+  // Two buttons do not fit beside the copy on a phone, so actions wrap onto
+  // their own row under the account details.
+  .settings-connection-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+    padding: 11px 10px;
+
+    // The icon spans two rows in the index layout above. Left on auto
+    // placement here it would push the actions down to row 3 and open a second
+    // grid gap, so both are pinned.
+    .settings-index-icon {
+      grid-row: 1;
+    }
+  }
+
+  .settings-connection-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+  }
+
   .settings-index-icon {
     grid-column: 1;
     grid-row: 1 / 3;
@@ -471,6 +492,11 @@
 
   .message-select {
     grid-column: 1;
+  }
+
+  // Narrow rows have no room for the hover toolbar; swipes cover the same actions.
+  .message-row-actions {
+    display: none;
   }
 
   .message-select.group-drag-source {
