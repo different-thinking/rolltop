@@ -625,9 +625,12 @@ func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID
 	return scanScopeMessages(rows)
 }
 
-// CategoryCounts is what one category view holds. Both numbers are counted over
-// exactly the rows the list renders, so the sidebar badge and the "act on
-// everything here" affordance never describe a different set than the page does.
+// CategoryCounts is what one category view holds, counted in messages over the
+// folders that view draws from. The list itself renders one row per
+// conversation, so a category with five messages in two threads reports five
+// beside two rows — the same relationship every folder in the sidebar already
+// has, and the number the whole-view delete needs, because that acts on
+// messages rather than on conversations.
 type CategoryCounts struct {
 	Total  int
 	Unread int

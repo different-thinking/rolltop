@@ -1,7 +1,7 @@
 // File overview: Ctrl+Shift+<number> navigation for the sidebar's top-level
 // lists, and the badge hint that appears while both modifiers are held.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { editableTarget } from "./keyboard";
 
 /** SidebarShortcut is one numbered destination, in the order the sidebar shows it. */
@@ -44,11 +44,15 @@ export function useSidebarShortcuts(shortcuts: SidebarShortcut[], open: (url: st
   const [hintsVisible, setHintsVisible] = useState(false);
   // The destinations and the navigate callback are both read through refs, so
   // the listeners are installed once and survive the chrome re-renders that
-  // arrive while a chord is being held.
+  // arrive while a chord is being held. The refs are written after the commit
+  // rather than during render: React may discard render work, and a chord
+  // arriving in that window must not be sent to a destination no UI ever showed.
   const targets = useRef<string[]>([]);
-  targets.current = shortcuts.slice(0, maxSidebarShortcuts).map((shortcut) => shortcut.url);
   const openRef = useRef(open);
-  openRef.current = open;
+  useLayoutEffect(() => {
+    targets.current = shortcuts.slice(0, maxSidebarShortcuts).map((shortcut) => shortcut.url);
+    openRef.current = open;
+  });
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
