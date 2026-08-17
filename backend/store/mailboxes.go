@@ -391,6 +391,30 @@ func (s *Store) ListMailboxesForUser(ctx context.Context, userID int64) ([]Mailb
 	return out, rows.Err()
 }
 
+// ListMailboxIDsWithRoleForUser returns the folders assigned one special role.
+// Callers that only need to know where a role lives use this instead of the full
+// folder summary, which aggregates per-folder message counts.
+func (s *Store) ListMailboxIDsWithRoleForUser(ctx context.Context, userID int64, role string) ([]int64, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM mailboxes WHERE user_id = ? AND role = ?`, userID, normalizeMailboxRole(role))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0, 2)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // LastUIDs returns the per-mailbox UID checkpoints used by incremental sync planning.
 func (s *Store) LastUIDs(ctx context.Context, userID, accountID int64) (map[string]uint32, error) {
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT name, last_uid FROM mailboxes WHERE user_id = ? AND account_id = ?`, userID, accountID)

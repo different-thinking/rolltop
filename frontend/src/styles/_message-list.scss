@@ -30,6 +30,11 @@
   margin-bottom: 8px;
 }
 
+.search-result-actions .search-scope-hint {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .selection-action-bar {
   min-height: 48px;
   display: flex;

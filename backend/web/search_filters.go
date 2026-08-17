@@ -12,22 +12,38 @@ import (
 
 var inSearchOperatorRE = regexp.MustCompile(`(?i)(^|\s)in:("[^"]+"|\S+)`)
 
+// searchMailboxFilter is either an allow list built from in: operators or, when
+// the query names no folder, the default view: everything except deleted mail.
 type searchMailboxFilter struct {
-	enabled bool
-	ids     map[int64]bool
+	enabled  bool
+	ids      map[int64]bool
+	excluded map[int64]bool
 }
 
 func (f searchMailboxFilter) matches(msg store.MessageRecord) bool {
-	if !f.enabled {
-		return true
+	if f.enabled {
+		return f.ids[msg.MailboxID]
 	}
-	return f.ids[msg.MailboxID]
+	return !f.excluded[msg.MailboxID]
 }
 
+// searchMailboxFilter resolves in: operators into an allow list. Without one,
+// Trash is left out the same way All Mail leaves it out: mail the user deleted
+// should not come back as a result, and `in:trash` is how they ask for it.
 func (s *Server) searchMailboxFilter(ctx context.Context, userID int64, query string) (string, searchMailboxFilter, error) {
 	cleaned, names := stripInSearchOperators(query)
 	if len(names) == 0 {
-		return query, searchMailboxFilter{}, nil
+		// Only the role lookup, not the full folder summary: this runs on every
+		// search, while the allow-list path below needs names and stays rarer.
+		trashIDs, err := s.store.ListMailboxIDsWithRoleForUser(ctx, userID, "trash")
+		if err != nil {
+			return "", searchMailboxFilter{}, err
+		}
+		excluded := make(map[int64]bool, len(trashIDs))
+		for _, id := range trashIDs {
+			excluded[id] = true
+		}
+		return query, searchMailboxFilter{excluded: excluded}, nil
 	}
 	mailboxes, err := s.store.ListMailboxesForUser(ctx, userID)
 	if err != nil {

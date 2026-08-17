@@ -120,6 +120,13 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 	const pageSize = 50
 	timing := newSearchTiming()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	// The cache key is the raw query and page, so a still-valid browser ETag is
+	// answered before any folder lookup, index repair, or Bleve work happens.
+	page := pageFromRequest(r)
+	cacheKey := mailListCacheKey{UserID: cu.User.ID, Page: page, Search: true, Query: q}
+	if s.writeSearchNotModifiedIfFresh(w, r, cacheKey) {
+		return
+	}
 	filterDone := timing.measure(&timing.filter)
 	searchQuery, mailboxFilter, err := s.searchMailboxFilter(r.Context(), cu.User.ID, q)
 	filterDone()
@@ -136,11 +143,6 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 			s.serverError(w, r, err)
 			return
 		}
-	}
-	page := pageFromRequest(r)
-	cacheKey := mailListCacheKey{UserID: cu.User.ID, Page: page, Search: true, Query: q}
-	if s.writeSearchNotModifiedIfFresh(w, r, cacheKey) {
-		return
 	}
 	generation := s.mailListGeneration(cu.User.ID)
 	offset := (page - 1) * pageSize

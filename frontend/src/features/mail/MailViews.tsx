@@ -818,7 +818,12 @@ export function SearchView({
       />
       {query ? (
         <div className="search-result-actions">
-          <div className="muted">Results for <strong>{query}</strong></div>
+          <div className="muted">
+            Results for <strong>{query}</strong>
+            {/* Deleted mail is left out the way All Mail leaves it out, so say
+                where it went instead of letting results look incomplete. */}
+            {query.toLowerCase().includes("in:") ? null : <span className="search-scope-hint"> · Trash excluded, add in:trash to include it</span>}
+          </div>
           {pluginSearchActions}
         </div>
       ) : null}
