@@ -751,6 +751,12 @@ function Topbar({
                 <span><strong>Admin panel</strong><small>Users and server-wide controls</small></span>
               </button>
             ) : null}
+            {user.is_admin ? (
+              <button className="account-menu-row" type="button" role="menuitem" onClick={() => menuNavigate("/admin/database")}>
+                <Icon name="archive" />
+                <span><strong>Database</strong><small>Integrity, backups, and repair</small></span>
+              </button>
+            ) : null}
             <button className="account-menu-row danger" type="button" role="menuitem" onClick={() => void menuLogout()}>
               <Icon name="logout" />
               <span><strong>Log out</strong><small>End this browser session</small></span>

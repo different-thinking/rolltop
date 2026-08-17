@@ -58,6 +58,10 @@ type Options struct {
 	SessionTTL   time.Duration
 	CookieSecure bool
 	WebhookToken string
+	// RequestRestart asks the process supervisor for a controlled restart. The
+	// admin database repair needs one, because a tenant database can only be
+	// replaced while nothing holds a handle on it. Nil disables the action.
+	RequestRestart func(userID int64, reason string)
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -87,6 +91,8 @@ type Server struct {
 	sessionTTL                time.Duration
 	cookieSecure              bool
 	webhookToken              string
+	requestRestart            func(userID int64, reason string)
+	maintenance               maintenanceState
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -299,6 +305,7 @@ func New(opts Options) (*Server, error) {
 		sessionTTL:            opts.SessionTTL,
 		cookieSecure:          opts.CookieSecure,
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
+		requestRestart:        opts.RequestRestart,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},

@@ -7,6 +7,8 @@ import type {
   Bootstrap,
   Contact,
   ContactAutocomplete,
+  DatabaseMaintenanceJob,
+  DatabaseOverview,
   ComposeAttachmentUpload,
   ComposeForm,
   ComposeIdentity,
@@ -494,6 +496,15 @@ export const api = {
     postJSON<{ ok: boolean }>(`/api/admin/users/${id}/password`, csrf, { password }),
   deleteUser: (csrf: string, id: number) =>
     deleteJSON<{ ok: boolean }>(`/api/admin/users/${id}`, csrf),
+  database: () => getJSON<DatabaseOverview>("/api/admin/database"),
+  checkDatabases: (csrf: string, userID = 0) =>
+    postJSON<{ job: DatabaseMaintenanceJob }>("/api/admin/database/check", csrf, { user_id: userID }),
+  backupDatabases: (csrf: string, userID = 0) =>
+    postJSON<{ job: DatabaseMaintenanceJob }>("/api/admin/database/backup", csrf, { user_id: userID }),
+  scheduleDatabaseRepair: (csrf: string, userID: number) =>
+    postJSON<{ ok: boolean; restarting: boolean }>("/api/admin/database/repair", csrf, { user_id: userID, confirm: true }),
+  cancelDatabaseRepair: (csrf: string, userID: number) =>
+    postJSON<{ ok: boolean }>("/api/admin/database/repair/cancel", csrf, { user_id: userID }),
   savePasswordResetSettings: (csrf: string, fromAddress: string) =>
     postJSON<{ ok: boolean; from_address: string }>("/api/admin/password-reset", csrf, { from_address: fromAddress }),
   adminPlugins: () => getJSON<{ plugins: PluginSetting[] }>("/api/admin/plugins"),

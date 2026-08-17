@@ -218,7 +218,15 @@ type appRuntime struct {
 	db              *store.Store
 	search          *search.Service
 	handler         http.Handler
-	restartRequired <-chan int64
+	restartRequired <-chan restartRequest
+}
+
+// restartRequest is a controlled-restart request from a subsystem that cannot
+// finish its work inside the running process: a stalled search index writer, or
+// an admin-scheduled database repair that needs the tenant file closed.
+type restartRequest struct {
+	UserID int64
+	Reason string
 }
 
 const searchWriterRestartShutdownTimeout = 15 * time.Second
@@ -420,11 +428,11 @@ func run() error {
 	startup.ready()
 	log.Printf("rolltop ready on %s", cfg.Addr)
 
-	restartUserID := int64(0)
+	restart := restartRequest{}
 	select {
 	case <-ctx.Done():
-	case restartUserID = <-app.restartRequired:
-		log.Printf("search writer restart requested user_id=%d", restartUserID)
+	case restart = <-app.restartRequired:
+		log.Printf("controlled restart requested user_id=%d reason=%q", restart.UserID, restart.Reason)
 		cancelApp()
 	case err := <-serverErr:
 		if err != nil {
@@ -433,9 +441,9 @@ func run() error {
 		return nil
 	}
 
-	if restartUserID > 0 {
+	if restart.UserID > 0 {
 		restartShutdownOwnsClose = true
-		restartErr := fmt.Errorf("search index writer stalled for user %d; restarting for offline recovery", restartUserID)
+		restartErr := fmt.Errorf("%s; restarting to continue offline", restart.Reason)
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
 			shutdownErr := shutdownServingApp(app, server, serverErr)
 			app.close()
@@ -489,6 +497,16 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 			_ = db.Close()
 		}
 	}()
+
+	// Repairs scheduled from the admin UI run here, while the tenant databases
+	// still have no open handles. Failures are recorded per tenant and do not
+	// stop the other tenants from starting.
+	startup.update("User databases", "checking scheduled repairs", 0, 1)
+	if _, err := runScheduledDatabaseRepairs(ctx, cfg.DataDir, pluginManifests, time.Now(), func(done, total int, detail string) {
+		startup.update("User databases", detail, done, total)
+	}); err != nil {
+		return nil, err
+	}
 
 	if startupIntegrityCheckRequired(cfg.StartupIntegrityCheck, uncleanShutdown) {
 		startup.update("User databases", "verifying after unclean shutdown", 0, 1)
@@ -546,12 +564,15 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users, time.Now()); err != nil {
 		return nil, err
 	}
-	restartRequired := make(chan int64, 1)
-	searchSvc.SetActiveWriterStallHandler(func(userID int64) {
+	restartRequired := make(chan restartRequest, 1)
+	requestRestart := func(userID int64, reason string) {
 		select {
-		case restartRequired <- userID:
+		case restartRequired <- restartRequest{UserID: userID, Reason: reason}:
 		default:
 		}
+	}
+	searchSvc.SetActiveWriterStallHandler(func(userID int64) {
+		requestRestart(userID, fmt.Sprintf("search index writer stalled for user %d", userID))
 	})
 
 	startup.update("Services", "initializing sync and web services", 0, 1)
@@ -569,19 +590,20 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	}
 	syncRunner := syncer.NewRunnerWithContext(ctx, syncSvc)
 	webServer, err := web.New(web.Options{
-		Store:        db,
-		Blobs:        blobStore,
-		Search:       searchSvc,
-		Syncer:       syncSvc,
-		SyncRunner:   syncRunner,
-		MasterKey:    cfg.MasterKey,
-		DataDir:      cfg.DataDir,
-		DatabasePath: cfg.DatabasePath,
-		IndexPath:    cfg.IndexPath,
-		PluginDir:    cfg.PluginDir,
-		SessionTTL:   cfg.SessionTTL,
-		CookieSecure: cfg.CookieSecure,
-		WebhookToken: cfg.WebhookToken,
+		Store:          db,
+		Blobs:          blobStore,
+		Search:         searchSvc,
+		Syncer:         syncSvc,
+		SyncRunner:     syncRunner,
+		MasterKey:      cfg.MasterKey,
+		DataDir:        cfg.DataDir,
+		DatabasePath:   cfg.DatabasePath,
+		IndexPath:      cfg.IndexPath,
+		PluginDir:      cfg.PluginDir,
+		SessionTTL:     cfg.SessionTTL,
+		CookieSecure:   cfg.CookieSecure,
+		WebhookToken:   cfg.WebhookToken,
+		RequestRestart: requestRestart,
 	})
 	if err != nil {
 		return nil, err

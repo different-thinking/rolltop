@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -169,53 +170,20 @@ func runRecoverDatabase(ctx context.Context, args []string, stdout, stderr io.Wr
 		return err
 	}
 
-	databasePath := userDatabasePath(cfg.DataDir, *userID)
-	if _, err := os.Stat(databasePath); err != nil {
-		return fmt.Errorf("open user %d database %s: %w", *userID, databasePath, err)
-	}
-	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	recoveredPath := databasePath + ".recovered-" + stamp
-	quarantinePath := databasePath + ".corrupt-" + stamp
-	for _, path := range []string{recoveredPath, quarantinePath} {
-		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("recovery path already exists: %s", path)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect recovery path %s: %w", path, err)
-		}
-	}
-
-	report, err := store.SalvageUserDatabase(ctx, databasePath, recoveredPath, manifests, func(message string) {
+	outcome, err := repairUserDatabase(ctx, cfg.DataDir, *userID, manifests, time.Now(), func(message string) {
 		fmt.Fprintf(stdout, "  %s\n", message)
 	})
 	if err != nil {
-		removeSQLiteFileSet(recoveredPath)
-		return fmt.Errorf("recover user %d database: %w", *userID, err)
-	}
-	if report.RowsCopied == 0 {
-		removeSQLiteFileSet(recoveredPath)
-		return fmt.Errorf("recovered no rows from %s; the damaged file was left untouched", databasePath)
-	}
-
-	if err := quarantineSQLiteFileSet(databasePath, quarantinePath); err != nil {
-		removeSQLiteFileSet(recoveredPath)
 		return err
 	}
-	if err := os.Rename(recoveredPath, databasePath); err != nil {
-		// Put the original back so the operator is never left without a
-		// database at the expected path.
-		restoreErr := quarantineSQLiteFileSet(quarantinePath, databasePath)
-		return errors.Join(fmt.Errorf("install recovered user %d database: %w", *userID, err), restoreErr)
+	// A repair scheduled from the admin UI is now redundant.
+	if clearErr := store.ClearUserDatabaseRepair(cfg.DataDir, *userID); clearErr != nil {
+		log.Printf("clear repair marker for user %d: %v", *userID, clearErr)
 	}
-
-	writeSalvageReport(stdout, *userID, report, databasePath, quarantinePath)
-	problems, err := store.CheckDatabaseFile(ctx, databasePath)
-	if err != nil {
-		return fmt.Errorf("verify recovered user %d database: %w", *userID, err)
+	if writeErr := store.WriteUserDatabaseRepairReport(cfg.DataDir, *userID, outcome); writeErr != nil {
+		log.Printf("persist repair report for user %d: %v", *userID, writeErr)
 	}
-	if len(problems) > 0 {
-		reportIntegrity(stdout, fmt.Sprintf("recovered user %d database", *userID), databasePath, problems)
-		return fmt.Errorf("recovered database is still damaged; the original is preserved at %s", quarantinePath)
-	}
+	writeSalvageReport(stdout, *userID, outcome.Report, store.UserDatabaseFilePath(cfg.DataDir, *userID), outcome.QuarantinePath)
 	return nil
 }
 

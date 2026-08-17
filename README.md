@@ -118,9 +118,18 @@ database /data/users/1/rolltop.db is corrupt: database disk image is malformed;
 stop rolltop and run "rolltop recover-db --user-id 1 --confirm-offline"
 ```
 
-Repair is always an explicit offline step, and it never modifies the damaged
-file. Stop every Rolltop process that mounts the data volume, then check which
-files SQLite considers damaged:
+Everything below is also available to admins under **Account menu → Database**,
+which is the shorter path: it lists every database with its size, WAL size, and
+integrity state next to the free space on the data volume, runs the integrity
+check and backups in the background while Rolltop keeps serving, and schedules
+a repair. Scheduling a repair writes a durable marker and restarts Rolltop,
+because a database can only be replaced while nothing holds a handle on it; the
+repair then runs during startup and its report appears on the same page. The
+commands below do the same work from a shell.
+
+Repair is always an explicit step, and it never modifies the damaged file.
+Stop every Rolltop process that mounts the data volume, then check which files
+SQLite considers damaged:
 
 ```sh
 ROLLTOP_SERVICE=<your-service-name>
