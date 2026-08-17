@@ -870,6 +870,7 @@ export default function App() {
           availableThemes={bootstrap.available_themes || []}
           location={location}
           navigate={navigate}
+          replaceRoute={replaceRoute}
           hiddenMessageIDs={hiddenMessageIDs}
           openCompose={openCompose}
           refreshChrome={refreshBootstrap}

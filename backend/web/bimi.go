@@ -48,9 +48,8 @@ func (s *Server) handleBrandIcon(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	cu, ok := current(r)
+	cu, ok := s.requireResourceAuth(w, r)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	if !s.pluginEnabled(r.Context(), plugins.BIMIBrandIcons) {
