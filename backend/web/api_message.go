@@ -997,7 +997,7 @@ func (s *Server) apiBulkCopyMessages(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusBadRequest, "copy source or destination is no longer available")
 				return
 			}
-			writeAPIError(w, http.StatusBadGateway, "could not start bulk copy")
+			s.apiError(w, r, http.StatusBadGateway, "could not start bulk copy", err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "mailbox": dest.Name})
@@ -1018,7 +1018,7 @@ func (s *Server) apiBulkCopyMessages(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "copy source or destination is no longer available")
 			return
 		}
-		writeAPIError(w, http.StatusBadGateway, "could not copy messages")
+		s.apiError(w, r, http.StatusBadGateway, "could not copy messages", err)
 		return
 	}
 	refreshDest()

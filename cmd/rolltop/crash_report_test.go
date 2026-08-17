@@ -34,8 +34,9 @@ func TestFirstStartReportsNothing(t *testing.T) {
 	if strings.Contains(logs, "previous run") {
 		t.Fatalf("first start reported previous-run evidence: %q", logs)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, uncleanShutdownMarkerName)); !os.IsNotExist(err) {
-		t.Fatalf("marker outlived a clean shutdown: %v", err)
+	state, ok := readRunState(filepath.Join(dataDir, crashStateName))
+	if !ok || !state.CleanShutdown {
+		t.Fatalf("clean shutdown not recorded: state=%+v ok=%t", state, ok)
 	}
 }
 
@@ -68,21 +69,39 @@ func TestFatalErrorIsReportedOnNextStart(t *testing.T) {
 	}
 }
 
-// A panic kills the process before finish() runs, leaving the marker in place
-// and a runtime dump appended by the Go runtime.
-func TestPanicDumpIsReportedOnNextStart(t *testing.T) {
+// An unrecovered panic runs deferred functions first and writes its dump only
+// afterwards, so the run signs off as clean and the dump lands after that. The
+// dump must still be reported on the next start.
+func TestPanicDumpAfterCleanSignOffIsReportedOnNextStart(t *testing.T) {
 	dataDir := t.TempDir()
 	func() {
 		testlog.Capture(t)
 		reporter := armCrashOutput(dataDir)
 		reporter.beginRun("test")
-		reporter.appendf("panic: simulated\n\ngoroutine 1 [running]:")
+		// The deferred crash.finish in run() sees no error while unwinding.
+		reporter.finish(nil)
+		// Only now does the runtime write the dump through the armed file.
+		appendToCrashLog(t, dataDir, "panic: simulated\n\ngoroutine 1 [running]:")
 	}()
 
 	logs := restart(t, dataDir, nil)
 
 	if !strings.Contains(logs, "previous run ended with a crash or fatal error") {
-		t.Fatalf("panic dump not reported on the next start: %q", logs)
+		t.Fatalf("panic dump written after the deferred sign-off was not reported: %q", logs)
+	}
+}
+
+// appendToCrashLog writes through a second handle, the way the runtime writes a
+// crash dump through the descriptor it duplicated when the output was armed.
+func appendToCrashLog(t *testing.T, dataDir, contents string) {
+	t.Helper()
+	file, err := os.OpenFile(filepath.Join(dataDir, crashLogName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(contents + "\n"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -119,6 +138,31 @@ func TestPlannedRestartIsNotACrash(t *testing.T) {
 		if strings.Contains(string(contents), "fatal:") {
 			t.Fatalf("planned restart recorded as a fatal error: %q", contents)
 		}
+	}
+}
+
+// The restart itself is planned, but cleanup that did not complete is a real
+// failure and must not inherit the planned classification.
+func TestFailedRestartCleanupIsRecordedAsFatal(t *testing.T) {
+	dataDir := t.TempDir()
+	cleanupErr := fmt.Errorf("search index writer stalled for user %d; restart cleanup failed: %w",
+		int64(1), errSearchWriterRestartShutdownTimeout)
+	if isPlannedRestart(cleanupErr) {
+		t.Fatal("a failed restart cleanup is still classified as a planned restart")
+	}
+	restart(t, dataDir, cleanupErr)
+
+	logs := restart(t, dataDir, nil)
+
+	if !strings.Contains(logs, "previous run ended with a crash or fatal error") {
+		t.Fatalf("failed restart cleanup not reported on the next start: %q", logs)
+	}
+	contents, err := os.ReadFile(filepath.Join(dataDir, crashLogName))
+	if err != nil {
+		t.Fatalf("crash log missing: %v", err)
+	}
+	if !strings.Contains(string(contents), "restart cleanup failed") {
+		t.Fatalf("crash log does not hold the cleanup failure: %q", contents)
 	}
 }
 
@@ -183,8 +227,8 @@ func TestFailedRotationKeepsTheExistingReport(t *testing.T) {
 }
 
 // With the crash log unwritable there is nothing to append a fatal error to, so
-// the marker has to stay: it is the only remaining evidence the run failed.
-func TestUnwritableCrashLogKeepsTheMarker(t *testing.T) {
+// the state must stay unclean: it is the only remaining evidence the run failed.
+func TestUnwritableCrashLogStillReportsUncleanShutdown(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dataDir, crashLogName), 0o700); err != nil {
 		t.Fatal(err)
@@ -205,7 +249,7 @@ func TestUnwritableCrashLogKeepsTheMarker(t *testing.T) {
 
 // A marker left by a still-running process must not be deleted by a run that
 // failed before it acquired the instance lock.
-func TestFailureBeforeBeginRunLeavesTheMarkerAlone(t *testing.T) {
+func TestFailureBeforeBeginRunLeavesLiveStateAlone(t *testing.T) {
 	dataDir := t.TempDir()
 	testlog.Capture(t)
 	live := armCrashOutput(dataDir)
@@ -214,8 +258,9 @@ func TestFailureBeforeBeginRunLeavesTheMarkerAlone(t *testing.T) {
 	early := armCrashOutput(dataDir)
 	early.finish(nil)
 
-	if _, err := os.Stat(filepath.Join(dataDir, uncleanShutdownMarkerName)); err != nil {
-		t.Fatalf("a run that never started removed another run's marker: %v", err)
+	state, ok := readRunState(filepath.Join(dataDir, crashStateName))
+	if !ok || state.CleanShutdown {
+		t.Fatalf("a run that never started overwrote the live run's state: state=%+v ok=%t", state, ok)
 	}
 }
 

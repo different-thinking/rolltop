@@ -399,8 +399,11 @@ func run() (runErr error) {
 			return shutdownErr
 		})
 		if cleanupErr != nil {
+			// Deliberately not wrapping errRestartForRecovery: the restart was
+			// planned, but a cleanup that did not complete is a real failure and
+			// has to be recorded as one.
 			log.Printf("search writer restart cleanup: %v", cleanupErr)
-			return errors.Join(restartErr, cleanupErr)
+			return fmt.Errorf("search index writer stalled for user %d; restart cleanup failed: %w", restartUserID, cleanupErr)
 		}
 		return restartErr
 	}

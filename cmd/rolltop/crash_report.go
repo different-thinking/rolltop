@@ -1,9 +1,17 @@
 // File overview: Persistent crash reporting. Runtime crash dumps (panics, fatal
 // runtime errors) and orderly fatal errors are appended to <data-dir>/crash.log
-// so they survive container recreation even when stderr output is lost. A
-// shutdown marker records how far the log had grown, which lets the next start
-// tell three cases apart: a clean exit, a run that reported why it died, and a
-// run killed before it could write anything (SIGKILL, kernel OOM kill).
+// so they survive container recreation even when stderr output is lost. A state
+// file records how far the log had grown when the run started and whether the
+// run ended cleanly, which lets the next start tell three cases apart: a clean
+// exit, a run that reported why it died, and a run killed before it could write
+// anything (SIGKILL, kernel OOM kill).
+//
+// Growth of the crash log is what identifies a reported failure, not the clean
+// shutdown flag. An unrecovered panic runs deferred functions first and only
+// then writes its dump, so by the time the runtime reports, this process has
+// already recorded whatever it believed about its own exit. Comparing sizes
+// catches the dump that arrives afterwards; recovering the panic to correct the
+// flag would rewrite the stack trace this file exists to preserve.
 
 package main
 
@@ -19,22 +27,26 @@ import (
 )
 
 const (
-	crashLogName              = "crash.log"
-	crashLogPrevName          = "crash.log.prev"
-	uncleanShutdownMarkerName = "rolltop.unclean-shutdown"
+	crashLogName     = "crash.log"
+	crashLogPrevName = "crash.log.prev"
+	crashStateName   = "crash-state.json"
 
 	// crashLogMaxBytes bounds the append-only log. Only failures are written,
 	// so this holds many incidents before the oldest are rotated away.
 	crashLogMaxBytes = 1 << 20
 )
 
-// shutdownMarker is written while a run is live and removed when it ends
-// cleanly. CrashLogBytes is the crash log size at the moment the run started;
-// any growth beyond it means this run recorded why it died.
-type shutdownMarker struct {
+// runState describes the run that wrote it. CrashLogBytes is the crash log size
+// once the run had announced itself, so any later growth is a report that run
+// produced. CleanShutdown records whether it got to end on its own terms. The
+// file is rewritten rather than deleted: the size baseline has to outlive a
+// clean shutdown, or a panic dump written after the process signed off would
+// look like part of an already-known report.
+type runState struct {
 	StartedAt     string `json:"started_at"`
 	PID           int    `json:"pid"`
 	CrashLogBytes int64  `json:"crash_log_bytes"`
+	CleanShutdown bool   `json:"clean_shutdown"`
 }
 
 // crashReporter persists crash evidence in the data directory. The crash log is
@@ -43,11 +55,13 @@ type shutdownMarker struct {
 type crashReporter struct {
 	dataDir string
 	file    *os.File
-	// owned tracks whether beginRun wrote this run's marker. Without it a
-	// failure before the instance lock was acquired could delete the marker of
-	// a run that is still going.
+	// owned tracks whether beginRun claimed the state file. Without it a failure
+	// before the instance lock was acquired could overwrite the state of a run
+	// that is still going.
 	owned    bool
 	finished bool
+	// baseline is the crash log size once this run had announced itself.
+	baseline int64
 }
 
 // armCrashOutput routes runtime crash dumps into the crash log. It runs before
@@ -68,9 +82,7 @@ func armCrashOutput(dataDir string) *crashReporter {
 }
 
 func (c *crashReporter) crashLogPath() string { return filepath.Join(c.dataDir, crashLogName) }
-func (c *crashReporter) markerPath() string {
-	return filepath.Join(c.dataDir, uncleanShutdownMarkerName)
-}
+func (c *crashReporter) statePath() string    { return filepath.Join(c.dataDir, crashStateName) }
 
 // open points runtime crash output at the crash log. The runtime duplicates the
 // descriptor, so it keeps writing to whichever file was armed last.
@@ -93,14 +105,14 @@ func (c *crashReporter) open() {
 // reporting that rewrites shared state, so holding the lock keeps a second
 // process from observing or clobbering a half-updated marker.
 func (c *crashReporter) beginRun(version string) {
-	previousBytes, uncleanShutdown := readShutdownMarker(c.markerPath())
+	previous, hadPreviousRun := readRunState(c.statePath())
 	size := c.crashLogSize()
 	switch {
-	case !uncleanShutdown:
-		// The previous run removed its marker, so it ended on its own terms.
-	case size > previousBytes:
+	case hadPreviousRun && size > previous.CrashLogBytes:
+		// Checked before CleanShutdown: a panic dump lands after the process
+		// has already recorded how it thought it was ending.
 		log.Printf("previous run ended with a crash or fatal error; the report is in %s", c.crashLogPath())
-	default:
+	case hadPreviousRun && !previous.CleanShutdown:
 		log.Printf("previous run was terminated without a clean shutdown and left no crash report; "+
 			"it was likely killed externally (kernel OOM kill or SIGKILL) or could not write %s - "+
 			"check the container exit code and the kernel log", c.crashLogPath())
@@ -109,8 +121,8 @@ func (c *crashReporter) beginRun(version string) {
 		c.rotate()
 	}
 	c.appendf("=== rolltop %s started at %s pid=%d ===", version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
-	c.writeMarker(c.crashLogSize())
 	c.owned = true
+	c.writeState(false)
 }
 
 // finish records how this run ended. It must run while the instance lock is
@@ -123,15 +135,16 @@ func (c *crashReporter) finish(err error) {
 	c.finished = true
 	if err == nil || isPlannedRestart(err) {
 		// An orderly exit, including the deliberate restart for search index
-		// recovery: drop the marker so the next start stays quiet.
-		c.clearMarker()
+		// recovery. The size baseline stays as it was, so a panic dump written
+		// after this point is still recognized as new on the next start.
+		c.writeState(true)
 		c.close()
 		return
 	}
-	// Keep the marker. Together with the crash log size it recorded, it tells
-	// the next start whether the reason below could be persisted at all.
+	// Leave the state marked unclean. Together with the size baseline it holds,
+	// it tells the next start whether the reason below could be persisted.
 	if !c.appendf("%s fatal: %v", time.Now().UTC().Format(time.RFC3339), err) {
-		log.Printf("could not persist the fatal error to %s; the unclean-shutdown marker stays for the next start", c.crashLogPath())
+		log.Printf("could not persist the fatal error to %s; the next start will report an unclean shutdown instead", c.crashLogPath())
 	}
 	c.close()
 }
@@ -171,26 +184,27 @@ func (c *crashReporter) crashLogSize() int64 {
 	return info.Size()
 }
 
-func (c *crashReporter) writeMarker(crashLogBytes int64) {
-	marker, err := json.Marshal(shutdownMarker{
+// writeState records this run. The size baseline is captured on the first write
+// and reused afterwards, so marking a clean shutdown cannot hide a report that
+// arrives between the two writes.
+func (c *crashReporter) writeState(cleanShutdown bool) {
+	if !c.owned {
+		return
+	}
+	if !cleanShutdown {
+		c.baseline = c.crashLogSize()
+	}
+	state, err := json.Marshal(runState{
 		StartedAt:     time.Now().UTC().Format(time.RFC3339),
 		PID:           os.Getpid(),
-		CrashLogBytes: crashLogBytes,
+		CrashLogBytes: c.baseline,
+		CleanShutdown: cleanShutdown,
 	})
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(c.markerPath(), append(marker, '\n'), 0o600); err != nil {
-		log.Printf("write unclean-shutdown marker %s: %v", c.markerPath(), err)
-	}
-}
-
-func (c *crashReporter) clearMarker() {
-	if !c.owned {
-		return
-	}
-	if err := os.Remove(c.markerPath()); err != nil && !os.IsNotExist(err) {
-		log.Printf("remove unclean-shutdown marker %s: %v", c.markerPath(), err)
+	if err := os.WriteFile(c.statePath(), append(state, '\n'), 0o600); err != nil {
+		log.Printf("write crash state %s: %v", c.statePath(), err)
 	}
 }
 
@@ -202,18 +216,18 @@ func (c *crashReporter) close() {
 	c.file = nil
 }
 
-// readShutdownMarker reports the crash log size the previous run recorded, and
-// whether a marker existed at all. A marker that cannot be parsed still counts
-// as evidence of an unclean shutdown; it claims an unreachable size so a stale
-// crash log is not misread as a fresh report.
-func readShutdownMarker(path string) (int64, bool) {
+// readRunState reports what the previous run recorded, and whether there was a
+// previous run at all. State that cannot be parsed still counts as evidence of
+// an unclean shutdown; it claims an unreachable size so a crash log left from
+// before is not misread as a fresh report.
+func readRunState(path string) (runState, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false
+		return runState{}, false
 	}
-	var marker shutdownMarker
-	if err := json.Unmarshal(data, &marker); err != nil {
-		return math.MaxInt64, true
+	var state runState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return runState{CrashLogBytes: math.MaxInt64}, true
 	}
-	return marker.CrashLogBytes, true
+	return state, true
 }
