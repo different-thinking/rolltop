@@ -9,6 +9,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -135,7 +136,36 @@ func TestLoginStoreFailureIsNotACredentialVerdict(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: "csrf-base"})
 	req.Header.Set("X-CSRF-Token", server.csrfForBase("csrf-base"))
 	handler.ServeHTTP(rec, req)
-	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("POST /api/login with failing store status = %d body=%s, must not claim invalid credentials", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("POST /api/login with failing store status = %d body=%s, want 500 rather than an invalid-credentials response", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBootstrapPayloadSessionFailureKeepsPublicRoutesAnonymous(t *testing.T) {
+	db, server, _, _ := newStoreFailureTestServer(t)
+	defer db.Close()
+
+	failed := httptest.NewRequest(http.MethodGet, "/login", nil)
+	failed = failed.WithContext(context.WithValue(failed.Context(), sessionErrorContextKey, context.DeadlineExceeded))
+	if _, err := server.bootstrapPayload(httptest.NewRecorder(), failed); !errors.Is(err, errSessionUnavailable) {
+		t.Fatalf("bootstrapPayload with failed session lookup err = %v, want errSessionUnavailable", err)
+	}
+
+	// handleApp falls back to an anonymous render for /login, /setup, and
+	// /reset-password by clearing the recorded session error; that render must
+	// succeed while the rest of the store still works.
+	cleared := failed.WithContext(context.WithValue(failed.Context(), sessionErrorContextKey, nil))
+	payload, err := server.bootstrapPayload(httptest.NewRecorder(), cleared)
+	if err != nil {
+		t.Fatalf("anonymous fallback bootstrap failed: %v", err)
+	}
+	if payload["user"] != nil {
+		t.Fatalf("anonymous fallback payload user = %v, want nil", payload["user"])
+	}
+	if usersExist, _ := payload["users_exist"].(bool); !usersExist {
+		t.Fatal("anonymous fallback payload must still report existing users")
+	}
+	if !isPublicAuthRoute("/login") || !isPublicAuthRoute("/setup") || isPublicAuthRoute("/mail") {
+		t.Fatal("public auth route classification is wrong")
 	}
 }
