@@ -5,6 +5,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +161,39 @@ func TestSavingAGoogleAccountKeepsTheSyncStartDate(t *testing.T) {
 	}
 }
 
+// XOAUTH2 sends the login name next to the token and Google rejects the pair
+// when they disagree. The email field is the user's From address and may well
+// be an alias, so it must not become the login name.
+func TestGoogleAccountAuthenticatesAsTheConnectedMailboxNotTheTypedAddress(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	input := googleAccountInput(connection.ID)
+	input.Email = "alias@company.example.test"
+	account, message, err := env.server.saveMailAccountFromInput(context.Background(), env.owner.ID, input)
+	if err != nil {
+		t.Fatalf("save: %v (%s)", err, message)
+	}
+	if account.Email != "alias@company.example.test" {
+		t.Fatalf("email = %q, want the alias the user chose to send as", account.Email)
+	}
+	if account.Username != connection.GoogleEmail || account.SMTPUsername != connection.GoogleEmail {
+		t.Fatalf("login names = %q/%q, want %q", account.Username, account.SMTPUsername, connection.GoogleEmail)
+	}
+}
+
+// The date picker sends the browser's local date, so east of UTC "today" is
+// already tomorrow by UTC and would be refused as a future date.
+func TestSyncStartDateAcceptsTomorrowForTimezonesAheadOfUTC(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	input := googleAccountInput(connection.ID)
+	input.SyncStartAt = time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	if _, message, err := env.server.saveMailAccountFromInput(
+		context.Background(), env.owner.ID, input); err != nil {
+		t.Fatalf("save with tomorrow's date: %v (%s)", err, message)
+	}
+}
+
 // A cutoff in the future mirrors nothing at all, which reads as a broken
 // account rather than a setting.
 func TestSyncStartDateRejectsUnusableValues(t *testing.T) {
@@ -165,7 +201,7 @@ func TestSyncStartDateRejectsUnusableValues(t *testing.T) {
 	connection := env.connect(t, env.owner)
 	for name, value := range map[string]string{
 		"not a date": "last tuesday",
-		"future":     time.Now().UTC().AddDate(0, 0, 2).Format("2006-01-02"),
+		"future":     time.Now().UTC().AddDate(0, 0, 3).Format("2006-01-02"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			input := googleAccountInput(connection.ID)
@@ -175,6 +211,46 @@ func TestSyncStartDateRejectsUnusableValues(t *testing.T) {
 				t.Fatalf("accepted %q with message %q", value, message)
 			}
 		})
+	}
+}
+
+// The outgoing server is saved by its own handler, which had no equivalent of
+// the incoming side's guard: an OAuth row stores an empty password, so carrying
+// it over produced a password account that fails at the next send with a
+// decryption error and nothing on screen explaining it.
+func TestSwitchingAGoogleSMTPServerBackToPasswordRequiresOne(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	created := env.send(t, env.owner, http.MethodPost, "/api/account/smtp",
+		[]byte(fmt.Sprintf(`{"label":"Gmail","auth_type":"google_oauth","google_connection_id":%d}`, connection.ID)))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		SMTPAccount apiSMTPAccount `json:"smtp_account"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SMTPAccount.Username != connection.GoogleEmail {
+		t.Fatalf("login name = %q, want the connected mailbox %q", payload.SMTPAccount.Username, connection.GoogleEmail)
+	}
+
+	switched := env.send(t, env.owner, http.MethodPost, "/api/account/smtp",
+		[]byte(fmt.Sprintf(`{"id":%d,"label":"Gmail","host":"smtp.example.test","port":587,"username":"someone","auth_type":"password"}`,
+			payload.SMTPAccount.ID)))
+	if switched.Code != http.StatusBadRequest {
+		t.Fatalf("switch status=%d body=%s, want 400", switched.Code, switched.Body.String())
+	}
+	if !strings.Contains(switched.Body.String(), "Enter a password") {
+		t.Fatalf("body = %s, want it to ask for a password", switched.Body.String())
+	}
+	stored, err := env.db.GetSMTPAccountForUser(context.Background(), env.owner.ID, payload.SMTPAccount.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.UsesGoogleOAuth() {
+		t.Fatal("the rejected switch still changed the stored server")
 	}
 }
 

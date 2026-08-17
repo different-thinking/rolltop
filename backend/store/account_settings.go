@@ -12,7 +12,7 @@ func prepareSMTPAccount(a SMTPAccount) (SMTPAccount, error) {
 	if a.UserID == 0 || strings.TrimSpace(a.Host) == "" || a.Port <= 0 {
 		return SMTPAccount{}, errors.New("SMTP account fields are incomplete")
 	}
-	a.AuthType = normalizedAuthType(a.AuthType)
+	a.AuthType = NormalizeAuthType(a.AuthType)
 	if a.AuthType == AuthTypeGoogleOAuth {
 		if a.GoogleConnectionID <= 0 {
 			return SMTPAccount{}, errors.New("google SMTP account is missing its connection")

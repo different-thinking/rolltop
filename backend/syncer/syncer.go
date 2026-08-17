@@ -318,7 +318,8 @@ func (s *Service) DiscoverMailboxes(ctx context.Context, userID int64) (int, err
 			return count, err
 		}
 		for _, info := range infos {
-			mb, err := s.Store.GetOrCreateMailboxWithRole(ctx, userID, account.ID, info.Name, mailboxSpecialUseRole(info.Attributes))
+			mb, err := s.Store.GetOrCreateMailboxFromDiscovery(ctx, userID, account.ID, info.Name,
+				mailboxSpecialUseRole(info.Attributes), info.Attributes)
 			if err != nil {
 				return count, err
 			}
@@ -1182,6 +1183,10 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		return plan, false, nil
 	}
 	var remoteUIDs []uint32
+	// Repair may only download what the account's sync start date allows.
+	// remoteUIDs stays the full list because the UID checkpoint below has to
+	// clear pre-cutoff messages that will never be fetched.
+	var fetchableUIDs []uint32
 	var snapshotUIDValidity uint32
 	expectedUIDValidity := plan.Status.UIDValidity
 	if expectedUIDValidity == 0 && mailbox.UIDValidity > 0 && mailbox.UIDValidity <= int64(^uint32(0)) {
@@ -1204,6 +1209,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 			}
 		}
 		remoteUIDs = snapshot.UIDs
+		fetchableUIDs = snapshot.Fetchable()
 		snapshotUIDValidity = snapshot.UIDValidity
 		expectedUIDValidity = snapshot.UIDValidity
 	} else {
@@ -1214,8 +1220,9 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		if err != nil {
 			return plan, false, err
 		}
+		fetchableUIDs = remoteUIDs
 	}
-	missing := missingRemoteUIDs(remoteUIDs, localUIDs)
+	missing := missingRemoteUIDs(fetchableUIDs, localUIDs)
 	highestRemoteUID := maxUID(remoteUIDs)
 	if progress != nil {
 		progress.MessagesTotal += len(missing) - plan.Pending
@@ -1239,7 +1246,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		plan.Pending = 0
 		return plan, true, nil
 	}
-	log.Printf("repair incomplete mailbox user_id=%d account_id=%d mailbox=%s local=%d remote=%d missing=%d last_uid=%d uidnext=%d", userID, account.ID, mailbox.Name, len(localUIDs), len(remoteUIDs), len(missing), plan.LastUID, plan.Status.UIDNext)
+	log.Printf("repair incomplete mailbox user_id=%d account_id=%d mailbox=%s local=%d remote=%d fetchable=%d missing=%d last_uid=%d uidnext=%d", userID, account.ID, mailbox.Name, len(localUIDs), len(remoteUIDs), len(fetchableUIDs), len(missing), plan.LastUID, plan.Status.UIDNext)
 
 	classifiers, storedHooks, err := s.postStorePluginHooks(ctx)
 	if err != nil {

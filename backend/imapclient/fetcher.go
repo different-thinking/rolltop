@@ -44,14 +44,7 @@ type Fetcher struct {
 	// OAuth. It is an interface rather than the manager itself so this package
 	// stays independent of the OAuth implementation and can be tested without
 	// one. A nil value only fails accounts that actually need it.
-	Tokens TokenSource
-}
-
-// TokenSource is the slice of the Google manager that IMAP authentication
-// needs.
-type TokenSource interface {
-	AccessToken(ctx context.Context, userID, connectionID int64) (string, error)
-	ForceRefresh(ctx context.Context, userID, connectionID int64) (string, error)
+	Tokens xoauth2.TokenSource
 }
 
 // ServerCapabilities contains the authenticated IMAP extensions used by
@@ -514,7 +507,7 @@ func (f *Fetcher) UIDs(ctx context.Context, account store.MailAccount, mailbox s
 	criteria := imap.NewSearchCriteria()
 	criteria.Uid = new(imap.SeqSet)
 	criteria.Uid.AddRange(1, 0)
-	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
+	uids, err := c.UidSearch(criteria)
 	if err != nil {
 		return nil, fmt.Errorf("search UIDs in mailbox %q: %w", mailbox, err)
 	}
@@ -530,10 +523,13 @@ func (f *Fetcher) UIDs(ctx context.Context, account store.MailAccount, mailbox s
 // included whole. Erring towards one extra day beats silently dropping mail
 // that arrived on the chosen date.
 //
-// The cutoff is also applied to the reconcile and flag searches, not just to
-// body fetches. Those compare the server's UID set against what is stored
-// locally, and a mailbox that legitimately holds nothing before the cutoff
-// would otherwise look permanently incomplete and be repaired forever.
+// This belongs only on searches that decide what to download. The searches that
+// decide what to delete or how to set flags must keep seeing the whole mailbox:
+// reconciliation removes local messages missing from the server's UID list, and
+// UpdateMailboxReadFlags marks every local message not in the seen list as
+// unread. Handing either a cutoff-limited list would delete or unread the mail
+// that was mirrored before the cutoff was set. Repair gets its own limited list
+// through MailboxUIDSnapshot.FetchableUIDs instead.
 func limitToSyncStart(criteria *imap.SearchCriteria, account store.MailAccount) *imap.SearchCriteria {
 	if account.SyncStartAt.IsZero() {
 		return criteria
@@ -1116,7 +1112,7 @@ func (f *Fetcher) SeenUIDs(ctx context.Context, account store.MailAccount, mailb
 	}
 	criteria := imap.NewSearchCriteria()
 	criteria.WithFlags = []string{imap.SeenFlag}
-	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
+	uids, err := c.UidSearch(criteria)
 	if err != nil {
 		return nil, fmt.Errorf("search seen UIDs in mailbox %q: %w", mailbox, err)
 	}
@@ -1169,7 +1165,7 @@ func (f *Fetcher) FlaggedUIDs(ctx context.Context, account store.MailAccount, ma
 	}
 	criteria := imap.NewSearchCriteria()
 	criteria.WithFlags = []string{imap.FlaggedFlag}
-	uids, err := c.UidSearch(limitToSyncStart(criteria, account))
+	uids, err := c.UidSearch(criteria)
 	if err != nil {
 		return nil, fmt.Errorf("search flagged UIDs in mailbox %q: %w", mailbox, err)
 	}
@@ -1308,39 +1304,28 @@ func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
 	})
 }
 
-// loginWithGoogleToken retries once against a forcibly refreshed token. The
-// stored token can be rejected while still looking valid here — a revoked scope,
-// a password change, or plain clock skew all produce a token this side believes
-// in and Google does not — and one extra round trip is cheaper than failing a
-// whole sync run.
+// loginWithGoogleToken authenticates with a Google access token, letting the
+// shared helper own the refresh-and-retry policy the SMTP path uses too.
 func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Client, error) {
-	if f.Tokens == nil {
-		return nil, fmt.Errorf("%w: account %d", ErrNoTokenSource, account.ID)
-	}
+	// login has no context of its own and runs inside a goroutine that
+	// loginByContext abandons on cancellation, so the token work is bounded by
+	// the same command timeout the connection uses.
 	ctx, cancel := context.WithTimeout(context.Background(), f.commandTimeout())
 	defer cancel()
-	token, err := f.Tokens.AccessToken(ctx, account.UserID, account.GoogleConnectionID)
+	var authenticated *client.Client
+	err := xoauth2.WithFreshToken(ctx, f.Tokens, account.UserID, account.GoogleConnectionID,
+		func(token string) error {
+			c, err := f.connectAndAuthenticate(account, authenticateXOAUTH2(account, token))
+			if err != nil {
+				return err
+			}
+			authenticated = c
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("obtain google access token: %w", err)
-	}
-	c, err := f.connectAndAuthenticate(account, authenticateXOAUTH2(account, token))
-	if err == nil {
-		return c, nil
-	}
-	var authFailure authenticationError
-	if !errors.As(err, &authFailure) {
 		return nil, err
 	}
-	refreshed, refreshErr := f.Tokens.ForceRefresh(ctx, account.UserID, account.GoogleConnectionID)
-	if refreshErr != nil {
-		// The original rejection describes the account better than a refresh
-		// failure that is itself only a symptom of it.
-		return nil, err
-	}
-	if refreshed == token {
-		return nil, err
-	}
-	return f.connectAndAuthenticate(account, authenticateXOAUTH2(account, refreshed))
+	return authenticated, nil
 }
 
 func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client) error {
@@ -1355,18 +1340,6 @@ func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.C
 		return c.Authenticate(xoauth2.NewSASLClient(account.Username, token))
 	}
 }
-
-// ErrNoTokenSource reports that an OAuth account was reached by a fetcher that
-// was never wired to the Google manager. That is a wiring mistake, not a user
-// error, so it is named rather than reported as a login failure.
-var ErrNoTokenSource = errors.New("this fetcher cannot mint Google access tokens")
-
-// authenticationError marks the credential exchange specifically, so a retry
-// with a fresh token is not spent on a server that was simply unreachable.
-type authenticationError struct{ err error }
-
-func (e authenticationError) Error() string { return e.err.Error() }
-func (e authenticationError) Unwrap() error { return e.err }
 
 func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate func(*client.Client) error) (*client.Client, error) {
 	var err error
@@ -1402,7 +1375,7 @@ func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate
 	c.Timeout = timeout
 	if err := authenticate(c); err != nil {
 		terminateClient(c)
-		return nil, authenticationError{fmt.Errorf("login to IMAP server %s: %w", addr, err)}
+		return nil, xoauth2.AuthError{Err: fmt.Errorf("login to IMAP server %s: %w", addr, err)}
 	}
 	return c, nil
 }

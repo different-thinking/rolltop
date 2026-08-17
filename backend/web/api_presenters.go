@@ -131,19 +131,10 @@ func apiAccountFromStore(account store.MailAccount) apiAccount {
 		SMTPSameAsIMAP:      sameSMTPSettings(account),
 		Mailbox:             account.Mailbox,
 		SyncIntervalMinutes: account.SyncIntervalMinutes,
-		AuthType:            accountAuthType(account.AuthType),
+		AuthType:            store.NormalizeAuthType(account.AuthType),
 		GoogleConnectionID:  account.GoogleConnectionID,
 		SyncStartAt:         apiSyncStartDate(account.SyncStartAt),
 	}
-}
-
-// accountAuthType reports the password default for rows written before the
-// column existed, so the form never receives an empty selection.
-func accountAuthType(authType string) string {
-	if strings.TrimSpace(authType) == store.AuthTypeGoogleOAuth {
-		return store.AuthTypeGoogleOAuth
-	}
-	return store.AuthTypePassword
 }
 
 // apiSyncStartDate renders the cutoff as a plain calendar date, which is what
@@ -207,7 +198,7 @@ func apiSMTPAccountFromStore(account store.SMTPAccount) apiSMTPAccount {
 		Port:               account.Port,
 		Username:           account.Username,
 		UseTLS:             account.UseTLS,
-		AuthType:           accountAuthType(account.AuthType),
+		AuthType:           store.NormalizeAuthType(account.AuthType),
 		GoogleConnectionID: account.GoogleConnectionID,
 	}
 }

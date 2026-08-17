@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { api, getJSON } from "../../api";
+import { api } from "../../api";
 import type { DatePrefs, LocationState, Toast } from "../../appTypes";
 import type { Account, AccountPurgeEstimate, Bootstrap, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
 import { Icon } from "../../components/Icon";
@@ -22,6 +22,8 @@ import { identitySecuritySettings } from "../../plugins/identitySecurity";
 import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/AdminRemoteImageBlocklist";
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
+import { GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
+import { loadGoogleConnections, type GoogleConnection } from "./googleConnections";
 import { SettingsEmpty, SettingsError, SettingsIndex, SettingsIndexRow, SettingsLoading, SettingsPage, SettingsShell } from "./SettingsUI";
 import type { SettingsSectionID } from "./SettingsUI";
 
@@ -33,18 +35,6 @@ function imapAccountDescription(account: Account): string {
   }
   return `${account.email} · ${account.host}:${account.port}`;
 }
-
-/** GoogleAccountOption is one connected Google account the IMAP form can use. */
-type GoogleAccountOption = {
-  id: number;
-  email: string;
-  needs_reauth: boolean;
-};
-
-type GoogleConnectionsPayload = {
-  configured: boolean;
-  connections: GoogleAccountOption[];
-};
 
 function emptySMTPForm() {
   return {
@@ -741,7 +731,7 @@ export function SettingsView({
   const [storageError, setStorageError] = useState("");
   const [notice, setNotice] = useState("");
   const [accountNeedsPassword, setAccountNeedsPassword] = useState(false);
-  const [googleConnections, setGoogleConnections] = useState<GoogleAccountOption[]>([]);
+  const [googleConnections, setGoogleConnections] = useState<GoogleConnection[]>([]);
   const [googleConfigured, setGoogleConfigured] = useState(false);
   const [form, setForm] = useState(() => emptyAccountForm());
   const [smtpForm, setSMTPForm] = useState(() => emptySMTPForm());
@@ -899,10 +889,10 @@ export function SettingsView({
     let cancelled = false;
     void (async () => {
       try {
-        const data = await getJSON<GoogleConnectionsPayload>("/api/google/connections");
+        const data = await loadGoogleConnections();
         if (cancelled) return;
-        setGoogleConfigured(Boolean(data.configured));
-        setGoogleConnections(data.connections || []);
+        setGoogleConfigured(data.configured);
+        setGoogleConnections(data.connections);
       } catch {
         if (!cancelled) setGoogleConfigured(false);
       }
@@ -2557,42 +2547,16 @@ export function SettingsView({
           <div className="settings-columns account-settings-grid">
             <section>
               <h3>Connection</h3>
-              {googleConfigured ? (
-                <label className="field">
-                  <span>Sign-in</span>
-                  <select value={form.auth_type} onChange={(event) => setField("auth_type", event.target.value)}>
-                    <option value={AUTH_PASSWORD}>Password</option>
-                    <option value={AUTH_GOOGLE}>Google account</option>
-                  </select>
-                </label>
-              ) : null}
+              <SignInMethodField configured={googleConfigured} value={form.auth_type} onChange={(value) => setField("auth_type", value)} />
               {usesGoogleSignIn ? (
                 <>
-                  <label className="field">
-                    <span>Google account</span>
-                    <select
-                      value={form.google_connection_id}
-                      onChange={(event) => setField("google_connection_id", event.target.value)}
-                      required
-                    >
-                      <option value="">Choose a connected account</option>
-                      {googleConnections.map((connection) => (
-                        <option key={connection.id} value={String(connection.id)}>
-                          {connection.email}{connection.needs_reauth ? " (needs reauthorization)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {googleConnections.length === 0 ? (
-                    <p className="muted">
-                      No Google account is connected yet.{" "}
-                      <a href="/settings/account/google" onClick={(event) => { event.preventDefault(); navigate("/settings/account/google"); }}>
-                        Connect one first
-                      </a>.
-                    </p>
-                  ) : (
-                    <p className="muted">Signs in to imap.gmail.com and smtp.gmail.com with this Google account. No password is stored.</p>
-                  )}
+                  <GoogleConnectionField
+                    connections={googleConnections}
+                    value={form.google_connection_id}
+                    onChange={(value) => setField("google_connection_id", value)}
+                    hint="Signs in to imap.gmail.com and smtp.gmail.com with this Google account. No password is stored."
+                    onConnectAccounts={() => navigate("/settings/account/google")}
+                  />
                   <Field label="Label" value={form.label} onChange={(value) => setField("label", value)} placeholder="Personal mail, Work archive" />
                   <Field label="Email" value={form.email} onChange={(value) => setField("email", value)} type="email" placeholder="Defaults to the connected address" />
                 </>
@@ -2651,15 +2615,7 @@ export function SettingsView({
           <div className="settings-columns display-settings-grid">
             <section>
               <Field label="Label" value={smtpForm.label} onChange={(value) => setSMTPField("label", value)} />
-              {googleConfigured ? (
-                <label className="field">
-                  <span>Sign-in</span>
-                  <select value={smtpForm.auth_type} onChange={(event) => setSMTPField("auth_type", event.target.value)}>
-                    <option value={AUTH_PASSWORD}>Password</option>
-                    <option value={AUTH_GOOGLE}>Google account</option>
-                  </select>
-                </label>
-              ) : null}
+              <SignInMethodField configured={googleConfigured} value={smtpForm.auth_type} onChange={(value) => setSMTPField("auth_type", value)} />
               {smtpUsesGoogleSignIn ? null : (
                 <>
                   <Field label="Host" value={smtpForm.host} onChange={(value) => setSMTPField("host", value)} />
@@ -2669,24 +2625,13 @@ export function SettingsView({
             </section>
             <section>
               {smtpUsesGoogleSignIn ? (
-                <>
-                  <label className="field">
-                    <span>Google account</span>
-                    <select
-                      value={smtpForm.google_connection_id}
-                      onChange={(event) => setSMTPField("google_connection_id", event.target.value)}
-                      required
-                    >
-                      <option value="">Choose a connected account</option>
-                      {googleConnections.map((connection) => (
-                        <option key={connection.id} value={String(connection.id)}>
-                          {connection.email}{connection.needs_reauth ? " (needs reauthorization)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="muted">Sends through smtp.gmail.com as this Google account. No password is stored.</p>
-                </>
+                <GoogleConnectionField
+                  connections={googleConnections}
+                  value={smtpForm.google_connection_id}
+                  onChange={(value) => setSMTPField("google_connection_id", value)}
+                  hint="Sends through smtp.gmail.com as this Google account. No password is stored."
+                  onConnectAccounts={() => navigate("/settings/account/google")}
+                />
               ) : (
                 <>
                   <Field label="Username" value={smtpForm.username} onChange={(value) => setSMTPField("username", value)} />

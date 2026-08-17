@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/xoauth2"
 )
 
 // fakeSMTPServer accepts one message per connection and records the credentials
@@ -159,35 +160,6 @@ func (s *fakeSMTPServer) payloads() []string {
 	return append([]string(nil), s.authPayloads...)
 }
 
-type stubTokens struct {
-	mu     sync.Mutex
-	tokens []string
-	index  int
-	forced int
-}
-
-func (s *stubTokens) AccessToken(context.Context, int64, int64) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.next(), nil
-}
-
-func (s *stubTokens) ForceRefresh(context.Context, int64, int64) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.forced++
-	return s.next(), nil
-}
-
-func (s *stubTokens) next() string {
-	if s.index >= len(s.tokens) {
-		return s.tokens[len(s.tokens)-1]
-	}
-	token := s.tokens[s.index]
-	s.index++
-	return token
-}
-
 func sendTestMessage(sender *Sender, account store.MailAccount) error {
 	return sender.SendRaw(context.Background(), account, []string{"recipient@example.test"},
 		[]byte("From: user@gmail.example.test\r\nTo: recipient@example.test\r\n\r\nbody\r\n"))
@@ -195,7 +167,7 @@ func sendTestMessage(sender *Sender, account store.MailAccount) error {
 
 func TestSendRawAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 	server := startFakeSMTPServer(t, "good-token")
-	sender := &Sender{Tokens: &stubTokens{tokens: []string{"good-token"}}}
+	sender := &Sender{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
 	if err := sendTestMessage(sender, server.account(t)); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -218,15 +190,15 @@ func TestSendRawAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 // turn this into a duplicate send.
 func TestSendRawRetriesOnceWithARefreshedTokenAndDeliversOnce(t *testing.T) {
 	server := startFakeSMTPServer(t, "fresh-token")
-	tokens := &stubTokens{tokens: []string{"stale-token", "fresh-token"}}
+	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
 	if err := sendTestMessage(&Sender{Tokens: tokens}, server.account(t)); err != nil {
 		t.Fatalf("send after refresh: %v", err)
 	}
 	if attempts := len(server.payloads()); attempts != 2 {
 		t.Fatalf("authentication attempts = %d, want 2", attempts)
 	}
-	if tokens.forced != 1 {
-		t.Fatalf("forced refreshes = %d, want 1", tokens.forced)
+	if tokens.Forced != 1 {
+		t.Fatalf("forced refreshes = %d, want 1", tokens.Forced)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -237,7 +209,7 @@ func TestSendRawRetriesOnceWithARefreshedTokenAndDeliversOnce(t *testing.T) {
 
 func TestSendRawReportsASenderThatCannotMintTokens(t *testing.T) {
 	server := startFakeSMTPServer(t, "good-token")
-	if err := sendTestMessage(&Sender{}, server.account(t)); !errors.Is(err, ErrNoTokenSource) {
-		t.Fatalf("send without a token source = %v, want ErrNoTokenSource", err)
+	if err := sendTestMessage(&Sender{}, server.account(t)); !errors.Is(err, xoauth2.ErrNoTokenSource) {
+		t.Fatalf("send without a token source = %v, want xoauth2.ErrNoTokenSource", err)
 	}
 }

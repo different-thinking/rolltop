@@ -12,10 +12,12 @@ import (
 
 const DefaultMailboxPattern = "*"
 
-// normalizedAuthType keeps an unknown or empty value on the password path.
+// NormalizeAuthType keeps an unknown or empty value on the password path.
 // Treating anything unrecognized as OAuth would let a typo silently disable
-// password authentication for an account that still depends on it.
-func normalizedAuthType(authType string) string {
+// password authentication for an account that still depends on it. It is
+// exported because the API layer normalizes the same field on the way in and
+// must not keep a second copy of this whitelist.
+func NormalizeAuthType(authType string) string {
 	if strings.TrimSpace(authType) == AuthTypeGoogleOAuth {
 		return AuthTypeGoogleOAuth
 	}
@@ -23,7 +25,7 @@ func normalizedAuthType(authType string) string {
 }
 
 func prepareMailAccount(a MailAccount) (MailAccount, error) {
-	a.AuthType = normalizedAuthType(a.AuthType)
+	a.AuthType = NormalizeAuthType(a.AuthType)
 	if a.AuthType != AuthTypeGoogleOAuth {
 		a.GoogleConnectionID = 0
 	}
@@ -231,6 +233,14 @@ func (s *Store) GetOrCreateMailbox(ctx context.Context, userID, accountID int64,
 // assigned role. Duplicate special roles are also left untouched so one unusual
 // server response cannot make folder settings ambiguous.
 func (s *Store) GetOrCreateMailboxWithRole(ctx context.Context, userID, accountID int64, name, discoveredRole string) (Mailbox, error) {
+	return s.GetOrCreateMailboxFromDiscovery(ctx, userID, accountID, name, discoveredRole, nil)
+}
+
+// GetOrCreateMailboxFromDiscovery additionally takes the raw SPECIAL-USE
+// attributes the server advertised. They decide the default sync mode for
+// folders whose purpose has no role of its own, which is the only way to
+// recognize Gmail's label views on a localized account.
+func (s *Store) GetOrCreateMailboxFromDiscovery(ctx context.Context, userID, accountID int64, name, discoveredRole string, attributes []string) (Mailbox, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "INBOX"
@@ -240,7 +250,7 @@ func (s *Store) GetOrCreateMailboxWithRole(ctx context.Context, userID, accountI
 	if role == "" {
 		role = defaultMailboxRole(name)
 	}
-	syncMode := defaultMailboxSyncMode(name, role)
+	syncMode := defaultMailboxSyncMode(name, role, attributes)
 	db := s.mustDataDB(ctx, userID)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -636,8 +646,8 @@ func normalizeMailboxIcon(icon string, name string, role string) string {
 	return defaultMailboxIcon(name, role)
 }
 
-func defaultMailboxSyncMode(name, role string) string {
-	if isLabelViewMailbox(name, role) {
+func defaultMailboxSyncMode(name, role string, attributes []string) string {
+	if isLabelViewMailbox(name, role, attributes) {
 		return "never"
 	}
 	if strings.EqualFold(strings.TrimSpace(name), "INBOX") {
@@ -646,17 +656,32 @@ func defaultMailboxSyncMode(name, role string) string {
 	return "manual"
 }
 
+// labelViewAttributes are the SPECIAL-USE attributes for folders that are views
+// over messages already stored elsewhere. \All and \Flagged are RFC 6154,
+// \Important is RFC 8457; Gmail advertises all three whatever language the
+// account is in.
+var labelViewAttributes = []string{"\\all", "\\flagged", "\\important"}
+
 // isLabelViewMailbox reports Gmail's virtual folders, which are views over
 // messages that already live in a real folder. This data model stores one
 // folder per message, so syncing them would mirror most of the mailbox a second
 // time and double the database for nothing.
 //
-// The \All special-use attribute is checked first because it is language
-// independent; the name list only has to cover Important and Starred, which
-// Gmail exposes without a standard attribute.
-func isLabelViewMailbox(name, role string) bool {
+// Attributes decide first because they are language independent: a German
+// account calls these folders "Alle Nachrichten", "Markiert" and "Wichtig", and
+// no list of English names will ever catch them. The names remain as a fallback
+// for servers that report no special-use metadata at all.
+func isLabelViewMailbox(name, role string, attributes []string) bool {
 	if role == "all" {
 		return true
+	}
+	for _, attribute := range attributes {
+		attribute = strings.ToLower(strings.TrimSpace(attribute))
+		for _, labelView := range labelViewAttributes {
+			if attribute == labelView {
+				return true
+			}
+		}
 	}
 	clean := strings.ToLower(strings.TrimSpace(name))
 	for _, prefix := range []string{"[gmail]/", "[google mail]/"} {

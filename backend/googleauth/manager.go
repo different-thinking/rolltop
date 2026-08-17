@@ -48,6 +48,21 @@ type Manager struct {
 
 	refreshMu sync.Mutex
 	refreshes map[refreshKey]*refreshCall
+
+	// tokenMu guards the decrypted-token cache. Every IMAP connection asks for a
+	// token, and a sync pass opens several per mailbox, so without this a single
+	// pass over a large account performs hundreds of single-row reads and
+	// AES-GCM decrypts of a row that has not changed. The database it would
+	// hammer is the same one that reports "database is locked" under load.
+	tokenMu sync.Mutex
+	tokens  map[refreshKey]cachedToken
+}
+
+// cachedToken is a decrypted access token and the instant it stops being
+// usable. Nothing here is written to disk; the row remains the durable copy.
+type cachedToken struct {
+	token     string
+	expiresAt time.Time
 }
 
 type refreshKey struct {
@@ -72,6 +87,7 @@ func NewManager(cfg Config, connections ConnectionStore, masterKey []byte) *Mana
 		masterKey: masterKey,
 		flows:     newFlowStore(time.Now),
 		refreshes: map[refreshKey]*refreshCall{},
+		tokens:    map[refreshKey]cachedToken{},
 	}
 }
 
@@ -207,8 +223,54 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 // AccessToken returns a currently valid access token for a connection,
 // refreshing it when it is expired or close to expiring.
 func (m *Manager) AccessToken(ctx context.Context, userID, connectionID int64) (string, error) {
-	token, _, err := m.AccessTokenAndConnection(ctx, userID, connectionID)
-	return token, err
+	if err := m.ready(); err != nil {
+		return "", err
+	}
+	if token, ok := m.cachedToken(userID, connectionID); ok {
+		return token, nil
+	}
+	token, connection, err := m.AccessTokenAndConnection(ctx, userID, connectionID)
+	if err != nil {
+		return "", err
+	}
+	m.cacheToken(userID, connectionID, token, connection.AccessTokenExpiresAt)
+	return token, nil
+}
+
+// cachedToken returns a token held in memory while it is still comfortably
+// valid. It applies the same expiry margin as the stored copy, so the cache can
+// never keep a token alive past the point the database would have refreshed it.
+func (m *Manager) cachedToken(userID, connectionID int64) (string, bool) {
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	entry, ok := m.tokens[refreshKey{userID: userID, connectionID: connectionID}]
+	if !ok || entry.token == "" || entry.expiresAt.IsZero() {
+		return "", false
+	}
+	if !m.timeNow().Add(refreshSkew).Before(entry.expiresAt) {
+		return "", false
+	}
+	return entry.token, true
+}
+
+func (m *Manager) cacheToken(userID, connectionID int64, token string, expiresAt time.Time) {
+	if token == "" || expiresAt.IsZero() {
+		return
+	}
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	m.tokens[refreshKey{userID: userID, connectionID: connectionID}] = cachedToken{token: token, expiresAt: expiresAt}
+}
+
+// forgetToken drops a cached token whose validity this process can no longer
+// vouch for: the server rejected it, or the connection is gone.
+func (m *Manager) forgetToken(userID, connectionID int64) {
+	if m == nil {
+		return
+	}
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	delete(m.tokens, refreshKey{userID: userID, connectionID: connectionID})
 }
 
 // AccessTokenAndConnection is AccessToken for callers that also need the
@@ -243,8 +305,15 @@ func (m *Manager) ForceRefresh(ctx context.Context, userID, connectionID int64) 
 	if err := m.ready(); err != nil {
 		return "", err
 	}
-	token, _, err := m.refresh(ctx, userID, connectionID, true)
-	return token, err
+	// The caller reached this because a server rejected the token, so the
+	// cached copy is exactly the value that must not be handed out again.
+	m.forgetToken(userID, connectionID)
+	token, connection, err := m.refresh(ctx, userID, connectionID, true)
+	if err != nil {
+		return "", err
+	}
+	m.cacheToken(userID, connectionID, token, connection.AccessTokenExpiresAt)
+	return token, nil
 }
 
 // AbandonFlow releases a pending authorization the user will never finish, so a
@@ -357,6 +426,9 @@ func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64, for
 			// error wins over the storage error: reporting a generic upstream
 			// failure here would leave the UI offering "Test connection"
 			// instead of "Reauthorize".
+			// A connection the user has to reauthorize must not keep serving a
+			// cached token, which would hide the broken state until it expires.
+			m.forgetToken(userID, connectionID)
 			if markErr := m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "Google rejected the stored authorization."); markErr != nil {
 				log.Printf("google connection user_id=%d connection_id=%d could not be flagged for reauthorization: %v", userID, connectionID, markErr)
 			}
@@ -434,6 +506,9 @@ func (m *Manager) Disconnect(ctx context.Context, userID, connectionID int64) (r
 	if err := m.store.DeleteGoogleConnection(ctx, userID, connectionID); err != nil {
 		return revokeErr, err
 	}
+	// The row is gone, so a token still held in memory would outlive the grant
+	// it belongs to and keep a disconnected account working until it expires.
+	m.forgetToken(userID, connectionID)
 	return revokeErr, nil
 }
 

@@ -3,23 +3,12 @@
 // result out of the callback's query string rather than from a fetch response.
 
 import { useCallback, useEffect, useState } from "react";
-import { deleteJSON, getJSON, postJSON } from "../../api";
+import { deleteJSON, postJSON } from "../../api";
 import { Icon } from "../../components/Icon";
 import type { Toast } from "../../appTypes";
 import { messageFromError } from "../../lib/errors";
 import { SettingsEmpty, SettingsError, SettingsLoading } from "./SettingsUI";
-
-type GoogleConnection = {
-  id: number;
-  email: string;
-  scopes: string[];
-  needs_reauth: boolean;
-};
-
-type GoogleConnectionsResponse = {
-  configured: boolean;
-  connections: GoogleConnection[];
-};
+import { loadGoogleConnections, type GoogleConnection } from "./googleConnections";
 
 // Scope URLs are unreadable in a badge, so they are shown as capabilities.
 // Google offers narrower variants of each scope (".readonly", ".other" and so
@@ -92,9 +81,11 @@ export function GoogleAccountsSettings({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getJSON<GoogleConnectionsResponse>("/api/google/connections");
+      // Always a fresh read: this view is where connections are added and
+      // removed, so it owns the state the server forms then read from cache.
+      const data = await loadGoogleConnections(true);
       setConfigured(data.configured);
-      setConnections(data.connections || []);
+      setConnections(data.connections);
       setLoadError("");
     } catch (error) {
       setLoadError(messageFromError(error));

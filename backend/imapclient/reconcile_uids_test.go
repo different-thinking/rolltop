@@ -3,6 +3,7 @@ package imapclient
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap"
 )
@@ -31,7 +32,7 @@ func TestSnapshotMailboxUIDsBindsSearchToSelectedUIDValidity(t *testing.T) {
 		status: &imap.MailboxStatus{UidValidity: 812, UidNext: 14},
 		uids:   []uint32{2, 8, 13},
 	}
-	snapshot, err := snapshotMailboxUIDs(context.Background(), client, " Archive ")
+	snapshot, err := snapshotMailboxUIDs(context.Background(), client, " Archive ", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestSnapshotMailboxUIDsBindsSearchToSelectedUIDValidity(t *testing.T) {
 
 func TestSnapshotMailboxUIDsRejectsMissingGeneration(t *testing.T) {
 	client := &fakeUIDSnapshotClient{status: &imap.MailboxStatus{UidNext: 43}, uids: []uint32{42}}
-	if _, err := snapshotMailboxUIDs(context.Background(), client, "Archive"); err == nil {
+	if _, err := snapshotMailboxUIDs(context.Background(), client, "Archive", time.Time{}); err == nil {
 		t.Fatal("snapshot accepted a selected mailbox without UIDVALIDITY")
 	}
 	if client.criteria != nil {
@@ -58,7 +59,7 @@ func TestSnapshotMailboxUIDsRejectsMissingGeneration(t *testing.T) {
 
 func TestSnapshotMailboxUIDsRejectsMissingCutoff(t *testing.T) {
 	client := &fakeUIDSnapshotClient{status: &imap.MailboxStatus{UidValidity: 812}, uids: []uint32{42}}
-	if _, err := snapshotMailboxUIDs(context.Background(), client, "Archive"); err == nil {
+	if _, err := snapshotMailboxUIDs(context.Background(), client, "Archive", time.Time{}); err == nil {
 		t.Fatal("snapshot accepted a selected mailbox without UIDNEXT")
 	}
 	if client.criteria != nil {
@@ -68,7 +69,7 @@ func TestSnapshotMailboxUIDsRejectsMissingCutoff(t *testing.T) {
 
 func TestSnapshotMailboxUIDsHandlesEmptyMailboxWithoutDynamicSearch(t *testing.T) {
 	client := &fakeUIDSnapshotClient{status: &imap.MailboxStatus{UidValidity: 812, UidNext: 1}}
-	snapshot, err := snapshotMailboxUIDs(context.Background(), client, "Archive")
+	snapshot, err := snapshotMailboxUIDs(context.Background(), client, "Archive", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

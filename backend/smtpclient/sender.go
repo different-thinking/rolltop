@@ -71,20 +71,8 @@ type Sender struct {
 	Timeout   time.Duration
 	// Tokens mints Google access tokens for accounts that authenticate with
 	// OAuth. Nil only fails accounts that actually need it.
-	Tokens TokenSource
+	Tokens xoauth2.TokenSource
 }
-
-// TokenSource is the slice of the Google manager that SMTP authentication
-// needs.
-type TokenSource interface {
-	AccessToken(ctx context.Context, userID, connectionID int64) (string, error)
-	ForceRefresh(ctx context.Context, userID, connectionID int64) (string, error)
-}
-
-// ErrNoTokenSource reports that an OAuth account was reached by a sender that
-// was never wired to the Google manager, which is a wiring mistake rather than
-// a credential problem.
-var ErrNoTokenSource = errors.New("this sender cannot mint Google access tokens")
 
 type smtpIdleDeadlineConn struct {
 	net.Conn
@@ -143,23 +131,14 @@ func (s *Sender) SendRaw(ctx context.Context, account store.MailAccount, recipie
 // refreshed token. Retrying is safe because authentication precedes MAIL FROM,
 // so a rejected login cannot have delivered anything.
 func (s *Sender) sendWithGoogleToken(ctx context.Context, account store.MailAccount, recipients []string, raw []byte) error {
-	if s.Tokens == nil {
-		return fmt.Errorf("%w: account %d", ErrNoTokenSource, account.ID)
-	}
-	token, err := s.Tokens.AccessToken(ctx, account.UserID, account.GoogleConnectionID)
+	username, err := smtpAuthUsername(account)
 	if err != nil {
-		return fmt.Errorf("obtain google access token: %w", err)
-	}
-	err = s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(smtpAuthUsername(account), token), recipients, raw)
-	var authFailure authenticationError
-	if err == nil || !errors.As(err, &authFailure) {
 		return err
 	}
-	refreshed, refreshErr := s.Tokens.ForceRefresh(ctx, account.UserID, account.GoogleConnectionID)
-	if refreshErr != nil || refreshed == token {
-		return err
-	}
-	return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(smtpAuthUsername(account), refreshed), recipients, raw)
+	return xoauth2.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
+		func(token string) error {
+			return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(username, token), recipients, raw)
+		})
 }
 
 // passwordAuth returns nil for an account without a user name, which is how a
@@ -171,14 +150,20 @@ func passwordAuth(account store.MailAccount, password string) smtp.Auth {
 	return smtp.PlainAuth("", account.SMTPUsername, password, account.SMTPHost)
 }
 
-// smtpAuthUsername falls back to the account address because Gmail expects the
-// mailbox itself, and an SMTP row created for an OAuth account may carry no
-// separate user name.
-func smtpAuthUsername(account store.MailAccount) string {
-	if name := strings.TrimSpace(account.SMTPUsername); name != "" {
-		return name
+// smtpAuthUsername is the connected Google mailbox, which the account handlers
+// copy out of the connection when the server is saved.
+//
+// There is deliberately no fallback to the envelope address: that is the
+// identity being sent as, which for a send-as alias is a different mailbox than
+// the one the token belongs to. Authenticating with a mismatched pair fails at
+// Google with a credentials error that names neither problem, so an empty name
+// is reported here instead.
+func smtpAuthUsername(account store.MailAccount) (string, error) {
+	name := strings.TrimSpace(account.SMTPUsername)
+	if name == "" {
+		return "", fmt.Errorf("google SMTP account %d has no connected mailbox to authenticate as", account.ID)
 	}
-	return strings.TrimSpace(account.Email)
+	return name, nil
 }
 
 func (s *Sender) dialAndSend(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte) error {
@@ -207,14 +192,6 @@ func (s *Sender) dialAndSend(ctx context.Context, account store.MailAccount, aut
 	return sendRawOnConn(ctx, account, auth, recipients, raw, conn)
 }
 
-// authenticationError marks a failure at the credential exchange, so a retry
-// with a refreshed token is not spent on an unreachable server or a rejected
-// recipient.
-type authenticationError struct{ err error }
-
-func (e authenticationError) Error() string { return e.err.Error() }
-func (e authenticationError) Unwrap() error { return e.err }
-
 func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte, conn net.Conn) error {
 	defer conn.Close()
 	stopContext := watchSMTPContext(ctx, conn)
@@ -239,7 +216,7 @@ func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Aut
 	}
 	if auth != nil {
 		if err := c.Auth(auth); err != nil {
-			return authenticationError{fmt.Errorf("authenticate to SMTP server: %w", err)}
+			return xoauth2.AuthError{Err: fmt.Errorf("authenticate to SMTP server: %w", err)}
 		}
 	}
 	fromAddr, err := firstAddress(account.Email)

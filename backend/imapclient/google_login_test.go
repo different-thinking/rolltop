@@ -3,7 +3,6 @@ package imapclient
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/xoauth2"
 )
 
 // fakeIMAPServer speaks just enough IMAP to exercise authentication: a greeting
@@ -29,6 +29,10 @@ type fakeIMAPServer struct {
 	logins         []string
 	searches       []string
 	advertiseOAuth bool
+	// allUIDs answers an unfiltered search and sinceUIDs a search carrying
+	// SINCE, so a test can tell the two snapshot searches apart by result.
+	allUIDs   []uint32
+	sinceUIDs []uint32
 }
 
 func startFakeIMAPServer(t *testing.T, acceptedTokens ...string) *fakeIMAPServer {
@@ -96,9 +100,14 @@ func (s *fakeIMAPServer) handle(conn net.Conn) {
 			fmt.Fprintf(conn, "* 5 EXISTS\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 99]\r\n%s OK [READ-ONLY] selected\r\n", tag)
 		case "UID":
 			s.mu.Lock()
-			s.searches = append(s.searches, strings.TrimSpace(line))
+			command := strings.TrimSpace(line)
+			s.searches = append(s.searches, command)
+			matches := s.allUIDs
+			if strings.Contains(strings.ToUpper(command), "SINCE ") {
+				matches = s.sinceUIDs
+			}
 			s.mu.Unlock()
-			fmt.Fprintf(conn, "* SEARCH\r\n%s OK search complete\r\n", tag)
+			fmt.Fprintf(conn, "* SEARCH%s\r\n%s OK search complete\r\n", formatUIDs(matches), tag)
 		case "LOGOUT":
 			fmt.Fprintf(conn, "* BYE\r\n%s OK logout\r\n", tag)
 			return
@@ -170,6 +179,28 @@ func (s *fakeIMAPServer) account(t *testing.T) store.MailAccount {
 	}
 }
 
+// setSearchResults decides what an unfiltered and a SINCE-limited search return.
+func (s *fakeIMAPServer) setSearchResults(all, since []uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allUIDs = append([]uint32(nil), all...)
+	s.sinceUIDs = append([]uint32(nil), since...)
+}
+
+func (s *fakeIMAPServer) searchCommands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.searches...)
+}
+
+func formatUIDs(uids []uint32) string {
+	out := ""
+	for _, uid := range uids {
+		out += " " + strconv.FormatUint(uint64(uid), 10)
+	}
+	return out
+}
+
 func (s *fakeIMAPServer) payloads() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -187,50 +218,9 @@ func encryptForTest(t *testing.T, secret string) string {
 	return encrypted
 }
 
-// stubTokens records how often each entry point was used, which is what
-// separates "retried with a fresh token" from "retried with the same one".
-type stubTokens struct {
-	mu       sync.Mutex
-	tokens   []string
-	index    int
-	forced   int
-	issued   int
-	tokenErr error
-	forceErr error
-}
-
-func (s *stubTokens) AccessToken(context.Context, int64, int64) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.tokenErr != nil {
-		return "", s.tokenErr
-	}
-	s.issued++
-	return s.next(), nil
-}
-
-func (s *stubTokens) ForceRefresh(context.Context, int64, int64) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.forceErr != nil {
-		return "", s.forceErr
-	}
-	s.forced++
-	return s.next(), nil
-}
-
-func (s *stubTokens) next() string {
-	if s.index >= len(s.tokens) {
-		return s.tokens[len(s.tokens)-1]
-	}
-	token := s.tokens[s.index]
-	s.index++
-	return token
-}
-
 func TestLoginAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
-	fetcher := &Fetcher{Tokens: &stubTokens{tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
 	client, err := fetcher.login(server.account(t))
 	if err != nil {
 		t.Fatalf("login: %v", err)
@@ -251,7 +241,7 @@ func TestLoginAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 // cached token happens to expire.
 func TestLoginRetriesOnceWithARefreshedToken(t *testing.T) {
 	server := startFakeIMAPServer(t, "fresh-token")
-	tokens := &stubTokens{tokens: []string{"stale-token", "fresh-token"}}
+	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
 	fetcher := &Fetcher{Tokens: tokens}
 	client, err := fetcher.login(server.account(t))
 	if err != nil {
@@ -265,8 +255,8 @@ func TestLoginRetriesOnceWithARefreshedToken(t *testing.T) {
 	if !strings.Contains(payloads[0], "stale-token") || !strings.Contains(payloads[1], "fresh-token") {
 		t.Fatalf("attempts did not go stale then fresh: %q", payloads)
 	}
-	if tokens.forced != 1 {
-		t.Fatalf("forced refreshes = %d, want 1", tokens.forced)
+	if tokens.Forced != 1 {
+		t.Fatalf("forced refreshes = %d, want 1", tokens.Forced)
 	}
 }
 
@@ -274,7 +264,7 @@ func TestLoginRetriesOnceWithARefreshedToken(t *testing.T) {
 // login for nothing.
 func TestLoginDoesNotRetryWhenTheRefreshReturnsTheSameToken(t *testing.T) {
 	server := startFakeIMAPServer(t, "other-token")
-	tokens := &stubTokens{tokens: []string{"stale-token"}}
+	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token"}}
 	fetcher := &Fetcher{Tokens: tokens}
 	if _, err := fetcher.login(server.account(t)); err == nil {
 		t.Fatal("login with a rejected token succeeded")
@@ -286,7 +276,7 @@ func TestLoginDoesNotRetryWhenTheRefreshReturnsTheSameToken(t *testing.T) {
 
 func TestLoginReportsAFetcherThatCannotMintTokens(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
-	if _, err := (&Fetcher{}).login(server.account(t)); !errors.Is(err, ErrNoTokenSource) {
+	if _, err := (&Fetcher{}).login(server.account(t)); !errors.Is(err, xoauth2.ErrNoTokenSource) {
 		t.Fatalf("login without a token source = %v, want ErrNoTokenSource", err)
 	}
 }
@@ -296,7 +286,7 @@ func TestLoginReportsAServerWithoutXOAUTH2(t *testing.T) {
 	server.mu.Lock()
 	server.advertiseOAuth = false
 	server.mu.Unlock()
-	fetcher := &Fetcher{Tokens: &stubTokens{tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
 	_, err := fetcher.login(server.account(t))
 	if err == nil {
 		t.Fatal("login against a server without XOAUTH2 succeeded")
@@ -314,7 +304,7 @@ func TestLoginStillUsesPasswordAuthenticationForOrdinaryAccounts(t *testing.T) {
 	account.AuthType = store.AuthTypePassword
 	account.GoogleConnectionID = 0
 	account.EncryptedPassword = encryptForTest(t, "hunter2")
-	fetcher := &Fetcher{MasterKey: testMasterKey(), Tokens: &stubTokens{tokens: []string{"unused"}}}
+	fetcher := &Fetcher{MasterKey: testMasterKey(), Tokens: &xoauth2.StubTokenSource{Tokens: []string{"unused"}}}
 	client, err := fetcher.login(account)
 	if err != nil {
 		t.Fatalf("password login: %v", err)

@@ -549,12 +549,20 @@ func applyGmailEndpoints(in *accountSettingsInput) {
 	in.Host = gmailIMAPHost
 	in.Port = gmailIMAPPort
 	in.UseTLS = true
-	in.SMTPHost = gmailSMTPHost
-	in.SMTPPort = gmailSMTPPort
-	in.SMTPUseTLS = true
 	in.SMTPSameAsIMAP = false
 	in.Password = ""
-	in.SMTPPassword = ""
+	applyGmailSMTPEndpoint(&in.SMTPHost, &in.SMTPPort, &in.SMTPUseTLS, &in.SMTPPassword)
+}
+
+// applyGmailSMTPEndpoint is shared with the standalone outgoing-server handler,
+// which pins the same endpoint on a differently shaped input. Keeping one writer
+// means a future change to the submission endpoint cannot reach only one of the
+// two ways an outgoing server is created.
+func applyGmailSMTPEndpoint(host *string, port *int, useTLS *bool, password *string) {
+	*host = gmailSMTPHost
+	*port = gmailSMTPPort
+	*useTLS = true
+	*password = ""
 }
 
 // parseSyncStartDate accepts a calendar date or an empty value meaning "no
@@ -569,7 +577,10 @@ func parseSyncStartDate(value string) (time.Time, string, error) {
 	if err != nil {
 		return time.Time{}, "Sync start date must be a date like 2024-01-31.", err
 	}
-	if parsed.After(time.Now().UTC()) {
+	// A whole day of slack, because the date picker sends the browser's local
+	// date: east of UTC "today" is already tomorrow here, and rejecting it would
+	// refuse a date the user can legitimately see on their own calendar.
+	if parsed.After(time.Now().UTC().AddDate(0, 0, 1)) {
 		return time.Time{}, "Sync start date cannot be in the future.", store.ErrNotFound
 	}
 	return parsed, "", nil
@@ -612,7 +623,7 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 	if in.Mailbox == "" {
 		in.Mailbox = store.DefaultMailboxPattern
 	}
-	authType := accountAuthType(in.AuthType)
+	authType := store.NormalizeAuthType(in.AuthType)
 	if authType == store.AuthTypeGoogleOAuth {
 		// Gmail's endpoints are fixed, and a wrong host is the one mistake that
 		// produces a confusing failure long after the form was submitted, so the
@@ -656,8 +667,12 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 		if in.Label == "" {
 			in.Label = connection.GoogleEmail
 		}
-		in.Username = in.Email
-		in.SMTPUsername = in.Email
+		// The login name is the connected mailbox, never the address the user
+		// typed. XOAUTH2 sends the name alongside the token and Google rejects
+		// the pair when they disagree, so an account whose From address is an
+		// alias would fail every login with a perfectly valid token.
+		in.Username = connection.GoogleEmail
+		in.SMTPUsername = connection.GoogleEmail
 	} else {
 		if in.Password == "" && existingErr == nil && existing.UsesGoogleOAuth() {
 			// Switching an OAuth account back to a password cannot silently
@@ -863,15 +878,14 @@ func (s *Server) apiSMTPAccount(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	authType := accountAuthType(in.AuthType)
+	authType := store.NormalizeAuthType(in.AuthType)
 	if authType == store.AuthTypeGoogleOAuth {
-		// Same reasoning as the incoming side: the endpoint is fixed and the
-		// connection has to belong to this tenant.
-		in.Host = gmailSMTPHost
-		in.Port = gmailSMTPPort
-		in.UseTLS = true
-		in.Password = ""
-		if _, message, err := s.googleConnectionForAccount(r.Context(), cu.User.ID, in.GoogleConnectionID); err != nil {
+		// Same reasoning as the incoming side: the endpoint is fixed, the
+		// connection has to belong to this tenant, and the login name is the
+		// connected mailbox rather than anything the form supplied.
+		applyGmailSMTPEndpoint(&in.Host, &in.Port, &in.UseTLS, &in.Password)
+		connection, message, err := s.googleConnectionForAccount(r.Context(), cu.User.ID, in.GoogleConnectionID)
+		if err != nil {
 			if message == "" {
 				s.serverError(w, r, err)
 				return
@@ -879,6 +893,7 @@ func (s *Server) apiSMTPAccount(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, message)
 			return
 		}
+		in.Username = connection.GoogleEmail
 	}
 	if in.Port <= 0 || in.Port > 65535 {
 		writeAPIError(w, http.StatusBadRequest, "Port must be a valid TCP port.")
@@ -893,6 +908,13 @@ func (s *Server) apiSMTPAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			s.serverError(w, r, err)
+			return
+		}
+		// An OAuth row stores no password, so carrying its empty value over
+		// would save a password account that can never authenticate and only
+		// fails at the next send.
+		if existing.UsesGoogleOAuth() && in.Password == "" {
+			writeAPIError(w, http.StatusBadRequest, "Enter a password to switch this server off Google sign-in.")
 			return
 		}
 		encrypted = existing.EncryptedPassword
