@@ -42,7 +42,6 @@ type Token struct {
 	RefreshToken string
 	ExpiresAt    time.Time
 	Scopes       []string
-	IDToken      string
 }
 
 // Userinfo identifies the Google account behind a connection.
@@ -76,27 +75,6 @@ func NewClient(cfg Config) *Client {
 
 func defaultRetryDelay(attempt int) time.Duration {
 	return time.Duration(1<<attempt) * 500 * time.Millisecond
-}
-
-func (c *Client) now() time.Time {
-	if c.Now != nil {
-		return c.Now()
-	}
-	return time.Now()
-}
-
-func (c *Client) httpClient() *http.Client {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
-	}
-	return http.DefaultClient
-}
-
-func (c *Client) retryDelay(attempt int) time.Duration {
-	if c.RetryDelay != nil {
-		return c.RetryDelay(attempt)
-	}
-	return defaultRetryDelay(attempt)
 }
 
 // ExchangeCode trades an authorization code for tokens. A missing refresh token
@@ -196,7 +174,6 @@ func (c *Client) postToken(ctx context.Context, form url.Values) (Token, error) 
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int64  `json:"expires_in"`
 		Scope        string `json:"scope"`
-		IDToken      string `json:"id_token"`
 		TokenType    string `json:"token_type"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -209,10 +186,9 @@ func (c *Client) postToken(ctx context.Context, form url.Values) (Token, error) 
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
 		Scopes:       strings.Fields(payload.Scope),
-		IDToken:      payload.IDToken,
 	}
 	if payload.ExpiresIn > 0 {
-		token.ExpiresAt = c.now().Add(time.Duration(payload.ExpiresIn) * time.Second).UTC()
+		token.ExpiresAt = c.Now().Add(time.Duration(payload.ExpiresIn) * time.Second).UTC()
 	}
 	return token, nil
 }
@@ -239,7 +215,7 @@ func (c *Client) do(ctx context.Context, build func() (*http.Request, error)) ([
 	var lastErr error
 	for attempt := 0; attempt < defaultMaxAttempts; attempt++ {
 		if attempt > 0 {
-			if err := sleepContext(ctx, c.retryDelay(attempt-1)); err != nil {
+			if err := sleepContext(ctx, c.RetryDelay(attempt-1)); err != nil {
 				return nil, err
 			}
 		}
@@ -267,7 +243,7 @@ func (c *Client) attempt(build func() (*http.Request, error)) (body []byte, retr
 	if err != nil {
 		return nil, false, err
 	}
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return nil, true, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}

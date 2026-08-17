@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"rolltop/backend/auth"
 	"rolltop/backend/crypto"
 	"rolltop/backend/store"
 )
@@ -125,11 +126,13 @@ func (m *Manager) StartConnect(userID int64, redirectURI, loginHint string) (str
 	if strings.TrimSpace(redirectURI) == "" {
 		return "", ErrNoRedirectURI
 	}
-	state, err := randomToken()
+	// The session and CSRF secrets come from the same generator, so hardening
+	// token generation happens in one place rather than missing OAuth.
+	state, err := auth.NewOpaqueToken()
 	if err != nil {
 		return "", err
 	}
-	verifier, err := randomToken()
+	verifier, err := auth.NewOpaqueToken()
 	if err != nil {
 		return "", err
 	}

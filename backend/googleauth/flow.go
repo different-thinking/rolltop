@@ -5,7 +5,6 @@
 package googleauth
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -146,15 +145,6 @@ func (s *flowStore) deleteOldestLocked(userID *int64) bool {
 	}
 	delete(s.flows, oldestState)
 	return true
-}
-
-// randomToken returns 32 bytes of entropy in URL-safe base64.
-func randomToken() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // codeChallenge derives the S256 PKCE challenge for a verifier.

@@ -129,7 +129,7 @@ func (s *Store) UpsertGoogleConnection(ctx context.Context, userID int64, in Goo
 			status_detail = '',
 			updated_at = excluded.updated_at`,
 		userID, email, subject, in.EncryptedRefreshToken,
-		in.EncryptedAccessToken, unixOrZero(in.AccessTokenExpiresAt), scopes,
+		in.EncryptedAccessToken, timeUnix(in.AccessTokenExpiresAt), scopes,
 		GoogleConnectionStatusOK, ts, ts)
 	if err != nil {
 		return GoogleConnection{}, err
@@ -187,7 +187,7 @@ func (s *Store) UpdateGoogleAccessToken(ctx context.Context, userID, connectionI
 			status_detail = '',
 			updated_at = ?
 		WHERE user_id = ? AND id = ?`,
-		encryptedAccessToken, unixOrZero(expiresAt),
+		encryptedAccessToken, timeUnix(expiresAt),
 		encryptedRefreshToken, encryptedRefreshToken,
 		GoogleConnectionStatusOK, nowUnix(), userID, connectionID)
 	if err != nil {
@@ -245,20 +245,6 @@ func requireGoogleConnectionRow(result sql.Result) error {
 	return nil
 }
 
-func unixOrZero(ts time.Time) int64 {
-	if ts.IsZero() {
-		return 0
-	}
-	return ts.Unix()
-}
-
-func timeOrZero(unix int64) time.Time {
-	if unix <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(unix, 0).UTC()
-}
-
 func scanGoogleConnection(dest scanDest) (GoogleConnection, error) {
 	var connection GoogleConnection
 	var scopes string
@@ -270,8 +256,8 @@ func scanGoogleConnection(dest scanDest) (GoogleConnection, error) {
 		return GoogleConnection{}, err
 	}
 	connection.GrantedScopes = splitGoogleScopes(scopes)
-	connection.AccessTokenExpiresAt = timeOrZero(expiresAt)
-	connection.CreatedAt = timeOrZero(createdAt)
-	connection.UpdatedAt = timeOrZero(updatedAt)
+	connection.AccessTokenExpiresAt = unixTime(expiresAt)
+	connection.CreatedAt = unixTime(createdAt)
+	connection.UpdatedAt = unixTime(updatedAt)
 	return connection, nil
 }
