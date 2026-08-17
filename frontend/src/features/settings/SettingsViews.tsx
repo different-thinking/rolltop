@@ -1670,6 +1670,9 @@ export function SettingsView({
         : "";
   const selectedSMTP = smtpAccounts.find((item) => item.id === selectedSMTPID) || null;
   const smtpUsesGoogleSignIn = smtpForm.auth_type === AUTH_GOOGLE;
+  // The stored password of an OAuth server is empty, so switching back has to
+  // collect one here rather than letting the save round trip fail.
+  const smtpSwitchingAwayFromGoogle = selectedSMTP?.auth_type === AUTH_GOOGLE && !smtpUsesGoogleSignIn;
   const smtpPasswordPlaceholder = selectedSMTP?.auth_type === AUTH_GOOGLE
     ? "Required to switch off Google sign-in"
     : selectedSMTPID
@@ -2635,7 +2638,14 @@ export function SettingsView({
               ) : (
                 <>
                   <Field label="Username" value={smtpForm.username} onChange={(value) => setSMTPField("username", value)} />
-                  <Field label="Password" value={smtpForm.password} onChange={(value) => setSMTPField("password", value)} type="password" placeholder={smtpPasswordPlaceholder} />
+                  <Field
+                    label="Password"
+                    value={smtpForm.password}
+                    onChange={(value) => setSMTPField("password", value)}
+                    type="password"
+                    placeholder={smtpPasswordPlaceholder}
+                    required={smtpSwitchingAwayFromGoogle}
+                  />
                   <label><input type="checkbox" checked={smtpForm.use_tls} onChange={(event) => setSMTPField("use_tls", event.target.checked)} /> Use TLS / STARTTLS</label>
                 </>
               )}

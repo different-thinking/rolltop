@@ -1375,7 +1375,15 @@ func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate
 	c.Timeout = timeout
 	if err := authenticate(c); err != nil {
 		terminateClient(c)
-		return nil, xoauth2.AuthError{Err: fmt.Errorf("login to IMAP server %s: %w", addr, err)}
+		wrapped := fmt.Errorf("login to IMAP server %s: %w", addr, err)
+		// A server that does not offer XOAUTH2 has not rejected the credential,
+		// so this must not look like a stale token: the retry would spend a real
+		// refresh at Google and open a second connection that fails identically,
+		// once per mailbox.
+		if errors.Is(err, xoauth2.ErrUnsupported) {
+			return nil, wrapped
+		}
+		return nil, xoauth2.AuthError{Err: wrapped}
 	}
 	return c, nil
 }

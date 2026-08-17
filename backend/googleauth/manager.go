@@ -412,7 +412,11 @@ func (m *Manager) doRefresh(ctx context.Context, userID, connectionID int64, for
 	refreshToken, err := crypto.DecryptString(m.masterKey, connection.EncryptedRefreshToken)
 	if err != nil {
 		// The master key no longer matches this ciphertext, so no amount of
-		// retrying helps; the user has to reconnect.
+		// retrying helps; the user has to reconnect. Both reauthorization
+		// branches drop the cached token, so the invariant "a connection
+		// flagged for reauthorization serves nothing" holds locally instead of
+		// resting on the cache and the row happening to expire together.
+		m.forgetToken(userID, connectionID)
 		if markErr := m.store.MarkGoogleConnectionReauthRequired(ctx, userID, connectionID, "stored token could not be decrypted"); markErr != nil {
 			log.Printf("google connection user_id=%d connection_id=%d could not be flagged for reauthorization: %v", userID, connectionID, markErr)
 		}

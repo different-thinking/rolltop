@@ -28,7 +28,21 @@ let inFlight: Promise<GoogleConnectionsResponse> | null = null;
 
 /** loadGoogleConnections fetches the connection list, reusing a cached answer. */
 export async function loadGoogleConnections(force = false): Promise<GoogleConnectionsResponse> {
-  if (force) forgetGoogleConnections();
+  if (force) {
+    forgetGoogleConnections();
+    // A request that started before the connection changed would answer with
+    // the state from before it, so a forced reload waits it out rather than
+    // adopting its result. The forms would otherwise keep offering an account
+    // that was just disconnected.
+    if (inFlight) {
+      try {
+        await inFlight;
+      } catch {
+        // Whatever it failed with, the fresh request below is what counts.
+      }
+      forgetGoogleConnections();
+    }
+  }
   if (cached) return cached;
   if (!inFlight) {
     inFlight = getJSON<GoogleConnectionsResponse>("/api/google/connections")

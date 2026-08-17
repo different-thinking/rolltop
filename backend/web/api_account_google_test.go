@@ -254,6 +254,30 @@ func TestSwitchingAGoogleSMTPServerBackToPasswordRequiresOne(t *testing.T) {
 	}
 }
 
+// The outgoing-server route accepts the same browser-supplied connection id as
+// the incoming one. Both go through googleConnectionForAccount, but the guard is
+// worth pinning at each entry point: a later refactor of one handler must not be
+// able to open a path to another tenant's mailbox.
+func TestSavingAGoogleSMTPServerRejectsAnotherTenantsConnection(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	foreign := env.connect(t, env.other)
+	response := env.send(t, env.owner, http.MethodPost, "/api/account/smtp",
+		[]byte(fmt.Sprintf(`{"label":"Gmail","auth_type":"google_oauth","google_connection_id":%d}`, foreign.ID)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "not connected") {
+		t.Fatalf("body = %s, want it to report the connection as unavailable", response.Body.String())
+	}
+	servers, err := env.db.ListSMTPAccountsForUser(context.Background(), env.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 0 {
+		t.Fatalf("stored outgoing servers = %d, want none", len(servers))
+	}
+}
+
 // An account list that cannot name the Google identity leaves the user unable
 // to tell which of several connected accounts a mailbox signs in as.
 func TestAccountListNamesTheConnectedGoogleAddress(t *testing.T) {

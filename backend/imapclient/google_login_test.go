@@ -281,18 +281,29 @@ func TestLoginReportsAFetcherThatCannotMintTokens(t *testing.T) {
 	}
 }
 
-func TestLoginReportsAServerWithoutXOAUTH2(t *testing.T) {
+// A server that does not offer the mechanism has not rejected the credential.
+// Treating it as one would spend a real token refresh at Google and a second
+// connection on every mailbox, forever, against a server that can never accept
+// the result. The stub hands out a different token on refresh, so a retry would
+// be visible here rather than hidden behind an unchanged value.
+func TestLoginDoesNotRefreshTheTokenWhenTheServerLacksXOAUTH2(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
 	server.mu.Lock()
 	server.advertiseOAuth = false
 	server.mu.Unlock()
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
-	_, err := fetcher.login(server.account(t))
+	tokens := &xoauth2.StubTokenSource{Tokens: []string{"first-token", "second-token"}}
+	_, err := (&Fetcher{Tokens: tokens}).login(server.account(t))
 	if err == nil {
 		t.Fatal("login against a server without XOAUTH2 succeeded")
 	}
 	if !strings.Contains(err.Error(), "XOAUTH2") {
 		t.Fatalf("error = %v, want it to name the missing mechanism", err)
+	}
+	if tokens.Forced != 0 {
+		t.Fatalf("forced refreshes = %d, want none for a server that cannot do XOAUTH2", tokens.Forced)
+	}
+	if attempts := len(server.payloads()); attempts != 0 {
+		t.Fatalf("authentication attempts = %d, want none", attempts)
 	}
 }
 
