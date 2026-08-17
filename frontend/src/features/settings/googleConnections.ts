@@ -4,12 +4,25 @@
 
 import { getJSON } from "../../api";
 
+/** GoogleContactsSync is the state of one connection's contact sync. It is
+ * absent until the connection has granted access to contacts. */
+export type GoogleContactsSync = {
+  status: string;
+  status_detail: string;
+  last_sync_at: string;
+  last_success_at: string;
+  contact_count: number;
+  ever_synced: boolean;
+};
+
 /** GoogleConnection is one Google account this user has authorized. */
 export type GoogleConnection = {
   id: number;
   email: string;
   scopes: string[];
   needs_reauth: boolean;
+  has_contacts_scope: boolean;
+  contacts_sync: GoogleContactsSync | null;
 };
 
 export type GoogleConnectionsResponse = {

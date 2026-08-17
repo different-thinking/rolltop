@@ -169,6 +169,15 @@ func writeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// writeJSONStatus answers with a body and a non-200 status. It exists for the
+// few failures that carry data the client needs -- a rejected edit that has to
+// show what the record looks like now -- which writeAPIError cannot express.
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 func writeJSONCached(w http.ResponseWriter, r *http.Request, value any) {
 	_, _ = writeJSONCachedWithETag(w, r, value)
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/emersion/go-imap/responses"
 
 	mmcrypto "rolltop/backend/crypto"
+	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
 	"rolltop/backend/xoauth2"
@@ -70,7 +71,7 @@ type Fetcher struct {
 	// OAuth. It is an interface rather than the manager itself so this package
 	// stays independent of the OAuth implementation and can be tested without
 	// one. A nil value only fails accounts that actually need it.
-	Tokens xoauth2.TokenSource
+	Tokens googletoken.TokenSource
 }
 
 // ServerCapabilities contains the authenticated IMAP extensions used by
@@ -1484,7 +1485,7 @@ func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Clien
 	ctx, cancel := context.WithTimeout(context.Background(), f.commandTimeout())
 	defer cancel()
 	var authenticated *client.Client
-	err := xoauth2.WithFreshToken(ctx, f.Tokens, account.UserID, account.GoogleConnectionID,
+	err := googletoken.WithFreshToken(ctx, f.Tokens, account.UserID, account.GoogleConnectionID,
 		func(token string) error {
 			c, err := f.connectAndAuthenticate(account, authenticateXOAUTH2(account, token))
 			if err != nil {
@@ -1554,7 +1555,7 @@ func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate
 		if errors.Is(err, xoauth2.ErrUnsupported) {
 			return nil, wrapped
 		}
-		return nil, xoauth2.AuthError{Err: wrapped}
+		return nil, googletoken.AuthError{Err: wrapped}
 	}
 	return c, nil
 }

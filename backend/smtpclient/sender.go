@@ -22,6 +22,7 @@ import (
 
 	"rolltop/backend/buildinfo"
 	mmcrypto "rolltop/backend/crypto"
+	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
 	"rolltop/backend/xoauth2"
 )
@@ -71,7 +72,7 @@ type Sender struct {
 	Timeout   time.Duration
 	// Tokens mints Google access tokens for accounts that authenticate with
 	// OAuth. Nil only fails accounts that actually need it.
-	Tokens xoauth2.TokenSource
+	Tokens googletoken.TokenSource
 }
 
 type smtpIdleDeadlineConn struct {
@@ -135,7 +136,7 @@ func (s *Sender) sendWithGoogleToken(ctx context.Context, account store.MailAcco
 	if err != nil {
 		return err
 	}
-	return xoauth2.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
+	return googletoken.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
 		func(token string) error {
 			return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(username, token), recipients, raw)
 		})
@@ -216,7 +217,7 @@ func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Aut
 	}
 	if auth != nil {
 		if err := c.Auth(auth); err != nil {
-			return xoauth2.AuthError{Err: fmt.Errorf("authenticate to SMTP server: %w", err)}
+			return googletoken.AuthError{Err: fmt.Errorf("authenticate to SMTP server: %w", err)}
 		}
 	}
 	fromAddr, err := firstAddress(account.Email)

@@ -2635,8 +2635,8 @@ export function SettingsView({
           <h2>SMTP server</h2>
           <div className="settings-columns display-settings-grid">
             <section>
-              <Field label="Label" value={smtpForm.label} onChange={(value) => setSMTPField("label", value)} />
               <SignInMethodField configured={googleConfigured} value={smtpForm.auth_type} onChange={(value) => setSMTPField("auth_type", value)} />
+              <Field label="Label" value={smtpForm.label} onChange={(value) => setSMTPField("label", value)} />
               {smtpUsesGoogleSignIn ? null : (
                 <>
                   <Field label="Host" value={smtpForm.host} onChange={(value) => setSMTPField("host", value)} />
