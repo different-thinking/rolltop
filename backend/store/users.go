@@ -11,6 +11,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"rolltop/backend/theme"
 )
 
 const userSelectColumns = `id, email, name, backup_email, password_hash, is_admin, date_locale, date_format, theme, search_preset, search_recency_bias, search_fuzzy, search_sender_boost, search_sender_history, search_contact_boost, search_attachment_weight, search_compact_splitting, created_at, updated_at`
@@ -207,19 +209,18 @@ func normalizeUserDateFormat(value string) string {
 }
 
 func normalizeUserTheme(value string) string {
-	theme := strings.ToLower(strings.TrimSpace(value))
-	switch theme {
-	case "classic":
-		return "classic"
-	case "classic_dark", "classic-dark":
-		return "classic_dark"
+	id := strings.ToLower(strings.TrimSpace(value))
+	if known := theme.Normalize(id); known != "" {
+		return known
+	}
+	switch id {
 	case "matrix", "modern":
 		return "matrix"
 	default:
-		if safeUserThemeID(theme) {
-			return theme
+		if safeUserThemeID(id) {
+			return id
 		}
-		return "classic"
+		return theme.Classic
 	}
 }
 

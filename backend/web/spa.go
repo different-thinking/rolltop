@@ -11,8 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+
+	"rolltop/backend/theme"
 )
 
 // Both conditions below are persistent deployment states rather than per-request
@@ -26,6 +29,8 @@ const frontendDistDir = "frontend/dist"
 const immutableFrontendAssetCacheControl = "public, max-age=31536000, immutable"
 
 var startupBootstrapMarker = []byte(`<meta name="rolltop-startup" />`)
+var startupThemeColorMarker = []byte(`<meta name="rolltop-theme-color" />`)
+var htmlOpenTagRE = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 
 type androidLatestMetadata struct {
 	VersionCode int    `json:"versionCode"`
@@ -77,7 +82,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "frontend startup marker is missing", http.StatusInternalServerError)
 			return
 		}
-		contents = injected
+		contents = injectStartupTheme(injected, startupThemeID(payload))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -86,6 +91,45 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "*")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(contents)
+}
+
+// injectStartupTheme stamps the reader's theme into the shell before the browser
+// parses it. Without this the first paint uses the light palette and flips once
+// React has read the bootstrap, which is a white flash on every cold load. An
+// absent marker is deliberate for the System theme: the stylesheet then follows
+// prefers-color-scheme on its own.
+func injectStartupTheme(index []byte, themeID string) []byte {
+	if marker := theme.DocumentMarker(themeID); marker != "" {
+		index = htmlOpenTagRE.ReplaceAllFunc(index, func(tag []byte) []byte {
+			if bytes.Contains(bytes.ToLower(tag), []byte("data-theme")) {
+				return tag
+			}
+			return append(append([]byte{}, tag[:len(tag)-1]...), []byte(` data-theme="`+marker+`">`)...)
+		})
+	}
+	return bytes.Replace(index, startupThemeColorMarker, themeColorMeta(themeID), 1)
+}
+
+func themeColorMeta(themeID string) []byte {
+	light, dark, systemDependent, ok := theme.ChromeColors(themeID)
+	if !ok {
+		// A plugin theme: its palette lives in a stylesheet the server does not
+		// parse, so the client sets the colour once that stylesheet is loaded.
+		return nil
+	}
+	if !systemDependent {
+		return []byte(`<meta name="theme-color" content="` + light + `" />`)
+	}
+	return []byte(`<meta name="theme-color" media="(prefers-color-scheme: light)" content="` + light + `" />` +
+		`<meta name="theme-color" media="(prefers-color-scheme: dark)" content="` + dark + `" />`)
+}
+
+func startupThemeID(payload map[string]any) string {
+	user, ok := payload["user"].(apiUser)
+	if !ok {
+		return theme.System
+	}
+	return user.Theme
 }
 
 func injectStartupBootstrap(index []byte, payload any) ([]byte, error) {

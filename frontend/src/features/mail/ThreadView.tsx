@@ -10,6 +10,7 @@ import type { Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeI
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
+import { applyEmailDocumentTheme, themedEmailDocument } from "../../lib/emailDocumentTheme";
 import { displayDateTime, displaySnoozeUntil, displayTime, formatBytes } from "../../lib/format";
 import { trashMailboxesByAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
@@ -2225,27 +2226,6 @@ function QuotedDetails({
   );
 }
 
-function currentEmailDocumentTheme(): "classic" | "classic_dark" | "matrix" {
-  const theme = document.documentElement.dataset.theme;
-  return theme === "classic_dark" || theme === "matrix" ? theme : "classic";
-}
-
-function themedEmailSrcDoc(srcDoc: string): string {
-  const theme = currentEmailDocumentTheme();
-  if (theme === "classic") return srcDoc;
-  return srcDoc.replace(/<html(\s|>)/i, `<html data-rolltop-theme="${theme}"$1`);
-}
-
-function applyEmailDocumentTheme(doc: Document | null | undefined) {
-  if (!doc) return;
-  const theme = currentEmailDocumentTheme();
-  if (theme === "classic") {
-    doc.documentElement.removeAttribute("data-rolltop-theme");
-    return;
-  }
-  doc.documentElement.setAttribute("data-rolltop-theme", theme);
-}
-
 // EmailFrame isolates message HTML in a sandboxed iframe, applies the active
 // Rolltop theme, highlights search terms inside the iframe document, and
 // repeatedly measures height because images/fonts can settle after load.
@@ -2263,7 +2243,7 @@ function EmailFrame({
   const ref = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(full ? 220 : 96);
   const highlightKey = `${highlightQuery}:${highlightTerms.join(",")}`;
-  const themedSrcDoc = themedEmailSrcDoc(srcDoc);
+  const themedSrcDoc = themedEmailDocument(srcDoc);
 
   useEffect(() => {
     setHeight(full ? 220 : 96);

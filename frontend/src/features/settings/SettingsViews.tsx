@@ -14,6 +14,7 @@ import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
 import { folderParentNames, folderTree, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
+import { systemThemeID } from "../../lib/theme";
 import { pluginIDs } from "../../plugins/registry";
 import { accountSettingsRoutes, matchAccountSettingsRoute } from "../../plugins/runtime";
 import type { RuntimePlugin, RuntimePlugins } from "../../plugins/runtime";
@@ -269,6 +270,7 @@ function IdentityMailboxFields({
 
 function fallbackThemes(): ThemeDefinition[] {
   return [
+    { id: systemThemeID, name: "System" },
     { id: "classic", name: "Classic" },
     { id: "classic_dark", name: "Classic Dark" }
   ];

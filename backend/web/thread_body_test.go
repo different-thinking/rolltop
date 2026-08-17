@@ -289,24 +289,23 @@ func TestEmailDocumentRendersPlainTextAsProportionalWrappedText(t *testing.T) {
 	}
 }
 
-func TestEmailDocumentIncludesDarkThemeStyles(t *testing.T) {
+func TestEmailDocumentLeavesThemingToTheClient(t *testing.T) {
 	doc := emailDocument("", "Hello dark mode", false)
 	if !strings.Contains(doc, `class="plaintext-doc"`) {
 		t.Fatalf("missing plaintext document marker: %s", doc)
 	}
-	if !strings.Contains(doc, `data-rolltop-theme="classic_dark"`) {
-		t.Fatalf("missing classic dark plaintext styles: %s", doc)
-	}
-	if !strings.Contains(doc, `data-rolltop-theme="matrix"`) {
-		t.Fatalf("missing matrix plaintext styles: %s", doc)
+	// Theme rules belong to frontend/src/lib/emailDocumentTheme.ts, which is the
+	// single source shared with the PGP plugin. A copy here would drift.
+	if strings.Contains(doc, "data-rolltop-theme") {
+		t.Fatalf("server document embeds theme rules: %s", doc)
 	}
 
 	htmlDoc := emailDocument(`<p>Hello HTML dark mode</p>`, "", false)
 	if strings.Contains(htmlDoc, `class="plaintext-doc"`) {
 		t.Fatalf("html document should not use plaintext marker: %s", htmlDoc)
 	}
-	if !strings.Contains(htmlDoc, `html[data-rolltop-theme="matrix"],html[data-rolltop-theme="matrix"] body`) {
-		t.Fatalf("missing matrix html document styles: %s", htmlDoc)
+	if strings.Contains(htmlDoc, "data-rolltop-theme") {
+		t.Fatalf("server document embeds theme rules: %s", htmlDoc)
 	}
 }
 

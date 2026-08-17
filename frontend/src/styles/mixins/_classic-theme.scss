@@ -7,7 +7,9 @@
   --font-brand: var(--font-display);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  // Surfaces, lowest to highest.
+  // Surfaces, lowest to highest. --chrome is the flat colour a browser tints
+  // its own UI with; it is read back at runtime for the theme-color meta.
+  --chrome: #f2f0eb;
   --bg: #f2f0eb;
   --surface-sunken: #f4f1ec;
   --surface: #fff;
@@ -25,7 +27,7 @@
   --on-action: #fff;
 
   --text: #202426;
-  --muted: #66716d;
+  --muted: #636e6a;
   --text-soft: #37413e;
 
   --border: #ded8d1;

@@ -16,6 +16,7 @@ import { messageCountLabel } from "./lib/format";
 import { currentLocation, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
+import { applyDocumentTheme, systemThemeID, watchSystemThemePreference } from "./lib/theme";
 import { embeddedBootstrap } from "./lib/startup";
 import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
@@ -50,6 +51,7 @@ let inMemoryPushSubscriptionOwner = 0;
 
 function themeChoices(themes: ThemeDefinition[] | undefined): ThemeDefinition[] {
   return themes && themes.length > 0 ? themes : [
+    { id: systemThemeID, name: "System" },
     { id: "classic", name: "Classic" },
     { id: "classic_dark", name: "Classic Dark" }
   ];
@@ -333,8 +335,10 @@ export default function App() {
     const choices = themeChoices(bootstrap?.available_themes);
     const selected = choices.find((choice) => choice.id === savedTheme) || choices.find((choice) => choice.id === "classic");
     loadPluginThemeCSS(selected);
-    document.documentElement.dataset.theme = selected?.id || "classic";
+    applyDocumentTheme(selected?.id || "classic");
   }, [bootstrap?.user?.theme, bootstrap?.available_themes]);
+
+  useEffect(() => watchSystemThemePreference(), []);
 
   useEffect(() => {
     const userID = bootstrap?.user?.id || null;

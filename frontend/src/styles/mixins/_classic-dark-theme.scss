@@ -9,6 +9,7 @@
 
   // Elevation is carried by lightness, not by shadows: black shadows are
   // invisible on a dark ground, so each step up is a lighter surface.
+  --chrome: #10161f;
   --bg: #10161f;
   --surface-sunken: #0d131b;
   --surface: #1a2230;
