@@ -23,6 +23,7 @@ import type {
   SMTPAccount,
   ScopeTrashResponse,
   SearchExplanation,
+  ServerLogLine,
   StorageStats,
   SwipePreferences,
   SyncFolder,
@@ -561,6 +562,9 @@ export const api = {
     postJSON<{ ok: boolean; restarting: boolean }>("/api/admin/database/repair", csrf, { user_id: userID, confirm: true }),
   cancelDatabaseRepair: (csrf: string, userID: number) =>
     postJSON<{ ok: boolean }>("/api/admin/database/repair/cancel", csrf, { user_id: userID }),
+  // The tail answers without an ETag, so every call reaches the server: a
+  // revalidated answer is the one thing this endpoint must never give.
+  serverLog: (limit = 200) => getJSON<{ lines: ServerLogLine[] }>(`/api/admin/log?limit=${limit}`),
   savePasswordResetSettings: (csrf: string, fromAddress: string) =>
     postJSON<{ ok: boolean; from_address: string }>("/api/admin/password-reset", csrf, { from_address: fromAddress }),
   adminPlugins: () => getJSON<{ plugins: PluginSetting[] }>("/api/admin/plugins"),

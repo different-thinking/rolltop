@@ -10,9 +10,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
-import { displayDateTime, formatBytes } from "../../../lib/format";
+import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
 import type { DatePrefs, Toast } from "../../../appTypes";
-import type { DatabaseOverview, DatabaseStatus } from "../../../types";
+import type { DatabaseOverview, DatabaseStatus, ServerLogLine } from "../../../types";
 
 const JOB_POLL_MS = 1500;
 const IDLE_POLL_MS = 15000;
@@ -55,8 +55,12 @@ export function AdminDatabaseView({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmRepair, setConfirmRepair] = useState<DatabaseStatus | null>(null);
+  const [logLines, setLogLines] = useState<ServerLogLine[] | null>(null);
+  const [logError, setLogError] = useState("");
+  const [logBusy, setLogBusy] = useState(false);
   const mounted = useRef(true);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const logListRef = useRef<HTMLOListElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -72,6 +76,32 @@ export function AdminDatabaseView({
       if (mounted.current) setLoading(false);
     }
   }, []);
+
+  // The tail is loaded on demand rather than polled: it is read when someone is
+  // chasing a failure they just reproduced, and the rest of the time it would
+  // only be an admin tab holding a connection open for nothing.
+  const loadLog = useCallback(async () => {
+    setLogBusy(true);
+    try {
+      const { lines } = await api.serverLog();
+      if (!mounted.current) return;
+      setLogLines(lines || []);
+      setLogError("");
+    } catch (err) {
+      if (mounted.current) setLogError(messageFromError(err));
+    } finally {
+      if (mounted.current) setLogBusy(false);
+    }
+  }, []);
+
+  // Lines read oldest first, so the failure someone just reproduced is the last
+  // row in a box that shows a fraction of them. Land on it rather than making
+  // every load start with a scroll to the bottom.
+  useEffect(() => {
+    const list = logListRef.current;
+    if (!list || !logLines?.length) return;
+    list.scrollTop = list.scrollHeight;
+  }, [logLines]);
 
   useEffect(() => {
     mounted.current = true;
@@ -333,6 +363,36 @@ export function AdminDatabaseView({
           </div>
         </>
       ) : null}
+
+      {/* Outside the overview guard on purpose. When the overview itself fails
+          — a system database that cannot even list its users — the tail is the
+          only thing left that can say why, so it must still render. */}
+      <div className="database-log">
+        <h2>Server log</h2>
+        <p className="settings-hint">
+          The newest lines this process wrote, kept in memory. A request that answers 500 says only
+          &ldquo;internal server error&rdquo; in the browser; the line naming the actual failure is here.
+          Reproduce the problem, then load the tail. It is cleared on restart.
+        </p>
+        <div className="database-log-actions">
+          <button type="button" className="secondary" disabled={logBusy} onClick={() => void loadLog()}>
+            <Icon name="sync" />
+            {logLines ? "Reload log" : "Load log"}
+          </button>
+        </div>
+        {logError ? <p className="settings-error">{logError}</p> : null}
+        {logLines && logLines.length === 0 ? <p className="settings-hint">Nothing logged yet.</p> : null}
+        {logLines && logLines.length > 0 ? (
+          <ol className="database-log-lines" ref={logListRef}>
+            {logLines.map((line, index) => (
+              <li key={`${line.time}-${index}`} className={line.error ? "is-error" : undefined}>
+                <time dateTime={line.time}>{displayLogTimestamp(line.time, datePrefs) || line.time}</time>
+                <pre>{line.message}</pre>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+      </div>
 
       {confirmRepair ? (
         <div className="database-confirm" role="dialog" aria-modal="true" aria-label="Confirm database repair">
