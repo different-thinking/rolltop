@@ -1730,7 +1730,7 @@ function MessageList({
     if (!target) {
       addToast(
         action === "trash"
-          ? "Choose a Trash folder for this account before using the trash swipe action."
+          ? "Choose a Trash folder for this account before moving messages to Trash."
           : "Choose an Archive folder for this account in swipe settings.",
         "error"
       );
@@ -1760,7 +1760,9 @@ function MessageList({
         if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
         removePendingSwipeMoveIDs(dismissedIDs);
-        if (unsnooze && !keepalive && movedIDs.length > 0) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
+        // The reminder belongs to this row's own message, so a partial move that
+        // relocated only sibling thread messages must leave it in place.
+        if (unsnooze && !keepalive && movedIDs.includes(conversation.message.id)) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
         if (error === undefined) {
           onMessagesMoved(messageIDs);
           return;
