@@ -3,12 +3,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { api } from "../../api";
+import { api, getJSON } from "../../api";
 import type { DatePrefs, LocationState, Toast } from "../../appTypes";
 import type { Account, AccountPurgeEstimate, Bootstrap, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
 import { Icon } from "../../components/Icon";
 import { Field, Stat } from "../../components/common";
-import { emptyAccountForm, accountToForm } from "../../lib/accountForm";
+import { emptyAccountForm, accountToForm, suggestedSyncStart, AUTH_GOOGLE, AUTH_PASSWORD } from "../../lib/accountForm";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
 import { folderParentNames, folderTree, isArchiveMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
@@ -25,6 +25,27 @@ import { GoogleAccountsSettings } from "./GoogleAccounts";
 import { SettingsEmpty, SettingsError, SettingsIndex, SettingsIndexRow, SettingsLoading, SettingsPage, SettingsShell } from "./SettingsUI";
 import type { SettingsSectionID } from "./SettingsUI";
 
+// A Google account's host is always the same, so the row names the Google
+// identity it signs in as instead, which is the part that differs between them.
+function imapAccountDescription(account: Account): string {
+  if (account.auth_type === AUTH_GOOGLE) {
+    return `${account.email} · ${account.google_email || "Google account unavailable"}`;
+  }
+  return `${account.email} · ${account.host}:${account.port}`;
+}
+
+/** GoogleAccountOption is one connected Google account the IMAP form can use. */
+type GoogleAccountOption = {
+  id: number;
+  email: string;
+  needs_reauth: boolean;
+};
+
+type GoogleConnectionsPayload = {
+  configured: boolean;
+  connections: GoogleAccountOption[];
+};
+
 function emptySMTPForm() {
   return {
     label: "",
@@ -32,7 +53,9 @@ function emptySMTPForm() {
     port: "587",
     username: "",
     password: "",
-    use_tls: true
+    use_tls: true,
+    auth_type: AUTH_PASSWORD,
+    google_connection_id: ""
   };
 }
 
@@ -44,7 +67,9 @@ function smtpToForm(account: SMTPAccount | null) {
     port: String(account.port || 587),
     username: account.username || "",
     password: "",
-    use_tls: account.use_tls
+    use_tls: account.use_tls,
+    auth_type: account.auth_type === AUTH_GOOGLE ? AUTH_GOOGLE : AUTH_PASSWORD,
+    google_connection_id: account.google_connection_id ? String(account.google_connection_id) : ""
   };
 }
 
@@ -716,6 +741,8 @@ export function SettingsView({
   const [storageError, setStorageError] = useState("");
   const [notice, setNotice] = useState("");
   const [accountNeedsPassword, setAccountNeedsPassword] = useState(false);
+  const [googleConnections, setGoogleConnections] = useState<GoogleAccountOption[]>([]);
+  const [googleConfigured, setGoogleConfigured] = useState(false);
   const [form, setForm] = useState(() => emptyAccountForm());
   const [smtpForm, setSMTPForm] = useState(() => emptySMTPForm());
   const [profileForm, setProfileForm] = useState(() => profileFormForUser(user, availableThemes));
@@ -860,6 +887,30 @@ export function SettingsView({
       }
     }
   }, [loadStorage, syncSelectionToRoute]);
+
+  // Google connections are only needed by the two server forms, so they are
+  // fetched when one opens rather than added to the settings payload every user
+  // pays for. A failure leaves the Google option hidden: the password form still
+  // works, and an error toast here would fire for every user who never set
+  // Google up.
+  const needsGoogleConnections = route.kind === "imap" || route.kind === "smtp";
+  useEffect(() => {
+    if (!needsGoogleConnections) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await getJSON<GoogleConnectionsPayload>("/api/google/connections");
+        if (cancelled) return;
+        setGoogleConfigured(Boolean(data.configured));
+        setGoogleConnections(data.connections || []);
+      } catch {
+        if (!cancelled) setGoogleConfigured(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [needsGoogleConnections]);
 
   // A completed run needs one fresh per-folder history snapshot if SSE was
   // missed. Keep this refresh away from editable account/identity form state.
@@ -1050,6 +1101,30 @@ export function SettingsView({
   function setField(field: string, value: string | boolean) {
     setForm((current) => {
       const next = { ...current, [field]: value };
+      // Switching to Google clears the credential fields the server ignores,
+      // so a half-filled password form cannot be read as still in effect. The
+      // start date is suggested rather than imposed: a long-lived Gmail mailbox
+      // is exactly where an unbounded first sync hurts.
+      if (field === "auth_type") {
+        if (value === AUTH_GOOGLE) {
+          next.password = "";
+          next.smtp_password = "";
+          next.smtp_same_as_imap = false;
+          if (!next.sync_start_at && !selectedAccountID) next.sync_start_at = suggestedSyncStart();
+          if (!next.google_connection_id && googleConnections.length === 1) {
+            next.google_connection_id = String(googleConnections[0].id);
+          }
+        } else {
+          next.google_connection_id = "";
+        }
+      }
+      if (field === "google_connection_id" && typeof value === "string") {
+        const chosen = googleConnections.find((connection) => String(connection.id) === value);
+        if (chosen && !String(next.email || "").trim()) {
+          next.email = chosen.email;
+          next.label = chosen.email;
+        }
+      }
       if (field === "email" && typeof value === "string") {
         if (String(current.username || "").trim() === "" || current.username === current.email) {
           next.username = value;
@@ -1132,7 +1207,10 @@ export function SettingsView({
         smtp_use_tls: form.smtp_use_tls,
         smtp_same_as_imap: form.smtp_same_as_imap,
         mailbox: form.mailbox,
-        sync_interval_minutes: Number(form.sync_interval_minutes)
+        sync_interval_minutes: Number(form.sync_interval_minutes),
+        auth_type: form.auth_type,
+        google_connection_id: Number(form.google_connection_id || 0),
+        sync_start_at: form.sync_start_at
       });
       addToast("IMAP server saved.");
       setSelectedAccountID(data.account.id);
@@ -1155,7 +1233,9 @@ export function SettingsView({
         port: Number(smtpForm.port),
         username: smtpForm.username,
         password: smtpForm.password,
-        use_tls: smtpForm.use_tls
+        use_tls: smtpForm.use_tls,
+        auth_type: smtpForm.auth_type,
+        google_connection_id: Number(smtpForm.google_connection_id || 0)
       });
       addToast("SMTP server saved.");
       setSelectedSMTPID(data.smtp_account.id);
@@ -1586,7 +1666,25 @@ export function SettingsView({
   const folderMap = useMemo(() => new Map(selectedFolders.map((folder) => [folder.mailbox.id, folder])), [selectedFolders]);
   const folderNodes = useMemo(() => folderTree(selectedFolderMailboxes, { includeHidden: true }), [selectedFolderMailboxes]);
   const selectedAccountLabel = account ? (account.label || account.email) : route.kind === "imap" && route.isNew ? "New IMAP server" : "IMAP server";
+  const usesGoogleSignIn = form.auth_type === AUTH_GOOGLE;
+  // Moving an account off Google needs a real password: the stored one is empty,
+  // so "leave blank to keep the current password" would produce an account that
+  // cannot authenticate at all.
+  const switchingAwayFromGoogle = Boolean(account) && account?.auth_type === AUTH_GOOGLE && !usesGoogleSignIn;
+  const passwordPlaceholder = switchingAwayFromGoogle
+    ? "Required to switch off Google sign-in"
+    : accountNeedsPassword
+      ? "Required to restore IMAP access"
+      : account
+        ? "Leave blank to keep current password"
+        : "";
   const selectedSMTP = smtpAccounts.find((item) => item.id === selectedSMTPID) || null;
+  const smtpUsesGoogleSignIn = smtpForm.auth_type === AUTH_GOOGLE;
+  const smtpPasswordPlaceholder = selectedSMTP?.auth_type === AUTH_GOOGLE
+    ? "Required to switch off Google sign-in"
+    : selectedSMTPID
+      ? "Leave blank to keep current password"
+      : "";
   const identitiesBySMTP = useMemo(() => {
     const byServer = new Map<number, MailIdentity[]>();
     identities.forEach((identity) => {
@@ -2459,25 +2557,72 @@ export function SettingsView({
           <div className="settings-columns account-settings-grid">
             <section>
               <h3>Connection</h3>
-              <Field label="Label" value={form.label} onChange={(value) => setField("label", value)} placeholder="Personal mail, Work archive" />
-              <Field label="Email" value={form.email} onChange={(value) => setField("email", value)} type="email" />
-              <Field label="Host" value={form.host} onChange={(value) => setField("host", value)} />
-              <Field label="Port" value={form.port} onChange={(value) => setField("port", value)} type="number" />
-              <Field label="Username" value={form.username} onChange={(value) => setField("username", value)} />
-              <Field
-                label="Password"
-                value={form.password}
-                onChange={(value) => setField("password", value)}
-                type="password"
-                placeholder={accountNeedsPassword ? "Required to restore IMAP access" : account ? "Leave blank to keep current password" : ""}
-                required={accountNeedsPassword || !account}
-              />
-              <label><input type="checkbox" checked={form.use_tls} onChange={(event) => setField("use_tls", event.target.checked)} /> Use TLS</label>
+              {googleConfigured ? (
+                <label className="field">
+                  <span>Sign-in</span>
+                  <select value={form.auth_type} onChange={(event) => setField("auth_type", event.target.value)}>
+                    <option value={AUTH_PASSWORD}>Password</option>
+                    <option value={AUTH_GOOGLE}>Google account</option>
+                  </select>
+                </label>
+              ) : null}
+              {usesGoogleSignIn ? (
+                <>
+                  <label className="field">
+                    <span>Google account</span>
+                    <select
+                      value={form.google_connection_id}
+                      onChange={(event) => setField("google_connection_id", event.target.value)}
+                      required
+                    >
+                      <option value="">Choose a connected account</option>
+                      {googleConnections.map((connection) => (
+                        <option key={connection.id} value={String(connection.id)}>
+                          {connection.email}{connection.needs_reauth ? " (needs reauthorization)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {googleConnections.length === 0 ? (
+                    <p className="muted">
+                      No Google account is connected yet.{" "}
+                      <a href="/settings/account/google" onClick={(event) => { event.preventDefault(); navigate("/settings/account/google"); }}>
+                        Connect one first
+                      </a>.
+                    </p>
+                  ) : (
+                    <p className="muted">Signs in to imap.gmail.com and smtp.gmail.com with this Google account. No password is stored.</p>
+                  )}
+                  <Field label="Label" value={form.label} onChange={(value) => setField("label", value)} placeholder="Personal mail, Work archive" />
+                  <Field label="Email" value={form.email} onChange={(value) => setField("email", value)} type="email" placeholder="Defaults to the connected address" />
+                </>
+              ) : (
+                <>
+                  <Field label="Label" value={form.label} onChange={(value) => setField("label", value)} placeholder="Personal mail, Work archive" />
+                  <Field label="Email" value={form.email} onChange={(value) => setField("email", value)} type="email" />
+                  <Field label="Host" value={form.host} onChange={(value) => setField("host", value)} />
+                  <Field label="Port" value={form.port} onChange={(value) => setField("port", value)} type="number" />
+                  <Field label="Username" value={form.username} onChange={(value) => setField("username", value)} />
+                  <Field
+                    label="Password"
+                    value={form.password}
+                    onChange={(value) => setField("password", value)}
+                    type="password"
+                    placeholder={passwordPlaceholder}
+                    required={accountNeedsPassword || !account || switchingAwayFromGoogle}
+                  />
+                  <label><input type="checkbox" checked={form.use_tls} onChange={(event) => setField("use_tls", event.target.checked)} /> Use TLS</label>
+                </>
+              )}
             </section>
             <section>
               <h3>Sync scope</h3>
               <Field label="Folders" value={form.mailbox} onChange={(value) => setField("mailbox", value)} placeholder="*" />
               <Field label="Interval minutes" value={form.sync_interval_minutes} onChange={(value) => setField("sync_interval_minutes", value)} type="number" />
+              <Field label="Sync mail since" value={form.sync_start_at} onChange={(value) => setField("sync_start_at", value)} type="date" />
+              <p className="muted">
+                Older mail is left on the server. Leave empty to mirror everything, which can take hours on a long-lived mailbox.
+              </p>
             </section>
           </div>
           <div className="actions split-actions">
@@ -2506,13 +2651,49 @@ export function SettingsView({
           <div className="settings-columns display-settings-grid">
             <section>
               <Field label="Label" value={smtpForm.label} onChange={(value) => setSMTPField("label", value)} />
-              <Field label="Host" value={smtpForm.host} onChange={(value) => setSMTPField("host", value)} />
-              <Field label="Port" value={smtpForm.port} onChange={(value) => setSMTPField("port", value)} type="number" />
+              {googleConfigured ? (
+                <label className="field">
+                  <span>Sign-in</span>
+                  <select value={smtpForm.auth_type} onChange={(event) => setSMTPField("auth_type", event.target.value)}>
+                    <option value={AUTH_PASSWORD}>Password</option>
+                    <option value={AUTH_GOOGLE}>Google account</option>
+                  </select>
+                </label>
+              ) : null}
+              {smtpUsesGoogleSignIn ? null : (
+                <>
+                  <Field label="Host" value={smtpForm.host} onChange={(value) => setSMTPField("host", value)} />
+                  <Field label="Port" value={smtpForm.port} onChange={(value) => setSMTPField("port", value)} type="number" />
+                </>
+              )}
             </section>
             <section>
-              <Field label="Username" value={smtpForm.username} onChange={(value) => setSMTPField("username", value)} />
-              <Field label="Password" value={smtpForm.password} onChange={(value) => setSMTPField("password", value)} type="password" placeholder={selectedSMTPID ? "Leave blank to keep current password" : ""} />
-              <label><input type="checkbox" checked={smtpForm.use_tls} onChange={(event) => setSMTPField("use_tls", event.target.checked)} /> Use TLS / STARTTLS</label>
+              {smtpUsesGoogleSignIn ? (
+                <>
+                  <label className="field">
+                    <span>Google account</span>
+                    <select
+                      value={smtpForm.google_connection_id}
+                      onChange={(event) => setSMTPField("google_connection_id", event.target.value)}
+                      required
+                    >
+                      <option value="">Choose a connected account</option>
+                      {googleConnections.map((connection) => (
+                        <option key={connection.id} value={String(connection.id)}>
+                          {connection.email}{connection.needs_reauth ? " (needs reauthorization)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="muted">Sends through smtp.gmail.com as this Google account. No password is stored.</p>
+                </>
+              ) : (
+                <>
+                  <Field label="Username" value={smtpForm.username} onChange={(value) => setSMTPField("username", value)} />
+                  <Field label="Password" value={smtpForm.password} onChange={(value) => setSMTPField("password", value)} type="password" placeholder={smtpPasswordPlaceholder} />
+                  <label><input type="checkbox" checked={smtpForm.use_tls} onChange={(event) => setSMTPField("use_tls", event.target.checked)} /> Use TLS / STARTTLS</label>
+                </>
+              )}
             </section>
           </div>
           <div className="actions split-actions">
@@ -2550,7 +2731,7 @@ export function SettingsView({
           {imapAccounts.length > 0 ? (
             <SettingsIndex ariaLabel="IMAP servers">
               {imapAccounts.map((item) => (
-                <SettingsIndexRow key={item.id} icon="inbox" title={item.label || item.email} description={`${item.email} · ${item.host}:${item.port}`} meta="IMAP" path={`/settings/account/mail/imap/${item.id}`} navigate={navigate} onNavigate={() => selectIMAP(item)} />
+                <SettingsIndexRow key={item.id} icon="inbox" title={item.label || item.email} description={imapAccountDescription(item)} meta={item.auth_type === AUTH_GOOGLE ? "Google" : "IMAP"} path={`/settings/account/mail/imap/${item.id}`} navigate={navigate} onNavigate={() => selectIMAP(item)} />
               ))}
             </SettingsIndex>
           ) : <SettingsEmpty icon="inbox" title="No IMAP servers" description="Add an incoming mail server to begin mirroring mail." />}

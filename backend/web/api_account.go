@@ -850,23 +850,42 @@ func (s *Server) apiSMTPAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ID       int64  `json:"id"`
-		Label    string `json:"label"`
-		Host     string `json:"host"`
-		Port     int    `json:"port"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-		UseTLS   bool   `json:"use_tls"`
+		ID                 int64  `json:"id"`
+		Label              string `json:"label"`
+		Host               string `json:"host"`
+		Port               int    `json:"port"`
+		Username           string `json:"username"`
+		Password           string `json:"password"`
+		UseTLS             bool   `json:"use_tls"`
+		AuthType           string `json:"auth_type"`
+		GoogleConnectionID int64  `json:"google_connection_id"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
+	}
+	authType := accountAuthType(in.AuthType)
+	if authType == store.AuthTypeGoogleOAuth {
+		// Same reasoning as the incoming side: the endpoint is fixed and the
+		// connection has to belong to this tenant.
+		in.Host = gmailSMTPHost
+		in.Port = gmailSMTPPort
+		in.UseTLS = true
+		in.Password = ""
+		if _, message, err := s.googleConnectionForAccount(r.Context(), cu.User.ID, in.GoogleConnectionID); err != nil {
+			if message == "" {
+				s.serverError(w, r, err)
+				return
+			}
+			writeAPIError(w, http.StatusBadRequest, message)
+			return
+		}
 	}
 	if in.Port <= 0 || in.Port > 65535 {
 		writeAPIError(w, http.StatusBadRequest, "Port must be a valid TCP port.")
 		return
 	}
 	encrypted := ""
-	if in.ID > 0 {
+	if in.ID > 0 && authType != store.AuthTypeGoogleOAuth {
 		existing, err := s.store.GetSMTPAccountForUser(r.Context(), cu.User.ID, in.ID)
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -887,14 +906,16 @@ func (s *Server) apiSMTPAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	account, err := s.store.UpsertSMTPAccount(r.Context(), store.SMTPAccount{
-		ID:                in.ID,
-		UserID:            cu.User.ID,
-		Label:             in.Label,
-		Host:              in.Host,
-		Port:              in.Port,
-		Username:          in.Username,
-		EncryptedPassword: encrypted,
-		UseTLS:            in.UseTLS,
+		ID:                 in.ID,
+		UserID:             cu.User.ID,
+		Label:              in.Label,
+		Host:               in.Host,
+		Port:               in.Port,
+		Username:           in.Username,
+		EncryptedPassword:  encrypted,
+		UseTLS:             in.UseTLS,
+		AuthType:           authType,
+		GoogleConnectionID: in.GoogleConnectionID,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "Could not save SMTP account.")

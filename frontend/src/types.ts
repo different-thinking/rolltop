@@ -613,6 +613,13 @@ export type Account = {
   smtp_same_as_imap: boolean;
   mailbox: string;
   sync_interval_minutes: number;
+  /** "password" or "google_oauth". */
+  auth_type: string;
+  google_connection_id: number;
+  /** Address of the connected Google account, when this signs in with Google. */
+  google_email?: string;
+  /** Calendar date (YYYY-MM-DD); empty means mirror everything the server has. */
+  sync_start_at?: string;
 };
 
 export type AccountPurgeEstimate = {
@@ -634,6 +641,9 @@ export type SMTPAccount = {
   port: number;
   username: string;
   use_tls: boolean;
+  /** "password" or "google_oauth". */
+  auth_type: string;
+  google_connection_id: number;
 };
 
 /** MailIdentity is the settings shape for a Me-contact-backed outgoing identity. */

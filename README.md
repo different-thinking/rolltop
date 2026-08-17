@@ -124,6 +124,28 @@ published decides how often accounts have to be reconnected:
 Whichever state applies, an expired or revoked grant is detected and the
 connection is marked as needing reauthorization rather than failing silently.
 
+### Gmail mailboxes
+
+Once an account is connected under Settings → Google, an IMAP server can select
+it under **Sign-in** instead of asking for a password. The endpoints are set to
+`imap.gmail.com:993` and `smtp.gmail.com:465` and no password is stored; the
+same choice is available for the outgoing SMTP server, so a Gmail account needs
+no app password in either direction. Existing password accounts can be switched
+over and back, though switching back requires entering a password, since the
+OAuth row does not keep one.
+
+Two Gmail-specific defaults matter for how much gets mirrored:
+
+- **All Mail, Important and Starred start excluded from sync.** They are views
+  over messages that already live in a real folder, and this mirror stores one
+  folder per message, so syncing them would duplicate most of the mailbox.
+- **Sync mail since** limits every fetch to messages delivered on or after a
+  date, applied as an IMAP `SINCE` so old bodies are never transferred at all.
+  Adding a Google account suggests two years back. Leaving it empty mirrors
+  everything, which on a long-lived mailbox can run for hours and produce a
+  much larger database. The value can be changed later; moving it further back
+  backfills through the normal folder repair rather than immediately.
+
 ## Run Locally
 
 ```sh
