@@ -160,7 +160,7 @@ export async function deleteJSON<T>(url: string, csrf: string, options: Mutation
 // batches are split here and dispatched together so every caller inherits the
 // limit, and so background (keepalive) commits hand all requests to the
 // browser before the page can unload.
-const bulkMessageIDLimit = 1000;
+export const bulkMessageIDLimit = 1000;
 
 function chunkMessageIDs(ids: number[]): number[][] {
   if (ids.length <= bulkMessageIDLimit) return [ids];

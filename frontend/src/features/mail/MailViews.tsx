@@ -4,7 +4,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { Star } from "@phosphor-icons/react";
-import { ApiError, api } from "../../api";
+import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
 import type { Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
@@ -989,6 +989,11 @@ type TrashMoveGroup = {
 // time so a partial failure restores only the rows that did not move.
 const inlineMoveMessageLimit = 5;
 
+// Keepalive request bodies share a 64 KiB browser quota; a 1000-ID move body
+// is roughly 10 KiB, so background commits dispatch at most this many chunks —
+// anything beyond the quota would be rejected by the browser anyway.
+const keepaliveMoveChunkBudget = 6;
+
 const messageSwipeMaxDistance = 112;
 const messageSwipeCommitDistance = 68;
 const messageSwipeCommitHoldMS = 170;
@@ -1309,7 +1314,7 @@ function MessageList({
       return;
     }
     const groups = new Map<number, TrashMoveGroup>();
-    let alreadyInTrashName = "";
+    const skippedTrashNames = new Set<string>();
     let alreadyInTrash = 0;
     for (const conversation of selected) {
       const accountIDs = conversationTransferAccountIDs(conversation);
@@ -1322,19 +1327,24 @@ function MessageList({
         addToast("Choose a Trash folder for this account before deleting messages.", "error");
         return;
       }
-      if (target.id === currentMailboxID) {
+      const messageIDs = conversationTransferMessageIDs(conversation);
+      // Skip rows that are certainly already in Trash: any row while viewing
+      // that Trash folder, or a single-message row whose message lives there.
+      // Multi-message threads elsewhere still move — their representative
+      // message may sit in Trash while older messages remain in the Inbox.
+      if (target.id === currentMailboxID || (messageIDs.length === 1 && conversation.message.mailbox_id === target.id)) {
         alreadyInTrash++;
-        alreadyInTrashName = target.name;
+        skippedTrashNames.add(target.name);
         continue;
       }
       const group = groups.get(target.id) || { target, messageIDs: [], items: [] };
-      const messageIDs = conversationTransferMessageIDs(conversation);
       group.items.push({ rowID: conversation.message.id, messageIDs });
       group.messageIDs.push(...messageIDs);
       groups.set(target.id, group);
     }
+    const skippedLabel = skippedTrashNames.size === 1 ? Array.from(skippedTrashNames)[0] : "Trash";
     if (groups.size === 0) {
-      addToast(alreadyInTrash === 1 ? `Message is already in ${alreadyInTrashName}.` : `Messages are already in ${alreadyInTrashName}.`);
+      addToast(alreadyInTrash === 1 ? `Message is already in ${skippedLabel}.` : `Messages are already in ${skippedLabel}.`);
       return;
     }
     const entries = Array.from(groups.values());
@@ -1356,6 +1366,7 @@ function MessageList({
       (keepalive) => commitTrashMove(entries, dismissIDs, destLabel, keepalive)
     );
     if (!registered) return;
+    if (alreadyInTrash > 0) addToast(`Skipped ${messageCountLabel(alreadyInTrash)} already in ${skippedLabel}.`);
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissIDs]));
     optimisticallyDismiss(dismissIDs);
     clearSelection();
@@ -1413,12 +1424,28 @@ function MessageList({
   // reconcile rows without guessing. Shared by swipe moves and bulk delete.
   async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedCount: number; error?: unknown }> {
     if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
-      try {
-        const data = await api.bulkMoveMessages(csrf, messageIDs, target.id, keepalive ? { keepalive: true } : undefined);
-        return { movedIDs: messageIDs, queuedCount: data.queued ? messageIDs.length : 0 };
-      } catch (err) {
-        return { movedIDs: [], queuedCount: 0, error: err };
+      // Chunk here (within the backend's batch cap) so each chunk's outcome is
+      // tracked independently: one failed chunk must not discard the moved IDs
+      // of chunks the backend already accepted.
+      const chunks: number[][] = [];
+      for (let start = 0; start < messageIDs.length; start += bulkMessageIDLimit) {
+        chunks.push(messageIDs.slice(start, start + bulkMessageIDLimit));
       }
+      const dispatched = keepalive ? chunks.slice(0, keepaliveMoveChunkBudget) : chunks;
+      const results = await Promise.allSettled(dispatched.map((chunk) =>
+        api.bulkMoveMessages(csrf, chunk, target.id, keepalive ? { keepalive: true } : undefined)));
+      const movedIDs: number[] = [];
+      let queuedCount = 0;
+      let error: unknown;
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          movedIDs.push(...dispatched[index]);
+          if (result.value.queued) queuedCount += dispatched[index].length;
+        } else if (error === undefined) {
+          error = result.reason;
+        }
+      });
+      return { movedIDs, queuedCount, error };
     }
     const movedIDs: number[] = [];
     let error: unknown;
