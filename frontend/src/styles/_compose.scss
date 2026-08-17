@@ -80,14 +80,6 @@
   min-height: 180px;
 }
 
-.inline-compose {
-  margin: 0 20px 20px 76px;
-  width: auto;
-  min-height: 260px;
-  border-radius: 8px;
-  box-shadow: none;
-}
-
 .inline-reply-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -256,8 +248,17 @@
     background: var(--field);
   }
 
-  .recipient-chip-list {
-    min-height: 38px;
+  // Named through .recipient-input so these outrank that block's own metrics,
+  // which size a compose-window row and would leave Cc and Bcc standing taller
+  // than the From and To rows above them. The caret sets the height here, so it
+  // has to come down with the list for the field to match the identity control.
+  .recipient-input .recipient-chip-list {
+    min-height: 32px;
+    padding: 2px 0;
+
+    > input {
+      min-height: 28px;
+    }
   }
 }
 
@@ -574,11 +575,6 @@
   font: 14px/1.5 var(--font-ui);
   white-space: pre-wrap;
   transition: opacity .28s ease, filter .28s ease, transform .28s ease;
-
-  .inline-compose &,
-  .inline-reply & {
-    min-height: 224px;
-  }
 
   &:empty::before {
     content: attr(data-placeholder);
