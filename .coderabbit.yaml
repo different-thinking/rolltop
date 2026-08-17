@@ -1,0 +1,10 @@
+# CodeRabbit configuration. This file takes precedence over the settings in
+# the CodeRabbit organization UI; unset options fall back to CodeRabbit's
+# defaults, not to the UI values.
+reviews:
+  auto_review:
+    enabled: true
+    # Review each PR once when it is opened, but do not automatically
+    # re-review on every subsequent push. A re-review can still be requested
+    # on demand by commenting "@coderabbitai review" on the PR.
+    auto_incremental_review: false
