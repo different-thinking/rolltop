@@ -303,7 +303,9 @@ func (s *Server) startBackendPlugin(ctx context.Context, pluginID string) (plugi
 		unregistered := s.protectedAPIRouteRegistry().unregisterPlugin(pluginID)
 		unregistered += s.publicAPIRouteRegistry().unregisterPlugin(pluginID)
 		s.recordBackendPluginFailure(pluginID, err)
-		logging.Debugf("backend plugin start failed plugin_id=%s routes_unregistered=%d error=%v", pluginID, unregistered, err)
+		// Start failures must reach the operator log even at the default log
+		// level: the admin UI may still show the plugin as enabled.
+		log.Printf("backend plugin start failed plugin_id=%s routes_unregistered=%d error=%v", pluginID, unregistered, err)
 		return nil, true, err
 	}
 	s.startedBackendPlugins[pluginID] = plugin
@@ -332,7 +334,7 @@ func (s *Server) stopBackendPluginInstance(pluginID string, plugin plugins.Backe
 		logging.Debugf("backend plugin stopping plugin_id=%s", pluginID)
 		stopErr = plugin.Stop(s)
 		if stopErr != nil {
-			logging.Debugf("backend plugin stop failed plugin_id=%s error=%v", pluginID, stopErr)
+			log.Printf("backend plugin stop failed plugin_id=%s error=%v", pluginID, stopErr)
 		}
 	}
 	unregistered := s.protectedAPIRouteRegistry().unregisterPlugin(pluginID)

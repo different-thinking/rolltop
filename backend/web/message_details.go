@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -107,14 +108,17 @@ func (s *Server) performOneClickUnsubscribe(ctx context.Context, target *url.URL
 	if target == nil {
 		return errOneClickUnavailable
 	}
-	logging.Debugf("one-click unsubscribe post target=%s", target.String())
+	targetStr := target.String()
+	logging.Debugf("one-click unsubscribe post target=%s", targetStr)
 	if err := validateOutboundHTTPS(ctx, target); err != nil {
-		logging.Debugf("one-click unsubscribe validation failed target=%s err=%v", target.String(), err)
+		// Always log outbound-guard rejections: they are the only record of a
+		// blocked unsubscribe target and matter for security review.
+		log.Printf("one-click unsubscribe validation failed target=%s err=%v", targetStr, err)
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader("List-Unsubscribe=One-Click"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetStr, strings.NewReader("List-Unsubscribe=One-Click"))
 	if err != nil {
-		logging.Debugf("one-click unsubscribe request build failed target=%s err=%v", target.String(), err)
+		logging.Debugf("one-click unsubscribe request build failed target=%s err=%v", targetStr, err)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -136,12 +140,12 @@ func (s *Server) performOneClickUnsubscribe(ctx context.Context, target *url.URL
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Debugf("one-click unsubscribe transport failed target=%s err=%v", target.String(), err)
+		log.Printf("one-click unsubscribe transport failed target=%s err=%v", targetStr, err)
 		return err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	logging.Debugf("one-click unsubscribe response target=%s status=%s", target.String(), resp.Status)
+	logging.Debugf("one-click unsubscribe response target=%s status=%s", targetStr, resp.Status)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return errors.New("unsubscribe endpoint returned non-2xx")
 	}

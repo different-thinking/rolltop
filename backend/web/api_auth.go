@@ -4,6 +4,7 @@ package web
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -13,12 +14,21 @@ import (
 	"rolltop/backend/store"
 )
 
+// errSessionUnavailable marks a bootstrap that could not resolve the caller's
+// session because of a store failure; serving it with user:null would make the
+// client drop a valid login.
+var errSessionUnavailable = errors.New("session lookup temporarily unavailable")
+
 func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
 	resp, err := s.bootstrapPayload(w, r)
+	if errors.Is(err, errSessionUnavailable) {
+		sessionUnavailable(w)
+		return
+	}
 	if err != nil {
 		s.serverError(w, err)
 		return
@@ -28,6 +38,9 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bootstrapPayload(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	if sessionLookupFailed(r) {
+		return nil, errSessionUnavailable
+	}
 	usersExist, err := s.usersExist(r.Context())
 	if err != nil {
 		return nil, err
@@ -170,6 +183,7 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.CreateUser(r.Context(), in.Email, in.Name, hash, true)
 	if err != nil {
+		log.Printf("setup create admin user: %v", err)
 		writeAPIError(w, http.StatusBadRequest, "Could not create admin user.")
 		return
 	}
@@ -209,6 +223,12 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, err := s.store.GetUserByEmail(r.Context(), in.Email)
+	if err != nil && !store.IsNotFound(err) {
+		// A store failure is not a credential verdict; reporting it as
+		// "invalid password" sends users into password resets during outages.
+		s.serverError(w, err)
+		return
+	}
 	if err != nil {
 		writeAPIError(w, http.StatusUnauthorized, "Invalid email or password.")
 		return
