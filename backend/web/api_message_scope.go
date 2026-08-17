@@ -33,10 +33,13 @@ const (
 )
 
 // scopeSelection mirrors the list view the user is looking at. A query wins over
-// a mailbox because search results are their own list; an empty scope is All Mail.
+// a mailbox because search results are their own list; an empty scope is All
+// Mail, and Unarchived narrows that empty scope to messages outside each
+// account's Archive folder so the Unarchived list never deletes archived mail.
 type scopeSelection struct {
-	MailboxID int64
-	Query     string
+	MailboxID  int64
+	Query      string
+	Unarchived bool
 }
 
 // scopeTrashGroup is one account's share of a scope trash: Trash belongs to an
@@ -90,13 +93,14 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ScopeMailboxID int64  `json:"scope_mailbox_id"`
-		ScopeQuery     string `json:"scope_query"`
+		ScopeMailboxID  int64  `json:"scope_mailbox_id"`
+		ScopeQuery      string `json:"scope_query"`
+		ScopeUnarchived bool   `json:"scope_unarchived"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	scope := scopeSelection{MailboxID: in.ScopeMailboxID, Query: strings.TrimSpace(in.ScopeQuery)}
+	scope := scopeSelection{MailboxID: in.ScopeMailboxID, Query: strings.TrimSpace(in.ScopeQuery), Unarchived: in.ScopeUnarchived}
 	plan, err := s.scopeTrashPlan(r.Context(), cu.User, scope)
 	if err != nil {
 		var missingTrash missingTrashMailboxError
@@ -250,6 +254,10 @@ func (s *Server) resolveScopeMessages(ctx context.Context, user store.User, scop
 			return nil, false, err
 		}
 		messages, err := s.store.ListMailboxScopeMessagesForUser(ctx, user.ID, scope.MailboxID, scopeTrashMessageLimit+1)
+		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
+	}
+	if scope.Unarchived {
+		messages, err := s.store.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)
 		return trimScopeMessages(messages, scopeTrashMessageLimit, err)
 	}
 	messages, err := s.store.ListAllMailScopeMessagesForUser(ctx, user.ID, scopeTrashMessageLimit+1)

@@ -120,6 +120,7 @@ export function MailView({
   const route = mailRoute(location.path);
   const mailboxID = route.mailboxID;
   const page = route.page;
+  const unarchived = route.unarchived;
   // A different signed-in user brings their own stored direction along. This is
   // adjusted during render rather than in an effect so the fetch below already
   // closes over the new user's order instead of requesting the old one first.
@@ -128,22 +129,29 @@ export function MailView({
     setSortOrder(loadMailSortOrder(userID));
   }
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
-  const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
+  // The Unarchived view is All Mail minus each account's chosen Archive folder
+  // (the swipe/row Archive destination), so its total subtracts those folders.
+  const archiveMailboxIDs = new Set(swipePreferences.archive_mailboxes.map((item) => item.mailbox_id));
+  const totalCount = mailbox
+    ? mailbox.message_count
+    : mailboxes
+      .filter((item) => item.show_in_all_mail !== false && !(unarchived && archiveMailboxIDs.has(item.id)))
+      .reduce((sum, item) => sum + item.message_count, 0);
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the
   // route names a folder this view cannot see, no whole-folder scope is offered.
   const scopeMailboxID = Number.parseInt(mailboxID || "0", 10) || 0;
   const listScope = scopeMailboxID === 0
-    ? { mailboxID: 0, query: "", label: "All Mail", total: totalCount }
+    ? { mailboxID: 0, query: "", unarchived, label: unarchived ? "Unarchived" : "All Mail", total: totalCount }
     : mailbox
       ? { mailboxID: scopeMailboxID, query: "", label: mailbox.name, total: mailbox.message_count }
       : undefined;
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
-  const listScopeKey = `${userID}:${mailboxID || "all"}:${sortOrder}`;
+  const listScopeKey = `${userID}:${mailboxID || (unarchived ? "unarchived" : "all")}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
   const slideDirection = useListSlideDirection(listScopeKey, page);
-  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder) : null;
+  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder, unarchived) : null;
   const displayConversations = cachedTransitionPage?.conversations || conversations;
   const displayHasPrev = cachedTransitionPage?.has_prev ?? hasPrev;
   const displayHasNext = cachedTransitionPage?.has_next ?? hasNext;
@@ -235,7 +243,7 @@ export function MailView({
     const isNewList = previousListKey.current !== listKey;
     const canAnimateNewMail = page === 1 && loaded.current && !isNewList && Boolean(refreshKey) && Boolean(latestSyncRun?.new_messages);
     if (isNewList || !loaded.current) {
-      const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
+      const cached = api.cachedMail(userID, mailboxID, page, sortOrder, unarchived);
       if (cached) {
         previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
         previousListKey.current = listKey;
@@ -254,7 +262,7 @@ export function MailView({
     }
     setError("");
     api
-      .mail(userID, mailboxID, page, sortOrder)
+      .mail(userID, mailboxID, page, sortOrder, unarchived)
       .then((data) => {
         if (cancelled) return;
         const nextIDs = new Set(data.conversations.map((conversation) => conversation.message.id));
@@ -279,13 +287,13 @@ export function MailView({
         // Deleting a full page can leave a later page with nothing on it. The
         // rows did not vanish, they moved forward, so follow them back instead
         // of parking the user on an empty page.
-        if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1));
-        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder);
-        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder);
+        if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1, unarchived));
+        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder, unarchived);
+        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder, unarchived);
       })
       .catch((err) => {
         if (!cancelled) {
-          const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
+          const cached = api.cachedMail(userID, mailboxID, page, sortOrder, unarchived);
           previousListKey.current = listKey;
           if (cached) {
             previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
@@ -313,9 +321,9 @@ export function MailView({
     return () => {
       cancelled = true;
     };
-  }, [userID, mailboxID, page, sortOrder, refreshKey, listKey, latestSyncRun?.new_messages]);
+  }, [userID, mailboxID, page, sortOrder, unarchived, refreshKey, listKey, latestSyncRun?.new_messages]);
 
-  const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage);
+  const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage, unarchived);
 
   // Reversing the direction rebuilds the paging window from the other end, so a
   // reader who was on page 4 of newest-first is sent back to the new first page.
@@ -323,7 +331,7 @@ export function MailView({
     if (next === sortOrder) return;
     saveMailSortOrder(userID, next);
     setSortOrder(next);
-    if (page !== 1) navigate(mailURL(mailboxID, 1));
+    if (page !== 1) navigate(mailURL(mailboxID, 1, unarchived));
   }
 
   function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
@@ -374,7 +382,7 @@ export function MailView({
   return (
     <>
       <ListHeader
-        title={mailbox?.name || "All Mail"}
+        title={mailbox?.name || (unarchived ? "Unarchived" : "All Mail")}
         titleClassName="mailbox-title"
         actions={<MailSortToggle order={sortOrder} onChange={changeSortOrder} />}
         pager={{
@@ -430,7 +438,7 @@ export function MailView({
                 showRecipients={mailbox?.role === "sent" || mailbox?.role === "drafts"}
                 openAsDraft={mailbox?.role === "drafts"}
                 datePrefs={datePrefs}
-                returnURL={mailURL(mailboxID, page)}
+                returnURL={mailURL(mailboxID, page, unarchived)}
                 navigate={navigate}
                 messageSecurityPlugins={messageSecurityPlugins}
                 addToast={addToast}
@@ -1137,6 +1145,8 @@ type ConversationReadState = {
 type MessageListScope = {
   mailboxID: number;
   query: string;
+  /** Marks the Unarchived list so a whole-view delete excludes Archive folders. */
+  unarchived?: boolean;
   label: string;
   total?: number;
 };
@@ -1374,7 +1384,7 @@ function MessageList({
   useEffect(() => {
     setScopeSelected(false);
     setScopeDeletePending(false);
-  }, [listScope?.mailboxID, listScope?.query]);
+  }, [listScope?.mailboxID, listScope?.query, listScope?.unarchived]);
 
   useEffect(() => {
     const ids = new Set(visible.map((conversation) => conversation.message.id));
@@ -1538,7 +1548,7 @@ function MessageList({
     setScopeDeletePending(false);
     setScopeDeleteBusy(true);
     try {
-      const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query });
+      const result = await api.scopeTrashMessages(csrf, { mailboxID: listScope.mailboxID, query: listScope.query, unarchived: listScope.unarchived });
       const queuedMessages = result.queued_messages || 0;
       // One action, one summary: the counts belong in a single sentence rather
       // than a stack of toasts the user has to read in order.

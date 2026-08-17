@@ -241,22 +241,49 @@ func scopeMessageLimit(limit int) int {
 	return limit
 }
 
+// archivedMailboxExclusion hides messages sitting in each account's chosen
+// Archive folder (the swipe/row Archive destination). The role guard mirrors
+// GetSwipePreferences: a mapped folder that has since become a system folder
+// no longer counts as an Archive. The fragment takes one user_id argument.
+const archivedMailboxExclusion = ` AND m.mailbox_id NOT IN (
+			SELECT sam.mailbox_id FROM swipe_archive_mailboxes sam
+			JOIN mailboxes smb ON smb.user_id = sam.user_id AND smb.id = sam.mailbox_id AND smb.role = ''
+			WHERE sam.user_id = ?)`
+
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
 // covers: every unsnoozed message in a folder All Mail shows. Rows the list
 // hides (Trash, Junk, Drafts, snoozed threads) stay out of the selection.
 func (s *Store) ListAllMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
+	return s.listAllMailScopeMessagesForUser(ctx, userID, limit, false)
+}
+
+// ListUnarchivedMailScopeMessagesForUser lists what an Unarchived selection
+// covers: the All Mail scope minus each account's Archive folder, so a
+// whole-view delete from the Unarchived list never reaches archived mail.
+func (s *Store) ListUnarchivedMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
+	return s.listAllMailScopeMessagesForUser(ctx, userID, limit, true)
+}
+
+func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int64, limit int, excludeArchived bool) ([]ScopeMessage, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	exclusion := ""
+	args := []any{userID}
+	if excludeArchived {
+		exclusion = archivedMailboxExclusion
+		args = append(args, userID)
+	}
+	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND mb.show_in_all_mail = 1 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
-		LIMIT ?`, userID, nowUnix(), scopeMessageLimit(limit))
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +349,18 @@ func (o ThreadListOrder) sortDirection() string {
 // A thread is always represented by its newest message; order only decides where
 // that thread lands in the page.
 func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
+	return s.listLatestThreadMessagesForUser(ctx, userID, limit, offset, order, false)
+}
+
+// ListUnarchivedLatestThreadMessagesForUser renders the Unarchived list: All
+// Mail minus the messages sitting in each account's chosen Archive folder. A
+// thread whose newest message is archived still appears through its newest
+// unarchived message, matching how single-folder lists represent threads.
+func (s *Store) ListUnarchivedLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
+	return s.listLatestThreadMessagesForUser(ctx, userID, limit, offset, order, true)
+}
+
+func (s *Store) listLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder, excludeArchived bool) ([]MessageRecord, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -330,6 +369,13 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 		limit = 50
 	}
 	direction := order.sortDirection()
+	exclusion := ""
+	args := []any{userID}
+	if excludeArchived {
+		exclusion = archivedMailboxExclusion
+		args = append(args, userID)
+	}
+	args = append(args, nowUnix(), limit, offset)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`WITH keyed AS (
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
 				MAX(printf('%%020d:%%020d',
@@ -339,14 +385,14 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 			JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-			WHERE m.user_id = ? AND mb.show_in_all_mail = 1 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+			WHERE m.user_id = ? AND mb.show_in_all_mail = 1%[2]s AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 			GROUP BY thread_group
 			ORDER BY latest_key %[1]s LIMIT ? OFFSET ?
 		)
 		SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
 			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
 		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
-		ORDER BY k.latest_key %[1]s`, direction), userID, nowUnix(), limit, offset)
+		ORDER BY k.latest_key %[1]s`, direction, exclusion), args...)
 	if err != nil {
 		return nil, err
 	}

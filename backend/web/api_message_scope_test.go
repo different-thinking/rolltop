@@ -145,6 +145,51 @@ func TestScopeTrashPlanCoversAllMailAndSkipsTrash(t *testing.T) {
 	}
 }
 
+func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-unarchived@example.test")
+	archive, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, 601, "")
+	archived := createScopeTestMessage(t, ctx, db, tenant, archive, 602, "")
+	if _, err := db.SaveSwipePreferences(ctx, store.SwipePreferences{
+		UserID:     tenant.user.ID,
+		LeftAction: store.SwipeActionSnooze, LeftSnoozePreset: store.SwipeSnoozeTomorrow,
+		RightAction: store.SwipeActionMarkRead, RightSnoozePreset: store.SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []store.SwipeArchiveMailbox{{AccountID: tenant.accountID, MailboxID: archive.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	// The Unarchived list's whole-view delete must never reach archived mail.
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{Unarchived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	if plan.Matched != 1 || len(ids) != 1 || ids[0] != kept.ID {
+		t.Fatalf("unarchived plan = matched %d ids %v, want only the inbox message %d", plan.Matched, ids, kept.ID)
+	}
+
+	// The plain All Mail scope still covers the Archive folder's messages.
+	allPlan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allIDs := planMessageIDs(allPlan)
+	if allPlan.Matched != 2 || !slices.Contains(allIDs, archived.ID) {
+		t.Fatalf("all mail plan = matched %d ids %v, want both messages including %d", allPlan.Matched, allIDs, archived.ID)
+	}
+}
+
 func TestScopeTrashPlanResolvesSearchFilter(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

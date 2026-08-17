@@ -466,6 +466,97 @@ func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T)
 	}
 }
 
+func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	archive, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.Role != "" || !archive.ShowInAllMail {
+		t.Fatalf("archive mailbox = role %q all-mail %t, want a plain All Mail folder", archive.Role, archive.ShowInAllMail)
+	}
+	base := time.Unix(1700000000, 0)
+	kept, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: inbox.ID, BlobID: blob.ID,
+		MessageIDHeader: "<unarchived-kept@example.test>", Subject: "Kept",
+		Date: base, UID: 1, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: archive.ID, BlobID: blob.ID,
+		MessageIDHeader: "<unarchived-archived@example.test>", Subject: "Archived",
+		Date: base.Add(time.Hour), UID: 2, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a chosen Archive folder nothing counts as archived, so the
+	// Unarchived list is exactly All Mail.
+	before, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("unarchived rows before mapping = %d, want both messages", len(before))
+	}
+
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: archive.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	unarchived, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unarchived) != 1 || unarchived[0].ID != kept.ID {
+		t.Fatalf("unarchived rows = %v, want only the inbox message %d", messageIDsOf(unarchived), kept.ID)
+	}
+	all, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all mail rows = %d, the Archive folder must stay in All Mail", len(all))
+	}
+
+	scope, err := db.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].ID != kept.ID {
+		t.Fatalf("unarchived scope = %+v, want only the inbox message %d", scope, kept.ID)
+	}
+	allScope, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allScope) != 2 {
+		t.Fatalf("all mail scope = %d rows, want both messages including %d", len(allScope), archived.ID)
+	}
+}
+
+func messageIDsOf(messages []MessageRecord) []int64 {
+	ids := make([]int64, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	return ids
+}
+
 func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))

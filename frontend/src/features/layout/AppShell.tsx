@@ -848,8 +848,10 @@ function Sidebar({
     serverStartedAt ? `Started ${new Date(serverStartedAt).toLocaleString()}` : "Server uptime",
     shortCommit ? `Commit ${shortCommit}` : ""
   ].filter(Boolean).join(" · ");
-  const activeMailbox = mailRoute(currentPath).mailboxID;
-  const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox;
+  const listRoute = mailRoute(currentPath);
+  const activeMailbox = listRoute.mailboxID;
+  const unarchivedActive = listRoute.unarchived;
+  const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !unarchivedActive;
   const snoozedActive = currentPath === "/snoozes";
   const accountGroups = useMemo(() => sidebarAccountGroups(mailboxes), [mailboxes]);
   const advertiseAndroidApp = shouldAdvertiseAndroidApp();
@@ -1057,6 +1059,14 @@ function Sidebar({
           onClick={(event) => open(event, "/mail")}
         >
           <span className="folder-name"><Icon name="mail" weight={allMailActive ? "bold" : undefined} />All Mail</span>
+        </a>
+        <a
+          href="/mail/unarchived"
+          className={`folder ${unarchivedActive ? "active" : ""}`}
+          title="All Mail without each account's Archive folder"
+          onClick={(event) => open(event, "/mail/unarchived")}
+        >
+          <span className="folder-name"><Icon name="inbox" weight={unarchivedActive ? "bold" : undefined} />Unarchived</span>
         </a>
     <a
       href="/snoozes"

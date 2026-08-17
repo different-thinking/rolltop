@@ -25,6 +25,9 @@ type mailListCacheKey struct {
 	Sort      string
 	Search    bool
 	Query     string
+	// Unarchived marks the All Mail view that hides each account's Archive
+	// folder, so its pages never revalidate against plain All Mail entries.
+	Unarchived bool
 }
 
 type mailListCacheEntry struct {
@@ -266,7 +269,7 @@ func (s *Server) warmAllMailFirstPage(ctx context.Context, userID int64) error {
 	if err != nil {
 		return err
 	}
-	response, err := s.mailPageResponse(ctx, user, 0, 1, store.ThreadListNewestFirst, newSearchTiming())
+	response, err := s.mailPageResponse(ctx, user, 0, false, 1, store.ThreadListNewestFirst, newSearchTiming())
 	if err != nil {
 		return err
 	}

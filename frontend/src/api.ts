@@ -213,9 +213,10 @@ function composeSendPayload(form: ComposeForm): ComposeForm {
 
 // The default order stays off the URL so warmed first pages, service caches, and
 // clients that never touch sorting all keep asking for the same address.
-function mailListURL(mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
+function mailListURL(mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, unarchived = false) {
   const q = new URLSearchParams({ page: String(page) });
   if (mailboxID) q.set("mailbox", mailboxID);
+  else if (unarchived) q.set("view", "unarchived");
   if (order !== defaultMailSortOrder) q.set("sort", order);
   return `/api/mail?${q}`;
 }
@@ -227,8 +228,8 @@ function mailCacheEpoch(userID: number) {
   return 0;
 }
 
-function mailListCacheKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder, epoch = mailCacheEpoch(userID)) {
-  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order)}`;
+function mailListCacheKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder, unarchived: boolean, epoch = mailCacheEpoch(userID)) {
+  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order, unarchived)}`;
 }
 
 function searchListURL(query: string, page: number) {
@@ -253,27 +254,30 @@ function cachedJSON<T>(cacheKey: string): T | null {
   return cached ? cached.data as T : null;
 }
 
-function cachedMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): MailListResponse | null {
-  const key = mailListCacheKey(userID, mailboxID, page, order);
+function cachedMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, unarchived = false): MailListResponse | null {
+  const key = mailListCacheKey(userID, mailboxID, page, order, unarchived);
   const cached = cachedJSON<MailListResponse>(key);
-  return cached || loadMailSnapshot(userID, mailboxID, page, order);
+  // The Unarchived view keeps no localStorage snapshot: snapshot keys only name
+  // mailbox/all pages, and an All Mail page painting there would show archived
+  // rows in a view whose promise is that they are gone.
+  return cached || (unarchived ? null : loadMailSnapshot(userID, mailboxID, page, order));
 }
 
-async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): Promise<MailListResponse> {
-  const url = mailListURL(mailboxID, page, order);
+async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, unarchived = false): Promise<MailListResponse> {
+  const url = mailListURL(mailboxID, page, order, unarchived);
   const epoch = mailCacheEpoch(userID);
-  const key = mailListCacheKey(userID, mailboxID, page, order, epoch);
+  const key = mailListCacheKey(userID, mailboxID, page, order, unarchived, epoch);
   const data = await getJSON<MailListResponse>(url, key);
   if (mailCacheEpoch(userID) !== epoch) {
     getCache.delete(key);
     return data;
   }
-  saveMailSnapshot(userID, mailboxID, page, data, order);
+  if (!unarchived) saveMailSnapshot(userID, mailboxID, page, data, order);
   return data;
 }
 
-function prefetchMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
-  void loadMail(userID, mailboxID, page, order).catch(() => undefined);
+function prefetchMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, unarchived = false) {
+  void loadMail(userID, mailboxID, page, order, unarchived).catch(() => undefined);
 }
 
 function clearMailCache(userID: number) {
@@ -388,10 +392,11 @@ export const api = {
   // not limited to the IDs one page happens to have loaded. The server resolves
   // the matches, groups them per account Trash, and answers with the runs it
   // started; progress arrives through the normal sync-run events.
-  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string }) =>
+  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string; unarchived?: boolean }) =>
     postJSON<ScopeTrashResponse>("/api/messages/scope-trash", csrf, {
       scope_mailbox_id: scope.mailboxID,
-      scope_query: scope.query
+      scope_query: scope.query,
+      scope_unarchived: Boolean(scope.unarchived)
     }),
   bulkCopyMessages: async (csrf: string, ids: number[], mailboxID: number) => {
     const results = await Promise.all(chunkMessageIDs(ids).map((chunk) =>

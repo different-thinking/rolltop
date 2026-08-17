@@ -35,16 +35,24 @@ func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 		}
 		mailboxID = id
 	}
+	// The only named view is Unarchived: All Mail without each account's Archive
+	// folder. An unknown view is a URL for a list this server cannot render.
+	view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view")))
+	if view != "" && view != "unarchived" {
+		http.NotFound(w, r)
+		return
+	}
+	unarchived := view == "unarchived" && mailboxID == 0
 	order := mailSortFromRequest(r)
-	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page, Sort: mailSortCacheKey(order)}
-	if mailboxID == 0 && page == 1 && s.writeMailListPageIfFresh(w, r, cacheKey) {
+	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page, Sort: mailSortCacheKey(order), Unarchived: unarchived}
+	if mailboxID == 0 && page == 1 && !unarchived && s.writeMailListPageIfFresh(w, r, cacheKey) {
 		return
 	}
 	if s.writeMailListNotModifiedIfFresh(w, r, cacheKey) {
 		return
 	}
 	generation := s.mailListGeneration(cu.User.ID)
-	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, page, order, timing)
+	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, unarchived, page, order, timing)
 	if err != nil {
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -81,7 +89,7 @@ func mailSortCacheKey(order store.ThreadListOrder) string {
 	return ""
 }
 
-func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, page int, order store.ThreadListOrder, timing *searchTiming) (map[string]any, error) {
+func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, unarchived bool, page int, order store.ThreadListOrder, timing *searchTiming) (map[string]any, error) {
 	const pageSize = 50
 	offset := (page - 1) * pageSize
 	fetchLimit := pageSize*3 + 1
@@ -100,7 +108,11 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		hydrateDone()
 	} else {
 		hydrateDone := timing.measure(&timing.hydrate)
-		messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
+		if unarchived {
+			messages, err = s.store.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
+		} else {
+			messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
+		}
 		hydrateDone()
 	}
 	if err != nil {
