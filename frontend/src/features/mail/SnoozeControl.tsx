@@ -46,13 +46,16 @@ export function SnoozeControl({
   datePrefs,
   disabled = false,
   label = "Snooze",
-  className = ""
+  className = "",
+  iconOnly = false
 }: {
   onSnooze: (until: Date) => void | Promise<void>;
   datePrefs?: DatePrefs;
   disabled?: boolean;
   label?: string;
   className?: string;
+  /** Render just the clock glyph, for compact rows that carry the label in the tooltip. */
+  iconOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -114,9 +117,9 @@ export function SnoozeControl({
 
   return (
     <>
-      <button className={className} type="button" disabled={disabled || busy} onClick={openPicker} title={label}>
+      <button className={className} type="button" disabled={disabled || busy} onClick={openPicker} title={label} aria-label={iconOnly ? label : undefined}>
         <Icon name="clock" />
-        <span>{label}</span>
+        {iconOnly ? null : <span>{label}</span>}
       </button>
       {dialog}
     </>

@@ -864,6 +864,12 @@
   }
 }
 
+.swipe-archive-hint {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .swipe-archive-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1821,7 +1827,7 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgb(0 0 0 / 45%);
+  background: var(--scrim-strong);
 }
 
 .database-confirm-panel {
