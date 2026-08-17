@@ -17,6 +17,8 @@ import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
 import { mailPageSize } from "../../lib/constants";
+import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
+import type { MailSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { mailRoute, mailURL, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
@@ -105,6 +107,7 @@ export function MailView({
   const [hasPrev, setHasPrev] = useState(false);
   const [hasNext, setHasNext] = useState(false);
   const [newMessageIDs, setNewMessageIDs] = useState<Set<number>>(() => new Set());
+  const [sortOrder, setSortOrder] = useState<MailSortOrder>(() => loadMailSortOrder(userID));
   const previousPageIDs = useRef<Set<number>>(new Set());
   const previousListKey = useRef("");
   const newMessageTimer = useRef<number | null>(null);
@@ -114,10 +117,10 @@ export function MailView({
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
   const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
-  const listScopeKey = `${userID}:${mailboxID || "all"}`;
+  const listScopeKey = `${userID}:${mailboxID || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
   const slideDirection = useListSlideDirection(listScopeKey, page);
-  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page) : null;
+  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder) : null;
   const displayConversations = cachedTransitionPage?.conversations || conversations;
   const displayHasPrev = cachedTransitionPage?.has_prev ?? hasPrev;
   const displayHasNext = cachedTransitionPage?.has_next ?? hasNext;
@@ -175,6 +178,11 @@ export function MailView({
     };
   }, []);
 
+  // A different signed-in user brings their own stored direction along.
+  useEffect(() => {
+    setSortOrder(loadMailSortOrder(userID));
+  }, [userID]);
+
   // A manual folder is refreshed when the user enters its view. The ref
   // coalesces chrome/SSE rerenders, while a new component mount (browser
   // refresh) or navigating away and back permits one fresh request.
@@ -205,7 +213,7 @@ export function MailView({
     const isNewList = previousListKey.current !== listKey;
     const canAnimateNewMail = page === 1 && loaded.current && !isNewList && Boolean(refreshKey) && Boolean(latestSyncRun?.new_messages);
     if (isNewList || !loaded.current) {
-      const cached = api.cachedMail(userID, mailboxID, page);
+      const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
       if (cached) {
         previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
         previousListKey.current = listKey;
@@ -224,7 +232,7 @@ export function MailView({
     }
     setError("");
     api
-      .mail(userID, mailboxID, page)
+      .mail(userID, mailboxID, page, sortOrder)
       .then((data) => {
         if (cancelled) return;
         const nextIDs = new Set(data.conversations.map((conversation) => conversation.message.id));
@@ -246,12 +254,12 @@ export function MailView({
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
         setShowingSavedPage(false);
-        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1);
-        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1);
+        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder);
+        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder);
       })
       .catch((err) => {
         if (!cancelled) {
-          const cached = api.cachedMail(userID, mailboxID, page);
+          const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
           previousListKey.current = listKey;
           if (cached) {
             previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
@@ -279,9 +287,18 @@ export function MailView({
     return () => {
       cancelled = true;
     };
-  }, [userID, mailboxID, page, refreshKey, listKey, latestSyncRun?.new_messages]);
+  }, [userID, mailboxID, page, sortOrder, refreshKey, listKey, latestSyncRun?.new_messages]);
 
   const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage);
+
+  // Reversing the direction rebuilds the paging window from the other end, so a
+  // reader who was on page 4 of newest-first is sent back to the new first page.
+  function changeSortOrder(next: MailSortOrder) {
+    if (next === sortOrder) return;
+    saveMailSortOrder(userID, next);
+    setSortOrder(next);
+    if (page !== 1) navigate(mailURL(mailboxID, 1));
+  }
 
   function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
     setConversations((current) => current.map((conversation) => {
@@ -333,6 +350,7 @@ export function MailView({
       <ListHeader
         title={mailbox?.name || "All Mail"}
         titleClassName="mailbox-title"
+        actions={<MailSortToggle order={sortOrder} onChange={changeSortOrder} />}
         pager={{
           page,
           pageSize: mailPageSize,
@@ -402,6 +420,43 @@ export function MailView({
         ) : null}
       </div>
     </>
+  );
+}
+
+/**
+ * MailSortToggle switches All Mail and folder lists between newest and oldest
+ * first. Both directions stay visible so the current one is readable at a
+ * glance instead of hidden behind a single toggle's next state, and both stay
+ * clickable while a page loads because the pending request is dropped anyway.
+ */
+function MailSortToggle({
+  order,
+  onChange
+}: {
+  order: MailSortOrder;
+  onChange: (order: MailSortOrder) => void;
+}) {
+  const choices: Array<{ value: MailSortOrder; label: string; icon: string; title: string }> = [
+    { value: "newest", label: "Newest", icon: "sort_descending", title: "Sort by date, newest first" },
+    { value: "oldest", label: "Oldest", icon: "sort_ascending", title: "Sort by date, oldest first" }
+  ];
+  return (
+    <div className="mail-sort-toggle" role="group" aria-label="Sort by date">
+      {choices.map((choice) => (
+        <button
+          className={choice.value === order ? "active" : ""}
+          type="button"
+          key={choice.value}
+          title={choice.title}
+          aria-label={choice.title}
+          aria-pressed={choice.value === order}
+          onClick={() => onChange(choice.value)}
+        >
+          <Icon name={choice.icon} />
+          <span>{choice.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 

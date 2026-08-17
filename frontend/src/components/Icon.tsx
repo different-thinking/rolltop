@@ -60,6 +60,8 @@ import {
   ShoppingBag,
   SignOut,
   Signature,
+  SortAscending,
+  SortDescending,
   Star,
   Tag,
   TextAa,
@@ -137,6 +139,8 @@ const iconMap: Record<string, PhosphorIcon> = {
   school: GraduationCap,
   shopping_bag: ShoppingBag,
   signature: Signature,
+  sort_ascending: SortAscending,
+  sort_descending: SortDescending,
   star: Star,
   sync: ArrowsClockwise,
   travel: AirplaneTilt

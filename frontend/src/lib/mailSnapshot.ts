@@ -2,6 +2,8 @@
 // snapshot paints only after the embedded bootstrap confirms the same user.
 
 import type { Conversation, MailListResponse, Message } from "../types";
+import { defaultMailSortOrder, mailSortOrder } from "./mailSort";
+import type { MailSortOrder } from "./mailSort";
 
 const snapshotVersion = 2;
 const maxSnapshotBytes = 900_000;
@@ -16,25 +18,29 @@ type MailSnapshot = {
   user_id: number;
   mailbox_id: number | null;
   page_number: number;
+  // Snapshots written before date sorting existed carry no order and are read
+  // back as the newest-first default they were captured in.
+  order?: MailSortOrder;
   saved_at: number;
   page: MailListResponse;
 };
 
-export function mailSnapshotStorageKey(userID: number, mailboxID: string | null, page: number): string {
+export function mailSnapshotStorageKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): string {
   const mailbox = normalizedMailboxID(mailboxID);
-  return `${snapshotPrefix}${userID}.${mailbox === null ? "all" : `box-${mailbox}`}.p${page}`;
+  const suffix = order === defaultMailSortOrder ? "" : `.${order}`;
+  return `${snapshotPrefix}${userID}.${mailbox === null ? "all" : `box-${mailbox}`}.p${page}${suffix}`;
 }
 
-export function loadMailSnapshot(userID: number, mailboxID: string | null, page: number): MailListResponse | null {
+export function loadMailSnapshot(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): MailListResponse | null {
   const mailbox = normalizedMailboxID(mailboxID);
   if (!positiveInteger(userID) || !positiveInteger(page) || (mailboxID !== null && mailbox === null)) return null;
   try {
-    const parsed = JSON.parse(localStorage.getItem(mailSnapshotStorageKey(userID, mailboxID, page)) || "null") as unknown;
-    if (validSnapshot(parsed, userID, mailbox, page)) return parsed.page;
+    const parsed = JSON.parse(localStorage.getItem(mailSnapshotStorageKey(userID, mailboxID, page, order)) || "null") as unknown;
+    if (validSnapshot(parsed, userID, mailbox, page, order)) return parsed.page;
   } catch {
     // A corrupt current entry should not prevent migration of a valid v1 page.
   }
-  if (mailbox === null && page === 1) {
+  if (mailbox === null && page === 1 && order === defaultMailSortOrder) {
     try {
       const legacy = JSON.parse(localStorage.getItem(`${legacyAllMailPrefix}${userID}`) || "null") as unknown;
       if (validLegacyAllMailSnapshot(legacy, userID)) {
@@ -56,7 +62,7 @@ function validLegacyAllMailSnapshot(value: unknown, userID: number): value is { 
     validMailPage(value.page) && value.page.page === 1 && value.page.has_prev === false;
 }
 
-export function saveMailSnapshot(userID: number, mailboxID: string | null, pageNumber: number, page: MailListResponse): boolean {
+export function saveMailSnapshot(userID: number, mailboxID: string | null, pageNumber: number, page: MailListResponse, order: MailSortOrder = defaultMailSortOrder): boolean {
   const mailbox = normalizedMailboxID(mailboxID);
   if (!positiveInteger(userID) || !positiveInteger(pageNumber) || (mailboxID !== null && mailbox === null) ||
     page.page !== pageNumber || !validMailPage(page)) return false;
@@ -65,13 +71,14 @@ export function saveMailSnapshot(userID: number, mailboxID: string | null, pageN
     user_id: userID,
     mailbox_id: mailbox,
     page_number: pageNumber,
+    order,
     saved_at: Date.now(),
     page
   };
   try {
     const serialized = JSON.stringify(snapshot);
     if (new TextEncoder().encode(serialized).byteLength > maxSnapshotBytes) return false;
-    const key = mailSnapshotStorageKey(userID, mailboxID, pageNumber);
+    const key = mailSnapshotStorageKey(userID, mailboxID, pageNumber, order);
     if (!storeWithQuotaRecovery(key, serialized, userID)) return false;
     pruneMailSnapshots(userID);
     return true;
@@ -105,10 +112,11 @@ export function clearOtherMailSnapshots(keepUserID: number) {
   }
 }
 
-function validSnapshot(value: unknown, userID: number, mailboxID: number | null, page: number): value is MailSnapshot {
+function validSnapshot(value: unknown, userID: number, mailboxID: number | null, page: number, order: MailSortOrder): value is MailSnapshot {
   if (!record(value)) return false;
   return value.version === snapshotVersion && value.user_id === userID &&
     value.mailbox_id === mailboxID && value.page_number === page &&
+    mailSortOrder(value.order) === order &&
     typeof value.saved_at === "number" && Number.isFinite(value.saved_at) && value.saved_at > 0 &&
     validMailPage(value.page) && value.page.page === page;
 }
