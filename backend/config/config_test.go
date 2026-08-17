@@ -57,6 +57,7 @@ func TestLoadUsesRolltopPluginDir(t *testing.T) {
 
 func TestLoadValidatesLogLevel(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_LOG_LEVEL", "")
 
 	cfg, err := Load()
 	if err != nil {
