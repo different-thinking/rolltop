@@ -99,6 +99,22 @@ docker run -d --name rolltop --restart unless-stopped -p 8080:8080 \
 
 Keep `.env.rolltop` with the same care as the Docker volume. Changing or losing `ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable.
 
+### Logs and crash reports
+
+All application logs go to **stderr**. `docker logs rolltop` shows them, but
+anything that pipes or redirects only stdout (`docker logs rolltop | grep …`,
+`docker logs rolltop > out.log`) silently drops every log line — use
+`docker logs rolltop 2>&1 | grep …` instead.
+
+Crashes are additionally persisted in the data volume so they survive
+container recreation: an unhandled panic or fatal error is written to
+`/data/crash.log`, and the next startup preserves it as `/data/crash.log.prev`
+and logs that it found it. If the process is killed without any chance to
+report (kernel OOM kill, SIGKILL), no crash report can exist; the next startup
+detects the unclean shutdown and says so — then check
+`docker inspect rolltop --format '{{.State.ExitCode}} {{.State.OOMKilled}}'`
+and the kernel log (`dmesg | grep -i oom`).
+
 ### Automatic Search Index Recovery
 
 Bleve writes pass through a shared priority- and byte-aware coordinator. It

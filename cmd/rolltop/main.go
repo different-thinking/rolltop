@@ -40,16 +40,24 @@ type mailboxWatcher interface {
 	WatchMailbox(ctx context.Context, account store.MailAccount, mailbox string, onChange func()) error
 }
 
+// crashReport is armed by run() once the instance lock is held; it persists
+// crash dumps and fatal errors in the data directory so they survive lost
+// container logs. All methods are nil-safe for the paths before arming.
+var crashReport *crashReporter
+
 func main() {
-	var err error
 	if len(os.Args) > 1 {
-		err = runCommand(context.Background(), os.Args[1:], os.Stdout, os.Stderr)
-	} else {
-		err = run()
+		if err := runCommand(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
-	if err != nil {
+	if err := run(); err != nil {
+		crashReport.recordFatal(err)
+		crashReport.markCleanShutdown()
 		log.Fatal(err)
 	}
+	crashReport.markCleanShutdown()
 }
 
 // Startup state is intentionally process-local: it exists before the normal
@@ -328,6 +336,7 @@ func run() error {
 		return err
 	}
 	defer lock.Close()
+	crashReport = setupCrashReporting(cfg.DataDir)
 
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
