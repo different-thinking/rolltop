@@ -54,9 +54,16 @@ export ROLLTOP_BLOB_RETENTION="336h"
 export ROLLTOP_COOKIE_SECURE="false"
 export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
+export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
+
+`ROLLTOP_STARTUP_INTEGRITY_CHECK` decides when SQLite files are verified during
+startup. `auto` (the default) verifies them only after a run that did not shut
+down cleanly, `always` verifies on every start, `never` disables the check.
+Verification reads every page, so `always` costs startup time proportional to
+the size of the mirror.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
@@ -142,10 +149,52 @@ anything was lost. The quarantined file is kept, so nothing is deleted.
 
 Corruption comes from the storage under the data volume, not from a Rolltop
 write path: Rolltop opens SQLite in WAL mode with one writer per tenant and an
-exclusive lock on the data directory. Recurring corruption on the same
-installation usually means the volume is on a network or overlay filesystem
-that does not honor SQLite's locking, or that the data directory was copied
-while the server was running. Snapshot the volume with Rolltop stopped.
+exclusive lock on the data directory. A killed process does not corrupt a WAL
+database — SQLite discards a partially written frame by its checksum on the
+next open. Recurring corruption on the same installation usually means the
+volume is on a network or overlay filesystem that does not honor SQLite's
+locking, that the host lost power, or that the data directory was copied while
+the server was running.
+
+### Shutdown And Restart
+
+Rolltop's shutdown ends with closing SQLite, which checkpoints the WAL into the
+database file. Everything before that step is bounded so the close is reached:
+the HTTP drain gets 3 seconds, the plugin host and search index together get 3
+more, and whatever has not finished by then is abandoned. Give the container
+enough grace for that sequence plus the checkpoint:
+
+```yaml
+services:
+  rolltop:
+    stop_grace_period: 60s
+    restart: unless-stopped
+```
+
+Without it, `docker stop` sends SIGKILL after its default 10 seconds. That does
+not corrupt the database, but it leaves a hot WAL that the next start has to
+replay, and the next start then treats the run as unclean and verifies the
+tenant files before serving (see `ROLLTOP_STARTUP_INTEGRITY_CHECK`).
+
+### Backups
+
+Copying `/data` with `cp`, `rsync`, `docker cp`, or a volume snapshot while
+Rolltop runs produces a torn database: the committed state is split between
+`rolltop.db` and its WAL. Use `backup-db`, which writes each database with
+SQLite's `VACUUM INTO` from a single read transaction and is safe to run while
+the server is serving:
+
+```sh
+docker compose exec "$ROLLTOP_SERVICE" \
+  rolltop backup-db --output /data/backups/$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+The copies mirror the data directory layout (`rolltop.db` and
+`users/<id>/rolltop.db`) and are already checkpointed, so no WAL sidecar is
+needed to read them. Message blobs and the Bleve index are deliberately not
+copied: blobs are re-fetchable from IMAP and the index is rebuilt from the
+database. Write backups outside the data volume if you want them to survive
+losing that volume.
 
 ### Automatic Search Index Recovery
 

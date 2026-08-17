@@ -25,7 +25,7 @@ It changes only derived search completion state; it does not delete or alter
 message content, IMAP state, attachments, or blobs.
 `
 
-const commandUsage = resetSearchUsage + "\n" + databaseMaintenanceUsage
+const commandUsage = resetSearchUsage + "\n" + databaseMaintenanceUsage + "\n" + backupDatabaseUsage
 
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -38,6 +38,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return runCheckDatabase(ctx, args[1:], stdout, stderr)
 	case "recover-db":
 		return runRecoverDatabase(ctx, args[1:], stdout, stderr)
+	case "backup-db":
+		return runBackupDatabase(ctx, args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		_, _ = io.WriteString(stdout, commandUsage)
 		return nil

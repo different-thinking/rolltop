@@ -223,20 +223,64 @@ type appRuntime struct {
 
 const searchWriterRestartShutdownTimeout = 15 * time.Second
 
+// The whole shutdown has to finish inside the container runtime's grace period
+// — ten seconds by default for "docker stop" — because the step that matters
+// most, closing SQLite so its WAL is checkpointed, comes last. These budgets
+// leave room for that close instead of letting a slow HTTP drain or a stuck
+// index writer consume the grace period and turn every restart into a SIGKILL.
+const (
+	httpDrainTimeout          = 3 * time.Second
+	interruptedSyncRunTimeout = 2 * time.Second
+	derivedCloseTimeout       = 3 * time.Second
+)
+
 var errSearchWriterRestartShutdownTimeout = errors.New("search writer restart cleanup timed out")
 
 func (a *appRuntime) close() {
+	a.closeWithin(derivedCloseTimeout)
+}
+
+// closeWithin releases the runtime in dependency order but gives the derived
+// subsystems only a bounded share of the shutdown budget. Whatever has not
+// finished by then is abandoned so the database close still runs: an abandoned
+// writer can only fail its own statement, while a skipped database close leaves
+// a hot WAL behind on every restart.
+func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 	if a == nil {
 		return
 	}
+	deadline := time.Now().Add(derivedBudget)
 	if a.pluginHost != nil {
-		_ = a.pluginHost.Close()
+		closeWithBudget("plugin host", time.Until(deadline), a.pluginHost.Close)
 	}
 	if a.search != nil {
-		_ = a.search.Close()
+		closeWithBudget("search index", time.Until(deadline), a.search.Close)
 	}
 	if a.db != nil {
-		_ = a.db.Close()
+		// Deliberately unbounded: this is the write that decides whether the
+		// next start opens a checkpointed database or replays a WAL.
+		if err := a.db.Close(); err != nil {
+			log.Printf("close databases: %v", err)
+		}
+	}
+}
+
+func closeWithBudget(name string, budget time.Duration, closeFn func() error) {
+	if budget <= 0 {
+		log.Printf("skipping %s shutdown: shutdown budget already spent", name)
+		return
+	}
+	done := make(chan error, 1)
+	go func() { done <- closeFn() }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("close %s: %v", name, err)
+		}
+	case <-timer.C:
+		log.Printf("%s did not close within %s; closing databases anyway", name, budget)
 	}
 }
 
@@ -257,17 +301,23 @@ func runSearchWriterRestartShutdown(timeout time.Duration, shutdown func() error
 }
 
 func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan error) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+	err := <-serverErr
+	// Recorded after the drain: no handler can start a new sync run once the
+	// listener is closed, and the write cannot eat the drain budget. Startup
+	// repeats this cleanup, so a shutdown too short to finish it loses nothing.
 	if app.db != nil {
-		if n, err := app.db.MarkRunningSyncRunsInterrupted(context.Background()); err != nil {
-			log.Printf("mark interrupted sync runs during shutdown: %v", err)
+		markCtx, cancelMark := context.WithTimeout(context.Background(), interruptedSyncRunTimeout)
+		defer cancelMark()
+		if n, markErr := app.db.MarkRunningSyncRunsInterrupted(markCtx); markErr != nil {
+			log.Printf("mark interrupted sync runs during shutdown: %v", markErr)
 		} else if n > 0 {
 			log.Printf("marked interrupted sync runs during shutdown: %d", n)
 		}
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
-	return <-serverErr
+	return err
 }
 
 // run starts the HTTP listener before backend initialization. That lets slow
@@ -329,9 +379,16 @@ func run() error {
 	}
 	defer lock.Close()
 
+	// The marker is claimed after the instance lock, so only the process that
+	// owns the data directory can decide what the previous run's exit means.
+	uncleanShutdown := claimRunningMarker(cfg.DataDir)
+	if uncleanShutdown {
+		log.Printf("previous rolltop run did not shut down cleanly")
+	}
+
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
-	app, err := startApp(appCtx, cfg, startup)
+	app, err := startApp(appCtx, cfg, startup, uncleanShutdown)
 	if err != nil {
 		startup.fail(err)
 		log.Printf("rolltop startup failed: %v", err)
@@ -346,9 +403,17 @@ func run() error {
 		return err
 	}
 	restartShutdownOwnsClose := false
+	databasesClosed := false
 	defer func() {
 		if !restartShutdownOwnsClose {
 			app.close()
+			databasesClosed = true
+		}
+		// The marker outlives any exit that did not get as far as closing
+		// SQLite, so the next start treats that exit as unclean and verifies
+		// the files before serving.
+		if databasesClosed {
+			releaseRunningMarker(cfg.DataDir)
 		}
 	}()
 	gate.setHandler(app.handler)
@@ -374,6 +439,7 @@ func run() error {
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
 			shutdownErr := shutdownServingApp(app, server, serverErr)
 			app.close()
+			databasesClosed = true
 			return shutdownErr
 		})
 		if cleanupErr != nil {
@@ -390,7 +456,7 @@ func run() error {
 
 // startApp performs the blocking startup work in dependency order: schema,
 // user stores, interrupted sync cleanup, search indexes, then web/sync services.
-func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*appRuntime, error) {
+func startApp(ctx context.Context, cfg config.Config, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
 	startup.update("System database", "opening", 0, 1)
 	pluginManifests, err := plugins.LoadManifests(cfg.PluginDir)
 	if err != nil {
@@ -423,6 +489,19 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 			_ = db.Close()
 		}
 	}()
+
+	if startupIntegrityCheckRequired(cfg.StartupIntegrityCheck, uncleanShutdown) {
+		startup.update("User databases", "verifying after unclean shutdown", 0, 1)
+		damaged, err := verifyUserDatabases(ctx, db, cfg.DataDir, func(done, total int, detail string) {
+			startup.update("User databases", detail, done, total)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(damaged) > 0 {
+			log.Printf("startup integrity check found %d damaged user database(s); repair them with rolltop recover-db", len(damaged))
+		}
+	}
 
 	startup.update("User databases", "opening per-user stores", 0, 1)
 	if err := db.PrepareUserStores(ctx, reporter); err != nil {

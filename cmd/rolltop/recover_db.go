@@ -26,7 +26,9 @@ const databaseMaintenanceUsage = `Usage:
   rolltop check-db [--user-id ID] --confirm-offline
   rolltop recover-db --user-id ID --confirm-offline
 
-The Rolltop server must be stopped.
+The Rolltop server must be stopped. Rolltop also verifies these files by itself
+during a startup that follows an unclean shutdown; see
+ROLLTOP_STARTUP_INTEGRITY_CHECK.
 
 check-db runs SQLite's quick_check against the installation database and every
 user database, or only the selected user, and changes nothing.

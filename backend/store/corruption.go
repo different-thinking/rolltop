@@ -114,20 +114,39 @@ func (s *Store) NoteError(userID int64, err error) error {
 			corrupt = newCorruptionError(userID, corrupt.Path, corrupt.Err)
 		}
 	}
+	s.latchCorruption(userID, path, corrupt.Err.Error())
+	return corrupt
+}
+
+// MarkCorrupt latches corruption that was found by inspecting a file rather
+// than by a failing statement, such as the startup integrity check. It returns
+// the same operator-facing error NoteError produces.
+func (s *Store) MarkCorrupt(userID int64, detail string) error {
+	if s == nil {
+		return nil
+	}
+	path := s.DatabaseFileForUser(userID)
+	s.latchCorruption(userID, path, detail)
+	return newCorruptionError(userID, path, errors.New(detail))
+}
+
+// latchCorruption records the first corruption seen for one tenant. Later
+// reports do not overwrite it, so the log keeps the original evidence.
+func (s *Store) latchCorruption(userID int64, path, detail string) {
 	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
 	if s.health == nil {
 		s.health = make(map[int64]DatabaseHealth)
 	}
-	if _, latched := s.health[userID]; !latched {
-		s.health[userID] = DatabaseHealth{
-			UserID:     userID,
-			Path:       path,
-			Detail:     corrupt.Err.Error(),
-			DetectedAt: time.Now().UTC(),
-		}
+	if _, latched := s.health[userID]; latched {
+		return
 	}
-	s.healthMu.Unlock()
-	return corrupt
+	s.health[userID] = DatabaseHealth{
+		UserID:     userID,
+		Path:       path,
+		Detail:     detail,
+		DetectedAt: time.Now().UTC(),
+	}
 }
 
 // DatabaseCorrupt reports whether this process has already seen corruption for
