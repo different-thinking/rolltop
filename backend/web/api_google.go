@@ -62,7 +62,7 @@ func (s *Server) apiGoogleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	connections, err := s.googleAuth.List(r.Context(), cu.User.ID)
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	out := make([]apiGoogleConnection, 0, len(connections))
@@ -119,14 +119,14 @@ func (s *Server) apiGoogleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			s.serverError(w, err)
+			s.serverError(w, r, err)
 			return
 		}
 		loginHint = connection.GoogleEmail
 	}
 	authURL, err := s.googleAuth.StartConnect(cu.User.ID, s.googleAuth.Config().RedirectURL(r), loginHint)
 	if err != nil {
-		s.writeGoogleError(w, err)
+		s.writeGoogleError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"authorization_url": authURL})
@@ -231,7 +231,7 @@ func (s *Server) googleConnectionTest(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 	if err != nil {
-		s.writeGoogleError(w, err)
+		s.writeGoogleError(w, r, err)
 		return
 	}
 	info, err := s.googleAuth.Client().Userinfo(r.Context(), token)
@@ -249,7 +249,7 @@ func (s *Server) googleConnectionTest(w http.ResponseWriter, r *http.Request, us
 		}
 	}
 	if err != nil {
-		s.writeGoogleError(w, err)
+		s.writeGoogleError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -273,7 +273,7 @@ func (s *Server) googleConnectionDisconnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err != nil {
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 		return
 	}
 	if revokeErr != nil {
@@ -288,7 +288,7 @@ func (s *Server) googleConnectionDisconnect(w http.ResponseWriter, r *http.Reque
 
 // writeGoogleError maps the manager's failures onto status codes without
 // forwarding upstream error text, which can quote request parameters.
-func (s *Server) writeGoogleError(w http.ResponseWriter, err error) {
+func (s *Server) writeGoogleError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, googleauth.ErrNotConfigured):
 		writeAPIError(w, http.StatusServiceUnavailable, "Google is not configured on this server.")
@@ -305,6 +305,6 @@ func (s *Server) writeGoogleError(w http.ResponseWriter, err error) {
 		// Anything left is local -- a busy database, a missing master key, an
 		// encryption failure. Blaming Google would send the operator off
 		// debugging OAuth while the fault is on this machine.
-		s.serverError(w, err)
+		s.serverError(w, r, err)
 	}
 }
