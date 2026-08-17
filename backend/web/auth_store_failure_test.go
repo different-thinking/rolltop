@@ -169,3 +169,57 @@ func TestBootstrapPayloadSessionFailureKeepsPublicRoutesAnonymous(t *testing.T) 
 		t.Fatal("public auth route classification is wrong")
 	}
 }
+
+func TestStoreSideDeadlineIsNotTreatedAsAnAbandonedRequest(t *testing.T) {
+	// A deadline the store or SQLite driver applies internally under lock
+	// contention arrives as context.DeadlineExceeded while the browser is
+	// still waiting. Classifying that by the error alone would demote a valid
+	// session to anonymous and force the spurious logout this file guards.
+	if clientAbandonedRequest(context.Background()) {
+		t.Fatal("a live request context was classified as abandoned")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !clientAbandonedRequest(canceled) {
+		t.Fatal("a canceled request context was not classified as abandoned")
+	}
+
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	if !clientAbandonedRequest(expired) {
+		t.Fatal("an expired request context was not classified as abandoned")
+	}
+}
+
+func TestIconRoutesAnswerUnavailableRatherThanNotFoundDuringStoreFailure(t *testing.T) {
+	db, _, handler, cookie := newStoreFailureTestServer(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A 404 here is cached by the browser as "this icon does not exist" and
+	// survives the outage, so these routes must report unavailability instead.
+	for _, target := range []string{"/contacts/1/icon", "/brand-icons/example.test"} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, request)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s during store failure status=%d, want 503", target, rec.Code)
+		}
+	}
+}
+
+func TestIconRoutesStillHideThemselvesFromAnonymousCallers(t *testing.T) {
+	db, _, handler, _ := newStoreFailureTestServer(t)
+	// The server's background workers keep writing into the temp directory, so
+	// the store has to be closed before the test's cleanup removes it.
+	defer db.Close()
+	for _, target := range []string{"/contacts/1/icon", "/brand-icons/example.test"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("anonymous GET %s status=%d, want 404", target, rec.Code)
+		}
+	}
+}

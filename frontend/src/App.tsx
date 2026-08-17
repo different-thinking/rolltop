@@ -13,6 +13,7 @@ import { ComposeOverlay } from "./features/compose/ComposeViews";
 import { RouteView } from "./RouteView";
 import { messageFromError } from "./lib/errors";
 import { messageCountLabel } from "./lib/format";
+import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
@@ -648,11 +649,11 @@ export default function App() {
       notification.close();
       window.focus();
       if (single) api.prewarmMessage(messageID);
-      else if (bootstrap?.user) api.prefetchMail(bootstrap.user.id, null, 1);
+      else if (bootstrap?.user) api.prefetchMail(bootstrap.user.id, null, 1, loadMailSortOrder(bootstrap.user.id));
       navigate(targetURL);
     };
     if (single) api.prewarmMessage(messageID);
-    else if (bootstrap?.user) api.prefetchMail(bootstrap.user.id, null, 1);
+    else if (bootstrap?.user) api.prefetchMail(bootstrap.user.id, null, 1, loadMailSortOrder(bootstrap.user.id));
   }, [bootstrap?.user, navigate, notificationsEnabled]);
 
   // When someone returns to an idle tab, warm All Mail before they click it.
@@ -666,7 +667,7 @@ export default function App() {
       if (inactiveFor < allMailWakePrefetchAfterMS) return;
       if (now - lastAllMailWakePrefetchAt.current < allMailWakePrefetchAfterMS) return;
       lastAllMailWakePrefetchAt.current = now;
-      api.prefetchMail(userID, null, 1);
+      api.prefetchMail(userID, null, 1, loadMailSortOrder(userID));
     }
     window.addEventListener("mousemove", onMouseMove, { passive: true });
     return () => window.removeEventListener("mousemove", onMouseMove);
@@ -870,6 +871,7 @@ export default function App() {
           availableThemes={bootstrap.available_themes || []}
           location={location}
           navigate={navigate}
+          replaceRoute={replaceRoute}
           hiddenMessageIDs={hiddenMessageIDs}
           openCompose={openCompose}
           refreshChrome={refreshBootstrap}

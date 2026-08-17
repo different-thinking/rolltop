@@ -864,13 +864,13 @@ func listMessages(ctx context.Context, st *store.Store, userID int64, args listA
 			return nil, "", err
 		}
 		if threads {
-			messages, err = st.ListLatestThreadMessagesForMailbox(ctx, userID, mailboxID, fetchLimit, offset)
+			messages, err = st.ListLatestThreadMessagesForMailbox(ctx, userID, mailboxID, fetchLimit, offset, store.ThreadListNewestFirst)
 		} else {
 			messages, err = st.ListMessagesForMailbox(ctx, userID, mailboxID, fetchLimit, offset)
 		}
 	} else {
 		if threads {
-			messages, err = st.ListLatestThreadMessagesForUser(ctx, userID, fetchLimit, offset)
+			messages, err = st.ListLatestThreadMessagesForUser(ctx, userID, fetchLimit, offset, store.ThreadListNewestFirst)
 		} else {
 			messages, err = st.ListMessagesForUser(ctx, userID, fetchLimit, offset)
 		}

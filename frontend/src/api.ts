@@ -31,6 +31,8 @@ import type {
   User
 } from "./types";
 import { clearMailSnapshots, clearOtherMailSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
+import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
+import type { MailSortOrder } from "./lib/mailSort";
 import { clearOtherCollapsedAccounts } from "./lib/sidebarLocal";
 
 /** Error thrown for non-2xx API responses after the JSON error payload is decoded. */
@@ -208,9 +210,12 @@ function composeSendPayload(form: ComposeForm): ComposeForm {
   return payload;
 }
 
-function mailListURL(mailboxID: string | null, page: number) {
+// The default order stays off the URL so warmed first pages, service caches, and
+// clients that never touch sorting all keep asking for the same address.
+function mailListURL(mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
   const q = new URLSearchParams({ page: String(page) });
   if (mailboxID) q.set("mailbox", mailboxID);
+  if (order !== defaultMailSortOrder) q.set("sort", order);
   return `/api/mail?${q}`;
 }
 
@@ -221,8 +226,8 @@ function mailCacheEpoch(userID: number) {
   return 0;
 }
 
-function mailListCacheKey(userID: number, mailboxID: string | null, page: number, epoch = mailCacheEpoch(userID)) {
-  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page)}`;
+function mailListCacheKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder, epoch = mailCacheEpoch(userID)) {
+  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order)}`;
 }
 
 function searchListURL(query: string, page: number) {
@@ -247,28 +252,27 @@ function cachedJSON<T>(cacheKey: string): T | null {
   return cached ? cached.data as T : null;
 }
 
-function cachedMail(userID: number, mailboxID: string | null, page: number): MailListResponse | null {
-  const key = mailListCacheKey(userID, mailboxID, page);
+function cachedMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): MailListResponse | null {
+  const key = mailListCacheKey(userID, mailboxID, page, order);
   const cached = cachedJSON<MailListResponse>(key);
-  return cached || loadMailSnapshot(userID, mailboxID, page);
+  return cached || loadMailSnapshot(userID, mailboxID, page, order);
 }
 
-async function loadMail(userID: number, mailboxID: string | null, page: number): Promise<MailListResponse> {
-  const url = mailListURL(mailboxID, page);
+async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): Promise<MailListResponse> {
+  const url = mailListURL(mailboxID, page, order);
   const epoch = mailCacheEpoch(userID);
-  const key = mailListCacheKey(userID, mailboxID, page, epoch);
+  const key = mailListCacheKey(userID, mailboxID, page, order, epoch);
   const data = await getJSON<MailListResponse>(url, key);
   if (mailCacheEpoch(userID) !== epoch) {
     getCache.delete(key);
     return data;
   }
-  saveMailSnapshot(userID, mailboxID, page, data);
+  saveMailSnapshot(userID, mailboxID, page, data, order);
   return data;
 }
 
-function prefetchMail(userID: number, mailboxID: string | null, page: number) {
-  const url = mailListURL(mailboxID, page);
-  void loadMail(userID, mailboxID, page).catch(() => undefined);
+function prefetchMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
+  void loadMail(userID, mailboxID, page, order).catch(() => undefined);
 }
 
 function clearMailCache(userID: number) {
@@ -289,6 +293,7 @@ function retainMailCacheForUser(userID: number) {
     if (match && Number(match[1]) !== userID) getCache.delete(key);
   }
   clearOtherMailSnapshots(userID);
+  clearOtherMailSortOrders(userID);
   clearOtherCollapsedAccounts(userID);
 }
 

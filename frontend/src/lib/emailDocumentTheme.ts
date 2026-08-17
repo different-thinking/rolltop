@@ -2,27 +2,44 @@
 // shell and the PGP plugin both render message documents, so the rules live
 // here once and are woven into the document string before the iframe loads it:
 // the body is themed on its first paint rather than repainted afterwards.
+//
+// Only plain-text messages are themed. An HTML message carries the sender's own
+// colours, and overriding them is how a readable newsletter turns into light
+// text on the mail's own white table. Those messages keep their design and
+// render as a light sheet inside the dark app, the way desktop mail clients do.
 
 /** EmailDocumentTheme is the theme marker written onto a message document. */
 export type EmailDocumentTheme = "classic" | "classic_dark" | "matrix";
 
 const themeMarkerAttribute = "data-rolltop-theme";
 
-// Dark message bodies use the same surface the .email-frame sits on, so the
-// mail content and its frame belong to one colour family. Mail markup carries
-// its own inline colours, which is why these need !important.
+/**
+ * plainTextDocumentClass marks a message document whose body Rolltop rendered
+ * itself from plain text. It is the only case where there are no author colours
+ * to conflict with, so it is the only case that gets a dark ground.
+ */
+export const plainTextDocumentClass = "plaintext-doc";
+
+const darkGrounds: Record<"classic_dark" | "matrix", { bg: string; text: string; link: string; linkBorder: string }> = {
+  // The same surface the .email-frame sits on, so message and frame belong to
+  // one colour family.
+  classic_dark: { bg: "#1a2230", text: "#e2dfd9", link: "#9cc9ea", linkBorder: "rgba(156,201,234,.5)" },
+  matrix: { bg: "#06130d", text: "#dcffe9", link: "#7dffbf", linkBorder: "rgba(125,255,191,.5)" }
+};
+
+function darkRules(root: string, ground: { bg: string; text: string; link: string; linkBorder: string }): string {
+  return `${root},${root} body{background:${ground.bg}!important;color:${ground.text}!important;color-scheme:dark}`
+    + `${root} a{color:${ground.link}!important;border-bottom-color:${ground.linkBorder}!important}`;
+}
+
+const plainText = `html.${plainTextDocumentClass}`;
+
 const emailDocumentThemeCSS = [
-  `html[${themeMarkerAttribute}="classic_dark"],html[${themeMarkerAttribute}="classic_dark"] body{background:#1a2230!important;color:#e2dfd9!important;color-scheme:dark}`,
-  `html[${themeMarkerAttribute}="classic_dark"] body :where(div,p,span,blockquote,pre,td,th,li){background:transparent!important;color:inherit!important;border-color:rgba(226,223,217,.24)!important}`,
-  `html[${themeMarkerAttribute}="classic_dark"] a{color:#9cc9ea!important;border-bottom-color:rgba(156,201,234,.5)!important}`,
-  `html[${themeMarkerAttribute}="matrix"],html[${themeMarkerAttribute}="matrix"] body{background:#06130d!important;color:#dcffe9!important;color-scheme:dark}`,
-  `html[${themeMarkerAttribute}="matrix"] body :where(div,p,span,blockquote,pre,td,th,li){background:transparent!important;color:inherit!important;border-color:rgba(74,222,128,.24)!important}`,
-  `html[${themeMarkerAttribute}="matrix"] a{color:#7dffbf!important;border-bottom-color:rgba(125,255,191,.5)!important}`,
-  // No marker means the reader follows the system, so the iframe does too.
+  darkRules(`${plainText}[${themeMarkerAttribute}="classic_dark"]`, darkGrounds.classic_dark),
+  darkRules(`${plainText}[${themeMarkerAttribute}="matrix"]`, darkGrounds.matrix),
+  // No marker means the reader follows the system, so the document does too.
   `@media (prefers-color-scheme:dark){`,
-  `html:not([${themeMarkerAttribute}]),html:not([${themeMarkerAttribute}]) body{background:#1a2230!important;color:#e2dfd9!important;color-scheme:dark}`,
-  `html:not([${themeMarkerAttribute}]) body :where(div,p,span,blockquote,pre,td,th,li){background:transparent!important;color:inherit!important;border-color:rgba(226,223,217,.24)!important}`,
-  `html:not([${themeMarkerAttribute}]) a{color:#9cc9ea!important;border-bottom-color:rgba(156,201,234,.5)!important}`,
+  darkRules(`${plainText}:not([${themeMarkerAttribute}])`, darkGrounds.classic_dark),
   `}`
 ].join("");
 

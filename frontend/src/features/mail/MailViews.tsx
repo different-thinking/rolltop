@@ -12,11 +12,13 @@ import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { trashMailboxForAccount } from "../../lib/folders";
+import { isArchiveMailboxChoice, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
 import { mailPageSize } from "../../lib/constants";
+import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
+import type { MailSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { mailRoute, mailURL, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
@@ -105,19 +107,28 @@ export function MailView({
   const [hasPrev, setHasPrev] = useState(false);
   const [hasNext, setHasNext] = useState(false);
   const [newMessageIDs, setNewMessageIDs] = useState<Set<number>>(() => new Set());
+  const [sortOrder, setSortOrder] = useState<MailSortOrder>(() => loadMailSortOrder(userID));
+  const [sortOrderUserID, setSortOrderUserID] = useState(userID);
   const previousPageIDs = useRef<Set<number>>(new Set());
   const previousListKey = useRef("");
   const newMessageTimer = useRef<number | null>(null);
   const route = mailRoute(location.path);
   const mailboxID = route.mailboxID;
   const page = route.page;
+  // A different signed-in user brings their own stored direction along. This is
+  // adjusted during render rather than in an effect so the fetch below already
+  // closes over the new user's order instead of requesting the old one first.
+  if (sortOrderUserID !== userID) {
+    setSortOrderUserID(userID);
+    setSortOrder(loadMailSortOrder(userID));
+  }
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
   const totalCount = mailbox ? mailbox.message_count : mailboxes.filter((item) => item.show_in_all_mail !== false).reduce((sum, item) => sum + item.message_count, 0);
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
-  const listScopeKey = `${userID}:${mailboxID || "all"}`;
+  const listScopeKey = `${userID}:${mailboxID || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
   const slideDirection = useListSlideDirection(listScopeKey, page);
-  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page) : null;
+  const cachedTransitionPage = previousListKey.current !== listKey ? api.cachedMail(userID, mailboxID, page, sortOrder) : null;
   const displayConversations = cachedTransitionPage?.conversations || conversations;
   const displayHasPrev = cachedTransitionPage?.has_prev ?? hasPrev;
   const displayHasNext = cachedTransitionPage?.has_next ?? hasNext;
@@ -205,7 +216,7 @@ export function MailView({
     const isNewList = previousListKey.current !== listKey;
     const canAnimateNewMail = page === 1 && loaded.current && !isNewList && Boolean(refreshKey) && Boolean(latestSyncRun?.new_messages);
     if (isNewList || !loaded.current) {
-      const cached = api.cachedMail(userID, mailboxID, page);
+      const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
       if (cached) {
         previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
         previousListKey.current = listKey;
@@ -224,7 +235,7 @@ export function MailView({
     }
     setError("");
     api
-      .mail(userID, mailboxID, page)
+      .mail(userID, mailboxID, page, sortOrder)
       .then((data) => {
         if (cancelled) return;
         const nextIDs = new Set(data.conversations.map((conversation) => conversation.message.id));
@@ -246,12 +257,12 @@ export function MailView({
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
         setShowingSavedPage(false);
-        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1);
-        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1);
+        if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder);
+        if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder);
       })
       .catch((err) => {
         if (!cancelled) {
-          const cached = api.cachedMail(userID, mailboxID, page);
+          const cached = api.cachedMail(userID, mailboxID, page, sortOrder);
           previousListKey.current = listKey;
           if (cached) {
             previousPageIDs.current = new Set(cached.conversations.map((conversation) => conversation.message.id));
@@ -279,9 +290,18 @@ export function MailView({
     return () => {
       cancelled = true;
     };
-  }, [userID, mailboxID, page, refreshKey, listKey, latestSyncRun?.new_messages]);
+  }, [userID, mailboxID, page, sortOrder, refreshKey, listKey, latestSyncRun?.new_messages]);
 
   const pageURL = (nextPage: number) => mailURL(mailboxID, nextPage);
+
+  // Reversing the direction rebuilds the paging window from the other end, so a
+  // reader who was on page 4 of newest-first is sent back to the new first page.
+  function changeSortOrder(next: MailSortOrder) {
+    if (next === sortOrder) return;
+    saveMailSortOrder(userID, next);
+    setSortOrder(next);
+    if (page !== 1) navigate(mailURL(mailboxID, 1));
+  }
 
   function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
     setConversations((current) => current.map((conversation) => {
@@ -333,6 +353,7 @@ export function MailView({
       <ListHeader
         title={mailbox?.name || "All Mail"}
         titleClassName="mailbox-title"
+        actions={<MailSortToggle order={sortOrder} onChange={changeSortOrder} />}
         pager={{
           page,
           pageSize: mailPageSize,
@@ -402,6 +423,43 @@ export function MailView({
         ) : null}
       </div>
     </>
+  );
+}
+
+/**
+ * MailSortToggle switches All Mail and folder lists between newest and oldest
+ * first. Both directions stay visible so the current one is readable at a
+ * glance instead of hidden behind a single toggle's next state, and both stay
+ * clickable while a page loads because the pending request is dropped anyway.
+ */
+function MailSortToggle({
+  order,
+  onChange
+}: {
+  order: MailSortOrder;
+  onChange: (order: MailSortOrder) => void;
+}) {
+  const choices: Array<{ value: MailSortOrder; label: string; icon: string; title: string }> = [
+    { value: "newest", label: "Newest", icon: "sort_descending", title: "Sort by date, newest first" },
+    { value: "oldest", label: "Oldest", icon: "sort_ascending", title: "Sort by date, oldest first" }
+  ];
+  return (
+    <div className="mail-sort-toggle" role="group" aria-label="Sort by date">
+      {choices.map((choice) => (
+        <button
+          className={choice.value === order ? "active" : ""}
+          type="button"
+          key={choice.value}
+          title={choice.title}
+          aria-label={choice.title}
+          aria-pressed={choice.value === order}
+          onClick={() => onChange(choice.value)}
+        >
+          <Icon name={choice.icon} />
+          <span>{choice.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1709,7 +1767,10 @@ function MessageList({
     return !snoozedView;
   }
 
-  function moveConversationBySwipe(conversation: Conversation, action: "trash" | "archive", direction: "start" | "end"): boolean {
+  // Shared single-row move for swipes and the pointer row actions. `direction`
+  // picks the dismissal: a swipe slides the row out toward the finger, while a
+  // row action (direction null) collapses it the way bulk delete does.
+  function moveConversation(conversation: Conversation, action: "trash" | "archive", direction: "start" | "end" | null): boolean {
     const accountIDs = conversationTransferAccountIDs(conversation);
     if (accountIDs.length !== 1) {
       addToast(`Cannot ${action} a conversation containing messages from multiple accounts.`, "error");
@@ -1721,13 +1782,13 @@ function MessageList({
       : (() => {
           const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
           return preference
-            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && mailbox.role === "")
+            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
             : undefined;
         })();
     if (!target) {
       addToast(
         action === "trash"
-          ? "Choose a Trash folder for this account before using the trash swipe action."
+          ? "Choose a Trash folder for this account before moving messages to Trash."
           : "Choose an Archive folder for this account in swipe settings.",
         "error"
       );
@@ -1748,8 +1809,18 @@ function MessageList({
         restoreDismissed(dismissedIDs);
       },
       async (keepalive) => {
+        // Deleting a snoozed row dismisses its reminder too. On a background
+        // commit the request has to leave before any await, or unload cancels
+        // it — but only once the move itself fits the keepalive chunk budget,
+        // so a truncated move never drops the reminder of a message that stays.
+        const unsnooze = snoozedView && action === "trash";
+        const keepaliveMoveComplete = messageIDs.length <= bulkMessageIDLimit * keepaliveMoveChunkBudget;
+        if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
         removePendingSwipeMoveIDs(dismissedIDs);
+        // The reminder belongs to this row's own message, so a partial move that
+        // relocated only sibling thread messages must leave it in place.
+        if (unsnooze && !keepalive && movedIDs.includes(conversation.message.id)) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
         if (error === undefined) {
           onMessagesMoved(messageIDs);
           return;
@@ -1765,7 +1836,8 @@ function MessageList({
     );
     if (!registered) return false;
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissedIDs]));
-    beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
+    if (direction) beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
+    else optimisticallyDismiss(dismissedIDs);
     return true;
   }
 
@@ -1789,7 +1861,7 @@ function MessageList({
         return snoozeConversationBySwipe(conversation, swipeSnoozeUntil(snoozePreset), direction);
       case "trash":
       case "archive":
-        return moveConversationBySwipe(conversation, action, direction);
+        return moveConversation(conversation, action, direction);
       }
     } finally {
       setSwipeActionBusy(false);
@@ -1905,6 +1977,29 @@ function MessageList({
     }
   }
 
+  // Pointer row actions reuse the swipe and selection mutation paths, so undo
+  // toasts, optimistic dismissal, and busy gating behave identically. A row that
+  // is already committing another action ignores them until it settles.
+  function rowActionBlocked(conversation: Conversation): boolean {
+    return selectionBusy
+      || pendingSwipeActionIDs.current.has(conversation.message.id)
+      || hiddenMessageIDs.has(conversation.message.id);
+  }
+
+  function replyToConversation(conversation: Conversation) {
+    navigate(`/compose?reply=${conversation.message.id}`);
+  }
+
+  function moveConversationByRowAction(conversation: Conversation, action: "trash" | "archive") {
+    if (rowActionBlocked(conversation)) return;
+    moveConversation(conversation, action, null);
+  }
+
+  function toggleConversationRead(conversation: Conversation) {
+    if (rowActionBlocked(conversation)) return;
+    markConversationRead(conversation, !conversation.is_read);
+  }
+
   function openRow(event: MouseEvent<HTMLDivElement>, href: string) {
     if (Date.now() < suppressRowClickUntil.current) return;
     if ((event.target as HTMLElement).closest("button,input,label")) return;
@@ -1993,6 +2088,7 @@ function MessageList({
         const touchMessageIDs = selected && selectedDragMessageIDs.length > 0 ? selectedDragMessageIDs : conversationTransferMessageIDs(conversation);
         const touchAccountIDs = selected && selectedDragAccountIDs.length > 0 ? selectedDragAccountIDs : conversationTransferAccountIDs(conversation);
         const movingOut = hiddenMessageIDs.has(msg.id);
+        const rowActionsDisabled = selectionBusy || movingOut || pendingSwipeActionIDs.current.has(msg.id);
         const activeSwipe = swipeState?.id === msg.id ? swipeState : null;
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));
@@ -2105,6 +2201,48 @@ function MessageList({
         ) : null}
         <span>{displayTime(snoozedView && conversation.snoozed_until ? conversation.snoozed_until : msg.date, datePrefs)}</span>
       </span>
+      <div className="message-row-actions" role="group" aria-label={`Actions for ${msg.subject || "message"}`}>
+        {openAsDraft ? null : (
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => replyToConversation(conversation)} title="Reply" aria-label="Reply">
+            <Icon name="reply" />
+          </button>
+        )}
+        {openAsDraft || snoozedView ? null : (
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "archive")} title="Archive" aria-label="Archive">
+            <Icon name="archive" />
+          </button>
+        )}
+        <button className="message-row-action row-action-delete" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "trash")} title="Move to trash" aria-label="Move to trash">
+          <Icon name="delete" />
+        </button>
+        {openAsDraft ? null : (
+          <button
+            className="message-row-action"
+            type="button"
+            disabled={rowActionsDisabled}
+            onClick={() => toggleConversationRead(conversation)}
+            title={conversation.is_read ? "Mark unread" : "Mark read"}
+            aria-label={conversation.is_read ? "Mark unread" : "Mark read"}
+          >
+            <Icon name={conversation.is_read ? "mail" : "mail_open"} />
+          </button>
+        )}
+        {openAsDraft ? null : snoozedView ? (
+          // The toolbar covers the date cell's unsnooze button, so it carries
+          // the same action while a pointer is over the row.
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => void unsnoozeConversations([conversation])} title="Unsnooze" aria-label="Unsnooze">
+            <Icon name="clock" />
+          </button>
+        ) : (
+          <SnoozeControl
+            className="message-row-action"
+            iconOnly
+            datePrefs={datePrefs}
+            disabled={rowActionsDisabled}
+            onSnooze={(until) => snoozeConversations([conversation], until)}
+          />
+        )}
+      </div>
       </div>
           </div>
         );

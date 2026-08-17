@@ -299,21 +299,67 @@ func frontendAssetCacheControl(cleanPath string) string {
 	return ""
 }
 
+// spaRoute declares one client-side route. This table is the single source of
+// truth: Handler() registers mux entries from it and both predicates below
+// answer from it, so a new SPA page is declared once instead of being kept in
+// step across three hand-maintained lists. Drifting between those lists is not
+// cosmetic — a path missing from the mux 404s, and an auth-recovery page
+// missing from the public set becomes unreachable during exactly the store
+// outages it exists to recover from.
+type spaRoute struct {
+	path string
+	// exact serves the path itself.
+	exact bool
+	// prefix serves everything below path + "/".
+	prefix bool
+	// public keeps the page reachable when the session cannot be resolved.
+	public bool
+	// ownPrefixHandler marks a subtree that is registered elsewhere because it
+	// serves more than the app shell.
+	ownPrefixHandler bool
+}
+
+var spaRoutes = []spaRoute{
+	{path: "/setup", exact: true, public: true},
+	{path: "/login", exact: true, public: true},
+	// Password reset emails link here, so it must survive a broken session too.
+	{path: "/reset-password", exact: true, public: true},
+	{path: "/mail", exact: true, prefix: true},
+	{path: "/snoozes", exact: true},
+	{path: "/mailbox", prefix: true},
+	{path: "/search", exact: true, prefix: true},
+	{path: "/compose", exact: true},
+	// /contacts/{id} doubles as a vCard download, so its subtree has its own
+	// handler that chooses between the file and the app shell.
+	{path: "/contacts", exact: true, prefix: true, ownPrefixHandler: true},
+	{path: "/messages", prefix: true},
+	{path: "/sync-runs", prefix: true},
+	{path: "/settings/account", exact: true, prefix: true},
+	{path: "/admin/users", exact: true},
+	{path: "/admin/database", exact: true},
+}
+
+// matchSPARoute finds the declaration serving a path.
+func matchSPARoute(p string) (spaRoute, bool) {
+	for _, route := range spaRoutes {
+		if route.exact && p == route.path {
+			return route, true
+		}
+		if route.prefix && strings.HasPrefix(p, route.path+"/") {
+			return route, true
+		}
+	}
+	return spaRoute{}, false
+}
+
 // isPublicAuthRoute names the SPA routes that must stay reachable without a
 // resolvable session so a browser can re-authenticate.
 func isPublicAuthRoute(p string) bool {
-	return p == "/login" || p == "/setup" || p == "/reset-password"
+	route, ok := matchSPARoute(p)
+	return ok && route.public
 }
 
 func isAppRoute(p string) bool {
-	switch {
-	case p == "/setup", p == "/login", p == "/mail", p == "/snoozes", p == "/search", p == "/compose", p == "/contacts", p == "/settings/account", p == "/admin/users", p == "/admin/database":
-		return true
-	case strings.HasPrefix(p, "/mail/"), strings.HasPrefix(p, "/mailbox/"), strings.HasPrefix(p, "/search/"):
-		return true
-	case strings.HasPrefix(p, "/messages/"), strings.HasPrefix(p, "/sync-runs/"), strings.HasPrefix(p, "/settings/account/"), strings.HasPrefix(p, "/contacts/"):
-		return true
-	default:
-		return false
-	}
+	_, ok := matchSPARoute(p)
+	return ok
 }
