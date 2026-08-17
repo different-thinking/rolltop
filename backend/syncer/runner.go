@@ -916,6 +916,18 @@ func (r *Runner) markPending(userID int64, mailboxes []string) {
 	}
 }
 
+func (r *Runner) markAccountMailboxesPending(userID, accountID int64, mailboxes []string) {
+	keys := accountMailboxKeys(userID, accountID, mailboxes)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accountMailboxPending == nil {
+		r.accountMailboxPending = map[string]bool{}
+	}
+	for _, key := range keys {
+		r.accountMailboxPending[key] = true
+	}
+}
+
 func (r *Runner) deferForegroundMailboxesLocked(userID int64, mailboxes []string) {
 	if r.foregroundDeferredBoxes == nil {
 		r.foregroundDeferredBoxes = map[int64]map[string]string{}
@@ -1031,6 +1043,7 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	ctx = withSyncTurnBudget(ctx)
 	r.setMailboxWorkActivitiesPhase(keys, "waiting_attachment")
 	if err := r.waitForAttachmentIndex(ctx, userID); err != nil {
 		return err
@@ -1043,6 +1056,13 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 		onRunStarted:     func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 		onRunFinished:    r.unregisterSyncRunControl,
 	}); err != nil {
+		if errors.Is(err, ErrSyncTurnPaused) {
+			// The folder still has remote history to mirror. Queue the follow-up
+			// turn through the reservation this job is about to release so a large
+			// backfill continues immediately instead of waiting for the next poll.
+			r.markPending(userID, mailboxes)
+			return nil
+		}
 		// A corrupt tenant database fails every mailbox in the same way, so the
 		// log has to name the file and the repair command rather than repeat a
 		// bare driver message once per sync turn.
@@ -1087,6 +1107,7 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	ctx = withSyncTurnBudget(ctx)
 	r.setMailboxWorkActivitiesPhase(keys, "waiting_attachment")
 	if err := r.waitForAttachmentIndex(ctx, userID); err != nil {
 		return err
@@ -1104,6 +1125,13 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 			onRunStarted:      func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 			onRunFinished:     r.unregisterSyncRunControl,
 		}); err != nil {
+		if errors.Is(err, ErrSyncTurnPaused) {
+			// Resume this account's folder right after the reservation is released
+			// instead of reporting a failure: the UID checkpoint is durable and a
+			// large backfill needs many bounded turns.
+			r.markAccountMailboxesPending(userID, accountID, mailboxes)
+			return nil
+		}
 		log.Printf("sync user_id=%d account_id=%d mailboxes=%s: %v", userID, accountID, strings.Join(mailboxes, ","), err)
 		return err
 	}

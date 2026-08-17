@@ -441,11 +441,14 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 	}
 	status := "ok"
 	errText := ""
+	// A bounded turn that pauses on its own budget is a normal incremental pass,
+	// not an interruption: its checkpoint is durable and the next turn resumes.
+	paused := false
 	defer func() {
 		if options.onRunFinished != nil {
 			defer options.onRunFinished(run.ID)
 		}
-		if ctx.Err() != nil && (status != "ok" || progress.MailboxesDone < progress.MailboxesTotal) {
+		if !paused && ctx.Err() != nil && (status != "ok" || progress.MailboxesDone < progress.MailboxesTotal) {
 			status = "interrupted"
 			errText = "Server stopped before this sync finished."
 		}
@@ -510,6 +513,15 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 
 	for _, planned := range plan {
 		mailboxName := planned.Name
+		if syncTurnBudgetSpent(ctx) && syncTurnMadeProgress(progress) {
+			// Do not open another folder with no time left to fetch from it. The
+			// rest of the plan is replanned from durable state next turn.
+			paused = true
+			log.Printf("sync user_id=%d account_id=%d mailbox=%q paused: turn budget spent, mailboxes_done=%d/%d stored=%d skipped=%d",
+				userID, account.ID, mailboxName, progress.MailboxesDone, progress.MailboxesTotal,
+				progress.MessagesStored, progress.MessagesSkipped)
+			return run, ErrSyncTurnPaused
+		}
 		mailboxLastUIDAtStart := planned.LastUID
 		generationRecoveryCheckpoint(ctx, mailboxLastUIDAtStart)
 		progress.CurrentMailbox = mailboxName
@@ -649,6 +661,19 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		repairedPlan, repaired, err := s.repairRequestedIncompleteMailbox(ctx, userID, account, mailbox, planned,
 			repairRequested, run.ID, &progress)
 		if err != nil {
+			if syncTurnPausedWithProgress(ctx, progress, err) {
+				// The repair mirrored part of the folder before its time ran out.
+				// Report a pause so the next turn continues with a smaller missing
+				// set instead of recording a failed sync.
+				paused = true
+				progress.CurrentUID = repairedPlan.LastUID
+				if ctx.Err() == nil {
+					s.updateSyncProgress(ctx, userID, run.ID, progress)
+				}
+				log.Printf("sync user_id=%d account_id=%d mailbox=%q paused on its turn budget during folder repair: seen=%d stored=%d last_uid=%d",
+					userID, account.ID, mailboxName, progress.MessagesSeen, progress.MessagesStored, repairedPlan.LastUID)
+				return run, ErrSyncTurnPaused
+			}
 			status = "failed"
 			errText = err.Error()
 			return run, err
@@ -864,7 +889,10 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				if !prewarmed {
 					progress.MessagesSkipped++
 				}
-				return s.updateSyncProgress(ctx, userID, run.ID, progress)
+				if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+					return err
+				}
+				return pauseSyncTurnIfBudgetSpent(ctx, progress)
 			}
 			generationRecoveryPhase(ctx, "sqlite-message-exists", "")
 			exists, err := s.Store.MessageExistsByUIDForGeneration(ctx, userID, account.ID, mailbox.ID,
@@ -910,7 +938,10 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 					lastUIDs[mailboxName] = item.UID
 					generationRecoveryCheckpoint(ctx, item.UID)
 				}
-				return s.updateSyncProgress(ctx, userID, run.ID, progress)
+				if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+					return err
+				}
+				return pauseSyncTurnIfBudgetSpent(ctx, progress)
 			}
 			if prewarmed {
 				// A concurrent local purge removed a preview row. Count and store the
@@ -946,7 +977,36 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				pendingImportUID = 0
 				generationRecoveryCheckpoint(ctx, item.UID)
 			}
-			return s.updateSyncProgress(ctx, userID, run.ID, progress)
+			if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+				return err
+			}
+			return pauseSyncTurnIfBudgetSpent(ctx, progress)
+		}
+		// finishMailboxTurn performs the durable bookkeeping a folder turn owes
+		// after its fetch stops, whether the folder completed or the turn paused
+		// with budget left for exactly this work.
+		finishMailboxTurn := func() error {
+			if err := searchBatch.Flush(ctx); err != nil {
+				return err
+			}
+			classificationBatch.Flush(ctx)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := completionBatch.Flush(ctx); err != nil {
+				return err
+			}
+			if pendingImportUID > lastUIDs[mailboxName] {
+				generationRecoveryPhase(ctx, "sqlite-checkpoint", "")
+				if err := s.Store.UpdateMailboxLastUIDForGeneration(ctx, userID, account.ID, mailbox.ID,
+					pendingImportUID, planned.Status.UIDValidity); err != nil {
+					return err
+				}
+				lastUIDs[mailboxName] = pendingImportUID
+				generationRecoveryCheckpoint(ctx, pendingImportUID)
+				pendingImportUID = 0
+			}
+			return nil
 		}
 		generationSnapshotRecovery := generationRebuildPending &&
 			generationRecoverySnapshot.UIDValidity == planned.Status.UIDValidity &&
@@ -984,37 +1044,35 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				planned.Status.UIDValidity, handleFetchedItem)
 		}
 		if err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
-		}
-		if err := searchBatch.Flush(ctx); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
-		}
-		classificationBatch.Flush(ctx)
-		if err := ctx.Err(); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
-		}
-		if err := completionBatch.Flush(ctx); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
-		}
-		if pendingImportUID > lastUIDs[mailboxName] {
-			generationRecoveryPhase(ctx, "sqlite-checkpoint", "")
-			if err := s.Store.UpdateMailboxLastUIDForGeneration(ctx, userID, account.ID, mailbox.ID,
-				pendingImportUID, planned.Status.UIDValidity); err != nil {
+			if !syncTurnPausedWithProgress(ctx, progress, err) {
 				status = "failed"
 				errText = err.Error()
 				return run, err
 			}
-			lastUIDs[mailboxName] = pendingImportUID
-			generationRecoveryCheckpoint(ctx, pendingImportUID)
-			pendingImportUID = 0
+			// The turn ran out of time, not out of health. Everything fetched so
+			// far is stored and checkpointed; report a pause so the caller resumes
+			// this folder instead of recording a failed sync.
+			paused = true
+			if ctx.Err() == nil {
+				if finishErr := finishMailboxTurn(); finishErr != nil {
+					paused = false
+					status = "failed"
+					errText = finishErr.Error()
+					return run, finishErr
+				}
+				progress.CurrentMailbox = mailboxName
+				progress.CurrentUID = lastUIDs[mailboxName]
+				s.updateSyncProgress(ctx, userID, run.ID, progress)
+			}
+			log.Printf("sync user_id=%d account_id=%d mailbox=%q paused on its turn budget: seen=%d stored=%d skipped=%d checkpoint_uid=%d cancelled_mid_fetch=%t",
+				userID, account.ID, mailboxName, progress.MessagesSeen, progress.MessagesStored,
+				progress.MessagesSkipped, lastUIDs[mailboxName], ctx.Err() != nil)
+			return run, ErrSyncTurnPaused
+		}
+		if err := finishMailboxTurn(); err != nil {
+			status = "failed"
+			errText = err.Error()
+			return run, err
 		}
 		if generationRebuildPending && !generationRecoveryComplete {
 			// The checkpoint and index batch are durable. End this scheduler turn
@@ -1188,7 +1246,14 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 	searchBatch := newFetchedSearchIndexBatch(s)
 	classificationBatch := newMessageClassificationBatch(s, classifiers)
 	completionBatch := newMessageImportCompletionBatch(s, userID)
-	handle := func(item FetchedMessage) error {
+	// A first mirror of a large folder is one sparse repair of every missing UID,
+	// which no bounded turn can finish. Count what this turn mirrored so it can
+	// stop cleanly; the next turn recomputes a smaller missing set from the rows
+	// that are now local. The mailbox checkpoint deliberately stays where it is
+	// until the repair completes, because it is also the baseline that separates
+	// new arrivals from mirrored history.
+	var repairHandled int
+	storeRepaired := func(item FetchedMessage) error {
 		if item.Mailbox == "" {
 			item.Mailbox = mailbox.Name
 		}
@@ -1279,33 +1344,64 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		}
 		return nil
 	}
+	handle := func(item FetchedMessage) error {
+		if err := storeRepaired(item); err != nil {
+			return err
+		}
+		repairHandled++
+		if syncTurnBudgetSpent(ctx) {
+			return errSyncTurnBudgetSpent
+		}
+		return nil
+	}
+	finishRepairBatches := func() error {
+		if err := searchBatch.Flush(ctx); err != nil {
+			return err
+		}
+		classificationBatch.Flush(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return completionBatch.Flush(ctx)
+	}
+	// handleRepairFetchError commits what a bounded turn mirrored before it ran
+	// out of time. Committing the batches is what makes those messages count as
+	// mirrored, so the next turn skips them instead of downloading them again. A
+	// turn that mirrored nothing has nothing to keep and reports its failure
+	// unchanged rather than asking to be rescheduled at once.
+	handleRepairFetchError := func(fetchErr error) (MailboxPlan, bool, error) {
+		if repairHandled == 0 || !syncTurnPaused(ctx, fetchErr) {
+			return plan, false, fetchErr
+		}
+		if ctx.Err() == nil {
+			if err := finishRepairBatches(); err != nil {
+				return plan, false, err
+			}
+		}
+		log.Printf("repair incomplete mailbox paused user_id=%d account_id=%d mailbox=%s handled=%d missing=%d last_uid=%d cancelled_mid_fetch=%t",
+			userID, account.ID, mailbox.Name, repairHandled, len(missing), plan.LastUID, ctx.Err() != nil)
+		return plan, false, fetchErr
+	}
 	if snapshotUIDValidity > 0 {
 		if err := s.fetchUIDsForGeneration(ctx, account, mailbox.Name, missing, snapshotUIDValidity, handle); err != nil {
-			return plan, false, err
+			return handleRepairFetchError(err)
 		}
 	} else if batchFetcher, ok := s.Fetcher.(uidBatchFetcher); ok {
 		if err := batchFetcher.FetchUIDs(ctx, account, mailbox.Name, missing, handle); err != nil {
-			return plan, false, err
+			return handleRepairFetchError(err)
 		}
 	} else {
 		for _, uid := range missing {
 			item, err := s.Fetcher.FetchMessage(ctx, account, mailbox.Name, uid)
-			if err != nil {
-				return plan, false, err
+			if err == nil {
+				err = handle(item)
 			}
-			if err := handle(item); err != nil {
-				return plan, false, err
+			if err != nil {
+				return handleRepairFetchError(err)
 			}
 		}
 	}
-	if err := searchBatch.Flush(ctx); err != nil {
-		return plan, false, err
-	}
-	classificationBatch.Flush(ctx)
-	if err := ctx.Err(); err != nil {
-		return plan, false, err
-	}
-	if err := completionBatch.Flush(ctx); err != nil {
+	if err := finishRepairBatches(); err != nil {
 		return plan, false, err
 	}
 	if highestRemoteUID > plan.LastUID {
