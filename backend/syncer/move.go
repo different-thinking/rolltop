@@ -5,12 +5,20 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
 )
+
+// moveRunConsecutiveFailureLimit ends a move that has started failing
+// systemically — a refused login, a dropped connection, a revoked account —
+// rather than attempting every remaining message against a server that is
+// rejecting all of them. Scattered per-message failures reset the counter and
+// never reach it.
+const moveRunConsecutiveFailureLimit = 25
 
 type messageMoveNotifier func(context.Context, plugins.MessageMoveContext)
 
@@ -96,35 +104,51 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 			onDone()
 		}
 	}()
+	// A whole-filter delete resolves thousands of IDs into one run, and single
+	// messages drop out of that snapshot on their own: a mailbox generation that
+	// changed since, a UID the server no longer has, a folder resynced while the
+	// run was working. Those belong to one message, so each is recorded and
+	// stepped over. Failing the whole run on the first left every remaining
+	// message where it was, with a finished run the sidebar does not show.
+	failures := 0
+	consecutiveFailures := 0
+	firstFailure := ""
+	stoppedEarly := false
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+		var failure error
 		msg, err := s.Store.GetMessageForUser(ctx, userID, id)
-		if err != nil {
-			if store.IsNotFound(err) {
-				// A caller can resolve IDs long before this run reaches them: a
-				// whole-filter delete snapshots thousands. A row that has since
-				// been moved or dropped by a resync has nothing left to move, so
-				// it is counted as handled instead of failing the whole run.
-				progress.MessagesSeen++
-				continue
+		switch {
+		case err == nil:
+			progress.CurrentMailbox = "Moving to " + destName
+			progress.CurrentUID = msg.UID
+			if moveErr := s.MoveMessage(ctx, userID, id, destMailboxID); moveErr != nil {
+				failure = moveErr
+			} else {
+				progress.MessagesStored++
 			}
-			status = "failed"
-			errText = err.Error()
-			return
-		}
-		progress.CurrentMailbox = "Moving to " + destName
-		progress.CurrentUID = msg.UID
-		if err := s.MoveMessage(ctx, userID, id, destMailboxID); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return
+		case store.IsNotFound(err):
+			// A row a resync has already moved or dropped has nothing left to
+			// move, so it counts as handled rather than as a failure.
+		default:
+			failure = err
 		}
 		progress.MessagesSeen++
-		progress.MessagesStored++
+		if failure != nil {
+			failures++
+			consecutiveFailures++
+			if firstFailure == "" {
+				firstFailure = failure.Error()
+			}
+			progress.MessagesSkipped = failures
+			log.Printf("move run skipped message user_id=%d run_id=%d message_id=%d: %v", userID, runID, id, failure)
+		} else {
+			consecutiveFailures = 0
+		}
 		if err := s.Store.UpdateSyncRunProgress(ctx, userID, runID, progress); err != nil {
 			status = "failed"
 			errText = err.Error()
@@ -134,7 +158,29 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 		// loop does: the completed move already invalidated the cached mail
 		// pages, so this only has to move the progress indicators.
 		s.notifyProgress(userID)
+		if consecutiveFailures >= moveRunConsecutiveFailureLimit {
+			stoppedEarly = true
+			break
+		}
 	}
+	if failures > 0 {
+		status = "failed"
+		errText = moveRunFailureSummary(progress.MessagesStored, len(ids), failures, stoppedEarly, firstFailure)
+	}
+}
+
+// moveRunFailureSummary describes a move that left messages behind. It is the
+// only account the user gets of a background move that did not finish, so it
+// leads with how much of the batch actually moved.
+func moveRunFailureSummary(moved, total, failures int, stoppedEarly bool, firstFailure string) string {
+	summary := fmt.Sprintf("Moved %d of %d messages; %d could not be moved.", moved, total, failures)
+	if stoppedEarly {
+		summary += " The move stopped early after repeated failures; run it again to continue."
+	}
+	if strings.TrimSpace(firstFailure) != "" {
+		summary += " First failure: " + firstFailure
+	}
+	return summary
 }
 
 // MoveMessage moves one message through IMAP using its account, source mailbox, destination mailbox, and UID.
