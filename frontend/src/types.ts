@@ -841,3 +841,22 @@ export type CalendarEventInput = {
   time_zone: string;
   attendees: { email: string; name: string; optional: boolean }[];
 };
+
+/** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */
+export type DuplicateAccountSummary = {
+  account_id: number;
+  email: string;
+  label: string;
+  hidden: number;
+};
+
+/**
+ * DuplicateCopyReport lists the copies an aggregating account fetched of mail
+ * another account was addressed in. They are hidden from every list; the report
+ * is what makes them visible as a number.
+ */
+export type DuplicateCopyReport = {
+  ok: boolean;
+  hidden: number;
+  accounts: DuplicateAccountSummary[];
+};

@@ -83,7 +83,6 @@ export function RouteView({
         location={location}
         navigate={navigate}
         mailboxes={mailboxes}
-        swipePreferences={swipePreferences}
         archiveMailboxes={archiveMailboxes}
         setMessagesHidden={setMessagesHidden}
         enabledPlugins={enabledPlugins}

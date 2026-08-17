@@ -24,7 +24,7 @@ func (s *Store) ListMessagesForUser(ctx context.Context, userID int64, limit, of
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND m.duplicate_of_message_id = 0 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END DESC, m.id DESC
 		LIMIT ? OFFSET ?`, userID, nowUnix(), limit, offset)
 	if err != nil {
@@ -48,7 +48,7 @@ func (s *Store) ListMessagesForMailbox(ctx context.Context, userID, mailboxID in
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id = ? AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND m.mailbox_id = ? AND m.duplicate_of_message_id = 0 AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END DESC, m.id DESC
 		LIMIT ? OFFSET ?`, userID, mailboxID, nowUnix(), limit, offset)
 	if err != nil {
@@ -289,7 +289,8 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+` AND m.duplicate_of_message_id = 0
+			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
 	if err != nil {
@@ -311,7 +312,8 @@ func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mai
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id = ? AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND m.mailbox_id = ? AND m.duplicate_of_message_id = 0
+			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, userID, mailboxID, nowUnix(), scopeMessageLimit(limit))
 	if err != nil {
@@ -371,7 +373,8 @@ func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`) AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`) AND m.duplicate_of_message_id = 0
+			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
 	if err != nil {
@@ -460,7 +463,8 @@ func latestThreadMessagesQuery(source, predicate, direction string) string {
 			FROM messages m%[1]s
 			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-			WHERE m.user_id = ?%[2]s AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+			WHERE m.user_id = ?%[2]s AND m.duplicate_of_message_id = 0
+				AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 			GROUP BY thread_group
 			ORDER BY latest_key %[3]s LIMIT ? OFFSET ?
 		)
@@ -588,7 +592,8 @@ func (s *Store) ListThreadMessagesForUser(ctx context.Context, userID int64, msg
 	}
 	rows, err := db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
 			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at
-		FROM messages WHERE user_id = ? AND thread_key = ? ORDER BY date_unix ASC, id ASC`, userID, key)
+		FROM messages WHERE user_id = ? AND thread_key = ? AND duplicate_of_message_id = 0
+		ORDER BY date_unix ASC, id ASC`, userID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +602,8 @@ func (s *Store) ListThreadMessagesForUser(ctx context.Context, userID int64, msg
 }
 
 func (s *Store) threadMessageIDProbe(ctx context.Context, db *sql.DB, userID int64, key string) ([]int64, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id FROM messages WHERE user_id = ? AND thread_key = ? ORDER BY date_unix ASC, id ASC LIMIT 2`, userID, key)
+	rows, err := db.QueryContext(ctx, `SELECT id FROM messages WHERE user_id = ? AND thread_key = ? AND duplicate_of_message_id = 0
+		ORDER BY date_unix ASC, id ASC LIMIT 2`, userID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -646,7 +652,8 @@ func (s *Store) ListThreadMessagesByKeysForUser(ctx context.Context, userID int6
 		}
 		rows, err := db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
 			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at
-		FROM messages WHERE user_id = ? AND thread_key IN (`+strings.Join(placeholders, ",")+`) ORDER BY thread_key ASC, date_unix ASC, id ASC`, args...)
+		FROM messages WHERE user_id = ? AND thread_key IN (`+strings.Join(placeholders, ",")+`) AND duplicate_of_message_id = 0
+			ORDER BY thread_key ASC, date_unix ASC, id ASC`, args...)
 		if err != nil {
 			return nil, err
 		}
