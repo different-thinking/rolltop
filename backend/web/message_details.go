@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/logging"
 	"rolltop/backend/store"
 )
 
@@ -107,14 +107,14 @@ func (s *Server) performOneClickUnsubscribe(ctx context.Context, target *url.URL
 	if target == nil {
 		return errOneClickUnavailable
 	}
-	log.Printf("debug one-click unsubscribe post target=%s", target.String())
+	logging.Debugf("one-click unsubscribe post target=%s", target.String())
 	if err := validateOutboundHTTPS(ctx, target); err != nil {
-		log.Printf("debug one-click unsubscribe validation failed target=%s err=%v", target.String(), err)
+		logging.Debugf("one-click unsubscribe validation failed target=%s err=%v", target.String(), err)
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader("List-Unsubscribe=One-Click"))
 	if err != nil {
-		log.Printf("debug one-click unsubscribe request build failed target=%s err=%v", target.String(), err)
+		logging.Debugf("one-click unsubscribe request build failed target=%s err=%v", target.String(), err)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -136,12 +136,12 @@ func (s *Server) performOneClickUnsubscribe(ctx context.Context, target *url.URL
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("debug one-click unsubscribe transport failed target=%s err=%v", target.String(), err)
+		logging.Debugf("one-click unsubscribe transport failed target=%s err=%v", target.String(), err)
 		return err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	log.Printf("debug one-click unsubscribe response target=%s status=%s", target.String(), resp.Status)
+	logging.Debugf("one-click unsubscribe response target=%s status=%s", target.String(), resp.Status)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return errors.New("unsubscribe endpoint returned non-2xx")
 	}
