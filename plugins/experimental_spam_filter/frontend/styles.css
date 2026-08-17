@@ -14,9 +14,9 @@
 }
 
 .experimental-spam-badge .icon { height: .9rem; width: .9rem; }
-.experimental-spam-badge.low { background: color-mix(in srgb, var(--ok, #17795f) 12%, transparent); color: var(--ok, #17795f); }
-.experimental-spam-badge.medium { background: color-mix(in srgb, var(--accent-warm, #c46b44) 14%, transparent); color: var(--accent-warm-strong, #93482c); }
-.experimental-spam-badge.high { background: color-mix(in srgb, var(--danger, #b14532) 14%, transparent); color: var(--danger, #b14532); }
+.experimental-spam-badge.low { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.experimental-spam-badge.medium { background: color-mix(in srgb, var(--accent-warm) 14%, transparent); color: var(--accent-warm-strong); }
+.experimental-spam-badge.high { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 .experimental-spam-settings { display: grid; gap: 1rem; }
 .experimental-spam-model-card,
@@ -31,14 +31,14 @@
   font-weight: 700;
   padding: .35rem .65rem;
 }
-.experimental-spam-state.ready { background: color-mix(in srgb, var(--ok, #17795f) 14%, transparent); color: var(--ok, #17795f); }
-.experimental-spam-state.learning { background: var(--accent-soft, rgba(196, 107, 68, .14)); color: var(--accent-strong, #151f2e); }
-.experimental-spam-state.error { background: color-mix(in srgb, var(--danger, #b14532) 14%, transparent); color: var(--danger, #b14532); }
+.experimental-spam-state.ready { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.experimental-spam-state.learning { background: var(--accent-soft); color: var(--accent-strong); }
+.experimental-spam-state.error { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 .experimental-spam-bayes-progress-list { display: grid; gap: .75rem; }
 .experimental-spam-bayes-progress { display: grid; gap: .35rem; }
 .experimental-spam-bayes-progress > div:first-child { display: flex; gap: 1rem; justify-content: space-between; }
-.experimental-spam-bayes-progress > div:first-child span { color: var(--muted, #68717d); font-variant-numeric: tabular-nums; }
+.experimental-spam-bayes-progress > div:first-child span { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .experimental-spam-stats {
   display: grid;
@@ -46,14 +46,14 @@
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
 }
 .experimental-spam-stats > div {
-  background: var(--surface-soft, rgba(127, 127, 127, .08));
+  background: var(--surface-soft);
   border-radius: .75rem;
   display: grid;
   gap: .2rem;
   padding: .85rem;
 }
 .experimental-spam-stats strong { font-size: 1.35rem; }
-.experimental-spam-stats span { color: var(--muted, #68717d); font-size: .8rem; }
+.experimental-spam-stats span { color: var(--muted); font-size: .8rem; }
 
 .experimental-spam-backfill-controls {
   align-items: end;
@@ -65,12 +65,12 @@
 .experimental-spam-backfill-controls select { min-height: 2.5rem; }
 .experimental-spam-backfill-status { display: grid; gap: .45rem; }
 .experimental-spam-backfill-status > div:first-child { display: flex; justify-content: space-between; }
-.experimental-spam-progress { background: rgba(127, 127, 127, .17); border-radius: 999px; height: .45rem; overflow: hidden; }
-.experimental-spam-progress span { background: var(--accent, #c46b44); display: block; height: 100%; transition: width .2s ease; }
+.experimental-spam-progress { background: color-mix(in srgb, var(--muted) 22%, transparent); border-radius: 999px; height: .45rem; overflow: hidden; }
+.experimental-spam-progress span { background: var(--accent); display: block; height: 100%; transition: width .2s ease; }
 
 .experimental-spam-bootstrap-accounts { display: grid; gap: .75rem; }
 .experimental-spam-bootstrap-accounts fieldset {
-  border: 1px solid rgba(127, 127, 127, .25);
+  border: 1px solid var(--border);
   border-radius: .75rem;
   display: grid;
   gap: .65rem;
@@ -83,29 +83,29 @@
 .experimental-spam-bootstrap-accounts select { min-height: 2.5rem; width: 100%; }
 .experimental-spam-bootstrap-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
 .experimental-spam-bootstrap-preview {
-  background: rgba(127, 127, 127, .08);
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
   border-radius: .65rem;
   display: grid;
   gap: .25rem;
   padding: .75rem;
 }
-.experimental-spam-bootstrap-preview small { color: var(--muted, #68717d); }
+.experimental-spam-bootstrap-preview small { color: var(--muted); }
 
 .experimental-spam-detail { display: grid; gap: .85rem; }
 .experimental-spam-detail-body { display: grid; gap: .85rem; }
-.experimental-spam-stale { background: color-mix(in srgb, #c47a20 12%, transparent); border-radius: .6rem; margin: 0; padding: .65rem; }
+.experimental-spam-stale { background: color-mix(in srgb, var(--warning) 14%, transparent); border-radius: .6rem; margin: 0; padding: .65rem; }
 .experimental-spam-scoreline { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
-.experimental-spam-feedback-label { color: var(--muted, #68717d); font-size: .8rem; }
+.experimental-spam-feedback-label { color: var(--muted); font-size: .8rem; }
 .experimental-spam-evidence-grid { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); }
-.experimental-spam-evidence-grid > div { background: rgba(127, 127, 127, .08); border-radius: .6rem; display: grid; gap: .15rem; padding: .65rem; }
-.experimental-spam-evidence-grid span { color: var(--muted, #68717d); font-size: .75rem; }
+.experimental-spam-evidence-grid > div { background: color-mix(in srgb, var(--muted) 12%, transparent); border-radius: .6rem; display: grid; gap: .15rem; padding: .65rem; }
+.experimental-spam-evidence-grid span { color: var(--muted); font-size: .75rem; }
 
 .experimental-spam-evidence-list { display: grid; gap: .35rem; }
 .experimental-spam-evidence-list ul { display: grid; gap: .3rem; list-style: none; margin: 0; padding: 0; }
 .experimental-spam-evidence-list li { align-items: baseline; display: flex; flex-wrap: wrap; gap: .4rem; justify-content: space-between; }
 .experimental-spam-evidence-list code { overflow-wrap: anywhere; }
-.experimental-spam-evidence-list small { color: var(--muted, #68717d); }
-.experimental-spam-evidence-note { background: rgba(127, 127, 127, .08); border-radius: .6rem; display: grid; gap: .25rem; padding: .65rem; }
+.experimental-spam-evidence-list small { color: var(--muted); }
+.experimental-spam-evidence-note { background: color-mix(in srgb, var(--muted) 12%, transparent); border-radius: .6rem; display: grid; gap: .25rem; padding: .65rem; }
 .experimental-spam-evidence-note p { margin: 0; }
-.experimental-spam-detail-meta { color: var(--muted, #68717d); font-size: .75rem; }
+.experimental-spam-detail-meta { color: var(--muted); font-size: .75rem; }
 .experimental-spam-feedback-actions { display: flex; flex-wrap: wrap; gap: .5rem; }

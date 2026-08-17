@@ -1,7 +1,7 @@
 .remote-imap-sync-settings,
 .remote-imap-sync-summary {
   --remote-sync-live: var(--ok);
-  --remote-sync-active: color-mix(in srgb, #3b8fbd 76%, var(--text));
+  --remote-sync-active: var(--info);
   --remote-sync-warning: var(--accent-warm-strong);
   --remote-sync-error: var(--danger);
 }

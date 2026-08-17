@@ -1,30 +1,81 @@
+// Classic: the light palette. Every colour the app paints comes from this list,
+// so a theme is a token swap and never a per-component patch list.
 @mixin theme {
   color-scheme: light;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Fraunces", Georgia, "Times New Roman", serif;
   --font-brand: var(--font-display);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  // Surfaces, lowest to highest.
   --bg: #f2f0eb;
+  --surface-sunken: #f4f1ec;
   --surface: #fff;
   --surface-subtle: #f8f6f2;
+  --surface-raised: #fff;
+  --field: #fff;
+
+  // High-contrast block used for avatars and other inked chips.
   --surface-ink: #151f2e;
+  --on-ink: #fff;
+
+  // Primary action (the compose button).
+  --action: #151f2e;
+  --action-hover: #2b3448;
+  --on-action: #fff;
+
   --text: #202426;
   --muted: #66716d;
+  --text-soft: #37413e;
+
   --border: #ded8d1;
   --border-strong: #b7b3aa;
+  --separator: #e6ece8;
+
+  --row-read: var(--surface);
+  --row-unread: var(--surface);
+
   --hover: #efe7e0;
   --active: #e7d8ce;
   --active-strong: #c46b44;
-  --accent: #c46b44;
+  --selected: #f2faf7;
+
+  // #b45c35 keeps the terracotta character while carrying white text at 4.6:1.
+  --accent: #b45c35;
   --accent-strong: #151f2e;
   --accent-soft: #f6e3da;
   --accent-warm: #c46b44;
   --accent-warm-strong: #93482c;
   --accent-sun: #b7b3aa;
-  --danger: #b14532;
+  --on-accent: #fff;
+  --button-text: var(--on-accent);
+  --focus: #b45c35;
+  --button-hover-border: rgba(180, 92, 53, .40);
+
+  // Status. Each pair is "colour" plus "text that sits on top of it".
   --ok: #17795f;
-  --button-text: #fff;
-  --focus: #c46b44;
-  --button-hover-border: rgba(196, 107, 68, .40);
+  --on-ok: #fff;
+  --info: #2b5f8a;
+  --on-info: #fff;
+  --warning: #8a5a17;
+  --on-warning: #fff;
+  --danger: #b14532;
+  --on-danger: #fff;
+
+  // Swipe actions derive their quiet and armed states from these hues.
+  // Deeper than the matching status colours: the quiet swipe surface is a 20%
+  // wash of the hue, and the label sits on top of it.
+  --swipe-read: #12634e;
+  --swipe-unread: #254f73;
+  --swipe-snooze: #8a4419;
+  --swipe-archive: #275768;
+  --swipe-trash: #93382a;
+  --on-swipe: #fff;
+
+  --scrim: rgba(21, 31, 46, .28);
+  --scrim-strong: rgba(21, 31, 46, .42);
+  --highlight: rgba(229, 169, 40, .26);
+  --on-highlight: #202426;
   --shadow: 0 1px 2px rgba(21, 31, 46, 0.13), 0 8px 20px rgba(21, 31, 46, 0.07);
+  --shadow-raised: 0 14px 34px rgba(38, 35, 31, .22);
 }
