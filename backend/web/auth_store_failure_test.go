@@ -2,7 +2,8 @@
 // fails transiently (busy/locked SQLite under heavy sync, disk pressure). A
 // store failure must never be reported as "no users" (which sends signed-in
 // browsers to the first-run admin setup screen) or as "signed out" (which
-// answers 401 to a valid session).
+// answers 401 to a valid session), and recovery routes such as logout must
+// keep working during the outage.
 
 package web
 
@@ -19,7 +20,7 @@ import (
 	"rolltop/backend/store"
 )
 
-func newStoreFailureTestServer(t *testing.T) (*store.Store, http.Handler, *http.Cookie) {
+func newStoreFailureTestServer(t *testing.T) (*store.Store, *Server, http.Handler, *http.Cookie) {
 	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
@@ -45,11 +46,11 @@ func newStoreFailureTestServer(t *testing.T) (*store.Store, http.Handler, *http.
 	if err != nil {
 		t.Fatal(err)
 	}
-	return db, server.Handler(), &http.Cookie{Name: sessionCookie, Value: token}
+	return db, server, server.Handler(), &http.Cookie{Name: sessionCookie, Value: token}
 }
 
 func TestBootstrapReportsErrorNotSetupWhenUserCountFails(t *testing.T) {
-	db, handler, _ := newStoreFailureTestServer(t)
+	db, _, handler, _ := newStoreFailureTestServer(t)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -61,21 +62,47 @@ func TestBootstrapReportsErrorNotSetupWhenUserCountFails(t *testing.T) {
 }
 
 func TestSessionLookupFailureIsNotTreatedAsSignedOut(t *testing.T) {
-	db, handler, cookie := newStoreFailureTestServer(t)
+	db, _, handler, cookie := newStoreFailureTestServer(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/bootstrap", "/api/profile"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s with valid session but failing store status = %d body=%s, want 503 rather than an anonymous response", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLogoutStillClearsCookieWhenStoreFails(t *testing.T) {
+	db, server, handler, cookie := newStoreFailureTestServer(t)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
 	req.AddCookie(cookie)
+	req.Header.Set("X-CSRF-Token", server.csrfForBase(cookie.Value))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("request with valid session but failing store status = %d body=%s, want 503 rather than an anonymous response", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/logout with failing store status = %d body=%s, want 200 so the cookie can still be cleared", rec.Code, rec.Body.String())
+	}
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("logout did not clear the session cookie")
 	}
 }
 
 func TestSetupRefusesWhenUserCountFails(t *testing.T) {
-	db, handler, _ := newStoreFailureTestServer(t)
+	db, _, handler, _ := newStoreFailureTestServer(t)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +114,7 @@ func TestSetupRefusesWhenUserCountFails(t *testing.T) {
 }
 
 func TestUnknownSessionCookieStillMeansSignedOut(t *testing.T) {
-	db, handler, cookie := newStoreFailureTestServer(t)
+	db, _, handler, cookie := newStoreFailureTestServer(t)
 	defer db.Close()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
@@ -95,5 +122,20 @@ func TestUnknownSessionCookieStillMeansSignedOut(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /api/profile with unknown session status = %d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLoginStoreFailureIsNotACredentialVerdict(t *testing.T) {
+	db, server, handler, _ := newStoreFailureTestServer(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: "csrf-base"})
+	req.Header.Set("X-CSRF-Token", server.csrfForBase("csrf-base"))
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("POST /api/login with failing store status = %d body=%s, must not claim invalid credentials", rec.Code, rec.Body.String())
 	}
 }

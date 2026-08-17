@@ -41,6 +41,10 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.store != nil {
 		payload, payloadErr := s.bootstrapPayload(w, r)
+		if errors.Is(payloadErr, errSessionUnavailable) {
+			sessionUnavailable(w)
+			return
+		}
 		if payloadErr != nil {
 			s.serverError(w, payloadErr)
 			return

@@ -6,6 +6,7 @@
 package logging
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -46,10 +47,17 @@ func SetDebug(enabled bool) {
 }
 
 // Debugf logs like log.Printf with a "debug " prefix, but only when debug
-// logging is enabled.
+// logging is enabled. Line separators in the rendered message are escaped so
+// values taken from mail content or URLs cannot forge extra log records.
+// Arguments are evaluated eagerly even when debug is off, so keep expensive
+// arguments behind a DebugEnabled() guard on hot paths.
 func Debugf(format string, args ...any) {
 	if !DebugEnabled() {
 		return
 	}
-	log.Printf("debug "+format, args...)
+	message := fmt.Sprintf(format, args...)
+	if strings.ContainsAny(message, "\r\n") {
+		message = strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(message)
+	}
+	log.Printf("debug %s", message)
 }
