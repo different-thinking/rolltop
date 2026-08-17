@@ -12,7 +12,7 @@ import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
-import { isArchiveMailboxChoice, trashMailboxForAccount } from "../../lib/folders";
+import { archiveMailboxForAccount, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -2061,12 +2061,7 @@ function MessageList({
     const accountID = accountIDs[0];
     const target = action === "trash"
       ? trashMailboxForAccount(mailboxes, accountID)
-      : (() => {
-          const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
-          return preference
-            ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
-            : undefined;
-        })();
+      : archiveMailboxForAccount(mailboxes, effectiveSwipePreferences.archive_mailboxes, accountID);
     if (!target) {
       addToast(
         action === "trash"

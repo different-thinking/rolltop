@@ -265,6 +265,18 @@
     align-items: flex-start;
   }
 
+  // A phone-width header has no room for the subject and seven commands side by
+  // side, so the toolbar drops onto its own full-width row instead of squeezing
+  // the subject into a column of wrapped words.
+  .thread-head {
+    flex-wrap: wrap;
+  }
+
+  .thread-head-actions {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
   .list-head-main {
     gap: 8px;
   }
