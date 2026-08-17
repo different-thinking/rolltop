@@ -6,7 +6,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
 import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
-import type { Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
+import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
@@ -853,6 +853,7 @@ export function ThreadView({
   navigate,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   setMessagesHidden,
   enabledPlugins,
   refreshChrome,
@@ -869,6 +870,8 @@ export function ThreadView({
   navigate: (url: string) => void;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
+  archiveMailboxes: AccountMailboxChoice[];
   setMessagesHidden: (messageIDs: number[], hidden: boolean) => void;
   enabledPlugins: string[];
   refreshChrome: () => Promise<Bootstrap | null>;
@@ -1664,7 +1667,7 @@ export function ThreadView({
     : [];
   const headerActionsBusy = loading || markUnreadBusy;
   const headerArchiveMailbox = headerActionItem
-    ? archiveMailboxForAccount(mailboxes, swipePreferences.archive_mailboxes, headerActionItem.message.account_id)
+    ? archiveMailboxForAccount(mailboxes, archiveMailboxes, headerActionItem.message.account_id)
     : undefined;
   const headerTrashMailbox = headerActionItem ? trashByAccount.get(headerActionItem.message.account_id) : undefined;
   const headerJunkMailbox = headerActionItem ? junkMailboxForAccount(mailboxes, headerActionItem.message.account_id) : undefined;

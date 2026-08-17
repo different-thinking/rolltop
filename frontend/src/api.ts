@@ -35,6 +35,7 @@ import type {
 import { clearMailSnapshots, clearOtherMailSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
 import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
 import type { MailSortOrder } from "./lib/mailSort";
+import type { MailView } from "./lib/routes";
 import { clearOtherCollapsedAccounts } from "./lib/sidebarLocal";
 
 /** Error thrown for non-2xx API responses after the JSON error payload is decoded. */
@@ -214,9 +215,10 @@ function composeSendPayload(form: ComposeForm): ComposeForm {
 
 // The default order stays off the URL so warmed first pages, service caches, and
 // clients that never touch sorting all keep asking for the same address.
-function mailListURL(mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
+function mailListURL(mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = "") {
   const q = new URLSearchParams({ page: String(page) });
   if (mailboxID) q.set("mailbox", mailboxID);
+  else if (view) q.set("view", view);
   if (order !== defaultMailSortOrder) q.set("sort", order);
   return `/api/mail?${q}`;
 }
@@ -228,8 +230,8 @@ function mailCacheEpoch(userID: number) {
   return 0;
 }
 
-function mailListCacheKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder, epoch = mailCacheEpoch(userID)) {
-  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order)}`;
+function mailListCacheKey(userID: number, mailboxID: string | null, page: number, order: MailSortOrder, view: MailView, epoch = mailCacheEpoch(userID)) {
+  return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order, view)}`;
 }
 
 function searchListURL(query: string, page: number) {
@@ -254,27 +256,30 @@ function cachedJSON<T>(cacheKey: string): T | null {
   return cached ? cached.data as T : null;
 }
 
-function cachedMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): MailListResponse | null {
-  const key = mailListCacheKey(userID, mailboxID, page, order);
+function cachedMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = ""): MailListResponse | null {
+  const key = mailListCacheKey(userID, mailboxID, page, order, view);
   const cached = cachedJSON<MailListResponse>(key);
-  return cached || loadMailSnapshot(userID, mailboxID, page, order);
+  // Named views keep no localStorage snapshot: snapshot keys only name
+  // mailbox/all pages, and an All Mail page painting into one of them would
+  // show exactly the rows that view exists to leave out.
+  return cached || (view ? null : loadMailSnapshot(userID, mailboxID, page, order));
 }
 
-async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder): Promise<MailListResponse> {
-  const url = mailListURL(mailboxID, page, order);
+async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = ""): Promise<MailListResponse> {
+  const url = mailListURL(mailboxID, page, order, view);
   const epoch = mailCacheEpoch(userID);
-  const key = mailListCacheKey(userID, mailboxID, page, order, epoch);
+  const key = mailListCacheKey(userID, mailboxID, page, order, view, epoch);
   const data = await getJSON<MailListResponse>(url, key);
   if (mailCacheEpoch(userID) !== epoch) {
     getCache.delete(key);
     return data;
   }
-  saveMailSnapshot(userID, mailboxID, page, data, order);
+  if (!view) saveMailSnapshot(userID, mailboxID, page, data, order);
   return data;
 }
 
-function prefetchMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder) {
-  void loadMail(userID, mailboxID, page, order).catch(() => undefined);
+function prefetchMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = "") {
+  void loadMail(userID, mailboxID, page, order, view).catch(() => undefined);
 }
 
 function clearMailCache(userID: number) {
@@ -389,10 +394,11 @@ export const api = {
   // not limited to the IDs one page happens to have loaded. The server resolves
   // the matches, groups them per account Trash, and answers with the runs it
   // started; progress arrives through the normal sync-run events.
-  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string }) =>
+  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView }) =>
     postJSON<ScopeTrashResponse>("/api/messages/scope-trash", csrf, {
       scope_mailbox_id: scope.mailboxID,
-      scope_query: scope.query
+      scope_query: scope.query,
+      scope_view: scope.view || ""
     }),
   bulkCopyMessages: async (csrf: string, ids: number[], mailboxID: number) => {
     const results = await Promise.all(chunkMessageIDs(ids).map((chunk) =>
