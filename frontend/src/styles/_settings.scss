@@ -1865,6 +1865,57 @@
   }
 }
 
+.database-log {
+  h2 {
+    margin: 0 0 4px;
+    font-size: 14px;
+  }
+}
+
+.database-log-actions {
+  margin: 10px 0 0;
+}
+
+.database-log-lines {
+  max-height: 420px;
+  margin: 10px 0 0;
+  padding: 10px;
+  overflow: auto;
+  list-style: none;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+
+  li {
+    display: grid;
+    // The timestamp column is fixed so the messages line up into a readable
+    // block instead of stepping in and out with each line's clock width.
+    grid-template-columns: minmax(0, 11em) minmax(0, 1fr);
+    gap: 10px;
+    padding: 2px 0;
+  }
+
+  li.is-error {
+    color: var(--danger);
+  }
+
+  time {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  pre {
+    margin: 0;
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
 .database-confirm {
   position: fixed;
   inset: 0;

@@ -687,6 +687,7 @@ export default function App() {
           sync_running: chrome.sync_running,
           latest_sync_run: chrome.latest_sync_run,
           active_sync_runs: chrome.active_sync_runs || [],
+          unfinished_move_run: chrome.unfinished_move_run ?? null,
           server_started_at: chrome.server_started_at || current.server_started_at,
           server_uptime_seconds: chrome.server_uptime_seconds ?? current.server_uptime_seconds,
           build_version: chrome.build_version || current.build_version,
@@ -695,7 +696,8 @@ export default function App() {
           build_commit: chrome.build_commit ?? current.build_commit,
           public_site_url: chrome.public_site_url || current.public_site_url,
           mail_generation: chrome.mail_generation ?? current.mail_generation,
-          swipe_preferences: chrome.swipe_preferences || current.swipe_preferences
+          swipe_preferences: chrome.swipe_preferences || current.swipe_preferences,
+          effective_archive_mailboxes: chrome.effective_archive_mailboxes || current.effective_archive_mailboxes
         } : current);
         if (chrome.latest_sync_run) {
           const previous = lastNotify.current;
@@ -716,6 +718,17 @@ export default function App() {
     };
   }, [bootstrap?.user, notifyNewMail]);
 
+  // Rows a mutation is about to remove are hidden from every mail list at once,
+  // so the drag/drop path and the thread header's own moves dismiss identically.
+  const setMessagesHidden = useCallback((messageIDs: number[], hidden: boolean) => {
+    if (messageIDs.length === 0) return;
+    setHiddenMessageIDs((current) => {
+      const next = new Set(current);
+      messageIDs.forEach((id) => hidden ? next.add(id) : next.delete(id));
+      return next;
+    });
+  }, []);
+
   // Folder drag/drop hides rows optimistically only for moves. Ctrl/Cmd-drag
   // copies messages to the destination and leaves the source list untouched.
   const moveMessages = useCallback(
@@ -724,13 +737,7 @@ export default function App() {
       const ids = Array.from(new Set(messageIDs.filter((id) => Number.isFinite(id) && id > 0)));
       if (ids.length === 0) return;
       const copying = action === "copy";
-      if (!copying) {
-        setHiddenMessageIDs((current) => {
-          const next = new Set(current);
-          ids.forEach((id) => next.add(id));
-          return next;
-        });
-      }
+      if (!copying) setMessagesHidden(ids, true);
       const verb = copying ? "Copying" : "Moving";
       const toastID = addToast(`${verb} ${messageCountLabel(ids.length)} to ${mailbox.name}...`, "loading");
       try {
@@ -752,17 +759,11 @@ export default function App() {
           updateToast(toastID, `Moved ${messageCountLabel(data.moved ?? ids.length)} to ${mailbox.name}.`, "success");
         }
       } catch (err) {
-        if (!copying) {
-          setHiddenMessageIDs((current) => {
-            const next = new Set(current);
-            ids.forEach((id) => next.delete(id));
-            return next;
-          });
-        }
+        if (!copying) setMessagesHidden(ids, false);
         updateToast(toastID, `${copying ? "Copy" : "Move"} failed: ${messageFromError(err)}`, "error");
       }
     },
-    [addToast, bootstrap?.csrf, updateToast]
+    [addToast, bootstrap?.csrf, setMessagesHidden, updateToast]
   );
 
   const logout = useCallback(async () => {
@@ -834,6 +835,7 @@ export default function App() {
         mailboxes={bootstrap.mailboxes || []}
         latestSyncRun={bootstrap.latest_sync_run || null}
         activeSyncRuns={bootstrap.active_sync_runs || []}
+        unfinishedMoveRun={bootstrap.unfinished_move_run || null}
         syncRunning={Boolean(bootstrap.sync_running)}
         accountNeedsPassword={Boolean(bootstrap.account_needs_password)}
         accountNotice={bootstrap.account_notice || ""}
@@ -867,12 +869,14 @@ export default function App() {
           syncRunning={Boolean(bootstrap.sync_running)}
           mailGeneration={bootstrap.mail_generation || 0}
           swipePreferences={bootstrap.swipe_preferences || defaultSwipePreferences()}
+          archiveMailboxes={bootstrap.effective_archive_mailboxes || []}
           enabledPlugins={bootstrap.enabled_plugins || []}
           availableThemes={bootstrap.available_themes || []}
           location={location}
           navigate={navigate}
           replaceRoute={replaceRoute}
           hiddenMessageIDs={hiddenMessageIDs}
+          setMessagesHidden={setMessagesHidden}
           openCompose={openCompose}
           refreshChrome={refreshBootstrap}
           runtimePlugins={runtimePlugins}

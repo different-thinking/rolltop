@@ -104,6 +104,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiAdminDatabaseJob(w, r)
 	case strings.HasPrefix(path, "admin/database/"):
 		s.apiAdminDatabaseAction(w, r, strings.TrimPrefix(path, "admin/database/"))
+	case path == "admin/log":
+		s.apiAdminLog(w, r)
 	case path == "admin/remote-image-blocklist":
 		s.apiAdminRemoteImageBlocklist(w, r)
 	case path == "messages/bulk-move":

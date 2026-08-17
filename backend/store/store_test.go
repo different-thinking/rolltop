@@ -466,6 +466,368 @@ func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T)
 	}
 }
 
+func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	archive, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.Role != "" || !archive.ShowInAllMail {
+		t.Fatalf("archive mailbox = role %q all-mail %t, want a plain All Mail folder", archive.Role, archive.ShowInAllMail)
+	}
+	base := time.Unix(1700000000, 0)
+	kept, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: inbox.ID, BlobID: blob.ID,
+		MessageIDHeader: "<unarchived-kept@example.test>", Subject: "Kept",
+		Date: base, UID: 1, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: archive.ID, BlobID: blob.ID,
+		MessageIDHeader: "<unarchived-archived@example.test>", Subject: "Archived",
+		Date: base.Add(time.Hour), UID: 2, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a chosen Archive folder nothing counts as archived, so the
+	// Unarchived list is exactly All Mail.
+	before, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("unarchived rows before mapping = %d, want both messages", len(before))
+	}
+
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: archive.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	unarchived, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unarchived) != 1 || unarchived[0].ID != kept.ID {
+		t.Fatalf("unarchived rows = %v, want only the inbox message %d", messageIDsOf(unarchived), kept.ID)
+	}
+	all, err := db.ListLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all mail rows = %d, the Archive folder must stay in All Mail", len(all))
+	}
+
+	scope, err := db.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].ID != kept.ID {
+		t.Fatalf("unarchived scope = %+v, want only the inbox message %d", scope, kept.ID)
+	}
+	allScope, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allScope) != 2 {
+		t.Fatalf("all mail scope = %d rows, want both messages including %d", len(allScope), archived.ID)
+	}
+}
+
+func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	swipeTarget, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityTarget, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Ablage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: swipeTarget.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no identity choice the stored swipe mapping still answers.
+	resolved, err := db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].MailboxID != swipeTarget.ID {
+		t.Fatalf("resolved archive = %+v, want the swipe mapping %d", resolved, swipeTarget.ID)
+	}
+
+	identity, err := db.CreateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		Email: "archive-owner@example.test", DisplayName: "Archive Owner",
+		IMAPAccountID: account.ID, ArchiveMailboxID: identityTarget.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ArchiveMailboxID != identityTarget.ID {
+		t.Fatalf("identity archive mailbox = %d, want %d", identity.ArchiveMailboxID, identityTarget.ID)
+	}
+
+	// The identity is the more specific setting, so it wins over the mapping.
+	resolved, err = db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].MailboxID != identityTarget.ID {
+		t.Fatalf("resolved archive = %+v, want the identity choice %d", resolved, identityTarget.ID)
+	}
+
+	// Unarchived follows the same resolution: the identity's folder is what is
+	// hidden, and the folder it replaced comes back into view.
+	base := time.Unix(1700000000, 0)
+	create := func(mailbox Mailbox, uid uint32) MessageRecord {
+		t.Helper()
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<archive-%d@example.test>", uid), Subject: "Archive test",
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	inboxMessage := create(inbox, 1)
+	swipeMessage := create(swipeTarget, 2)
+	identityMessage := create(identityTarget, 3)
+	rows, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := messageIDsOf(rows)
+	if len(got) != 2 || !slices.Contains(got, inboxMessage.ID) || !slices.Contains(got, swipeMessage.ID) {
+		t.Fatalf("unarchived rows = %v, want the inbox and swipe-folder messages %d and %d",
+			got, inboxMessage.ID, swipeMessage.ID)
+	}
+	if slices.Contains(got, identityMessage.ID) {
+		t.Fatalf("unarchived rows = %v, must not include the identity's archive folder message %d", got, identityMessage.ID)
+	}
+
+	// An identity cannot point Archive at a folder that already means something
+	// else, matching the choices settings offers.
+	if _, err := db.UpdateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		ID: identity.ID, IMAPAccountID: account.ID, ArchiveMailboxID: inbox.ID,
+	}); err == nil {
+		t.Fatal("an identity was allowed to archive into the Inbox")
+	}
+
+	// Leaving the IMAP server on Automatic is the default, and settings accepts
+	// an Archive folder alongside it, so the choice has to keep counting: the
+	// folder itself names the account it belongs to.
+	if _, err := db.UpdateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		ID: identity.ID, IMAPAccountID: 0, ArchiveMailboxID: identityTarget.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	automatic, err := db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(automatic) != 1 || automatic[0].AccountID != account.ID || automatic[0].MailboxID != identityTarget.ID {
+		t.Fatalf("resolved archive with an Automatic IMAP server = %+v, want account %d folder %d",
+			automatic, account.ID, identityTarget.ID)
+	}
+}
+
+// A role view spans every account the user owns, and never another user's.
+func TestRoleViewsSpanAccountsAndStayTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, firstAccount, _, blob := testMailbox(t, ctx, db)
+	secondAccount, err := db.UpsertMailAccount(ctx, MailAccount{
+		UserID: user.ID, Email: "second@example.test", Host: "imap.example.test", Port: 993,
+		Username: "second", EncryptedPassword: "secret", UseTLS: true, Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1700000000, 0)
+	sendFrom := func(accountID int64, uid uint32) MessageRecord {
+		t.Helper()
+		mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, accountID, "Sent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: accountID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<span-%d@example.test>", uid), Subject: "Sent",
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	first := sendFrom(firstAccount.ID, 1)
+	second := sendFrom(secondAccount.ID, 2)
+
+	rows, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, "sent", 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := messageIDsOf(rows)
+	if len(got) != 2 || !slices.Contains(got, first.ID) || !slices.Contains(got, second.ID) {
+		t.Fatalf("sent rows = %v, want both accounts: %d and %d", got, first.ID, second.ID)
+	}
+	scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, "sent", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 2 {
+		t.Fatalf("sent scope = %+v, want both accounts' messages", scope)
+	}
+
+	other, err := db.CreateUser(ctx, "role-other@example.test", "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAccount, err := db.UpsertMailAccount(ctx, MailAccount{
+		UserID: other.ID, Email: "role-other@example.test", Host: "imap.example.test", Port: 993,
+		Username: "other", EncryptedPassword: "secret", UseTLS: true, Mailbox: "INBOX",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSent, err := db.GetOrCreateMailbox(ctx, other.ID, otherAccount.ID, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := db.RoleMailboxIDsForUser(ctx, user.ID, "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(ids, otherSent.ID) {
+		t.Fatalf("sent folders = %v, must not include another tenant's folder %d", ids, otherSent.ID)
+	}
+}
+
+func messageIDsOf(messages []MessageRecord) []int64 {
+	ids := make([]int64, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	return ids
+}
+
+func TestRoleViewsReadTheFoldersCarryingThatRole(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	sent, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drafts, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Drafts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Role != "sent" || drafts.Role != "drafts" {
+		t.Fatalf("roles = %q/%q, want sent/drafts", sent.Role, drafts.Role)
+	}
+	base := time.Unix(1700000000, 0)
+	create := func(mailbox Mailbox, uid uint32, subject string) MessageRecord {
+		t.Helper()
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<role-%d@example.test>", uid), Subject: subject,
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	received := create(inbox, 1, "Received")
+	sentMessage := create(sent, 2, "Sent")
+	draftMessage := create(drafts, 3, "Draft")
+
+	for _, tt := range []struct {
+		role string
+		want int64
+	}{{role: "sent", want: sentMessage.ID}, {role: "drafts", want: draftMessage.ID}} {
+		t.Run(tt.role, func(t *testing.T) {
+			messages, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, tt.role, 10, 0, ThreadListNewestFirst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 || messages[0].ID != tt.want {
+				t.Fatalf("%s rows = %v, want only %d; the inbox message was %d",
+					tt.role, messageIDsOf(messages), tt.want, received.ID)
+			}
+			scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, tt.role, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scope) != 1 || scope[0].ID != tt.want {
+				t.Fatalf("%s scope = %+v, want only %d", tt.role, scope, tt.want)
+			}
+		})
+	}
+
+	// Reassigning the role moves the view with it: the folder carries the role,
+	// so there is no second place where a stale choice could linger.
+	if err := db.UpdateMailboxSettings(ctx, user.ID, sent.ID, MailboxSettings{
+		SyncMode: sent.SyncMode, Role: "", Icon: "folder", ShowInSidebar: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateMailboxSettings(ctx, user.ID, inbox.ID, MailboxSettings{
+		SyncMode: inbox.SyncMode, Role: "sent", Icon: "send", ShowInSidebar: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := db.ListRoleLatestThreadMessagesForUser(ctx, user.ID, "sent", 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 1 || moved[0].ID != received.ID {
+		t.Fatalf("sent rows after reassigning the role = %v, want only %d", messageIDsOf(moved), received.ID)
+	}
+
+	if _, err := db.RoleMailboxIDsForUser(ctx, user.ID, "nonsense"); err == nil {
+		t.Fatal("an unsupported role must not resolve to a folder set")
+	}
+}
+
 func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))

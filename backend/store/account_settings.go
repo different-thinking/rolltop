@@ -270,6 +270,9 @@ func (s *Store) CreateMailIdentityForUser(ctx context.Context, userID int64, in 
 		if in.DraftsMailboxID > 0 {
 			next.DraftsMailboxID = in.DraftsMailboxID
 		}
+		if in.ArchiveMailboxID > 0 {
+			next.ArchiveMailboxID = in.ArchiveMailboxID
+		}
 		return s.UpdateMailIdentityForUser(ctx, userID, next)
 	}
 	return MailIdentity{}, ErrNotFound
@@ -294,6 +297,9 @@ func (s *Store) UpdateMailIdentityForUser(ctx context.Context, userID int64, in 
 		return MailIdentity{}, err
 	}
 	if err := s.validateIdentityMailboxRole(ctx, userID, in.DraftsMailboxID, "drafts", in.IMAPAccountID); err != nil {
+		return MailIdentity{}, err
+	}
+	if err := s.validateIdentityArchiveMailbox(ctx, userID, in.ArchiveMailboxID, in.IMAPAccountID); err != nil {
 		return MailIdentity{}, err
 	}
 	current, err := s.GetMailIdentityForUser(ctx, userID, in.ID)
@@ -330,8 +336,8 @@ func (s *Store) UpdateMailIdentityForUser(ctx context.Context, userID int64, in 
 	if _, err = tx.ExecContext(ctx, `UPDATE contacts SET display_name = ?, is_me = 1, is_primary = CASE WHEN ? THEN 1 ELSE is_primary END, updated_at = ? WHERE user_id = ? AND id = ?`, display, boolInt(in.IsPrimary), nowUnix(), userID, current.ContactID); err != nil {
 		return rollback()
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE mail_identities SET smtp_account_id = ?, imap_account_id = ?, sent_mailbox_id = ?, drafts_mailbox_id = ?, display_name = ?, signature = ?, autocrypt_enabled = ?, is_primary = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
-		in.SMTPAccountID, in.IMAPAccountID, in.SentMailboxID, in.DraftsMailboxID, display, signature, boolInt(in.AutocryptEnabled), boolInt(in.IsPrimary), nowUnix(), userID, current.ID)
+	res, err := tx.ExecContext(ctx, `UPDATE mail_identities SET smtp_account_id = ?, imap_account_id = ?, sent_mailbox_id = ?, drafts_mailbox_id = ?, archive_mailbox_id = ?, display_name = ?, signature = ?, autocrypt_enabled = ?, is_primary = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		in.SMTPAccountID, in.IMAPAccountID, in.SentMailboxID, in.DraftsMailboxID, in.ArchiveMailboxID, display, signature, boolInt(in.AutocryptEnabled), boolInt(in.IsPrimary), nowUnix(), userID, current.ID)
 	if err != nil {
 		return rollback()
 	}
@@ -378,7 +384,11 @@ func (s *Store) ensurePrimaryMailIdentity(ctx context.Context, userID int64) err
 // user's current account roles. It is safe to run during startup migrations and after
 // onboarding because it only fills empty IMAP/Sent/Drafts choices.
 func (s *Store) EnsureMailIdentityMailboxDefaults(ctx context.Context, userID int64) error {
-	identities, err := s.listMailIdentitiesForUserNoSync(ctx, userID)
+	// This also runs as a post-migration step for a schema version older than
+	// some of the columns mail_identities has today, so it reads exactly the
+	// columns it fills in rather than the shared select, which would break the
+	// upgrade path every time the table grows.
+	identities, err := s.listIdentityMailboxDefaultRows(ctx, userID)
 	if err != nil {
 		return err
 	}
@@ -404,6 +414,27 @@ func (s *Store) EnsureMailIdentityMailboxDefaults(ctx context.Context, userID in
 		}
 	}
 	return nil
+}
+
+// listIdentityMailboxDefaultRows reads the narrow identity shape the mailbox
+// default backfill works on. Keeping it separate from mailIdentitySelectSQL is
+// what lets an old migration's post step keep running against today's code.
+func (s *Store) listIdentityMailboxDefaultRows(ctx context.Context, userID int64) ([]MailIdentity, error) {
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT id, email, smtp_account_id, imap_account_id, sent_mailbox_id, drafts_mailbox_id
+		FROM mail_identities WHERE user_id = ? ORDER BY id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MailIdentity
+	for rows.Next() {
+		var item MailIdentity
+		if err := rows.Scan(&item.ID, &item.Email, &item.SMTPAccountID, &item.IMAPAccountID, &item.SentMailboxID, &item.DraftsMailboxID); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) listMailIdentitiesForUserNoSync(ctx context.Context, userID int64) ([]MailIdentity, error) {
@@ -515,15 +546,37 @@ func (s *Store) validateIdentityMailboxRole(ctx context.Context, userID, mailbox
 	return nil
 }
 
+// validateIdentityArchiveMailbox checks an identity's Archive destination.
+// Archive has no mailbox role of its own, so instead of matching a role this
+// rejects the folders that already mean something else, matching the choices
+// the settings UI offers.
+func (s *Store) validateIdentityArchiveMailbox(ctx context.Context, userID, mailboxID, imapAccountID int64) error {
+	if mailboxID == 0 {
+		return nil
+	}
+	mailbox, err := s.GetMailboxForUser(ctx, userID, mailboxID)
+	if err != nil {
+		return err
+	}
+	switch normalizeMailboxRole(mailbox.Role) {
+	case "inbox", "sent", "drafts", "trash", "junk":
+		return ErrNotFound
+	}
+	if imapAccountID > 0 && mailbox.AccountID != imapAccountID {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func mailIdentitySelectSQL() string {
-	return `SELECT id, user_id, contact_id, contact_email_id, smtp_account_id, imap_account_id, sent_mailbox_id, drafts_mailbox_id, email, display_name, signature, autocrypt_enabled, is_primary, created_at, updated_at FROM mail_identities`
+	return `SELECT id, user_id, contact_id, contact_email_id, smtp_account_id, imap_account_id, sent_mailbox_id, drafts_mailbox_id, archive_mailbox_id, email, display_name, signature, autocrypt_enabled, is_primary, created_at, updated_at FROM mail_identities`
 }
 
 func scanMailIdentity(row rowScanner) (MailIdentity, error) {
 	var ident MailIdentity
 	var autocryptEnabled, primary int
 	var created, updated int64
-	err := row.Scan(&ident.ID, &ident.UserID, &ident.ContactID, &ident.ContactEmailID, &ident.SMTPAccountID, &ident.IMAPAccountID, &ident.SentMailboxID, &ident.DraftsMailboxID, &ident.Email, &ident.DisplayName, &ident.Signature, &autocryptEnabled, &primary, &created, &updated)
+	err := row.Scan(&ident.ID, &ident.UserID, &ident.ContactID, &ident.ContactEmailID, &ident.SMTPAccountID, &ident.IMAPAccountID, &ident.SentMailboxID, &ident.DraftsMailboxID, &ident.ArchiveMailboxID, &ident.Email, &ident.DisplayName, &ident.Signature, &autocryptEnabled, &primary, &created, &updated)
 	ident.AutocryptEnabled = autocryptEnabled != 0
 	ident.IsPrimary = primary != 0
 	ident.CreatedAt = unixTime(created)

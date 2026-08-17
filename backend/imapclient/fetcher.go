@@ -32,6 +32,28 @@ const (
 	idleCycleDuration         = 29 * time.Minute
 	idleStopGrace             = 5 * time.Second
 	defaultIMAPCommandTimeout = 60 * time.Second
+	defaultFetchBatchSize     = 10
+	// defaultFetchBatchBytes bounds the raw bodies one fetch batch may hold.
+	// Message count alone does not: ten ordinary mails are a megabyte, ten mails
+	// carrying video attachments are gigabytes, and the sync path holds a whole
+	// batch until its last message has been stored so the IMAP command deadline
+	// cannot expire while messages are being written.
+	defaultFetchBatchBytes = 16 * 1024 * 1024
+	// uidSizeProbeWindow bounds one metadata probe. It covers many more UIDs than
+	// a body batch can hold, because the probe transfers a few dozen bytes per
+	// message and one extra command per two hundred is not worth saving. The
+	// window also bounds the size map the probe returns, which is why a
+	// contiguous run that would encode as a single short range is split anyway.
+	uidSizeProbeWindow = 200
+	// maxUIDProbeCommandBytes bounds the encoded UID set instead of counting
+	// UIDs, because that is what RFC 2683 advises keeping short. A contiguous
+	// window collapses into one range and never approaches it; a sparse repair
+	// set of seven-digit UIDs would, so it is split until it fits.
+	maxUIDProbeCommandBytes = 800
+	// assumedMessageBytes stands in for a size the server did not report. It is
+	// the batch budget divided by the default batch size, so an unhelpful server
+	// simply gets the count-based batching this fetcher has always used.
+	assumedMessageBytes = defaultFetchBatchBytes / defaultFetchBatchSize
 )
 
 var errIdleStopTimeout = errors.New("IDLE session did not stop cleanly")
@@ -41,6 +63,10 @@ type Fetcher struct {
 	MasterKey []byte
 	Timeout   time.Duration
 	BatchSize uint32
+	// BatchBytes caps the raw bodies one batch may hold. Zero selects
+	// defaultFetchBatchBytes; a batch always fetches at least one message, so a
+	// message larger than this is fetched on its own rather than skipped.
+	BatchBytes int64
 	// Tokens mints Google access tokens for accounts that authenticate with
 	// OAuth. It is an interface rather than the manager itself so this package
 	// stays independent of the OAuth implementation and can be tested without
@@ -581,6 +607,13 @@ func (f *Fetcher) FetchUIDs(ctx context.Context, account store.MailAccount, mail
 	return f.fetchUIDs(ctx, c, mailbox, uids, handle)
 }
 
+// fetchUIDs downloads bodies in batches that respect both a message count and a
+// byte budget. The whole batch stays in memory until its last message has been
+// stored, deliberately: handing messages over while the UID FETCH is still open
+// would put storage, MIME parsing, and Bleve commits back inside the IMAP
+// command deadline. Planning the batch in bytes is what keeps that decision
+// affordable, so a folder with large attachments no longer decides how much
+// memory a sync turn needs.
 func (f *Fetcher) fetchUIDs(ctx context.Context, c *client.Client, mailbox string, uids []uint32, handle func(syncer.FetchedMessage) error) error {
 	uids = normalizeUIDList(uids)
 	if len(uids) == 0 {
@@ -589,77 +622,215 @@ func (f *Fetcher) fetchUIDs(ctx context.Context, c *client.Client, mailbox strin
 	if handle == nil {
 		return errors.New("fetch UIDs requires a message handler")
 	}
-	batchSize := f.BatchSize
-	if batchSize == 0 {
-		batchSize = 10
-	}
+	batchSize := f.batchSize()
 	section := rawBodySection()
 	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchFlags, section.FetchItem()}
-	for i := 0; i < len(uids); i += int(batchSize) {
+	probeUnavailable := false
+	for _, window := range uidProbeWindows(uids, batchSize) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		end := i + int(batchSize)
-		if end > len(uids) {
-			end = len(uids)
-		}
-		requested := uids[i:end]
-		seqset := new(imap.SeqSet)
-		seqset.AddNum(requested...)
-		messages := make(chan *imap.Message, 20)
-		done := make(chan error, 1)
-		go func() {
-			done <- guardedUIDFetch(ctx, c, seqset, items, messages)
-		}()
-		fetched := make([]syncer.FetchedMessage, 0, len(requested))
-		var readErr error
-		for msg := range messages {
-			if msg == nil {
-				continue
+		var sizes map[uint32]int64
+		if !probeUnavailable {
+			probed, err := probeUIDSizes(ctx, c, mailbox, window, batchSize)
+			switch {
+			case err == nil:
+				sizes = probed
+			case ctx.Err() != nil:
+				return err
+			default:
+				// A server that will not answer a metadata probe still gets its
+				// bodies. Planning by message count is what this fetcher did
+				// before it planned by bytes, so the fetch continues rather than
+				// failing the whole folder over a command the sync only wanted in
+				// order to size its batches.
+				probeUnavailable = true
+				log.Printf("fetch mailbox %q plans batches by message count: %v", mailbox, err)
 			}
-			body := msg.GetBody(section)
-			if body == nil {
-				continue
+		}
+		for _, requested := range planUIDFetchBatches(window, sizes, batchSize, f.batchBytes()) {
+			if err := f.fetchUIDBatch(ctx, c, mailbox, requested, section, items, handle); err != nil {
+				return err
 			}
-			raw, err := io.ReadAll(body)
-			if err != nil {
-				if readErr == nil {
-					readErr = fmt.Errorf("read message body mailbox %q UID %d: %w", mailbox, msg.Uid, err)
-				}
-				continue
+		}
+	}
+	return nil
+}
+
+func (f *Fetcher) batchSize() int {
+	if f != nil && f.BatchSize > 0 {
+		return int(f.BatchSize)
+	}
+	return defaultFetchBatchSize
+}
+
+func (f *Fetcher) batchBytes() int64 {
+	if f != nil && f.BatchBytes > 0 {
+		return f.BatchBytes
+	}
+	return defaultFetchBatchBytes
+}
+
+// uidProbeWindows splits a UID list into the spans one size probe covers, by UID
+// count and by the length of the command that carries them. A fetcher that
+// already downloads one message at a time has nothing to plan, so it keeps the
+// whole list as a single window and skips the probe entirely.
+func uidProbeWindows(uids []uint32, batchSize int) [][]uint32 {
+	if batchSize <= 1 || len(uids) <= 1 {
+		return [][]uint32{uids}
+	}
+	windows := make([][]uint32, 0, (len(uids)+uidSizeProbeWindow-1)/uidSizeProbeWindow)
+	for start := 0; start < len(uids); {
+		end := min(start+uidSizeProbeWindow, len(uids))
+		for end-start > 1 && encodedUIDSetBytes(uids[start:end]) > maxUIDProbeCommandBytes {
+			end = start + (end-start)/2
+		}
+		windows = append(windows, uids[start:end])
+		start = end
+	}
+	return windows
+}
+
+// encodedUIDSetBytes measures the set as the server will receive it, so ranges
+// are counted as ranges rather than as the UIDs they stand for.
+func encodedUIDSetBytes(uids []uint32) int {
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uids...)
+	return len(seqset.String())
+}
+
+// probeUIDSizes reads RFC822.SIZE for one window. The size of a message arrives
+// with the body it is supposed to bound, so the only way to plan a body fetch by
+// bytes is to ask for the sizes first; the answer is a few dozen bytes per
+// message. A server that omits a size leaves that message out of the map and
+// gets the count-based batching this fetcher has always used.
+func probeUIDSizes(ctx context.Context, c *client.Client, mailbox string, uids []uint32, batchSize int) (map[uint32]int64, error) {
+	if batchSize <= 1 || len(uids) <= 1 {
+		return nil, nil
+	}
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uids...)
+	messages := make(chan *imap.Message, 64)
+	done := make(chan error, 1)
+	go func() {
+		done <- guardedUIDFetch(ctx, c, seqset, []imap.FetchItem{imap.FetchUid, imap.FetchRFC822Size}, messages)
+	}()
+	sizes := make(map[uint32]int64, len(uids))
+	for msg := range messages {
+		if msg == nil || msg.Uid == 0 || msg.Size == 0 {
+			continue
+		}
+		sizes[msg.Uid] = int64(msg.Size)
+	}
+	if err := <-done; err != nil {
+		return nil, fmt.Errorf("fetch mailbox %q UID size batch %s: %w", mailbox, describeBatch(uids), err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return sizes, nil
+}
+
+// planUIDFetchBatches groups UIDs into batches that stay inside both budgets. A
+// message larger than the byte budget on its own still gets fetched, in a batch
+// of its own: it cannot be made smaller, but it must not arrive alongside
+// anything else.
+func planUIDFetchBatches(uids []uint32, sizes map[uint32]int64, maxMessages int, maxBytes int64) [][]uint32 {
+	if len(uids) == 0 {
+		return nil
+	}
+	if maxMessages < 1 {
+		maxMessages = 1
+	}
+	batches := make([][]uint32, 0, (len(uids)+maxMessages-1)/maxMessages)
+	start := 0
+	batchBytes := int64(0)
+	for i, uid := range uids {
+		size := int64(assumedMessageBytes)
+		if known, ok := sizes[uid]; ok && known > 0 {
+			size = known
+		}
+		if i > start && (i-start >= maxMessages || (maxBytes > 0 && batchBytes+size > maxBytes)) {
+			batches = append(batches, uids[start:i])
+			start = i
+			batchBytes = 0
+		}
+		batchBytes += size
+	}
+	return append(batches, uids[start:])
+}
+
+func (f *Fetcher) fetchUIDBatch(ctx context.Context, c *client.Client, mailbox string, requested []uint32,
+	section *imap.BodySectionName, items []imap.FetchItem, handle func(syncer.FetchedMessage) error,
+) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(requested...)
+	// The buffer never needs to outgrow the batch, and sizing it to the batch is
+	// what makes the byte budget a real bound: a larger buffer would let the
+	// server queue bodies from beyond the batch that was planned.
+	messages := make(chan *imap.Message, min(len(requested), 20))
+	done := make(chan error, 1)
+	go func() {
+		done <- guardedUIDFetch(ctx, c, seqset, items, messages)
+	}()
+	fetched := make([]syncer.FetchedMessage, 0, len(requested))
+	var readErr error
+	for msg := range messages {
+		if msg == nil {
+			continue
+		}
+		body := msg.GetBody(section)
+		if body == nil {
+			continue
+		}
+		raw, err := io.ReadAll(body)
+		if err != nil {
+			if readErr == nil {
+				readErr = fmt.Errorf("read message body mailbox %q UID %d: %w", mailbox, msg.Uid, err)
 			}
-			fetched = append(fetched, syncer.FetchedMessage{
-				Mailbox:      mailbox,
-				UID:          msg.Uid,
-				InternalDate: msg.InternalDate,
-				Size:         int64(msg.Size),
-				Flags:        msg.Flags,
-				Raw:          raw,
-			})
+			continue
 		}
-		if err := <-done; err != nil {
-			return fmt.Errorf("fetch mailbox %q UID batch %s: %w", mailbox, describeBatch(requested), err)
-		}
-		if readErr != nil {
-			return readErr
-		}
+		fetched = append(fetched, syncer.FetchedMessage{
+			Mailbox:      mailbox,
+			UID:          msg.Uid,
+			InternalDate: msg.InternalDate,
+			Size:         int64(msg.Size),
+			Flags:        msg.Flags,
+			Raw:          raw,
+		})
+	}
+	if err := <-done; err != nil {
+		return fmt.Errorf("fetch mailbox %q UID batch %s: %w", mailbox, describeBatch(requested), err)
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ordered, err := orderFetchedUIDBatch(requested, fetched)
+	if err != nil {
+		return fmt.Errorf("fetch mailbox %q UID batch %s: %w", mailbox, describeBatch(requested), err)
+	}
+	fetched = nil
+	for i := range ordered {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		ordered, err := orderFetchedUIDBatch(requested, fetched)
-		if err != nil {
-			return fmt.Errorf("fetch mailbox %q UID batch %s: %w", mailbox, describeBatch(requested), err)
+		if err := handle(ordered[i]); err != nil {
+			return fmt.Errorf("store message mailbox %q UID %d: %w", mailbox, ordered[i].UID, err)
 		}
-		for _, message := range ordered {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := handle(message); err != nil {
-				return fmt.Errorf("store message mailbox %q UID %d: %w", mailbox, message.UID, err)
-			}
-		}
+		// Drop each body as soon as it is stored. Holding the whole batch until
+		// the last message has been parsed and indexed keeps the largest mails in
+		// the folder resident for the entire batch.
+		ordered[i].Raw = nil
 	}
 	return nil
 }

@@ -25,17 +25,20 @@ export type SwipeAction = "trash" | "archive" | "snooze" | "mark_read" | "mark_u
 
 export type SwipeSnoozePreset = "later_today" | "tomorrow" | "next_week";
 
-export type SwipeArchiveMailbox = {
+/** AccountMailboxChoice is one account's pick for a folder role the app assigns. */
+export type AccountMailboxChoice = {
   account_id: number;
   mailbox_id: number;
 };
+
+export type SwipeArchiveMailbox = AccountMailboxChoice;
 
 export type SwipePreferences = {
   left_action: SwipeAction;
   left_snooze_preset: SwipeSnoozePreset;
   right_action: SwipeAction;
   right_snooze_preset: SwipeSnoozePreset;
-  archive_mailboxes: SwipeArchiveMailbox[];
+  archive_mailboxes: AccountMailboxChoice[];
 };
 
 /** Mailbox mirrors a folder summary row including sync, visibility, and indexing counters. */
@@ -507,9 +510,16 @@ export type Bootstrap = {
   mailboxes: Mailbox[];
   latest_sync_run?: SyncRun | null;
   active_sync_runs?: SyncRun[];
+  /** The newest move that ended leaving messages behind, if there is one. */
+  unfinished_move_run?: SyncRun | null;
   sync_running?: boolean;
   mail_generation?: number;
   swipe_preferences?: SwipePreferences;
+  /**
+   * The folder the Archive action files into per account, after an identity's
+   * own choice has overridden the stored swipe mapping.
+   */
+  effective_archive_mailboxes?: AccountMailboxChoice[];
   account_needs_password?: boolean;
   account_notice?: string;
   database_unavailable?: boolean;
@@ -537,9 +547,11 @@ export type ChromeEvent = {
   mailboxes: Mailbox[];
   latest_sync_run: SyncRun | null;
   active_sync_runs: SyncRun[];
+  unfinished_move_run?: SyncRun | null;
   sync_running: boolean;
   mail_generation: number;
   swipe_preferences?: SwipePreferences;
+  effective_archive_mailboxes?: AccountMailboxChoice[];
   server_started_at?: string;
   server_uptime_seconds?: number;
   build_version?: string;
@@ -661,6 +673,7 @@ export type MailIdentity = {
   imap_account_id: number;
   sent_mailbox_id: number;
   drafts_mailbox_id: number;
+  archive_mailbox_id: number;
   email: string;
   display_name: string;
   signature: string;
@@ -747,4 +760,11 @@ export type DatabaseOverview = {
   backup_dir: string;
   job?: DatabaseMaintenanceJob | null;
   restart_supported: boolean;
+};
+
+/** ServerLogLine is one captured line of the process log tail. */
+export type ServerLogLine = {
+  time: string;
+  message: string;
+  error: boolean;
 };

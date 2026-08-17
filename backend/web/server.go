@@ -163,7 +163,11 @@ type viewData struct {
 	Mailboxes      []store.MailboxSummary
 	LatestSyncRun  *store.SyncRun
 	ActiveSyncRuns []store.SyncRun
-	SyncRunning    bool
+	// UnfinishedMoveRun is the newest move that ended leaving messages behind,
+	// reported separately because it cannot be recovered from LatestSyncRun: a
+	// finished move immediately queues the mailbox refresh that supersedes it.
+	UnfinishedMoveRun *store.SyncRun
+	SyncRunning       bool
 }
 
 type threadMessageView struct {
@@ -787,9 +791,34 @@ func (s *Server) loadMailboxChrome(ctx context.Context, userID int64, data *view
 			}
 		}
 	}
+	// Looked up on its own rather than picked out of the bounded feed above: a
+	// busy account produces more than that feed holds within the day this notice
+	// covers, and the run would silently drop out of it.
+	if run, err := s.store.LatestSyncRunWithMarkerForUser(ctx, userID, syncer.MoveSyncRunMarker); err == nil {
+		data.UnfinishedMoveRun = unfinishedMoveRun(run)
+	}
 	if s.syncRunner != nil {
 		data.SyncRunning = s.syncRunner.IsRunning(userID)
 	}
+}
+
+// unfinishedMoveRunMaxAge bounds how long a move that left messages behind keeps
+// reporting itself. The messages really are still there, but an indefinite notice
+// for a delete the user has long since dealt with is just noise.
+const unfinishedMoveRunMaxAge = 24 * time.Hour
+
+// unfinishedMoveRun decides whether the newest move is worth telling the user
+// about. A move still running reports itself through the ordinary progress
+// display, and a newest move that succeeded means nothing is outstanding.
+func unfinishedMoveRun(run store.SyncRun) *store.SyncRun {
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	if status == "running" || status == "ok" {
+		return nil
+	}
+	if strings.TrimSpace(run.Error) == "" || time.Since(run.UpdatedAt) > unfinishedMoveRunMaxAge {
+		return nil
+	}
+	return &run
 }
 
 func (s *Server) maybeRefreshMailboxStatuses(userID int64, boxes []store.MailboxSummary) {

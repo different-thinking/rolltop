@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -175,6 +176,29 @@ func (s *Store) GetSyncRunForUser(ctx context.Context, userID, id int64) (SyncRu
 		FROM sync_runs WHERE user_id = ? AND id = ?`, userID, id).
 		Scan(&r.ID, &r.UserID, &r.AccountID, &r.Status, &started, &finished, &updated,
 			&r.MessagesSeen, &r.MessagesStored, &r.MessagesSkipped, &r.NewMessages, &r.LatestNewFrom, &r.LatestNewSubject, &r.LatestNewMessageID, &r.MessagesTotal, &r.MailboxesDone, &r.MailboxesTotal, &r.CurrentMailbox, &r.CurrentUID, &r.Error)
+	r.StartedAt = unixTime(started)
+	r.FinishedAt = unixTime(finished)
+	r.UpdatedAt = unixTime(updated)
+	return r, err
+}
+
+// LatestSyncRunWithMarkerForUser returns the newest run whose LatestNewFrom is
+// the given marker, regardless of how much other activity has happened since.
+// The recent-activity feed is bounded and collapsed, so a run that has to be
+// found reliably cannot be looked up there. Returns ErrNotFound when the user
+// has no such run.
+func (s *Store) LatestSyncRunWithMarkerForUser(ctx context.Context, userID int64, marker string) (SyncRun, error) {
+	var r SyncRun
+	var started, finished, updated int64
+	err := s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT id, user_id, account_id, status, started_at, finished_at, updated_at,
+			messages_seen, messages_stored, messages_skipped, new_messages, latest_new_from, latest_new_subject, latest_new_message_id, messages_total, mailboxes_done, mailboxes_total, current_mailbox, current_uid, error
+		FROM sync_runs WHERE user_id = ? AND latest_new_from = ?
+		ORDER BY updated_at DESC, id DESC LIMIT 1`, userID, marker).
+		Scan(&r.ID, &r.UserID, &r.AccountID, &r.Status, &started, &finished, &updated,
+			&r.MessagesSeen, &r.MessagesStored, &r.MessagesSkipped, &r.NewMessages, &r.LatestNewFrom, &r.LatestNewSubject, &r.LatestNewMessageID, &r.MessagesTotal, &r.MailboxesDone, &r.MailboxesTotal, &r.CurrentMailbox, &r.CurrentUID, &r.Error)
+	if err == sql.ErrNoRows {
+		return SyncRun{}, ErrNotFound
+	}
 	r.StartedAt = unixTime(started)
 	r.FinishedAt = unixTime(finished)
 	r.UpdatedAt = unixTime(updated)

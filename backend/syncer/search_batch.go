@@ -16,6 +16,13 @@ const (
 	// Larger batches reduced commit count but performed worse on real mailboxes,
 	// where document projection and Bleve segment merges were less responsive.
 	explicitSearchRepairBatchSize = 25
+	// fetchedSearchIndexBatchBytes caps what a batch may hold while it waits for
+	// its commit. The document count alone does not bound memory: a folder with
+	// large messages fills twenty-five documents with tens of megabytes of body
+	// and attachment text, and a first sync that keeps hitting that is what makes
+	// the process grow until it is killed mid-write. Documents are bounded to the
+	// indexable limits on the way in, so this is a real ceiling and not a guess.
+	fetchedSearchIndexBatchBytes uint64 = 8 * 1024 * 1024
 )
 
 // pendingFetchedSearchIndex carries a Bleve document plus the metadata flag
@@ -35,7 +42,9 @@ type pendingFetchedSearchIndex struct {
 type fetchedSearchIndexBatch struct {
 	service  *Service
 	maxItems int
+	maxBytes uint64
 	items    []pendingFetchedSearchIndex
+	bytes    uint64
 }
 
 type messageImportCompletionBatch struct {
@@ -52,7 +61,10 @@ func newFetchedSearchIndexBatchWithSize(service *Service, maxItems int) *fetched
 	if maxItems <= 0 {
 		maxItems = fetchedSearchIndexBatchSize
 	}
-	return &fetchedSearchIndexBatch{service: service, maxItems: maxItems}
+	// Every caller shares one payload budget: the smaller checkpoint sizes exist
+	// to bound how much work a cancelled maintenance pass discards, which is a
+	// different question from how much memory a batch may hold.
+	return &fetchedSearchIndexBatch{service: service, maxItems: maxItems, maxBytes: fetchedSearchIndexBatchBytes}
 }
 
 func newMessageImportCompletionBatch(service *Service, userID int64) *messageImportCompletionBatch {
@@ -81,14 +93,24 @@ func (b *messageImportCompletionBatch) Flush(ctx context.Context) error {
 	return nil
 }
 
-// Add queues one prepared message and flushes when the batch reaches the
-// configured size. Nil entries represent mailboxes that are not search-visible.
+// Add queues one prepared message and flushes when the batch reaches its
+// document count or its retained payload budget, whichever comes first. Nil
+// entries represent mailboxes that are not search-visible.
+//
+// The document is trimmed to the indexable limits before it is queued. Nothing
+// that could reach Bleve is discarded by that; what is discarded is the part of
+// a large body or attachment extraction that the projection would drop at commit
+// time anyway, after the batch had already carried it.
 func (b *fetchedSearchIndexBatch) Add(ctx context.Context, item *pendingFetchedSearchIndex) error {
 	if item == nil {
 		return nil
 	}
-	b.items = append(b.items, *item)
-	if len(b.items) < b.maxItems {
+	queued := *item
+	bounded, bytes := search.BoundIndexDocument(queued.Document)
+	queued.Document = bounded
+	b.items = append(b.items, queued)
+	b.bytes += bytes
+	if len(b.items) < b.maxItems && b.bytes < b.maxBytes {
 		return nil
 	}
 	return b.Flush(ctx)
@@ -160,6 +182,10 @@ func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 			}
 		}
 	}
+	// Release the committed payload instead of parking it in the backing array
+	// until the next twenty-five messages overwrite it entry by entry.
+	clear(b.items)
 	b.items = b.items[:0]
+	b.bytes = 0
 	return nil
 }

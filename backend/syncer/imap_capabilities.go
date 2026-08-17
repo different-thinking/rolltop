@@ -105,6 +105,21 @@ type MoveReceiptFetcher interface {
 	MoveMessageWithReceipt(ctx context.Context, account store.MailAccount, sourceMailbox string, destMailbox string, uid uint32, expectedSourceUIDValidity uint32) (*MoveReceipt, error)
 }
 
+// MoveSession performs several moves within one account over one held
+// connection. Implementations are bound to their account at open time, so the
+// caller no longer names it per move. Methods must be called sequentially.
+type MoveSession interface {
+	MoveMessageWithReceipt(ctx context.Context, sourceMailbox string, destMailbox string, uid uint32, expectedSourceUIDValidity uint32) (*MoveReceipt, error)
+	Close() error
+}
+
+// MoveSessionFetcher is an optional Fetcher capability that lets a batch of
+// moves share one login instead of reconnecting for every message. A fetcher
+// without it still works: moves fall back to connecting per message.
+type MoveSessionFetcher interface {
+	OpenMoveSession(ctx context.Context, account store.MailAccount) (MoveSession, error)
+}
+
 // UIDExistenceFetcher is an optional Fetcher capability for bounded checks of
 // a single UID in a mailbox.
 type UIDExistenceFetcher interface {
