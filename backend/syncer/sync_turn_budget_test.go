@@ -378,6 +378,95 @@ func TestBoundedTurnThatMirrorsNothingStillReportsFailure(t *testing.T) {
 	}
 }
 
+func TestPausedFolderEarnsLongerTurnsAndGivesThemBackWhenItCatchesUp(t *testing.T) {
+	runner := &Runner{mailboxTurnBudgets: map[string]time.Duration{}}
+	keys := accountMailboxKeys(1, 1, []string{"INBOX"})
+
+	if got := runner.mailboxTurnTimeout(keys, liveInboxSyncTurnTimeout); got != liveInboxSyncTurnTimeout {
+		t.Fatalf("first turn timeout=%s, want the freshness budget %s", got, liveInboxSyncTurnTimeout)
+	}
+	// Each pause doubles the next turn so a backfill stops paying for a fresh plan
+	// every 90 seconds, and the growth stops at the ceiling.
+	timeout := liveInboxSyncTurnTimeout
+	for i := 0; i < 8; i++ {
+		runner.escalateMailboxTurnBudget(keys, timeout)
+		next := runner.mailboxTurnTimeout(keys, liveInboxSyncTurnTimeout)
+		if next <= timeout && next != maxMailboxSyncTurnTimeout {
+			t.Fatalf("turn %d timeout=%s did not grow past %s", i, next, timeout)
+		}
+		if next > maxMailboxSyncTurnTimeout {
+			t.Fatalf("turn %d timeout=%s exceeded the ceiling %s", i, next, maxMailboxSyncTurnTimeout)
+		}
+		timeout = next
+	}
+	if timeout != maxMailboxSyncTurnTimeout {
+		t.Fatalf("escalated timeout settled at %s, want the ceiling %s", timeout, maxMailboxSyncTurnTimeout)
+	}
+
+	runner.clearMailboxTurnBudget(keys)
+	if got := runner.mailboxTurnTimeout(keys, liveInboxSyncTurnTimeout); got != liveInboxSyncTurnTimeout {
+		t.Fatalf("timeout after a completed turn=%s, want the freshness budget %s", got, liveInboxSyncTurnTimeout)
+	}
+	if len(runner.mailboxTurnBudgets) != 0 {
+		t.Fatalf("completed folder left %d earned budgets behind", len(runner.mailboxTurnBudgets))
+	}
+}
+
+func TestBackfillTurnsGrowUntilTheFolderIsMirrored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, mailbox := createRunnerMailboxFixture(t, ctx, db, "growing-turns@example.test")
+	const remoteCount = 6
+	if err := db.UpdateMailboxRemoteStatus(ctx, user.ID, mailbox.ID, 0, 0, remoteCount+1, 7); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := newBackfillFetcher(remoteCount)
+	fetcher.stopAfter = 2
+	runner := NewRunnerWithContext(ctx, &Service{Store: db, Blobs: blob.New(t.TempDir()), Fetcher: fetcher})
+	runner.liveInboxSyncTimeout = time.Minute
+
+	if !runner.StartAccountMailboxes(user.ID, account.ID, []string{mailbox.Name}) {
+		t.Fatal("Inbox sync did not start")
+	}
+	key := accountMailboxKey(user.ID, account.ID, mailbox.Name)
+	var peak time.Duration
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		runner.mu.Lock()
+		if earned := runner.mailboxTurnBudgets[key]; earned > peak {
+			peak = earned
+		}
+		runner.mu.Unlock()
+		stored, err := db.CountMessagesForMailbox(ctx, user.ID, mailbox.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored == remoteCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("growing backfill stalled after %d of %d messages", stored, remoteCount)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	waitForRunnerUserIdle(t, runner, user.ID)
+
+	if peak <= time.Minute {
+		t.Fatalf("paused backfill turns never grew past the freshness budget: peak=%s", peak)
+	}
+	runner.mu.Lock()
+	earned := runner.mailboxTurnBudgets[key]
+	runner.mu.Unlock()
+	if earned != 0 {
+		t.Fatalf("mirrored folder kept an earned turn budget of %s", earned)
+	}
+}
+
 func TestWithSyncTurnBudgetKeepsMostOfTheTurnForFetching(t *testing.T) {
 	if ctx := withSyncTurnBudget(context.Background()); syncTurnBudgeted(ctx) {
 		t.Fatal("a context without a deadline was given a turn budget")

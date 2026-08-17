@@ -1449,6 +1449,10 @@ func TestForegroundOperationPreemptsAutoPlanningWaitingOnAttachmentWorker(t *tes
 		}
 		foregroundStarted <- finish
 	}()
+	// The barrier is installed together with the preemption that cancels auto
+	// planning. Releasing the attachment worker before it exists lets planning
+	// resume and reach local state first, which is not what this test measures.
+	waitForForegroundBarrier(t, r, user.ID)
 	releaseAttachment()
 	var finish func()
 	select {
@@ -2281,6 +2285,23 @@ func installBlockedAttachmentWorker(r *Runner, userID int64) (<-chan struct{}, f
 		close(done)
 	}()
 	return canceled, func() { close(release) }
+}
+
+func waitForForegroundBarrier(t *testing.T, r *Runner, userID int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		held := r.foregroundRunning[userID] > 0
+		r.mu.Unlock()
+		if held {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreground operation did not install its barrier")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func waitForRunnerUserIdle(t *testing.T, r *Runner, userID int64) {

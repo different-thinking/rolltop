@@ -1821,7 +1821,7 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgb(0 0 0 / 45%);
+  background: var(--scrim);
 }
 
 .database-confirm-panel {

@@ -24,6 +24,14 @@ const liveInboxSyncTurnTimeout = 90 * time.Second
 // account-wide pass (and its visible sync run) alive forever; the next
 // scheduled pass resumes from the durable UID checkpoint.
 const ordinaryMailboxSyncTurnTimeout = 3 * time.Minute
+
+// A first mirror of a large folder needs many turns, and every turn pays for its
+// own plan: STATUS, a remote UID listing, and the local UID set. A folder that
+// has already paused on its budget therefore earns a longer next turn, doubling
+// up to this ceiling, so the time goes into fetching bodies instead of
+// replanning. The ceiling keeps one folder from owning the account pass, and the
+// budget drops back to the freshness timeout as soon as a turn finishes cleanly.
+const maxMailboxSyncTurnTimeout = 10 * time.Minute
 const senderStatsRefreshTimeout = 2 * time.Minute
 
 // Attachment indexing is derived, replayable work. Most stages honor cancellation,
@@ -52,6 +60,7 @@ type Runner struct {
 	workActivities             map[string]runnerWorkActivity
 	mailboxPending             map[string]bool
 	accountMailboxPending      map[string]bool
+	mailboxTurnBudgets         map[string]time.Duration
 	foregroundRunning          map[int64]int
 	foregroundDone             map[int64]chan struct{}
 	foregroundDeferredAuto     map[int64]bool
@@ -122,6 +131,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		workActivities:             map[string]runnerWorkActivity{},
 		mailboxPending:             map[string]bool{},
 		accountMailboxPending:      map[string]bool{},
+		mailboxTurnBudgets:         map[string]time.Duration{},
 		foregroundRunning:          map[int64]int{},
 		foregroundDone:             map[int64]chan struct{}{},
 		foregroundDeferredAuto:     map[int64]bool{},
@@ -916,6 +926,54 @@ func (r *Runner) markPending(userID int64, mailboxes []string) {
 	}
 }
 
+// mailboxTurnTimeout applies the escalated budget a folder earned by pausing on
+// an earlier turn. A folder that keeps up with its freshness timeout never has
+// an entry and keeps the short turn.
+func (r *Runner) mailboxTurnTimeout(keys []string, base time.Duration) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	timeout := base
+	for _, key := range keys {
+		if earned := r.mailboxTurnBudgets[key]; earned > timeout {
+			timeout = earned
+		}
+	}
+	return timeout
+}
+
+// escalateMailboxTurnBudget doubles the next turn for a folder that mirrored
+// what it could and still had history left, up to maxMailboxSyncTurnTimeout.
+func (r *Runner) escalateMailboxTurnBudget(keys []string, spent time.Duration) {
+	if spent <= 0 {
+		return
+	}
+	next := spent * 2
+	if next > maxMailboxSyncTurnTimeout {
+		next = maxMailboxSyncTurnTimeout
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.mailboxTurnBudgets == nil {
+		r.mailboxTurnBudgets = map[string]time.Duration{}
+	}
+	for _, key := range keys {
+		if next > r.mailboxTurnBudgets[key] {
+			r.mailboxTurnBudgets[key] = next
+		}
+	}
+}
+
+// clearMailboxTurnBudget returns a folder to its freshness timeout once a turn
+// ends without asking for more time, which also keeps the map from retaining
+// folders that are done.
+func (r *Runner) clearMailboxTurnBudget(keys []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, key := range keys {
+		delete(r.mailboxTurnBudgets, key)
+	}
+}
+
 func (r *Runner) markAccountMailboxesPending(userID, accountID int64, mailboxes []string) {
 	keys := accountMailboxKeys(userID, accountID, mailboxes)
 	r.mu.Lock()
@@ -1037,6 +1095,7 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 			timeout = liveInboxSyncTurnTimeout
 		}
 	}
+	timeout = r.mailboxTurnTimeout(keys, timeout)
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1057,12 +1116,15 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 		onRunFinished:    r.unregisterSyncRunControl,
 	}); err != nil {
 		if errors.Is(err, ErrSyncTurnPaused) {
-			// The folder still has remote history to mirror. Queue the follow-up
-			// turn through the reservation this job is about to release so a large
-			// backfill continues immediately instead of waiting for the next poll.
+			// The folder still has remote history to mirror. Give the follow-up turn
+			// more time and queue it through the reservation this job is about to
+			// release, so a large backfill continues immediately instead of waiting
+			// for the next poll.
+			r.escalateMailboxTurnBudget(keys, timeout)
 			r.markPending(userID, mailboxes)
 			return nil
 		}
+		r.clearMailboxTurnBudget(keys)
 		// A corrupt tenant database fails every mailbox in the same way, so the
 		// log has to name the file and the repair command rather than repeat a
 		// bare driver message once per sync turn.
@@ -1070,6 +1132,7 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 		log.Printf("sync user_id=%d mailboxes=%s: %v", userID, strings.Join(mailboxes, ","), err)
 		return err
 	}
+	r.clearMailboxTurnBudget(keys)
 	return nil
 }
 
@@ -1101,6 +1164,7 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 			timeout = liveInboxSyncTurnTimeout
 		}
 	}
+	timeout = r.mailboxTurnTimeout(keys, timeout)
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1128,13 +1192,16 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 		if errors.Is(err, ErrSyncTurnPaused) {
 			// Resume this account's folder right after the reservation is released
 			// instead of reporting a failure: the UID checkpoint is durable and a
-			// large backfill needs many bounded turns.
+			// large backfill needs many bounded turns, each longer than the last.
+			r.escalateMailboxTurnBudget(keys, timeout)
 			r.markAccountMailboxesPending(userID, accountID, mailboxes)
 			return nil
 		}
+		r.clearMailboxTurnBudget(keys)
 		log.Printf("sync user_id=%d account_id=%d mailboxes=%s: %v", userID, accountID, strings.Join(mailboxes, ","), err)
 		return err
 	}
+	r.clearMailboxTurnBudget(keys)
 	return nil
 }
 
