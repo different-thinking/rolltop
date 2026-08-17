@@ -32,9 +32,16 @@ function decodePathSegment(value = ""): string {
  * MailView names a whole-account list. All Mail is the unnamed default; the
  * others live under /mail/<view> and never combine with a single mailbox.
  */
-export type MailView = "" | "unarchived" | "sent" | "drafts";
+export type MailView = "" | "inbox" | "sent" | "drafts";
 
-const mailViews: MailView[] = ["unarchived", "sent", "drafts"];
+const mailViews: MailView[] = ["inbox", "sent", "drafts"];
+
+/**
+ * legacyMailViews keeps older URLs working. The Inbox list shipped as
+ * /mail/unarchived, so bookmarks, the installed app's cached shell, and open
+ * tabs still name it that way.
+ */
+const legacyMailViews: Record<string, MailView> = { unarchived: "inbox" };
 
 /** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
 export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {
@@ -43,7 +50,9 @@ export function mailRoute(path: string): { mailboxID: string | null; page: numbe
     const id = positiveInt(parts[1], 0);
     return { mailboxID: id > 0 ? String(id) : null, page: positiveInt(parts[2], 1), view: "" };
   }
-  const named = mailViews.find((view) => parts[0] === "mail" && parts[1] === view);
+  const named = parts[0] === "mail"
+    ? mailViews.find((view) => parts[1] === view) || legacyMailViews[parts[1] || ""]
+    : undefined;
   if (named) return { mailboxID: null, page: positiveInt(parts[2], 1), view: named };
   return { mailboxID: null, page: parts[0] === "mail" ? positiveInt(parts[1], 1) : 1, view: "" };
 }

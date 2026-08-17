@@ -15,6 +15,7 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/syncer"
 )
 
 type scopeTestTenant struct {
@@ -56,6 +57,11 @@ func newScopeTestTenant(t *testing.T, ctx context.Context, db *store.Store, emai
 
 func createScopeTestMessage(t *testing.T, ctx context.Context, db *store.Store, tenant scopeTestTenant, mailbox store.Mailbox, uid uint32, subject string) store.MessageRecord {
 	t.Helper()
+	return createScopeTestMessageDated(t, ctx, db, tenant, mailbox, uid, subject, time.Now().UTC())
+}
+
+func createScopeTestMessageDated(t *testing.T, ctx context.Context, db *store.Store, tenant scopeTestTenant, mailbox store.Mailbox, uid uint32, subject string, date time.Time) store.MessageRecord {
+	t.Helper()
 	if subject == "" {
 		subject = fmt.Sprintf("Scope %d", uid)
 	}
@@ -70,7 +76,7 @@ func createScopeTestMessage(t *testing.T, ctx context.Context, db *store.Store, 
 	message, err := db.CreateMessage(ctx, store.CreateMessage{
 		UserID: tenant.user.ID, AccountID: tenant.accountID, MailboxID: mailbox.ID, BlobID: blob.ID,
 		FromAddr: "sender@example.test", Subject: subject,
-		Date: time.Now().UTC(), InternalDate: time.Now().UTC(), UID: uid, BlobPath: blob.Path,
+		Date: date, InternalDate: date, UID: uid, BlobPath: blob.Path,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +84,7 @@ func createScopeTestMessage(t *testing.T, ctx context.Context, db *store.Store, 
 	return message
 }
 
-func planMessageIDs(plan scopeTrashPlan) []int64 {
+func planMessageIDs(plan scopeMovePlan) []int64 {
 	ids := make([]int64, 0, 8)
 	for _, group := range plan.Groups {
 		ids = append(ids, group.MessageIDs...)
@@ -170,7 +176,7 @@ func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
 
 	// The Unarchived list's whole-view delete must never reach archived mail.
-	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: mailViewUnarchived})
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: mailViewInbox})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +384,7 @@ func TestScopeTrashPlanGroupsPerAccount(t *testing.T) {
 		t.Fatalf("groups ordered %d then %d, want ascending account IDs",
 			plan.Groups[0].AccountID, plan.Groups[1].AccountID)
 	}
-	byAccount := map[int64]scopeTrashGroup{}
+	byAccount := map[int64]scopeMoveGroup{}
 	for _, group := range plan.Groups {
 		byAccount[group.AccountID] = group
 	}
@@ -410,7 +416,7 @@ func TestScopeTrashPlanReportsTruncation(t *testing.T) {
 	}
 	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
 
-	overFetched, err := db.ListAllMailScopeMessagesForUser(ctx, tenant.user.ID, 4)
+	overFetched, err := db.ListAllMailScopeMessagesForUser(ctx, tenant.user.ID, store.ScopeFilter{}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,8 +505,8 @@ func TestScopeTrashRequiresTrashMailbox(t *testing.T) {
 	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
 
 	_, err = server.scopeTrashPlan(ctx, user, scopeSelection{})
-	var missingTrash missingTrashMailboxError
-	if !errors.As(err, &missingTrash) {
+	var missingTrash missingScopeTargetError
+	if !errors.As(err, &missingTrash) || missingTrash.folder != "Trash" {
 		t.Fatalf("error = %v, want a missing trash mailbox error", err)
 	}
 
@@ -529,5 +535,129 @@ func TestScopeTrashRejectsNonPost(t *testing.T) {
 	server.apiScopeTrashMessages(res, req)
 	if res.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", res.Code)
+	}
+}
+
+func TestScopeArchivePlanMovesOnlyMailOlderThanTheCutoff(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-archive@example.test")
+	archive, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, store.SwipePreferences{
+		UserID:     tenant.user.ID,
+		LeftAction: store.SwipeActionSnooze, LeftSnoozePreset: store.SwipeSnoozeTomorrow,
+		RightAction: store.SwipeActionMarkRead, RightSnoozePreset: store.SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []store.SwipeArchiveMailbox{{AccountID: tenant.accountID, MailboxID: archive.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC)
+	old := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 901, "Old", cutoff.Add(-72*time.Hour))
+	// A message stamped on the cutoff day is not older than it, so it stays.
+	sameDay := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 902, "Same day", cutoff.Add(6*time.Hour))
+	recent := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 903, "Recent", cutoff.Add(90*24*time.Hour))
+	alreadyArchived := createScopeTestMessageDated(t, ctx, db, tenant, archive, 904, "Archived", cutoff.Add(-96*time.Hour))
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeArchivePlan(ctx, tenant.user, scopeSelection{Filter: store.ScopeFilter{Before: cutoff}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Groups) != 1 {
+		t.Fatalf("groups = %d, want one account group", len(plan.Groups))
+	}
+	if plan.Groups[0].Target.ID != archive.ID {
+		t.Fatalf("target mailbox = %d, want the archive folder %d", plan.Groups[0].Target.ID, archive.ID)
+	}
+	ids := planMessageIDs(plan)
+	if len(ids) != 1 || ids[0] != old.ID {
+		t.Fatalf("planned ids = %v, want only the message older than the cutoff %d", ids, old.ID)
+	}
+	if slices.Contains(ids, sameDay.ID) || slices.Contains(ids, recent.ID) {
+		t.Fatalf("planned ids = %v, must leave mail from the cutoff day onwards alone", ids)
+	}
+	if slices.Contains(ids, alreadyArchived.ID) {
+		t.Fatalf("planned ids = %v, must not move already archived mail %d", ids, alreadyArchived.ID)
+	}
+	if plan.Skipped != 1 {
+		t.Fatalf("skipped = %d, want the message already in Archive", plan.Skipped)
+	}
+}
+
+func TestScopeArchivePlanReportsAccountsWithoutAnArchiveFolder(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-archive-missing@example.test")
+	cutoff := time.Now().UTC()
+	createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 911, "Old", cutoff.Add(-72*time.Hour))
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	_, err = server.scopeArchivePlan(ctx, tenant.user, scopeSelection{Filter: store.ScopeFilter{Before: cutoff}})
+	var missingTarget missingScopeTargetError
+	if !errors.As(err, &missingTarget) {
+		t.Fatalf("error = %v, want a missing archive folder error", err)
+	}
+	if missingTarget.folder != "Archive" {
+		t.Fatalf("missing folder = %q, want Archive", missingTarget.folder)
+	}
+}
+
+func TestScopeArchiveRequestRequiresACutoff(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-archive-cutoff@example.test")
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012"), syncer: &syncer.Service{}}
+
+	payload, err := json.Marshal(map[string]any{"scope_mailbox_id": 0, "scope_query": "", "before": ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/scope-archive", bytes.NewReader(payload))
+	req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: tenant.user}))
+	csrfBase := "scope-archive-csrf"
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfBase})
+	req.Header.Set("X-CSRF-Token", server.csrfForBase(csrfBase))
+	res := httptest.NewRecorder()
+	server.apiScopeArchiveMessages(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an archive without a cutoff", res.Code)
+	}
+}
+
+func TestParseScopeCutoffKeepsTheNamedDay(t *testing.T) {
+	day, err := parseScopeCutoff("2024-03-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !day.Equal(time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("cutoff = %s, want the start of 1 March 2024 UTC", day)
+	}
+	moment, err := parseScopeCutoff("2024-03-01T12:30:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !moment.Equal(time.Date(2024, time.March, 1, 12, 30, 0, 0, time.UTC)) {
+		t.Fatalf("cutoff = %s, want the exact timestamp", moment)
+	}
+	if empty, err := parseScopeCutoff("  "); err != nil || !empty.IsZero() {
+		t.Fatalf("empty cutoff = %s, %v, want the zero time and no error", empty, err)
+	}
+	if _, err := parseScopeCutoff("last tuesday"); err == nil {
+		t.Fatal("unparsable cutoff was accepted")
 	}
 }

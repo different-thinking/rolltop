@@ -475,6 +475,23 @@ The web app is installable as a limited offline PWA. It caches the shell and a b
 
 All Mail and every folder list can be sorted by date in either direction from the list header. The choice is stored per user in the browser and follows the reader from folder to folder; flipping it returns to the first page because the paging window is rebuilt from the other end. Mail lists support selection with batch read/unread and snooze actions plus `j`, `k`, and `x` keyboard navigation; `/` focuses search and thread shortcuts cover reply, reply-all, forward, and return-to-list. Hovering or keyboard-focusing a row on a pointer device reveals per-row Reply, Archive, Move to trash, Mark read/unread, and Snooze buttons that run the same undoable mutations as the selection toolbar. The conversation header repeats those commands as a small toolbar — Reply, Reply all, Forward, Archive, Move to trash, Mark unread, and Report spam. The three moves are held behind the same undo toast as the row actions and cover the messages of the open conversation that share its folder, so a thread's Sent or Trash copies stay put; Mark unread instead reaches the whole thread, because opening it is what marked the whole thread read. Report spam moves the conversation into the account's Junk folder, which is also what teaches the optional spam filter. Android left/right row swipes are independently configurable for Trash, account-specific Archive folders, recurring snooze times, Mark read, or Mark unread. Compose keeps a bounded, per-user browser recovery copy, supports reusable local templates, and merges saved contacts with recent tenant-scoped correspondents. Recovery never serializes attachment bodies. Thread views show explicitly source-labeled authentication results and conservative sender/link cautions.
 
+The sidebar leads with `Inbox`: All Mail minus each account's chosen Archive
+folder, so it is everything that has not been filed away yet, across every
+account. All Mail sits below it and still shows the lot. Both are whole-account
+lists rather than the `INBOX` folder of one account, which keeps its own entry
+under Folders. The older `/mail/unarchived` address still resolves to `Inbox`.
+
+Two list-header actions work on a whole list rather than on selected rows.
+`Archive older` moves everything the current list holds that is dated before a
+chosen day into each account's Archive folder — the day itself is kept, the
+cutoff is applied in SQL rather than after the fact, and a very large backlog is
+archived in repeated passes that say how much they covered. `Empty Trash`
+appears only on a folder carrying the Trash role and is the one place rolltop
+deletes mail on the server instead of moving it: the folder is listed live,
+flagged `\Deleted`, and expunged under a proven `UIDVALIDITY`, so mail the
+mirror never downloaded goes too, and local rows, blobs, and search documents
+are removed only for the UIDs the server confirms are gone.
+
 rolltop uses IMAP `IDLE` for INBOX wakeups when the server supports it and keeps the scheduled INBOX poll as a fallback. Remote deletes and moves are reconciled after folder syncs by comparing local UIDs with the server's current UID set.
 
 ## License And Contributions

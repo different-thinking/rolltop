@@ -132,12 +132,12 @@ export type MailListResponse = {
 };
 
 /**
- * ScopeTrashResponse reports what a whole-filter delete resolved server-side.
+ * ScopeMoveResponse reports what a whole-filter move resolved server-side.
  * `matched` counts the messages the filter selected, `skipped` those already in
- * their account's Trash, and `truncated` says the filter has more matches than
- * one pass moves, so another pass is needed to finish it.
+ * the folder they would move to, and `truncated` says the filter has more
+ * matches than one pass moves, so another pass is needed to finish it.
  */
-export type ScopeTrashResponse = {
+export type ScopeMoveResponse = {
   ok: boolean;
   queued: boolean;
   matched: number;
@@ -147,6 +147,9 @@ export type ScopeTrashResponse = {
   runs: { run_id: number; account_id: number; mailbox: string; messages: number }[];
   partial_error?: string;
 };
+
+/** ScopeTrashResponse is the whole-filter delete's shape, unchanged from a move. */
+export type ScopeTrashResponse = ScopeMoveResponse;
 
 export type MessageSnooze = {
   id: number;

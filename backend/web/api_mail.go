@@ -18,11 +18,16 @@ import (
 type mailView string
 
 const (
-	mailViewAll        mailView = ""
-	mailViewUnarchived mailView = "unarchived"
-	mailViewSent       mailView = "sent"
-	mailViewDrafts     mailView = "drafts"
+	mailViewAll    mailView = ""
+	mailViewInbox  mailView = "inbox"
+	mailViewSent   mailView = "sent"
+	mailViewDrafts mailView = "drafts"
 )
+
+// mailViewLegacyNames maps names older clients still send onto the view they
+// now belong to. The Inbox list shipped as "unarchived", and a cached app shell
+// or an open tab keeps asking for it under that name after an upgrade.
+var mailViewLegacyNames = map[string]mailView{"unarchived": mailViewInbox}
 
 // role maps the views that are simply "every folder carrying this role" onto
 // that role. An empty result means the view is built some other way.
@@ -41,8 +46,12 @@ func (v mailView) role() string {
 // a list this server can render: an unknown name is a request for a view that
 // does not exist rather than a silent fall back to All Mail.
 func parseMailView(raw string) (mailView, bool) {
-	switch view := mailView(strings.ToLower(strings.TrimSpace(raw))); view {
-	case mailViewAll, mailViewUnarchived, mailViewSent, mailViewDrafts:
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if legacy, ok := mailViewLegacyNames[name]; ok {
+		return legacy, true
+	}
+	switch view := mailView(name); view {
+	case mailViewAll, mailViewInbox, mailViewSent, mailViewDrafts:
 		return view, true
 	default:
 		return mailViewAll, false
@@ -152,7 +161,7 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		switch role := view.role(); {
 		case role != "":
 			messages, err = s.store.ListRoleLatestThreadMessagesForUser(ctx, user.ID, role, fetchLimit, offset, order)
-		case view == mailViewUnarchived:
+		case view == mailViewInbox:
 			messages, err = s.store.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		default:
 			messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)

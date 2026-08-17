@@ -143,7 +143,7 @@ func authenticatedSwipePreferencesRequest(t *testing.T, server *Server, user sto
 	return request
 }
 
-// The Archive mapping decides what the Unarchived list leaves out, so saving it
+// The Archive mapping decides what the Inbox list leaves out, so saving it
 // has to retire that list's cached pages. Without this the browser keeps
 // revalidating to 304 and shows the pre-change rows until unrelated mail
 // activity happens to bump the generation.

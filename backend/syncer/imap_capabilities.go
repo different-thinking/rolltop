@@ -141,6 +141,15 @@ type BatchUIDValidityExistenceFetcher interface {
 	ExistingUIDsWithValidity(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32) (existingUIDs []uint32, uidValidity uint32, err error)
 }
 
+// ExpungeFetcher is the one capability that deletes mail on the server instead
+// of moving it. It exists for emptying a Trash folder: the messages are named
+// by UID under a proven UIDVALIDITY, and the returned list is the UIDs the
+// server no longer has, so local rows are only dropped for mail that is really
+// gone. Nothing else in sync may use it.
+type ExpungeFetcher interface {
+	ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+}
+
 // MailboxUIDSnapshot binds a mailbox UID listing to UIDVALIDITY and UIDNEXT from
 // the same read-only SELECT. UIDNext is an exclusive upper bound: local rows at
 // or above it may have been inserted after the UID search and cannot be reconciled.

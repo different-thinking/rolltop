@@ -533,14 +533,14 @@ func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 		t.Fatalf("all mail rows = %d, the Archive folder must stay in All Mail", len(all))
 	}
 
-	scope, err := db.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, 100)
+	scope, err := db.ListUnarchivedMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(scope) != 1 || scope[0].ID != kept.ID {
 		t.Fatalf("unarchived scope = %+v, want only the inbox message %d", scope, kept.ID)
 	}
-	allScope, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, 100)
+	allScope, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestRoleViewsSpanAccountsAndStayTenantScoped(t *testing.T) {
 	if len(got) != 2 || !slices.Contains(got, first.ID) || !slices.Contains(got, second.ID) {
 		t.Fatalf("sent rows = %v, want both accounts: %d and %d", got, first.ID, second.ID)
 	}
-	scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, "sent", 100)
+	scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, "sent", ScopeFilter{}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +793,7 @@ func TestRoleViewsReadTheFoldersCarryingThatRole(t *testing.T) {
 				t.Fatalf("%s rows = %v, want only %d; the inbox message was %d",
 					tt.role, messageIDsOf(messages), tt.want, received.ID)
 			}
-			scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, tt.role, 100)
+			scope, err := db.ListRoleMailScopeMessagesForUser(ctx, user.ID, tt.role, ScopeFilter{}, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2298,4 +2298,66 @@ func testMailbox(t *testing.T, ctx context.Context, db *Store) (User, MailAccoun
 		t.Fatal(err)
 	}
 	return user, account, mailbox, blob
+}
+
+// A scope with a cutoff must resolve old mail even when the newest messages
+// alone would fill the caller's limit: the cutoff runs in SQL, not in a pass
+// over rows that a newest-first limit already threw the old ones out of.
+func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	cutoff := time.Unix(1700000000, 0).UTC()
+	oldest, err := db.CreateMessage(ctx, CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: inbox.ID, BlobID: blob.ID,
+		MessageIDHeader: "<cutoff-old@example.test>", Subject: "Old",
+		Date: cutoff.Add(-48 * time.Hour), UID: 1, BlobPath: blob.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, offset := range []time.Duration{time.Hour, 24 * time.Hour, 72 * time.Hour} {
+		if _, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: inbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<cutoff-new-%d@example.test>", i), Subject: "New",
+			Date: cutoff.Add(offset), UID: uint32(10 + i), BlobPath: blob.Path,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filter := ScopeFilter{Before: cutoff}
+
+	for _, tt := range []struct {
+		name string
+		list func() ([]ScopeMessage, error)
+	}{
+		{"all mail", func() ([]ScopeMessage, error) {
+			return db.ListAllMailScopeMessagesForUser(ctx, user.ID, filter, 1)
+		}},
+		{"mailbox", func() ([]ScopeMessage, error) {
+			return db.ListMailboxScopeMessagesForUser(ctx, user.ID, inbox.ID, filter, 1)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scope, err := tt.list()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scope) != 1 || scope[0].ID != oldest.ID {
+				t.Fatalf("scope = %+v, want only the message older than the cutoff %d", scope, oldest.ID)
+			}
+		})
+	}
+
+	unfiltered, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfiltered) != 4 {
+		t.Fatalf("unfiltered scope = %d rows, want every message", len(unfiltered))
+	}
 }

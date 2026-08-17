@@ -39,6 +39,64 @@
   }
 }
 
+// List-header maintenance actions (archive by date, empty trash) sit beside the
+// sort toggle and read as quiet controls until they are hovered.
+.list-head-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: none;
+
+  .icon {
+    width: 15px;
+    height: 15px;
+  }
+
+  &:hover:not(:disabled) {
+    color: var(--accent-strong);
+  }
+
+  &.destructive:hover:not(:disabled) {
+    color: var(--danger);
+  }
+}
+
+// The cutoff row of the archive-by-date dialog: presets first, then the exact day.
+.date-cutoff-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+
+  button.active {
+    border-color: var(--accent-strong);
+    color: var(--text);
+  }
+}
+
+.date-cutoff-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 13px;
+
+  input {
+    width: auto;
+    min-width: 150px;
+  }
+}
+
 .mail-cache-warning {
   padding: 7px 14px;
   border-bottom: 1px solid var(--border);
