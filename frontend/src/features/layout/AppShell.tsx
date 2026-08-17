@@ -850,8 +850,9 @@ function Sidebar({
   ].filter(Boolean).join(" · ");
   const listRoute = mailRoute(currentPath);
   const activeMailbox = listRoute.mailboxID;
-  const unarchivedActive = listRoute.unarchived;
-  const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !unarchivedActive;
+  const unarchivedActive = listRoute.view === "unarchived";
+  const sentActive = listRoute.view === "sent";
+  const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
   const snoozedActive = currentPath === "/snoozes";
   const accountGroups = useMemo(() => sidebarAccountGroups(mailboxes), [mailboxes]);
   const advertiseAndroidApp = shouldAdvertiseAndroidApp();
@@ -1067,6 +1068,14 @@ function Sidebar({
           onClick={(event) => open(event, "/mail/unarchived")}
         >
           <span className="folder-name"><Icon name="inbox" weight={unarchivedActive ? "bold" : undefined} />Unarchived</span>
+        </a>
+        <a
+          href="/mail/sent"
+          className={`folder ${sentActive ? "active" : ""}`}
+          title="Sent mail across every account"
+          onClick={(event) => open(event, "/mail/sent")}
+        >
+          <span className="folder-name"><Icon name="send" weight={sentActive ? "bold" : undefined} />Sent</span>
         </a>
     <a
       href="/snoozes"

@@ -21,17 +21,20 @@ type apiUser struct {
 	SearchCompactSplitting bool   `json:"search_compact_splitting"`
 }
 
-type apiSwipeArchiveMailbox struct {
+// apiAccountMailboxChoice is one account's pick for a folder role the app
+// assigns itself, such as its Archive destination or its Sent folder.
+type apiAccountMailboxChoice struct {
 	AccountID int64 `json:"account_id"`
 	MailboxID int64 `json:"mailbox_id"`
 }
 
 type apiSwipePreferences struct {
-	LeftAction        string                   `json:"left_action"`
-	LeftSnoozePreset  string                   `json:"left_snooze_preset"`
-	RightAction       string                   `json:"right_action"`
-	RightSnoozePreset string                   `json:"right_snooze_preset"`
-	ArchiveMailboxes  []apiSwipeArchiveMailbox `json:"archive_mailboxes"`
+	LeftAction        string                    `json:"left_action"`
+	LeftSnoozePreset  string                    `json:"left_snooze_preset"`
+	RightAction       string                    `json:"right_action"`
+	RightSnoozePreset string                    `json:"right_snooze_preset"`
+	ArchiveMailboxes  []apiAccountMailboxChoice `json:"archive_mailboxes"`
+	SentMailboxes     []apiAccountMailboxChoice `json:"sent_mailboxes"`
 }
 
 type apiAuthProvider struct {

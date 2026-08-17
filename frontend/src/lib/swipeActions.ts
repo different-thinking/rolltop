@@ -22,7 +22,8 @@ export function defaultSwipePreferences(): SwipePreferences {
     left_snooze_preset: "tomorrow",
     right_action: "mark_read",
     right_snooze_preset: "tomorrow",
-    archive_mailboxes: []
+    archive_mailboxes: [],
+    sent_mailboxes: []
   };
 }
 

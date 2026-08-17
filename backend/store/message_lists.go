@@ -313,6 +313,81 @@ func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mai
 	return scanScopeMessages(rows)
 }
 
+// SentMailboxIDsForUser resolves the folders the global Sent view reads. An
+// account's explicitly chosen Sent folder wins; an account without a usable
+// choice falls back to the folder sync gave the sent role, so the view is
+// populated before anyone opens settings. A choice whose folder has since taken
+// on another role stops counting and the account falls back with it.
+func (s *Store) SentMailboxIDsForUser(ctx context.Context, userID int64) ([]int64, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT mb.id
+		FROM mailboxes mb
+		LEFT JOIN sent_mailboxes sm ON sm.user_id = mb.user_id AND sm.account_id = mb.account_id
+		LEFT JOIN mailboxes chosen ON chosen.user_id = sm.user_id AND chosen.id = sm.mailbox_id
+			AND chosen.role IN ('sent', '')
+		WHERE mb.user_id = ?
+			AND CASE WHEN chosen.id IS NULL THEN mb.role = 'sent' ELSE mb.id = chosen.id END
+		ORDER BY mb.id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0, 4)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListSentMailScopeMessagesForUser lists what a Sent selection covers, so a
+// whole-view delete from the Sent list reaches exactly the rows it shows.
+func (s *Store) ListSentMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
+	mailboxIDs, err := s.SentMailboxIDsForUser(ctx, userID)
+	if err != nil || len(mailboxIDs) == 0 {
+		return nil, err
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	placeholders, idArgs := int64ListPlaceholders(mailboxIDs)
+	args := make([]any, 0, len(idArgs)+3)
+	args = append(args, userID)
+	args = append(args, idArgs...)
+	args = append(args, nowUnix(), scopeMessageLimit(limit))
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
+		FROM messages m
+		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
+			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
+		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`) AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		ORDER BY m.date_unix DESC, m.id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScopeMessages(rows)
+}
+
+// int64ListPlaceholders renders an IN list for a caller-owned set of IDs. Only
+// values the store itself resolved are ever passed here, never request input.
+func int64ListPlaceholders(values []int64) (string, []any) {
+	marks := make([]string, len(values))
+	args := make([]any, 0, len(values))
+	for i, value := range values {
+		marks[i] = "?"
+		args = append(args, value)
+	}
+	return strings.Join(marks, ","), args
+}
+
 func scanScopeMessages(rows *sql.Rows) ([]ScopeMessage, error) {
 	out := make([]ScopeMessage, 0, 64)
 	for rows.Next() {
@@ -426,6 +501,51 @@ func (s *Store) ListLatestThreadMessagesForMailbox(ctx context.Context, userID, 
 			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
 		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
 		ORDER BY k.latest_key %[1]s`, direction), userID, mailboxID, nowUnix(), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+// ListSentLatestThreadMessagesForUser renders the global Sent view: one row per
+// conversation across every account's Sent folder. Unlike All Mail it ignores
+// show_in_all_mail, because hiding Sent from the combined list is not a reason
+// to empty the list built specifically from it.
+func (s *Store) ListSentLatestThreadMessagesForUser(ctx context.Context, userID int64, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
+	mailboxIDs, err := s.SentMailboxIDsForUser(ctx, userID)
+	if err != nil || len(mailboxIDs) == 0 {
+		return nil, err
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	direction := order.sortDirection()
+	placeholders, idArgs := int64ListPlaceholders(mailboxIDs)
+	args := make([]any, 0, len(idArgs)+4)
+	args = append(args, userID)
+	args = append(args, idArgs...)
+	args = append(args, nowUnix(), limit, offset)
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`WITH keyed AS (
+			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
+				MAX(printf('%%020d:%%020d',
+					CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END,
+					m.id)) AS latest_key
+			FROM messages m
+			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
+				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
+			WHERE m.user_id = ? AND m.mailbox_id IN (%[2]s) AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+			GROUP BY thread_group
+			ORDER BY latest_key %[1]s LIMIT ? OFFSET ?
+		)
+		SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
+			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
+		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
+		ORDER BY k.latest_key %[1]s`, direction, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}

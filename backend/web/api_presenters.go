@@ -37,9 +37,13 @@ func safeUser(user store.User) apiUser {
 }
 
 func apiSwipePreferencesFromStore(preferences store.SwipePreferences) apiSwipePreferences {
-	archiveMailboxes := make([]apiSwipeArchiveMailbox, 0, len(preferences.ArchiveMailboxes))
+	archiveMailboxes := make([]apiAccountMailboxChoice, 0, len(preferences.ArchiveMailboxes))
 	for _, mailbox := range preferences.ArchiveMailboxes {
-		archiveMailboxes = append(archiveMailboxes, apiSwipeArchiveMailbox{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
+		archiveMailboxes = append(archiveMailboxes, apiAccountMailboxChoice{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
+	}
+	sentMailboxes := make([]apiAccountMailboxChoice, 0, len(preferences.SentMailboxes))
+	for _, mailbox := range preferences.SentMailboxes {
+		sentMailboxes = append(sentMailboxes, apiAccountMailboxChoice{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
 	}
 	return apiSwipePreferences{
 		LeftAction:        preferences.LeftAction,
@@ -47,6 +51,7 @@ func apiSwipePreferencesFromStore(preferences store.SwipePreferences) apiSwipePr
 		RightAction:       preferences.RightAction,
 		RightSnoozePreset: preferences.RightSnoozePreset,
 		ArchiveMailboxes:  archiveMailboxes,
+		SentMailboxes:     sentMailboxes,
 	}
 }
 

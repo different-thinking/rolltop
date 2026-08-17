@@ -28,24 +28,31 @@ function decodePathSegment(value = ""): string {
   }
 }
 
-/** Parse /mail, /mail/pN, /mail/unarchived(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
-export function mailRoute(path: string): { mailboxID: string | null; page: number; unarchived: boolean } {
+/**
+ * MailView names a whole-account list. All Mail is the unnamed default; the
+ * others live under /mail/<view> and never combine with a single mailbox.
+ */
+export type MailView = "" | "unarchived" | "sent";
+
+const mailViews: MailView[] = ["unarchived", "sent"];
+
+/** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
+export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "mailbox") {
     const id = positiveInt(parts[1], 0);
-    return { mailboxID: id > 0 ? String(id) : null, page: positiveInt(parts[2], 1), unarchived: false };
+    return { mailboxID: id > 0 ? String(id) : null, page: positiveInt(parts[2], 1), view: "" };
   }
-  if (parts[0] === "mail" && parts[1] === "unarchived") {
-    return { mailboxID: null, page: positiveInt(parts[2], 1), unarchived: true };
-  }
-  return { mailboxID: null, page: parts[0] === "mail" ? positiveInt(parts[1], 1) : 1, unarchived: false };
+  const named = mailViews.find((view) => parts[0] === "mail" && parts[1] === view);
+  if (named) return { mailboxID: null, page: positiveInt(parts[2], 1), view: named };
+  return { mailboxID: null, page: parts[0] === "mail" ? positiveInt(parts[1], 1) : 1, view: "" };
 }
 
-/** mailURL builds the friendly mailbox/all-mail/unarchived list URL for a page. */
-export function mailURL(mailboxID: string | number | null, page = 1, unarchived = false): string {
+/** mailURL builds the friendly mailbox or whole-account list URL for a page. */
+export function mailURL(mailboxID: string | number | null, page = 1, view: MailView = ""): string {
   const suffix = page > 1 ? `/p${page}` : "";
   if (mailboxID) return `/mailbox/${mailboxID}${suffix}`;
-  return unarchived ? `/mail/unarchived${suffix}` : `/mail${suffix}`;
+  return view ? `/mail/${view}${suffix}` : `/mail${suffix}`;
 }
 
 /** Parse /search/q/:query/pN slugs into search state. */

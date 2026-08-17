@@ -549,6 +549,103 @@ func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 	}
 }
 
+func TestSentViewFallsBackToRoleAndHonorsExplicitChoice(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	detected, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detected.Role != "sent" {
+		t.Fatalf("Sent mailbox role = %q, want sent", detected.Role)
+	}
+	custom, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Gesendete Elemente")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1700000000, 0)
+	create := func(mailbox Mailbox, uid uint32, subject string) MessageRecord {
+		t.Helper()
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<sent-%d@example.test>", uid), Subject: subject,
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	inboxMessage := create(inbox, 1, "Received")
+	detectedMessage := create(detected, 2, "Sent from detected folder")
+	customMessage := create(custom, 3, "Sent from custom folder")
+
+	// No explicit choice: the folder sync recognized as Sent carries the view.
+	fallback, err := db.ListSentLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallback) != 1 || fallback[0].ID != detectedMessage.ID {
+		t.Fatalf("fallback sent rows = %v, want only %d; inbox message was %d",
+			messageIDsOf(fallback), detectedMessage.ID, inboxMessage.ID)
+	}
+
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: custom.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit choice replaces the detected folder rather than adding to it.
+	chosen, err := db.ListSentLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chosen) != 1 || chosen[0].ID != customMessage.ID {
+		t.Fatalf("chosen sent rows = %v, want only %d", messageIDsOf(chosen), customMessage.ID)
+	}
+	scope, err := db.ListSentMailScopeMessagesForUser(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].ID != customMessage.ID {
+		t.Fatalf("sent scope = %+v, want only %d", scope, customMessage.ID)
+	}
+
+	// The saved choice round-trips, and the Sent folder stays a legal pick.
+	saved, err := db.GetSwipePreferences(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.SentMailboxes) != 1 || saved.SentMailboxes[0].MailboxID != custom.ID {
+		t.Fatalf("saved sent mailboxes = %+v, want the custom folder %d", saved.SentMailboxes, custom.ID)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: detected.ID}},
+	}); err != nil {
+		t.Fatalf("choosing the detected Sent folder must stay valid: %v", err)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		SentMailboxes: []SentMailbox{{AccountID: account.ID, MailboxID: inbox.ID}},
+	}); !errors.Is(err, ErrInvalidSwipePreferences) {
+		t.Fatalf("choosing the Inbox as Sent = %v, want ErrInvalidSwipePreferences", err)
+	}
+}
+
 func messageIDsOf(messages []MessageRecord) []int64 {
 	ids := make([]int64, 0, len(messages))
 	for _, msg := range messages {

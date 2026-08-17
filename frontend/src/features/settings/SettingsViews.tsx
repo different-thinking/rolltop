@@ -11,7 +11,7 @@ import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm } from "../../lib/accountForm";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
-import { folderParentNames, folderTree, isArchiveMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
+import { folderParentNames, folderTree, isArchiveMailboxChoice, isSentMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
 import { systemThemeID } from "../../lib/theme";
@@ -530,7 +530,8 @@ const dateLocaleChoices = [
 function cloneSwipePreferences(preferences: SwipePreferences): SwipePreferences {
   return {
     ...preferences,
-    archive_mailboxes: preferences.archive_mailboxes.map((mailbox) => ({ ...mailbox }))
+    archive_mailboxes: preferences.archive_mailboxes.map((mailbox) => ({ ...mailbox })),
+    sent_mailboxes: (preferences.sent_mailboxes || []).map((mailbox) => ({ ...mailbox }))
   };
 }
 
@@ -1276,6 +1277,11 @@ export function SettingsView({
         accountIDs.has(item.account_id) && mailboxes.some((mailbox) =>
           mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isArchiveMailboxChoice(mailbox)
         )
+      ),
+      sent_mailboxes: swipeDraft.sent_mailboxes.filter((item) =>
+        accountIDs.has(item.account_id) && mailboxes.some((mailbox) =>
+          mailbox.id === item.mailbox_id && mailbox.account_id === item.account_id && isSentMailboxChoice(mailbox)
+        )
       )
     };
     setSavingSwipePreferences(true);
@@ -1919,6 +1925,19 @@ export function SettingsView({
       return !selectedID || !archiveChoices(account.id).some((mailbox) => mailbox.id === selectedID);
     });
     const missingArchiveAccounts = archiveRequired ? accountsMissingArchive : [];
+    // Sent needs no coverage rule: an account without an explicit choice falls
+    // back to its detected Sent folder, and only an account with neither
+    // contributes nothing to the view.
+    const sentByAccount = new Map(swipeDraft.sent_mailboxes.map((item) => [item.account_id, item.mailbox_id]));
+    const sentChoices = (accountID: number) => mailboxes
+      .filter((mailbox) => mailbox.account_id === accountID && isSentMailboxChoice(mailbox))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const accountsMissingSent = imapAccounts.filter((account) => {
+      const choices = sentChoices(account.id);
+      const selectedID = sentByAccount.get(account.id);
+      if (selectedID && choices.some((mailbox) => mailbox.id === selectedID)) return false;
+      return !choices.some((mailbox) => mailbox.role === "sent");
+    });
 
     function updateArchiveMailbox(accountID: number, mailboxID: number) {
       swipeDraftDirty.current = true;
@@ -1926,6 +1945,19 @@ export function SettingsView({
         ...current,
         archive_mailboxes: [
           ...current.archive_mailboxes.filter((item) => item.account_id !== accountID),
+          ...(mailboxID > 0 ? [{ account_id: accountID, mailbox_id: mailboxID }] : [])
+        ]
+      }));
+    }
+
+    // Clearing the choice is meaningful rather than empty: the account goes back
+    // to whichever folder sync recognized as its Sent folder.
+    function updateSentMailbox(accountID: number, mailboxID: number) {
+      swipeDraftDirty.current = true;
+      setSwipeDraft((current) => ({
+        ...current,
+        sent_mailboxes: [
+          ...current.sent_mailboxes.filter((item) => item.account_id !== accountID),
           ...(mailboxID > 0 ? [{ account_id: accountID, mailbox_id: mailboxID }] : [])
         ]
       }));
@@ -2011,6 +2043,44 @@ export function SettingsView({
                 {archiveRequired
                   ? "Choose an archive folder for every IMAP account."
                   : "Accounts without an archive folder cannot use the Archive action."}
+              </small>
+            ) : null}
+          </section>
+        ) : null}
+        {imapAccounts.length > 0 ? (
+          <section className="swipe-archive-settings">
+            <h3>Sent folders</h3>
+            <p className="swipe-archive-hint">
+              Used by the Sent view in the sidebar. Leave an account on its detected folder unless its sent mail lands somewhere else.
+            </p>
+            <div className="swipe-archive-grid">
+              {imapAccounts.map((account) => {
+                const choices = sentChoices(account.id);
+                const detected = choices.find((mailbox) => mailbox.role === "sent");
+                return (
+                  <label key={account.id}>
+                    <span>{imapAccountLabel(account)}</span>
+                    <select
+                      value={sentByAccount.get(account.id) || 0}
+                      disabled={choices.length === 0}
+                      onChange={(event) => updateSentMailbox(account.id, Number(event.target.value))}
+                    >
+                      <option value={0}>
+                        {choices.length === 0
+                          ? "No eligible folders"
+                          : detected
+                            ? `Detected: ${detected.name}`
+                            : "No detected folder"}
+                      </option>
+                      {choices.map((mailbox) => <option value={mailbox.id} key={mailbox.id}>{mailbox.name}</option>)}
+                    </select>
+                  </label>
+                );
+              })}
+            </div>
+            {accountsMissingSent.length > 0 ? (
+              <small className="swipe-validation">
+                Accounts with neither a detected nor a chosen Sent folder stay out of the Sent view.
               </small>
             ) : null}
           </section>
@@ -2535,7 +2605,7 @@ export function SettingsView({
   } else if (route.kind === "about") {
     page = <SettingsPage title="About Rolltop" description="Software license and source terms." backPath="/settings/account/general" navigate={navigate}>{renderLicenseSettings()}</SettingsPage>;
   } else if (route.kind === "swipes") {
-    page = <SettingsPage title="Swipe actions" description="Choose what left and right swipes do on touch devices, and which folder the Archive action uses." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSwipeSettings()}</SettingsPage>;
+    page = <SettingsPage title="Swipe actions" description="Choose what left and right swipes do on touch devices, and which folders each account uses for Archive and Sent." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSwipeSettings()}</SettingsPage>;
   } else if (route.kind === "search") {
     page = <SettingsPage title="Search tuning" description="Control typo tolerance, ranking, and attachment matching." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSearchSettings()}</SettingsPage>;
   } else if (route.kind === "mail") {
@@ -2587,7 +2657,7 @@ export function SettingsView({
     page = (
       <SettingsPage title="Preferences" description="Message gestures and search behavior." navigate={navigate}>
         <SettingsIndex ariaLabel="Mail preferences">
-          <SettingsIndexRow icon="arrow_back" title="Swipe actions" description="Configure left and right gestures, archive folders, and snooze timing." meta={`Left: ${swipeLabel(swipeDraft.left_action)} · Right: ${swipeLabel(swipeDraft.right_action)}`} path="/settings/account/preferences/swipes" navigate={navigate} />
+          <SettingsIndexRow icon="arrow_back" title="Swipe actions" description="Configure left and right gestures, archive and sent folders, and snooze timing." meta={`Left: ${swipeLabel(swipeDraft.left_action)} · Right: ${swipeLabel(swipeDraft.right_action)}`} path="/settings/account/preferences/swipes" navigate={navigate} />
           <SettingsIndexRow icon="search" title="Search tuning" description="Adjust ranking, typo matching, contacts, and attachment text." meta={profileForm.search_preset || "Balanced"} path="/settings/account/preferences/search" navigate={navigate} />
         </SettingsIndex>
       </SettingsPage>

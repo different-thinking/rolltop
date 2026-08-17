@@ -170,7 +170,7 @@ func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
 
 	// The Unarchived list's whole-view delete must never reach archived mail.
-	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{Unarchived: true})
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: mailViewUnarchived})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +187,33 @@ func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 	allIDs := planMessageIDs(allPlan)
 	if allPlan.Matched != 2 || !slices.Contains(allIDs, archived.ID) {
 		t.Fatalf("all mail plan = matched %d ids %v, want both messages including %d", allPlan.Matched, allIDs, archived.ID)
+	}
+}
+
+func TestScopeTrashPlanSentCoversOnlySentFolders(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-sent@example.test")
+	sent, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := createScopeTestMessage(t, ctx, db, tenant, tenant.inbox, 701, "")
+	sentMessage := createScopeTestMessage(t, ctx, db, tenant, sent, 702, "")
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{View: mailViewSent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	if plan.Matched != 1 || len(ids) != 1 || ids[0] != sentMessage.ID {
+		t.Fatalf("sent plan = matched %d ids %v, want only the sent message %d; inbox message was %d",
+			plan.Matched, ids, sentMessage.ID, received.ID)
 	}
 }
 

@@ -1,7 +1,7 @@
 // File overview: Folder tree helpers. They turn flat mailbox rows into nested sidebar/settings
 // nodes without changing the backend mailbox identifiers.
 
-import type { Mailbox } from "../types";
+import type { AccountMailboxChoice, Mailbox } from "../types";
 
 /** FolderNode is one mailbox plus nested child folders for sidebar/settings tree rendering. */
 export type FolderNode = {
@@ -101,6 +101,34 @@ export function nodeContainsMailbox(node: FolderNode, id: string | null): boolea
  */
 export function isArchiveMailboxChoice(mailbox: Mailbox): boolean {
   return !["inbox", "sent", "drafts", "trash", "junk"].includes(mailbox.role);
+}
+
+/**
+ * isSentMailboxChoice reports whether a mailbox may serve as an account's Sent
+ * folder. The folder sync already recognized as Sent is offered alongside plain
+ * folders, so an account whose sent mail lands somewhere unusual can say so.
+ */
+export function isSentMailboxChoice(mailbox: Mailbox): boolean {
+  return mailbox.role === "sent" || mailbox.role === "";
+}
+
+/**
+ * sentMailboxIDs resolves which folders the global Sent view reads, mirroring
+ * the server: an account's explicit choice wins, and an account without a
+ * usable one falls back to the folder detected as Sent.
+ */
+export function sentMailboxIDs(mailboxes: Mailbox[], choices: AccountMailboxChoice[]): Set<number> {
+  const chosenByAccount = new Map<number, number>();
+  for (const choice of choices) {
+    const mailbox = mailboxes.find((item) => item.id === choice.mailbox_id && item.account_id === choice.account_id);
+    if (mailbox && isSentMailboxChoice(mailbox)) chosenByAccount.set(choice.account_id, mailbox.id);
+  }
+  const ids = new Set<number>();
+  for (const mailbox of mailboxes) {
+    const chosen = chosenByAccount.get(mailbox.account_id);
+    if (chosen === undefined ? mailbox.role === "sent" : mailbox.id === chosen) ids.add(mailbox.id);
+  }
+  return ids;
 }
 
 /** trashMailboxForAccount returns the account's Trash-role mailbox, if one exists. */

@@ -12,9 +12,37 @@ import (
 	"rolltop/backend/store"
 )
 
-// apiMail returns a paged conversation list for All Mail or one mailbox. It asks
-// SQLite for extra rows because conversation grouping can collapse several message
-// rows into one visible thread.
+// mailView names a whole-account list that is not a single folder. All Mail is
+// the default and the others narrow or replace it, so a named view is only
+// meaningful when no mailbox is selected.
+type mailView string
+
+const (
+	mailViewAll        mailView = ""
+	mailViewUnarchived mailView = "unarchived"
+	mailViewSent       mailView = "sent"
+)
+
+// parseMailView resolves a view name. The bool reports whether the value names
+// a list this server can render: an unknown name is a request for a view that
+// does not exist rather than a silent fall back to All Mail.
+func parseMailView(raw string) (mailView, bool) {
+	switch view := mailView(strings.ToLower(strings.TrimSpace(raw))); view {
+	case mailViewAll, mailViewUnarchived, mailViewSent:
+		return view, true
+	default:
+		return mailViewAll, false
+	}
+}
+
+// mailViewFromRequest reads the named view from the URL.
+func mailViewFromRequest(r *http.Request) (mailView, bool) {
+	return parseMailView(r.URL.Query().Get("view"))
+}
+
+// apiMail returns a paged conversation list for All Mail, a named view, or one
+// mailbox. It asks SQLite for extra rows because conversation grouping can
+// collapse several message rows into one visible thread.
 func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -35,24 +63,23 @@ func (s *Server) apiMail(w http.ResponseWriter, r *http.Request) {
 		}
 		mailboxID = id
 	}
-	// The only named view is Unarchived: All Mail without each account's Archive
-	// folder. An unknown view is a URL for a list this server cannot render.
-	view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view")))
-	if view != "" && view != "unarchived" {
+	// A named view describes the whole-account list, so pairing it with a single
+	// mailbox is a contradiction rather than a narrowing.
+	view, viewKnown := mailViewFromRequest(r)
+	if !viewKnown || (view != mailViewAll && mailboxID != 0) {
 		http.NotFound(w, r)
 		return
 	}
-	unarchived := view == "unarchived" && mailboxID == 0
 	order := mailSortFromRequest(r)
-	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page, Sort: mailSortCacheKey(order), Unarchived: unarchived}
-	if mailboxID == 0 && page == 1 && !unarchived && s.writeMailListPageIfFresh(w, r, cacheKey) {
+	cacheKey := mailListCacheKey{UserID: cu.User.ID, MailboxID: mailboxID, Page: page, Sort: mailSortCacheKey(order), View: string(view)}
+	if mailboxID == 0 && page == 1 && view == mailViewAll && s.writeMailListPageIfFresh(w, r, cacheKey) {
 		return
 	}
 	if s.writeMailListNotModifiedIfFresh(w, r, cacheKey) {
 		return
 	}
 	generation := s.mailListGeneration(cu.User.ID)
-	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, unarchived, page, order, timing)
+	response, err := s.mailPageResponse(r.Context(), cu.User, mailboxID, view, page, order, timing)
 	if err != nil {
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -89,7 +116,7 @@ func mailSortCacheKey(order store.ThreadListOrder) string {
 	return ""
 }
 
-func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, unarchived bool, page int, order store.ThreadListOrder, timing *searchTiming) (map[string]any, error) {
+func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxID int64, view mailView, page int, order store.ThreadListOrder, timing *searchTiming) (map[string]any, error) {
 	const pageSize = 50
 	offset := (page - 1) * pageSize
 	fetchLimit := pageSize*3 + 1
@@ -108,9 +135,12 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		hydrateDone()
 	} else {
 		hydrateDone := timing.measure(&timing.hydrate)
-		if unarchived {
+		switch view {
+		case mailViewUnarchived:
 			messages, err = s.store.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
-		} else {
+		case mailViewSent:
+			messages, err = s.store.ListSentLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
+		default:
 			messages, err = s.store.ListLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		}
 		hydrateDone()

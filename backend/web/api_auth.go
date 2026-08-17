@@ -170,9 +170,13 @@ func (s *Server) apiSwipePreferences(w http.ResponseWriter, r *http.Request) {
 			RightAction:       in.RightAction,
 			RightSnoozePreset: in.RightSnoozePreset,
 			ArchiveMailboxes:  make([]store.SwipeArchiveMailbox, 0, len(in.ArchiveMailboxes)),
+			SentMailboxes:     make([]store.SentMailbox, 0, len(in.SentMailboxes)),
 		}
 		for _, mailbox := range in.ArchiveMailboxes {
 			preferences.ArchiveMailboxes = append(preferences.ArchiveMailboxes, store.SwipeArchiveMailbox{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
+		}
+		for _, mailbox := range in.SentMailboxes {
+			preferences.SentMailboxes = append(preferences.SentMailboxes, store.SentMailbox{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
 		}
 		saved, err := s.store.SaveSwipePreferences(r.Context(), preferences)
 		if errors.Is(err, store.ErrInvalidSwipePreferences) {
