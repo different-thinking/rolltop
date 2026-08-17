@@ -127,17 +127,24 @@ func (s *Server) apiScopeTrashMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	runs, queued, startErr := s.startTrashPlan(r.Context(), cu.User.ID, plan)
+	s.respondTrashPlan(w, r, cu.User.ID, plan, "delete")
+}
+
+// respondTrashPlan starts a plan and writes the shared Trash response, so every
+// caller reports queued runs, partial starts, and truncation the same way and a
+// change to that contract cannot land in one handler and miss the other. action
+// names the operation in the two error messages.
+func (s *Server) respondTrashPlan(w http.ResponseWriter, r *http.Request, userID int64, plan scopeTrashPlan, action string) {
+	runs, queued, startErr := s.startTrashPlan(r.Context(), userID, plan)
 	if len(runs) == 0 {
-		if errors.Is(startErr, errForegroundBusy) {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the delete", startErr)
-			return
-		}
-		if store.IsNotFound(startErr) {
+		switch {
+		case errors.Is(startErr, errForegroundBusy):
+			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the "+action, startErr)
+		case store.IsNotFound(startErr):
 			http.NotFound(w, r)
-			return
+		default:
+			s.apiError(w, r, http.StatusBadGateway, "could not start the "+action, startErr)
 		}
-		s.apiError(w, r, http.StatusBadGateway, "could not start the delete", startErr)
 		return
 	}
 	response := map[string]any{

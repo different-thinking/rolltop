@@ -128,6 +128,27 @@ func storeDuplicateMessage(t *testing.T, ctx context.Context, db *store.Store, u
 	return message
 }
 
+// waitForDuplicateMoveRun keeps the store open until the move the cleanup queued
+// has finished. StartMoveMessages hands the work to a goroutine and returns, so a
+// test that asserts and exits lets t.Cleanup close the database underneath it.
+func waitForDuplicateMoveRun(t *testing.T, f duplicateWebFixture, runID int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		run, err := f.db.GetSyncRunForUser(f.ctx, f.owner.ID, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != "running" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cleanup run %d did not finish: %+v", runID, run)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func duplicateRequest(t *testing.T, server *Server, user store.User, method, target string) *http.Request {
 	t.Helper()
 	request := httptest.NewRequest(method, target, nil)
@@ -180,6 +201,7 @@ func TestAPIAccountDuplicatesTrashMovesOnlyTheHiddenCopy(t *testing.T) {
 		Queued  bool `json:"queued"`
 		Matched int  `json:"matched"`
 		Runs    []struct {
+			RunID     int64  `json:"run_id"`
 			AccountID int64  `json:"account_id"`
 			Mailbox   string `json:"mailbox"`
 			Messages  int    `json:"messages"`
@@ -195,6 +217,7 @@ func TestAPIAccountDuplicatesTrashMovesOnlyTheHiddenCopy(t *testing.T) {
 		t.Fatalf("cleanup targets account %d folder %q, want %d %q",
 			payload.Runs[0].AccountID, payload.Runs[0].Mailbox, f.aggregateID, f.aggregateTrash.Name)
 	}
+	waitForDuplicateMoveRun(t, f, payload.Runs[0].RunID)
 	addressed, err := f.db.GetMessageForUser(f.ctx, f.owner.ID, f.original.ID)
 	if err != nil {
 		t.Fatal(err)

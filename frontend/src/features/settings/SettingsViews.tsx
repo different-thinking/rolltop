@@ -981,10 +981,13 @@ export function SettingsView({
   }, [load]);
 
   // The duplicate report is its own request: it runs one grouping query the
-  // account payload has no reason to carry, and it is only read on this page.
+  // account payload has no reason to carry, and only the IMAP server page reads
+  // it, so it is fetched when that page opens rather than on every settings
+  // route.
   useEffect(() => {
+    if (route.kind !== "imap" || route.isNew) return;
     void loadDuplicates();
-  }, [loadDuplicates]);
+  }, [loadDuplicates, route.kind, route.isNew]);
 
   useEffect(() => {
     const runningAccountIDs = new Set(folders.filter((folder) => folder.is_running).map((folder) => folder.mailbox.account_id));
@@ -2502,12 +2505,13 @@ export function SettingsView({
     const accounts = duplicates?.accounts || [];
     return (
       <section className="panel">
-        <h2>Duplicate copies</h2>
+        <h2>Duplicate copies (all accounts)</h2>
         <p className="muted">
           An account that collects mail from your other accounts - Gmail fetching POP3 mail, or a
           forward - delivers a second copy of a message the addressed account already holds. Those
           copies are hidden from lists, threads, and unread counts. Moving them to that account's
           Trash stops the server from sending them again; the addressed account's mail is untouched.
+          Both actions below cover every IMAP server on this Rolltop account, not only this one.
         </p>
         {hidden > 0 ? (
           <ul className="duplicate-account-list">

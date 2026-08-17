@@ -565,7 +565,14 @@ func (s *Store) UpdateMailboxSettings(ctx context.Context, userID, mailboxID int
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Role and All Mail visibility are exactly what decides whether a row may
+	// stand in as the original a duplicate hides behind. Moving a folder to Junk
+	// or out of All Mail would otherwise leave its copies hidden behind a row the
+	// reader can no longer reach, until someone happened to run a full rescan.
+	return s.RefreshDuplicateCopiesForMailbox(ctx, userID, mailboxID)
 }
 
 // EffectiveMailboxSyncMode resolves inherit/auto/manual/never for a mailbox under its account defaults.

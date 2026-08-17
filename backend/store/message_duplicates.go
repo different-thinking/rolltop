@@ -24,6 +24,9 @@ const (
 	// groups than this resumes from the returned cursor instead of restarting,
 	// so repeated passes actually finish the mailbox.
 	maxDuplicateScanGroups = 50000
+	// duplicateLookupBatch caps one IN list when hidden copies are looked up by
+	// id, keeping the statement inside SQLite's parameter limit.
+	duplicateLookupBatch = 500
 )
 
 // duplicateHideableRole names the folders a copy may be hidden in. Sent and
@@ -205,6 +208,54 @@ const duplicateCopyColumns = `SELECT m.id, m.account_id, m.mailbox_id, mb.role, 
 	FROM messages m
 	JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id`
 
+// RefreshDuplicateCopiesForMailbox re-resolves every duplicate group one folder
+// takes part in. A folder's role and All Mail visibility decide whether its rows
+// may stand in as the original, so changing either has to reconsider the groups
+// that already leaned on this folder - both the copies hidden here and the
+// copies elsewhere hiding behind a row of this folder.
+func (s *Store) RefreshDuplicateCopiesForMailbox(ctx context.Context, userID, mailboxID int64) error {
+	if userID <= 0 || mailboxID <= 0 {
+		return nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return err
+	}
+	// Only rows already carrying a pointer, in either direction, can be affected:
+	// a folder change never hides mail that detection had not already judged.
+	// That keeps this bounded by the duplicates a tenant has rather than by the
+	// size of the folder.
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT message_id_header FROM messages
+		WHERE user_id = ? AND message_id_header <> '' AND (
+			(mailbox_id = ? AND duplicate_of_message_id <> 0)
+			OR duplicate_of_message_id IN (
+				SELECT id FROM messages WHERE user_id = ? AND mailbox_id = ?))`,
+		userID, mailboxID, userID, mailboxID)
+	if err != nil {
+		return err
+	}
+	headers := make([]string, 0, 16)
+	for rows.Next() {
+		var header string
+		if err := rows.Scan(&header); err != nil {
+			rows.Close()
+			return err
+		}
+		headers = append(headers, header)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, header := range headers {
+		if err := s.RefreshDuplicateCopiesForMessageID(ctx, userID, header); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RefreshDuplicateCopiesForMessageID rescans the copies of one Message-ID. Sync
 // calls it for each stored message, so a copy that arrives after its original is
 // hidden on arrival rather than at the next full scan.
@@ -251,17 +302,11 @@ func (s *Store) applyDuplicatePointers(ctx context.Context, db *sql.DB, userID i
 		current[item.ID] = item.DuplicateOf
 	}
 	pending := make([][2]int64, 0, len(updates))
-	hidden, revealed := 0, 0
 	for id, original := range updates {
 		if current[id] == original {
 			continue
 		}
 		pending = append(pending, [2]int64{id, original})
-		if original == 0 {
-			revealed++
-			continue
-		}
-		hidden++
 	}
 	if len(pending) == 0 {
 		return 0, 0, nil
@@ -271,17 +316,41 @@ func (s *Store) applyDuplicatePointers(ctx context.Context, db *sql.DB, userID i
 		return 0, 0, err
 	}
 	defer tx.Rollback()
+	// The copies were read outside this transaction, so the row chosen as the
+	// original can be deleted in between. Its delete trigger runs before this
+	// pointer exists and would leave nothing to clear it, so the write itself
+	// checks that the target is still there: a hidden copy pointing at a missing
+	// row is the permanent "hid the only copy" failure the design exists to
+	// prevent. Releasing a pointer needs no such check and always applies.
 	stmt, err := tx.PrepareContext(ctx, `UPDATE messages SET duplicate_of_message_id = ?, updated_at = ?
-		WHERE user_id = ? AND id = ?`)
+		WHERE user_id = ? AND id = ?
+			AND (? = 0 OR EXISTS (SELECT 1 FROM messages original
+				WHERE original.user_id = ? AND original.id = ?))`)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer stmt.Close()
 	now := nowUnix()
+	hidden, revealed := 0, 0
 	for _, update := range pending {
-		if _, err := stmt.ExecContext(ctx, update[1], now, userID, update[0]); err != nil {
+		result, err := stmt.ExecContext(ctx, update[1], now, userID, update[0], update[1], userID, update[1])
+		if err != nil {
 			return 0, 0, err
 		}
+		// Counting applied rows rather than planned ones keeps the reported
+		// numbers honest when a target vanished mid-scan.
+		applied, err := result.RowsAffected()
+		if err != nil {
+			return 0, 0, err
+		}
+		if applied == 0 {
+			continue
+		}
+		if update[1] == 0 {
+			revealed++
+			continue
+		}
+		hidden++
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
@@ -498,7 +567,10 @@ func (s *Store) CountHiddenDuplicateCopiesForUser(ctx context.Context, userID in
 // behind an original. Callers that hydrate messages by id use it to apply the
 // same exclusion the list queries apply in SQL.
 func (s *Store) DuplicateCopyIDsForUser(ctx context.Context, userID int64, ids []int64) (map[int64]bool, error) {
-	unique := uniquePositiveIDs(ids, maxMessageSimilarityCandidates)
+	// Every id the caller hydrated has to be answered for. Borrowing the
+	// similarity search's candidate cap here would silently let hidden copies
+	// past the filter once a page of search hits grew beyond it.
+	unique := uniquePositiveIDs(ids, len(ids))
 	if userID <= 0 || len(unique) == 0 {
 		return nil, nil
 	}
@@ -507,8 +579,8 @@ func (s *Store) DuplicateCopyIDsForUser(ctx context.Context, userID int64, ids [
 		return nil, err
 	}
 	out := map[int64]bool{}
-	for start := 0; start < len(unique); start += 500 {
-		end := start + 500
+	for start := 0; start < len(unique); start += duplicateLookupBatch {
+		end := start + duplicateLookupBatch
 		if end > len(unique) {
 			end = len(unique)
 		}

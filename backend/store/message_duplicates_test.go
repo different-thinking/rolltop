@@ -442,3 +442,67 @@ func TestDuplicateScanResumesFromItsCursor(t *testing.T) {
 		t.Fatalf("resumed pass saw %d groups, want only the one past the cursor", resumed.Groups)
 	}
 }
+
+// Role and All Mail visibility decide whether a row may stand in as the
+// original. Taking the addressed account's folder out of All Mail has to release
+// the copies hiding behind it, not wait for someone to run a full rescan.
+func TestChangingAFolderOutOfAllMailReleasesItsHiddenCopies(t *testing.T) {
+	f := newDuplicateFixture(t)
+	const header = "<visibility@partner.test>"
+	f.storeMessage(t, f.original, f.originalInbox, 30, header, "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 30, header, "info@firma.test")
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer == 0 {
+		t.Fatal("expected the fetched copy to start out hidden")
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, f.originalInbox, MailboxSettings{
+		SyncMode: "auto", Role: "inbox", ShowInSidebar: true, ShowInAllMail: false, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
+		t.Fatalf("copy still points at %d after its original left All Mail", pointer)
+	}
+	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("list returned %d messages, want both copies visible again", len(messages))
+	}
+}
+
+// The pointer write happens after the copies were read, so the row picked as the
+// original can be gone by then. Its delete trigger has already run, so nothing
+// would clear a pointer written afterwards: the write has to refuse instead.
+func TestPointerWriteRefusesAnOriginalThatVanishedMidScan(t *testing.T) {
+	f := newDuplicateFixture(t)
+	const header = "<vanished@partner.test>"
+	original := f.storeMessage(t, f.original, f.originalInbox, 31, header, "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 31, header, "info@firma.test")
+	db, err := f.db.dataDB(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copies := []DuplicateCopy{
+		{ID: original.ID, AccountID: f.original, MailboxID: f.originalInbox, MailboxRole: "inbox", ShowInAllMail: true, MessageID: header},
+		{ID: fetched.ID, AccountID: f.aggregate, MailboxID: f.aggregateInbox, MailboxRole: "inbox", ShowInAllMail: true, MessageID: header},
+	}
+	// The delete stands in for the race: it lands between the read above and the
+	// write below, exactly where the trigger can no longer help.
+	if err := f.db.DeleteMessageForUser(f.ctx, f.userID, original.ID); err != nil {
+		t.Fatal(err)
+	}
+	hidden, _, err := f.db.applyDuplicatePointers(f.ctx, db, f.userID, copies, map[int64]int64{fetched.ID: original.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 0 {
+		t.Fatalf("reported %d hidden copies, want the write refused", hidden)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
+		t.Fatalf("copy points at deleted message %d, which nothing would ever clear", pointer)
+	}
+}

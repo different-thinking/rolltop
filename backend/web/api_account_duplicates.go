@@ -136,27 +136,7 @@ func (s *Server) apiAccountDuplicatesTrash(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	runs, queued, startErr := s.startTrashPlan(r.Context(), cu.User.ID, plan)
-	if len(runs) == 0 {
-		if errors.Is(startErr, errForegroundBusy) {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule the cleanup", startErr)
-			return
-		}
-		if store.IsNotFound(startErr) {
-			http.NotFound(w, r)
-			return
-		}
-		s.apiError(w, r, http.StatusBadGateway, "could not start the cleanup", startErr)
-		return
-	}
-	response := map[string]any{
-		"ok": true, "queued": true, "matched": plan.Matched, "skipped": plan.Skipped,
-		"queued_messages": queued, "truncated": plan.Truncated, "runs": runs,
-	}
-	if startErr != nil {
-		response["partial_error"] = "Some accounts could not be started."
-	}
-	writeJSON(w, response)
+	s.respondTrashPlan(w, r, cu.User.ID, plan, "cleanup")
 }
 
 // duplicateAccountSummaries joins the per-account counts with the account names
