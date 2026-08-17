@@ -377,7 +377,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleHome)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/assets/", s.handleFrontendAsset)
-	mux.HandleFunc("/manifest.webmanifest", s.handleFrontendAsset)
+	mux.HandleFunc("/manifest.webmanifest", s.handleWebManifest)
 	mux.HandleFunc("/sw.js", s.handleFrontendAsset)
 	mux.HandleFunc("/offline.html", s.handleFrontendAsset)
 	mux.HandleFunc("/icon.svg", s.handleFrontendAsset)

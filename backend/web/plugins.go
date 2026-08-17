@@ -14,6 +14,7 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/theme"
 )
 
 func (s *Server) pluginEnabled(ctx context.Context, pluginID string) bool {
@@ -46,8 +47,9 @@ func (s *Server) languageSearchEnabled(ctx context.Context) bool {
 
 func (s *Server) availableThemes(ctx context.Context) []apiThemeDefinition {
 	themes := []apiThemeDefinition{
-		{ID: "classic", Name: "Classic"},
-		{ID: "classic_dark", Name: "Classic Dark"},
+		{ID: theme.System, Name: "System"},
+		{ID: theme.Classic, Name: "Classic"},
+		{ID: theme.ClassicDark, Name: "Classic Dark"},
 	}
 	if s == nil {
 		return themes

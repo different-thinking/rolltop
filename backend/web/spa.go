@@ -11,8 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+
+	"rolltop/backend/theme"
 )
 
 // Both conditions below are persistent deployment states rather than per-request
@@ -26,6 +29,8 @@ const frontendDistDir = "frontend/dist"
 const immutableFrontendAssetCacheControl = "public, max-age=31536000, immutable"
 
 var startupBootstrapMarker = []byte(`<meta name="rolltop-startup" />`)
+var startupThemeColorMarker = []byte(`<meta name="rolltop-theme-color" />`)
+var htmlOpenTagRE = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 
 type androidLatestMetadata struct {
 	VersionCode int    `json:"versionCode"`
@@ -77,7 +82,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "frontend startup marker is missing", http.StatusInternalServerError)
 			return
 		}
-		contents = injected
+		contents = injectStartupTheme(injected, s.currentThemeID(r))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -86,6 +91,95 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "*")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(contents)
+}
+
+// injectStartupTheme stamps the reader's theme into the shell before the browser
+// parses it. Without this the first paint uses the light palette and flips once
+// React has read the bootstrap, which is a white flash on every cold load. An
+// absent marker is deliberate for the System theme: the stylesheet then follows
+// prefers-color-scheme on its own.
+func injectStartupTheme(index []byte, themeID string) []byte {
+	if marker := theme.DocumentMarker(themeID); marker != "" {
+		index = htmlOpenTagRE.ReplaceAllFunc(index, func(tag []byte) []byte {
+			if bytes.Contains(bytes.ToLower(tag), []byte("data-theme")) {
+				return tag
+			}
+			return append(append([]byte{}, tag[:len(tag)-1]...), []byte(` data-theme="`+marker+`">`)...)
+		})
+	}
+	return bytes.Replace(index, startupThemeColorMarker, themeColorMeta(themeID), 1)
+}
+
+func themeColorMeta(themeID string) []byte {
+	light, dark, systemDependent, ok := theme.ChromeColors(themeID)
+	if !ok {
+		// A plugin theme: its palette lives in a stylesheet the server does not
+		// parse, so the client sets the colour once that stylesheet is loaded.
+		return nil
+	}
+	if !systemDependent {
+		return []byte(`<meta name="theme-color" content="` + light + `" />`)
+	}
+	return []byte(`<meta name="theme-color" media="(prefers-color-scheme: light)" content="` + light + `" />` +
+		`<meta name="theme-color" media="(prefers-color-scheme: dark)" content="` + dark + `" />`)
+}
+
+// currentThemeID reports the signed-in reader's theme. Signed-out shells and
+// unresolvable sessions get System, which leaves the document unmarked so the
+// stylesheet follows the operating system instead of pinning the light palette.
+func (s *Server) currentThemeID(r *http.Request) string {
+	cu, ok := current(r)
+	if !ok || strings.TrimSpace(cu.User.Theme) == "" {
+		return theme.System
+	}
+	return cu.User.Theme
+}
+
+// handleWebManifest personalises the installed app's splash and title-bar
+// colours, which belong to the reader's theme. That makes the response
+// per-user, which is why the service worker no longer keeps it in its shared
+// static cache.
+func (s *Server) handleWebManifest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	full := filepath.Join(frontendDistDir, "manifest.webmanifest")
+	raw, err := os.ReadFile(full)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if s.store != nil {
+		themed, themeErr := themedWebManifest(raw, s.currentThemeID(r))
+		if themeErr != nil {
+			logHandlerError(r, fmt.Errorf("theme web manifest %s: %w", full, themeErr))
+		} else {
+			raw = themed
+		}
+	}
+	w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Vary", "*")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func themedWebManifest(raw []byte, themeID string) ([]byte, error) {
+	light, _, systemDependent, ok := theme.ChromeColors(themeID)
+	// A manifest has no media queries, so System cannot express "follow the
+	// operating system" here and keeps the shipped light colours; the same goes
+	// for plugin themes, whose palette the server cannot read.
+	if !ok || systemDependent {
+		return raw, nil
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, err
+	}
+	manifest["theme_color"] = light
+	manifest["background_color"] = light
+	return json.Marshal(manifest)
 }
 
 func injectStartupBootstrap(index []byte, payload any) ([]byte, error) {

@@ -22,7 +22,7 @@
   padding: 10px 18px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  box-shadow: inset 0 -3px 0 rgba(196, 107, 68, .46);
+  box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--accent-warm) 62%, transparent);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -73,7 +73,7 @@
     width: 100%;
     height: 44px;
     border: 1px solid transparent;
-    background: #ece7df;
+    background: var(--surface-sunken);
     border-radius: 7px;
     padding-left: 46px;
 
@@ -224,7 +224,7 @@
   width: 18px;
   height: 10px;
   border-radius: 999px;
-  background: rgba(88, 101, 96, .32);
+  background: color-mix(in srgb, var(--muted) 46%, transparent);
   position: relative;
   flex: 0 0 auto;
 
@@ -401,7 +401,7 @@
 .sidebar {
   padding: 16px 12px;
   border-right: 1px solid var(--border);
-  background: #f7faf8;
+  background: var(--surface);
   height: calc(100vh - 64px);
   position: sticky;
   top: 64px;
@@ -422,14 +422,14 @@
   width: 100%;
   justify-content: flex-start;
   margin-bottom: 16px;
-  box-shadow: 0 1px 2px rgba(38, 35, 31, .16);
-  background: var(--surface-ink);
-  color: #fff;
-  border-color: var(--surface-ink);
+  box-shadow: var(--shadow);
+  background: var(--action);
+  color: var(--on-action);
+  border-color: var(--action);
 
   &:hover {
-    background: #2b3448;
-    border-color: #2b3448;
+    background: var(--action-hover);
+    border-color: var(--action-hover);
   }
 }
 
@@ -442,7 +442,7 @@
   min-height: 34px;
   padding: 7px 10px 7px 13px;
   border-radius: 7px;
-  color: #53605b;
+  color: var(--muted);
   text-decoration: none;
 
   &:hover,
@@ -451,7 +451,7 @@
   }
 
   &.drop-target {
-    box-shadow: inset 0 0 0 1px rgba(196, 107, 68, .25), inset 3px 0 0 var(--accent);
+    box-shadow: inset 0 0 0 1px var(--active-strong), inset 3px 0 0 var(--accent);
   }
 
   &.active {
@@ -521,7 +521,7 @@
   color: var(--muted);
 
   &:hover {
-    background: rgba(196, 107, 68, .12);
+    background: var(--hover);
   }
 }
 

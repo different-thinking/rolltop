@@ -1,5 +1,8 @@
 @import url("https://fonts.googleapis.com/css2?family=Michroma&display=swap");
 
+// Everything colour-related is a token. What is left below the token block is
+// decoration that only this theme wants: the glow, the terminal cursor, the
+// logo treatment. Components never need a matrix-specific colour rule.
 :root[data-theme="matrix"] {
   color-scheme: dark;
   --font-ui: "Inter", "Aptos", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -7,29 +10,71 @@
   --font-display: "IBM Plex Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --font-brand: var(--font-heading);
   --font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+
+  --chrome: #020604;
   --bg: linear-gradient(180deg, rgba(0, 245, 160, .035) 0 1px, transparent 1px 22px), radial-gradient(circle at 14% -8%, rgba(0, 245, 160, .20), transparent 34rem), radial-gradient(circle at 88% 8%, rgba(34, 211, 238, .14), transparent 30rem), linear-gradient(180deg, #020604 0%, #041109 45%, #020604 100%);
+  --surface-sunken: #030b07;
   --surface: #06130d;
   --surface-subtle: #0a1c13;
+  --surface-raised: #0c2418;
+  --field: #020c07;
+
   --surface-ink: #000f08;
+  --on-ink: #7dffbf;
+
+  --action: #00f5a0;
+  --action-hover: #66ffc6;
+  --on-action: #00160c;
+
   --text: #dcffe9;
   --muted: #78ad8d;
-  --border: rgba(74, 222, 128, .25);
-  --border-strong: rgba(74, 222, 128, .54);
+  --text-soft: #b6e6c8;
+
+  --border: rgba(74, 222, 128, .34);
+  --border-strong: rgba(74, 222, 128, .60);
+  --separator: rgba(74, 222, 128, .18);
+
+  --row-read: rgba(2, 12, 7, .34);
+  --row-unread: rgba(0, 245, 160, .055);
+
   --hover: rgba(0, 245, 160, .11);
   --active: rgba(0, 245, 160, .16);
   --active-strong: rgba(0, 245, 160, .62);
+  --selected: rgba(0, 245, 160, .12);
+
   --accent: #00f5a0;
   --accent-strong: #7dffbf;
   --accent-soft: rgba(0, 245, 160, .14);
   --accent-warm: #22d3ee;
   --accent-warm-strong: #8ff4ff;
   --accent-sun: #c084fc;
-  --danger: #fb7185;
-  --ok: #00f5a0;
-  --button-text: #00160c;
+  --on-accent: #00160c;
+  --button-text: var(--on-accent);
   --focus: #00f5a0;
   --button-hover-border: rgba(34, 211, 238, .62);
+
+  --ok: #00f5a0;
+  --on-ok: #00160c;
+  --info: #22d3ee;
+  --on-info: #00160c;
+  --warning: #fbbf24;
+  --on-warning: #1a1208;
+  --danger: #fb7185;
+  --on-danger: #1a0509;
+
+  --swipe-read: #00f5a0;
+  --swipe-unread: #22d3ee;
+  --swipe-snooze: #fbbf24;
+  --swipe-archive: #67e8f9;
+  --swipe-trash: #fb7185;
+  --on-swipe: #00160c;
+
+  --scrim: rgba(0, 6, 3, .62);
+  --scrim-strong: rgba(0, 6, 3, .78);
+  --highlight: rgba(0, 245, 160, .24);
+  --on-highlight: #effff5;
   --shadow: 0 0 0 1px rgba(0, 245, 160, .07), 0 18px 48px rgba(0, 0, 0, .42), 0 0 28px rgba(0, 245, 160, .08);
+  --shadow-raised: 0 0 0 1px rgba(0, 245, 160, .10), 0 24px 60px rgba(0, 0, 0, .52), 0 0 36px rgba(0, 245, 160, .12);
 }
 
 :root[data-theme="matrix"] body {
@@ -38,7 +83,6 @@
 }
 
 :root[data-theme="matrix"] .topbar {
-  background: rgba(1, 8, 5, .92);
   box-shadow: inset 0 -1px 0 rgba(0, 245, 160, .34), 0 12px 36px rgba(0, 0, 0, .36);
   backdrop-filter: blur(18px);
 }
@@ -98,10 +142,6 @@
   stroke: #fff;
 }
 
-:root[data-theme="matrix"] .sidebar {
-  background: linear-gradient(180deg, rgba(4, 18, 10, .94), rgba(1, 8, 5, .96));
-}
-
 :root[data-theme="matrix"] .top-search input,
 :root[data-theme="matrix"] input[type="text"],
 :root[data-theme="matrix"] input[type="email"],
@@ -109,8 +149,6 @@
 :root[data-theme="matrix"] input[type="number"],
 :root[data-theme="matrix"] textarea,
 :root[data-theme="matrix"] select {
-  background: rgba(2, 12, 7, .82);
-  border-color: var(--border);
   box-shadow: inset 0 0 0 1px rgba(0, 245, 160, .04);
 }
 
@@ -120,94 +158,35 @@
   letter-spacing: .01em;
 }
 
-:root[data-theme="matrix"] button.secondary,
-:root[data-theme="matrix"] .button.secondary,
-:root[data-theme="matrix"] button.ghost,
-:root[data-theme="matrix"] .button.ghost {
-  background: rgba(5, 20, 13, .78);
-  color: var(--text);
-}
-
 :root[data-theme="matrix"] .panel,
 :root[data-theme="matrix"] .message-table,
 :root[data-theme="matrix"] .thread-shell,
-:root[data-theme="matrix"] .thread-card,
-:root[data-theme="matrix"] .thread-body,
 :root[data-theme="matrix"] .compose-window,
-:root[data-theme="matrix"] .inline-reply,
-:root[data-theme="matrix"] .inline-reply-row,
 :root[data-theme="matrix"] .confirm-dialog,
 :root[data-theme="matrix"] .original-source-dialog,
 :root[data-theme="matrix"] .toast {
-  background: rgba(5, 19, 12, .88);
-  border-color: var(--border);
   backdrop-filter: blur(18px);
-}
-
-:root[data-theme="matrix"] .message-row {
-  background: transparent;
-  border-bottom-color: rgba(74, 222, 128, .16);
-}
-
-:root[data-theme="matrix"] .message-row.read {
-  background: rgba(2, 12, 7, .34);
-  color: var(--muted);
-}
-
-:root[data-theme="matrix"] .message-row.unread {
-  background: rgba(0, 245, 160, .055);
-  color: var(--text);
 }
 
 :root[data-theme="matrix"] .message-row:hover,
 :root[data-theme="matrix"] .thread-card.collapsed:hover,
 :root[data-theme="matrix"] .message-row.selected {
-  background: rgba(0, 245, 160, .12);
   box-shadow: inset 3px 0 0 var(--accent), 0 0 24px rgba(0, 245, 160, .08);
-}
-
-:root[data-theme="matrix"] .date-preview,
-:root[data-theme="matrix"] .stat-card,
-:root[data-theme="matrix"] .message-menu-panel,
-:root[data-theme="matrix"] .search-autocomplete,
-:root[data-theme="matrix"] .folder-sync-notice,
-:root[data-theme="matrix"] .sidebar-sync,
-:root[data-theme="matrix"] .sync-run-list,
-:root[data-theme="matrix"] .sync-run-mini,
-:root[data-theme="matrix"] .body-notice,
-:root[data-theme="matrix"] .image-notice,
-:root[data-theme="matrix"] .compose-format,
-:root[data-theme="matrix"] th {
-  background: rgba(2, 12, 7, .74);
-  border-color: var(--border);
 }
 
 :root[data-theme="matrix"] .avatar,
 :root[data-theme="matrix"] .inline-reply-avatar {
-  color: var(--accent-strong);
   text-shadow: 0 0 12px rgba(0, 245, 160, .65);
   box-shadow: inset 0 -3px 0 var(--accent-warm), 0 0 18px rgba(0, 245, 160, .24);
 }
 
-:root[data-theme="matrix"] .email-frame {
-  background: var(--surface);
-}
-
 :root[data-theme="matrix"] .search-hit,
 :root[data-theme="matrix"] mark {
-  background: rgba(0, 245, 160, .24);
-  color: #effff5;
   box-shadow: 0 0 12px rgba(0, 245, 160, .18);
 }
 
 :root[data-theme="matrix"] .skeleton-block {
   background: linear-gradient(90deg, rgba(0, 245, 160, .05) 0%, rgba(0, 245, 160, .18) 45%, rgba(0, 245, 160, .05) 90%);
-}
-
-:root[data-theme="matrix"] .progress,
-:root[data-theme="matrix"] .folder-sync-progress,
-:root[data-theme="matrix"] .sync-percent > div {
-  background: rgba(0, 245, 160, .12);
 }
 
 :root[data-theme="matrix"] .progress div,

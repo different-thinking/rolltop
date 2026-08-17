@@ -118,6 +118,20 @@ function highlightImageAltMatches(doc: Document, pattern: RegExp) {
   pattern.lastIndex = 0;
 }
 
+// Search highlighting inside the message iframe follows the same three states as
+// the body theme itself: an explicit dark marker, an explicit matrix marker, and
+// no marker at all, which means the reader follows the operating system.
+const lightHighlight = "mark.rolltop-search-hit{background:rgba(229,169,40,.26);color:#202426;border-radius:3px;padding:0 1px;box-shadow:none}"
+  + "img.rolltop-search-image-hit{outline:2px solid rgba(229,169,40,.92)!important;outline-offset:2px!important;box-shadow:0 0 0 4px rgba(229,169,40,.20)!important;border-radius:4px}";
+
+const darkHighlight = (scope: string) => `${scope} mark.rolltop-search-hit{background:rgba(224,182,77,.28);color:#f5f2ec}`
+  + `${scope} img.rolltop-search-image-hit{outline-color:rgba(224,182,77,.95)!important;box-shadow:0 0 0 4px rgba(224,182,77,.22)!important}`;
+
+const emailHighlightCSS = lightHighlight
+  + darkHighlight('html[data-rolltop-theme="classic_dark"]')
+  + darkHighlight('html[data-rolltop-theme="matrix"]')
+  + `@media (prefers-color-scheme:dark){${darkHighlight("html:not([data-rolltop-theme])")}}`;
+
 /** Highlight search terms inside a sandboxed email iframe after it has loaded. */
 export function highlightEmailDocument(doc: Document | null | undefined, query: string, terms: string[] = []) {
   if (!doc || (!query.trim() && terms.length === 0)) return;
@@ -128,7 +142,7 @@ export function highlightEmailDocument(doc: Document | null | undefined, query: 
   if (!doc.head.querySelector("[data-rolltop-highlight-style]")) {
     const style = doc.createElement("style");
     style.setAttribute("data-rolltop-highlight-style", "true");
-    style.textContent = "mark.rolltop-search-hit{background:rgba(229,169,40,.26);color:#202426;border-radius:3px;padding:0 1px;box-shadow:none}img.rolltop-search-image-hit{outline:2px solid rgba(229,169,40,.92)!important;outline-offset:2px!important;box-shadow:0 0 0 4px rgba(229,169,40,.20)!important;border-radius:4px}html[data-rolltop-theme=\"classic_dark\"] mark.rolltop-search-hit,html[data-rolltop-theme=\"matrix\"] mark.rolltop-search-hit{background:rgba(224,182,77,.28);color:#f5fff8}html[data-rolltop-theme=\"classic_dark\"] img.rolltop-search-image-hit,html[data-rolltop-theme=\"matrix\"] img.rolltop-search-image-hit{outline-color:rgba(224,182,77,.95)!important;box-shadow:0 0 0 4px rgba(224,182,77,.22)!important}";
+    style.textContent = emailHighlightCSS;
     doc.head.appendChild(style);
   }
   highlightImageAltMatches(doc, pattern);
