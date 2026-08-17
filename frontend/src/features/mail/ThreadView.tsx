@@ -6,13 +6,13 @@ import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
 import type { DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
-import type { Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
+import type { Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { applyEmailDocumentTheme, themedEmailDocument } from "../../lib/emailDocumentTheme";
-import { displayDateTime, displaySnoozeUntil, displayTime, formatBytes } from "../../lib/format";
-import { trashMailboxesByAccount } from "../../lib/folders";
+import { displayDateTime, displaySnoozeUntil, displayTime, formatBytes, messageCountLabel } from "../../lib/format";
+import { archiveMailboxForAccount, junkMailboxForAccount, trashMailboxesByAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { HighlightedText, highlightEmailDocument } from "../../lib/searchHighlight";
 import { messageBackURL, messageHighlightQuery, messageHighlightTerms, messageSearchHitID } from "../../lib/routes";
@@ -56,6 +56,16 @@ type MessagePluginPanelState = {
   messageID: number;
   panelID: string;
 };
+
+/** HeaderActionKind names the header toolbar commands that run a request. */
+type HeaderActionKind = "archive" | "trash" | "spam" | "unread";
+
+/** headerMoveFailureLabel names a failed header move the way the button did. */
+function headerMoveFailureLabel(action: "archive" | "trash" | "spam"): string {
+  if (action === "archive") return "Archive";
+  if (action === "trash") return "Move to trash";
+  return "Report spam";
+}
 
 type MessageActionPlugin = RuntimePlugin & {
   renderMessageMenuActions?: (context: MessageActionContext) => ReactNode;
@@ -842,6 +852,7 @@ export function ThreadView({
   location,
   navigate,
   mailboxes,
+  swipePreferences,
   enabledPlugins,
   refreshChrome,
   openCompose,
@@ -856,6 +867,7 @@ export function ThreadView({
   location: LocationState;
   navigate: (url: string) => void;
   mailboxes: Mailbox[];
+  swipePreferences: SwipePreferences;
   enabledPlugins: string[];
   refreshChrome: () => Promise<Bootstrap | null>;
   openCompose: (query?: string) => void;
@@ -887,6 +899,7 @@ export function ThreadView({
   const [autocryptImports, setAutocryptImports] = useState<Record<number, AttachmentPGPImportState>>({});
   const [autocryptGossipImports, setAutocryptGossipImports] = useState<Record<number, Record<string, AttachmentPGPImportState>>>({});
   const [searchExplanations, setSearchExplanations] = useState<Record<number, SearchExplanationState>>({});
+  const [headerActionBusy, setHeaderActionBusy] = useState<HeaderActionKind | "">("");
   const [loadStatus, setLoadStatus] = useState<MessageLoadStatus | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1616,9 +1629,76 @@ export function ThreadView({
     void refreshChrome().catch(() => undefined);
   }
 
+  // The header toolbar carries the commands the list offers on row hover. Reply,
+  // reply all, and forward act on the message the URL points at — the same one
+  // the r/a/f shortcuts use. Archive, trash, spam, and mark unread act on the
+  // conversation, but only on the part of it that shares the open message's
+  // folder, so a thread's Sent or Trash copies stay where they are, exactly as a
+  // row action in that folder's list would have behaved.
+  const headerActionItem = thread.find((item) => item.message.id === currentMessageID) || thread[thread.length - 1] || null;
+  const headerActionMessageIDs = headerActionItem
+    ? thread.filter((item) => item.message.mailbox_id === headerActionItem.message.mailbox_id).map((item) => item.message.id)
+    : [];
+  const headerActionsBusy = loading || headerActionBusy !== "";
+  const headerArchiveMailbox = headerActionItem
+    ? archiveMailboxForAccount(mailboxes, swipePreferences.archive_mailboxes, headerActionItem.message.account_id)
+    : undefined;
+  const headerTrashMailbox = headerActionItem ? trashByAccount.get(headerActionItem.message.account_id) : undefined;
+  const headerJunkMailbox = headerActionItem ? junkMailboxForAccount(mailboxes, headerActionItem.message.account_id) : undefined;
+
+  // A move button whose folder is missing or already open stays visible but
+  // disabled, with the reason in its tooltip, rather than failing on click.
+  function headerMoveState(target: Mailbox | undefined, label: string, missingHint: string) {
+    if (!target) return { disabled: true, title: missingHint };
+    if (headerActionItem?.message.mailbox_id === target.id) return { disabled: true, title: `Already in ${target.name}` };
+    return { disabled: headerActionsBusy, title: `${label} (${target.name})` };
+  }
+
+  async function moveThreadMessages(action: "archive" | "trash" | "spam") {
+    if (!headerActionItem || headerActionBusy) return;
+    const target = action === "archive" ? headerArchiveMailbox : action === "trash" ? headerTrashMailbox : headerJunkMailbox;
+    if (!target || headerActionItem.message.mailbox_id === target.id) return;
+    const ids = headerActionMessageIDs;
+    setHeaderActionBusy(action);
+    try {
+      const result = await api.bulkMoveMessages(csrf, ids, target.id);
+      addToast(result.queued
+        ? `Move task started for ${messageCountLabel(ids.length)}.`
+        : `Moved ${messageCountLabel(result.moved ?? ids.length)} to ${target.name}.`);
+      await refreshChrome();
+      navigate(backURL);
+    } catch (err) {
+      addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}`, "error");
+    } finally {
+      setHeaderActionBusy("");
+    }
+  }
+
+  async function markThreadUnread() {
+    if (!headerActionItem || headerActionBusy) return;
+    const ids = headerActionMessageIDs;
+    setHeaderActionBusy("unread");
+    try {
+      await api.bulkRead(csrf, ids, false);
+      addToast(`Marked ${messageCountLabel(ids.length)} unread.`);
+      await refreshChrome();
+      // Opening a conversation marks it read again, so returning to the list is
+      // part of the action rather than a convenience.
+      navigate(backURL);
+    } catch (err) {
+      addToast(`Mark unread failed: ${messageFromError(err)}`, "error");
+    } finally {
+      setHeaderActionBusy("");
+    }
+  }
+
+  const archiveState = headerMoveState(headerArchiveMailbox, "Archive", "Choose an Archive folder for this account in swipe settings");
+  const trashState = headerMoveState(headerTrashMailbox, "Move to trash", "Choose a Trash folder for this account before moving messages to Trash");
+  const spamState = headerMoveState(headerJunkMailbox, "Report spam", "This account has no Junk folder to report spam into");
+
   return (
     <>
-      <div className="content-head">
+      <div className="content-head thread-head">
         <div className="thread-head-main">
           {!androidNativeAvailable() ? (
             <button className="ghost" type="button" onClick={() => navigate(backURL)} title="Back to results">
@@ -1630,6 +1710,83 @@ export function ThreadView({
           </h1>
           {mailbox ? <span className="label-pill">{mailbox.name}</span> : null}
         </div>
+        {headerActionItem ? (
+          <div className="thread-head-actions" role="group" aria-label="Conversation actions" aria-busy={headerActionBusy !== ""}>
+            <button
+              className="thread-head-action"
+              type="button"
+              disabled={headerActionsBusy}
+              onClick={() => void beginReply(headerActionItem)}
+              title="Reply"
+              aria-label="Reply"
+            >
+              <Icon name="reply" />
+            </button>
+            {headerActionItem.can_reply_all ? (
+              <button
+                className="thread-head-action"
+                type="button"
+                disabled={headerActionsBusy}
+                onClick={() => void beginReply(headerActionItem, true)}
+                title="Reply all"
+                aria-label="Reply all"
+              >
+                <Icon name="reply_all" />
+              </button>
+            ) : null}
+            <button
+              className="thread-head-action"
+              type="button"
+              disabled={headerActionsBusy}
+              onClick={() => openCompose(`forward=${headerActionItem.message.id}`)}
+              title="Forward"
+              aria-label="Forward"
+            >
+              <Icon name="forward" />
+            </button>
+            <span className="thread-head-action-divider" aria-hidden="true" />
+            <button
+              className="thread-head-action"
+              type="button"
+              disabled={archiveState.disabled}
+              onClick={() => void moveThreadMessages("archive")}
+              title={archiveState.title}
+              aria-label="Archive"
+            >
+              <Icon name="archive" />
+            </button>
+            <button
+              className="thread-head-action thread-head-action-delete"
+              type="button"
+              disabled={trashState.disabled}
+              onClick={() => void moveThreadMessages("trash")}
+              title={trashState.title}
+              aria-label="Move to trash"
+            >
+              <Icon name="delete" />
+            </button>
+            <button
+              className="thread-head-action"
+              type="button"
+              disabled={headerActionsBusy}
+              onClick={() => void markThreadUnread()}
+              title="Mark unread"
+              aria-label="Mark unread"
+            >
+              <Icon name="mail" />
+            </button>
+            <button
+              className="thread-head-action"
+              type="button"
+              disabled={spamState.disabled}
+              onClick={() => void moveThreadMessages("spam")}
+              title={spamState.title}
+              aria-label="Report spam"
+            >
+              <Icon name="spam" />
+            </button>
+          </div>
+        ) : null}
       </div>
       {error ? <div className="error">{error}</div> : null}
       {loading ? <div className="panel muted">Loading conversation...</div> : null}

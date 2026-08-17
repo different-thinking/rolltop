@@ -78,6 +78,7 @@ export function RouteView({
         location={location}
         navigate={navigate}
         mailboxes={mailboxes}
+        swipePreferences={swipePreferences}
         enabledPlugins={enabledPlugins}
         refreshChrome={refreshChrome}
         openCompose={openCompose}
