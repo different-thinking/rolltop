@@ -3,7 +3,7 @@
 // written it twice once already, the policy lives here so a change to it cannot
 // reach only one protocol.
 
-package xoauth2
+package googletoken
 
 import (
 	"context"

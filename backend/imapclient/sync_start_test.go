@@ -8,9 +8,9 @@ import (
 
 	"github.com/emersion/go-imap"
 
+	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
-	"rolltop/backend/xoauth2"
 )
 
 // The cutoff has to reach the server. Filtering locally would still download
@@ -38,7 +38,7 @@ func TestFetchMailboxSendsTheCutoffToTheServer(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
 	account := server.account(t)
 	account.SyncStartAt = time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC)
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	err := fetcher.FetchMailbox(context.Background(), account, "INBOX", 0,
 		func(syncer.FetchedMessage) error { return nil })
 	if err != nil {
@@ -61,7 +61,7 @@ func TestSnapshotReportsASeparateFetchableListUnderACutoff(t *testing.T) {
 	server.setSearchResults([]uint32{1, 2, 3, 4}, []uint32{3, 4})
 	account := server.account(t)
 	account.SyncStartAt = time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC)
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	snapshot, err := fetcher.SnapshotMailboxUIDs(context.Background(), account, "INBOX")
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
@@ -92,7 +92,7 @@ func TestSnapshotReportsASeparateFetchableListUnderACutoff(t *testing.T) {
 func TestSnapshotIssuesOneSearchWithoutACutoff(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
 	server.setSearchResults([]uint32{1, 2}, nil)
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	snapshot, err := fetcher.SnapshotMailboxUIDs(context.Background(), server.account(t), "INBOX")
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
@@ -117,7 +117,7 @@ func TestDeleteAndFlagSearchesNeverCarryTheCutoff(t *testing.T) {
 	server := startFakeIMAPServer(t, "good-token")
 	account := server.account(t)
 	account.SyncStartAt = cutoff
-	fetcher := &Fetcher{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	fetcher := &Fetcher{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	ctx := context.Background()
 	if _, err := fetcher.UIDs(ctx, account, "INBOX"); err != nil {
 		t.Fatalf("reconcile UIDs: %v", err)

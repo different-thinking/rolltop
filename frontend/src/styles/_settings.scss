@@ -293,6 +293,14 @@
   font-weight: 650;
 }
 
+// A failed sync explains what to do about it, which the single truncated line
+// of a normal row cannot carry, so this one wraps.
+.settings-index-copy small.settings-status-error {
+  color: var(--danger);
+  white-space: normal;
+  overflow: visible;
+}
+
 .settings-index-chevron {
   color: var(--muted);
 

@@ -29,6 +29,17 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   list, and read/star sync marks every local message outside the returned set as
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
+- Google is the leading system for the contacts it owns. A local write to a
+  contact whose `source` is `google` must reach Google before the local row
+  changes, or the next sync silently undoes it. On an etag conflict, adopt
+  Google's version and say so; never force the local one through.
+- Provenance on a contact — `source`, `google_connection_id`, `external_id`,
+  `etag` — is written only by the sync and the write-back path.
+  `UpdateContact` deliberately leaves those columns alone so an ordinary edit
+  cannot detach a contact from the account that owns it.
+- Disconnecting a Google account demotes its contacts to local ones. Do not
+  make it delete them: the user asked to stop syncing, and Rolltop's copy is
+  often the only one they can still reach.
 - A cross-account duplicate copy is hidden behind a pointer to the row that stays
   visible, and that pointer is only safe while it resolves. Deletes clear it in a
   SQLite trigger rather than in Go, because reconciliation, folder purges, account
