@@ -589,7 +589,7 @@ type PendingMailboxGenerationRebuild struct {
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
 	if s.split {
 		var out []PendingMailboxGenerationRebuild
-		if err := s.forEachServiceableUser(ctx, "list pending mailbox generation rebuilds", func(user User, us *Store) error {
+		if err := s.forEachServiceableUser(ctx, "list pending mailbox generation rebuilds", nil, func(user User, us *Store) error {
 			items, err := us.ListPendingMailboxGenerationRebuilds(ctx)
 			if err != nil {
 				return err

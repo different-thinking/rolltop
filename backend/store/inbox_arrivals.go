@@ -347,7 +347,7 @@ func (s *Store) ListDueInboxArrivals(ctx context.Context, userID, accountID int6
 func (s *Store) ListPendingInboxArrivalSchedules(ctx context.Context) ([]PendingInboxArrivalSchedule, error) {
 	if s.split {
 		var out []PendingInboxArrivalSchedule
-		if err := s.forEachServiceableUser(ctx, "list pending inbox arrivals", func(_ User, us *Store) error {
+		if err := s.forEachServiceableUser(ctx, "list pending inbox arrivals", nil, func(_ User, us *Store) error {
 			items, err := us.ListPendingInboxArrivalSchedules(ctx)
 			if err != nil {
 				return err

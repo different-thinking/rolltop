@@ -20,10 +20,7 @@ func (s *Store) BackfillThreadKeys(ctx context.Context, limit int) (int, error) 
 	if s.split {
 		total := 0
 		remaining := limit
-		err := s.forEachServiceableUser(ctx, "backfill thread keys", func(_ User, us *Store) error {
-			if remaining <= 0 {
-				return errSweepDone
-			}
+		err := s.forEachServiceableUser(ctx, "backfill thread keys", func() bool { return remaining <= 0 }, func(_ User, us *Store) error {
 			n, err := us.BackfillThreadKeys(ctx, remaining)
 			if err != nil {
 				return err
@@ -78,10 +75,7 @@ func (s *Store) BackfillThreadHeadersFromBlobs(ctx context.Context, dataDir stri
 	if s.split {
 		totalChecked, totalUpdated := 0, 0
 		remaining := limit
-		err := s.forEachServiceableUser(ctx, "backfill thread headers", func(_ User, us *Store) error {
-			if remaining <= 0 {
-				return errSweepDone
-			}
+		err := s.forEachServiceableUser(ctx, "backfill thread headers", func() bool { return remaining <= 0 }, func(_ User, us *Store) error {
 			checked, updated, err := us.BackfillThreadHeadersFromBlobs(ctx, dataDir, remaining)
 			if err != nil {
 				return err

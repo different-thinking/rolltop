@@ -130,7 +130,7 @@ func (s *Store) ListMailAccountsForUser(ctx context.Context, userID int64) ([]Ma
 func (s *Store) ListAccounts(ctx context.Context) ([]MailAccount, error) {
 	if s.split {
 		out := []MailAccount{}
-		if err := s.forEachServiceableUser(ctx, "list accounts", func(user User, _ *Store) error {
+		if err := s.forEachServiceableUser(ctx, "list accounts", nil, func(user User, _ *Store) error {
 			accounts, err := s.ListMailAccountsForUser(ctx, user.ID)
 			if err != nil {
 				return err

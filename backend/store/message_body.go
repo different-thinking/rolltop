@@ -82,10 +82,7 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 	if s.split {
 		total := 0
 		remaining := limit
-		err := s.forEachServiceableUser(ctx, "compact message bodies", func(_ User, us *Store) error {
-			if remaining <= 0 {
-				return errSweepDone
-			}
+		err := s.forEachServiceableUser(ctx, "compact message bodies", func() bool { return remaining <= 0 }, func(_ User, us *Store) error {
 			n, err := us.CompactMessageBodiesBefore(ctx, cutoff, previewLimit, remaining)
 			if err != nil {
 				return err
@@ -158,10 +155,7 @@ func (s *Store) ListMessagesWithPrunableBlobs(ctx context.Context, cutoff time.T
 	}
 	if s.split {
 		out := make([]MessageRecord, 0, limit)
-		if err := s.forEachServiceableUser(ctx, "list prunable blobs", func(_ User, us *Store) error {
-			if len(out) >= limit {
-				return errSweepDone
-			}
+		if err := s.forEachServiceableUser(ctx, "list prunable blobs", func() bool { return len(out) >= limit }, func(_ User, us *Store) error {
 			items, err := us.ListMessagesWithPrunableBlobs(ctx, cutoff, limit-len(out))
 			if err != nil {
 				return err
@@ -190,10 +184,7 @@ func (s *Store) ListMessagesWithExpiredCachedBlobs(ctx context.Context, cutoff t
 	}
 	if s.split {
 		out := make([]MessageRecord, 0, limit)
-		if err := s.forEachServiceableUser(ctx, "list expired cached blobs", func(_ User, us *Store) error {
-			if len(out) >= limit {
-				return errSweepDone
-			}
+		if err := s.forEachServiceableUser(ctx, "list expired cached blobs", func() bool { return len(out) >= limit }, func(_ User, us *Store) error {
 			items, err := us.ListMessagesWithExpiredCachedBlobs(ctx, cutoff, limit-len(out))
 			if err != nil {
 				return err

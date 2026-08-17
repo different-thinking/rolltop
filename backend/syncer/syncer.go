@@ -375,7 +375,10 @@ func (s *Service) syncUserWithOptions(ctx context.Context, userID int64, request
 	if !options.deferOrdinaryMaintenanceNow() {
 		completedCleanups, failedCleanups, cleanupErr := s.drainPendingBlobCleanupsForUser(ctx, userID, genericBlobCleanupOpportunisticLimit)
 		if cleanupErr != nil {
-			log.Printf("generic blob cleanup user_id=%d: %v", userID, cleanupErr)
+			// The drain now surfaces tenant corruption instead of counting it as
+			// another failed path, so this line has to carry the file and the
+			// repair command like every other tenant-scoped report.
+			log.Printf("generic blob cleanup user_id=%d: %v", userID, s.Store.NoteError(userID, cleanupErr))
 		} else if failedCleanups > 0 {
 			log.Printf("generic blob cleanup user_id=%d completed=%d failed=%d", userID, completedCleanups, failedCleanups)
 		}

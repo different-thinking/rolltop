@@ -98,6 +98,13 @@ func (s *Service) drainPendingBlobCleanupsForUser(ctx context.Context, userID in
 			completed++
 			continue
 		}
+		// A per-entry failure is journaled and counted, but corruption is not a
+		// per-entry condition: it fails every remaining entry the same way, and
+		// counting it as another failed path would leave the tenant unlatched
+		// and re-drained on every pass forever.
+		if store.IsCorrupt(err) {
+			return completed, failed, err
+		}
 		failed++
 	}
 	return completed, failed, nil

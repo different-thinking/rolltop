@@ -932,6 +932,12 @@ func inboxAutoTargets(ctx context.Context, db *store.Store) ([]inboxAutoTarget, 
 			continue
 		}
 		for _, account := range accounts {
+			// The tenant database backs every account, so once it is latched the
+			// remaining accounts would only reproduce the same failure and print
+			// the same repair command again within this one pass.
+			if db.DatabaseCorrupt(userID) {
+				break
+			}
 			mb, err := inboxMailbox(ctx, db, userID, account)
 			if err != nil {
 				log.Printf("inbox mailbox user_id=%d account_id=%d: %v", userID, account.ID, db.NoteError(userID, err))

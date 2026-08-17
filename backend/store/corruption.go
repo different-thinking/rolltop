@@ -116,6 +116,18 @@ func (s *Store) noteError(userID int64, err error) (error, bool) {
 	if s == nil || err == nil || !IsCorrupt(err) {
 		return err, false
 	}
+	// The unavailable handle reports itself as corruption so callers can branch
+	// on it consistently, but it is not evidence that a file is damaged.
+	// mustDataDB hands it back for any tenant it could not resolve, including
+	// transient reasons like a full disk or an exhausted descriptor table, and
+	// logs that real cause itself. Latching on it would take a healthy tenant
+	// out of service for the life of the process and print a recover-db command
+	// for an intact file. A tenant that really is corrupt is already latched --
+	// that is why dataDB refused to resolve it -- so declining here loses
+	// nothing.
+	if errors.Is(err, errDatabaseUnavailable) {
+		return err, false
+	}
 	path := s.DatabaseFileForUser(userID)
 	corrupt := newCorruptionError(userID, path, err)
 	// open() already wrapped failures it saw during migration; keep that
@@ -263,10 +275,6 @@ func (s *Store) ServiceableUsers(ctx context.Context) ([]User, error) {
 	return serviceable, nil
 }
 
-// errSweepDone ends a forEachServiceableUser walk early without reporting a
-// failure. Budgeted sweeps return it once they have filled their batch.
-var errSweepDone = errors.New("sweep finished early")
-
 // forEachServiceableUser runs fn against every tenant that can still answer
 // queries, and is how every split-mode sweep in this package fans out.
 //
@@ -283,20 +291,26 @@ var errSweepDone = errors.New("sweep finished early")
 // Errors that are not corruption still abort the sweep. A tenant is only
 // skipped on the evidence that its file cannot answer at all, never because one
 // query happened to fail.
-func (s *Store) forEachServiceableUser(ctx context.Context, sweep string, fn func(user User, us *Store) error) error {
+//
+// done, when supplied, is checked before each tenant is resolved. Budgeted
+// sweeps stop there rather than opening a tenant database they have no budget
+// left to read, which also keeps a failure to resolve that tenant from
+// discarding the batch they have already collected.
+func (s *Store) forEachServiceableUser(ctx context.Context, sweep string, done func() bool, fn func(user User, us *Store) error) error {
 	users, err := s.ServiceableUsers(ctx)
 	if err != nil {
 		return err
 	}
 	for _, user := range users {
+		if done != nil && done() {
+			return nil
+		}
 		us, err := s.UserStore(ctx, user.ID)
 		if err == nil {
 			err = fn(user, us)
 		}
 		switch {
 		case err == nil:
-		case errors.Is(err, errSweepDone):
-			return nil
 		case s.noteSweepCorruption(sweep, user.ID, err):
 		default:
 			return err

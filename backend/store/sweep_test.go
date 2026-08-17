@@ -46,7 +46,7 @@ func TestSweepLatchesAndSkipsATenantThatFailsWithCorruption(t *testing.T) {
 	damaged, healthy := users[0], users[1]
 
 	var visited []int64
-	err := db.forEachServiceableUser(ctx, "test sweep", func(user User, _ *Store) error {
+	err := db.forEachServiceableUser(ctx, "test sweep", nil, func(user User, _ *Store) error {
 		visited = append(visited, user.ID)
 		if user.ID == damaged.ID {
 			// What a statement on an already-open handle reports once the file
@@ -73,7 +73,7 @@ func TestSweepLatchesAndSkipsATenantThatFailsWithCorruption(t *testing.T) {
 	// The latch is what makes the next sweep quiet: the tenant is gone from the
 	// serviceable set, so nothing reopens a file that cannot answer.
 	visited = nil
-	if err := db.forEachServiceableUser(ctx, "test sweep", func(user User, _ *Store) error {
+	if err := db.forEachServiceableUser(ctx, "test sweep", nil, func(user User, _ *Store) error {
 		visited = append(visited, user.ID)
 		return nil
 	}); err != nil {
@@ -91,7 +91,7 @@ func TestSweepReportsADamagedTenantOnceWithItsRepairCommand(t *testing.T) {
 	damaged := users[0]
 
 	for range 3 {
-		if err := db.forEachServiceableUser(ctx, "reconcile stale sync runs", func(_ User, _ *Store) error {
+		if err := db.forEachServiceableUser(ctx, "reconcile stale sync runs", nil, func(_ User, _ *Store) error {
 			return fmt.Errorf("update sync_runs: %w", ErrCorrupt)
 		}); err != nil {
 			t.Fatalf("sweep reported the damaged tenant as a failure: %v", err)
@@ -120,7 +120,7 @@ func TestSweepAbortsOnAnErrorThatIsNotCorruption(t *testing.T) {
 
 	failure := errors.New("mailbox generation rebuild crossed tenant boundary")
 	visited := 0
-	err := db.forEachServiceableUser(ctx, "test sweep", func(_ User, _ *Store) error {
+	err := db.forEachServiceableUser(ctx, "test sweep", nil, func(_ User, _ *Store) error {
 		visited++
 		return failure
 	})
@@ -140,20 +140,52 @@ func TestSweepAbortsOnAnErrorThatIsNotCorruption(t *testing.T) {
 	}
 }
 
-func TestSweepStopsEarlyWithoutReportingAFailure(t *testing.T) {
+func TestBudgetedSweepStopsBeforeResolvingTheNextTenant(t *testing.T) {
 	ctx := context.Background()
-	db, _, _ := openSweepStore(t, "first@example.test", "second@example.test")
+	db, _, users := openSweepStore(t, "first@example.test", "second@example.test")
 
 	visited := 0
-	err := db.forEachServiceableUser(ctx, "test sweep", func(_ User, _ *Store) error {
+	err := db.forEachServiceableUser(ctx, "test sweep", func() bool { return visited >= 1 }, func(_ User, _ *Store) error {
 		visited++
-		return errSweepDone
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("a budgeted sweep that filled its batch reported %v", err)
 	}
 	if visited != 1 {
-		t.Fatalf("sweep visited %d tenants after finishing early, want 1", visited)
+		t.Fatalf("sweep visited %d tenants after filling its batch, want 1", visited)
+	}
+	// Checking the budget only after the tenant was resolved opened a database
+	// the sweep had no budget left to read, and turned a failure to open it into
+	// an error that discarded the batch the sweep had already collected.
+	db.mu.Lock()
+	_, opened := db.userStores[users[1].ID]
+	db.mu.Unlock()
+	if opened {
+		t.Fatal("sweep opened the tenant database it had no budget left to read")
+	}
+}
+
+func TestSweepDoesNotLatchATenantItSimplyCouldNotResolve(t *testing.T) {
+	db, _, users := openSweepStore(t, "transient@example.test")
+	user := users[0]
+
+	// mustDataDB hands back this handle for any tenant it could not resolve,
+	// including transient reasons like a full disk, and it reports itself as
+	// corruption so callers branch on it consistently. Latching on it would
+	// disable a healthy tenant for the life of the process and print a
+	// recover-db command for an intact file.
+	noted, latched := db.noteError(user.ID, errDatabaseUnavailable)
+	if latched {
+		t.Fatal("an unresolved tenant was latched as corrupt")
+	}
+	if db.DatabaseCorrupt(user.ID) {
+		t.Fatal("an unresolved tenant was taken out of service")
+	}
+	// It still has to classify as corruption, or callers that branch on
+	// IsCorrupt would answer 500 where they mean "temporarily unavailable".
+	if !IsCorrupt(noted) {
+		t.Fatal("the unavailable handle stopped classifying as corruption")
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	"rolltop/backend/store"
 )
 
 const (
@@ -66,8 +68,17 @@ func (s *Server) processDueSnoozes(ctx context.Context, now time.Time) (time.Tim
 	var next time.Time
 	var firstErr error
 	for _, user := range users {
+		// A tenant whose database is already latched cannot be processed, and
+		// repeating that failure every cycle only buries the one log line that
+		// tells the operator how to repair it.
+		if s.store.DatabaseCorrupt(user.ID) {
+			continue
+		}
 		events, err := s.store.RecordDueSnoozeReminderEvents(ctx, user.ID, now, snoozeSchedulerProcessLimit)
 		if err != nil {
+			if s.noteSnoozeTenantFailure(user.ID, err) {
+				continue
+			}
 			if !errors.Is(err, context.Canceled) && firstErr == nil {
 				firstErr = err
 			}
@@ -83,6 +94,9 @@ func (s *Server) processDueSnoozes(ctx context.Context, now time.Time) (time.Tim
 		}
 		userNext, err := s.store.NextPendingSnoozeDue(ctx, user.ID)
 		if err != nil {
+			if s.noteSnoozeTenantFailure(user.ID, err) {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -93,6 +107,23 @@ func (s *Server) processDueSnoozes(ctx context.Context, now time.Time) (time.Tim
 		}
 	}
 	return next, firstErr
+}
+
+// noteSnoozeTenantFailure latches a tenant whose database has stopped answering
+// and reports whether the scheduler should carry on without it.
+//
+// Corruption is deliberately not returned as the sweep's error. Returning it put
+// the scheduler into its 30-second error backoff on every cycle -- degrading
+// wake accuracy for every healthy tenant -- and re-logged a bare driver message
+// forever, because nothing on this path ever latched the tenant to take it out
+// of the serviceable set.
+func (s *Server) noteSnoozeTenantFailure(userID int64, err error) bool {
+	noted := s.store.NoteError(userID, err)
+	if !store.IsCorrupt(noted) {
+		return false
+	}
+	log.Printf("snooze scheduler user_id=%d: %v", userID, noted)
+	return true
 }
 
 func (s *Server) notifySnoozeStateChanged(userID int64) {

@@ -112,6 +112,16 @@ func (r *Runner) reconcileGenerationRecoveryUsers(pending map[int64]bool,
 		}
 	}
 	for userID := range r.generationRecoveryUsers {
+		// A tenant missing from `pending` normally means its rebuilds finished.
+		// For a tenant whose database is latched as corrupt it means only that
+		// the sweep could not read it: it is filtered out of ServiceableUsers,
+		// so the list never had a chance to report it. Clearing the gate on that
+		// silence would replay a tenant that is still mid-rebuild, and lose the
+		// knowledge that it was, once the file is repaired. Hold the gate until
+		// the tenant can answer for itself again.
+		if r.tenantDatabaseCorrupt(userID) {
+			continue
+		}
 		expectedEpoch, observed := snapshot[userID]
 		freshSnapshot := observed && expectedEpoch == r.generationRecoveryEpoch[userID]
 		if pendingAccounts != nil && !pending[userID] && freshSnapshot {
@@ -157,6 +167,15 @@ func (r *Runner) refreshGenerationRecoveryGateForUser(ctx context.Context, userI
 	}
 	r.reconcileGenerationRecoveryUsers(pendingUsers, nil, nil, snapshot)
 	r.wakeMailboxGenerationRebuildRecovery()
+}
+
+// tenantDatabaseCorrupt reports whether this process has already latched the
+// tenant's database as unreadable.
+func (r *Runner) tenantDatabaseCorrupt(userID int64) bool {
+	if r == nil || r.Service == nil || r.Service.Store == nil {
+		return false
+	}
+	return r.Service.Store.DatabaseCorrupt(userID)
 }
 
 func (r *Runner) activateGenerationRecoveryLocked(userID int64) {

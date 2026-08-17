@@ -32,7 +32,7 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 	}
 	if s.split {
 		var total int64
-		err := s.forEachServiceableUser(ctx, "reconcile stale sync runs", func(_ User, us *Store) error {
+		err := s.forEachServiceableUser(ctx, "reconcile stale sync runs", nil, func(_ User, us *Store) error {
 			n, err := us.InterruptStaleSyncRuns(ctx, maxAge)
 			if err != nil {
 				return err
@@ -58,7 +58,7 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context) (int64, error) {
 	if s.split {
 		var total int64
-		err := s.forEachServiceableUser(ctx, "interrupt running sync runs", func(_ User, us *Store) error {
+		err := s.forEachServiceableUser(ctx, "interrupt running sync runs", nil, func(_ User, us *Store) error {
 			n, err := us.MarkRunningSyncRunsInterrupted(ctx)
 			if err != nil {
 				return err
@@ -282,7 +282,7 @@ func syncRunNoopFolderKey(run SyncRun) string {
 func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 	if s.split {
 		var ids []int64
-		err := s.forEachServiceableUser(ctx, "list users with accounts", func(user User, us *Store) error {
+		err := s.forEachServiceableUser(ctx, "list users with accounts", nil, func(user User, us *Store) error {
 			var count int
 			if err := us.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_accounts WHERE user_id = ?`, user.ID).Scan(&count); err != nil {
 				return err
