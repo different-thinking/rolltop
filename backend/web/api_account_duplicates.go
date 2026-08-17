@@ -57,7 +57,16 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	stats, err := s.store.RefreshDuplicateCopiesForUser(r.Context(), cu.User.ID)
+	// A tenant with more duplicate groups than one pass covers resumes from the
+	// cursor the previous pass returned, so repeating the request finishes the
+	// mailbox instead of re-reading its first groups.
+	var in struct {
+		After string `json:"after"`
+	}
+	if r.ContentLength > 0 && !decodeJSON(w, r, &in) {
+		return
+	}
+	stats, err := s.store.RefreshDuplicateCopiesForUser(r.Context(), cu.User.ID, in.After)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -72,6 +81,7 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 		"ok": true, "hidden": total, "accounts": summaries,
 		"groups": stats.Groups, "newly_hidden": stats.Hidden,
 		"revealed": stats.Revealed, "truncated": stats.Truncated,
+		"next": stats.NextHeader,
 	})
 }
 

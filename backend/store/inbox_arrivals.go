@@ -137,7 +137,7 @@ func (s *Store) HoldOrClassifyInboxArrival(ctx context.Context, userID, syncRunI
 				}
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE pending_inbox_arrivals
-				SET sync_run_id = COALESCE(NULLIF(?, 0), sync_run_id), event_id = ?, updated_at = ?
+				SET sync_run_id = COALESCE(NULLIF(?, 0), sync_run_id), event_id = NULLIF(?, 0), updated_at = ?
 				WHERE user_id = ? AND id = ?`, syncRunID, decision.Event.ID, nowUnixValue,
 				userID, existing.ID); err != nil {
 				return InboxArrivalDecision{}, err

@@ -110,7 +110,7 @@ func TestDuplicateScanHidesTheCopyTheAccountWasNotAddressedIn(t *testing.T) {
 	original := f.storeMessage(t, f.original, f.originalInbox, 1, "<invoice@partner.test>", "info@firma.test")
 	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 1, "<invoice@partner.test>", "info@firma.test")
 
-	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID)
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestDuplicateScanKeepsBothCopiesWhenNoAccountWasAddressed(t *testing.T) {
 	first := f.storeMessage(t, f.original, f.originalInbox, 2, "<list@partner.test>", "members@list.test")
 	second := f.storeMessage(t, f.aggregate, f.aggregateInbox, 2, "<list@partner.test>", "members@list.test")
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int64{first.ID, second.ID} {
@@ -165,7 +165,7 @@ func TestDuplicateScanKeepsBothCopiesWhenBothAccountsWereAddressed(t *testing.T)
 	first := f.storeMessage(t, f.original, f.originalInbox, 3, "<both@partner.test>", recipients)
 	second := f.storeMessage(t, f.aggregate, f.aggregateInbox, 3, "<both@partner.test>", recipients)
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int64{first.ID, second.ID} {
@@ -191,7 +191,7 @@ func TestDuplicateScanNeverHidesASentCopy(t *testing.T) {
 	f.storeMessage(t, f.original, f.originalInbox, 4, "<reply@partner.test>", "info@firma.test")
 	sentCopy := f.storeMessage(t, f.aggregate, sent.ID, 4, "<reply@partner.test>", "info@firma.test")
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if pointer := f.duplicatePointer(t, sentCopy.ID); pointer != 0 {
@@ -206,7 +206,7 @@ func TestDeletingTheOriginalRevealsItsHiddenCopy(t *testing.T) {
 	f := newDuplicateFixture(t)
 	original := f.storeMessage(t, f.original, f.originalInbox, 5, "<gone@partner.test>", "info@firma.test")
 	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 5, "<gone@partner.test>", "info@firma.test")
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != original.ID {
@@ -248,7 +248,7 @@ func TestFolderCountersIgnoreHiddenDuplicates(t *testing.T) {
 	f := newDuplicateFixture(t)
 	f.storeMessage(t, f.original, f.originalInbox, 7, "<counted@partner.test>", "info@firma.test")
 	f.storeMessage(t, f.aggregate, f.aggregateInbox, 7, "<counted@partner.test>", "info@firma.test")
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	mailboxes, err := f.db.ListMailboxesForUser(f.ctx, f.userID)
@@ -303,7 +303,7 @@ func TestDuplicateScanStaysInsideOneTenant(t *testing.T) {
 	}
 	f.storeMessage(t, f.aggregate, f.aggregateInbox, 8, "<shared@partner.test>", "info@firma.test")
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	otherDB, err := f.db.dataDB(f.ctx, other.ID)
@@ -333,7 +333,7 @@ func TestHiddenDuplicateCopyProducesNoNewMailEvent(t *testing.T) {
 	f := newDuplicateFixture(t)
 	original := f.storeMessage(t, f.original, f.originalInbox, 9, "<ping@partner.test>", "info@firma.test")
 	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 9, "<ping@partner.test>", "info@firma.test")
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID); err != nil {
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, created, err := f.db.RecordNewMailEvent(f.ctx, f.userID, original); err != nil {
@@ -347,5 +347,98 @@ func TestHiddenDuplicateCopyProducesNoNewMailEvent(t *testing.T) {
 	}
 	if created {
 		t.Fatal("the fetched duplicate produced a second new-mail event")
+	}
+}
+
+// A Spam-filed row in the addressed account cannot stand in as the original:
+// junk folders are forced out of All Mail, so hiding the aggregating account's
+// copy behind it would leave the message reachable only from that Spam list.
+func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
+	f := newDuplicateFixture(t)
+	junk, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Spam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, junk.ID, MailboxSettings{
+		SyncMode: "auto", Role: "junk", ShowInSidebar: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.storeMessage(t, f.original, junk.ID, 10, "<spam@partner.test>", "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 10, "<spam@partner.test>", "info@firma.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
+		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
+	}
+	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) == 0 {
+		t.Fatal("both copies disappeared from the list, leaving the message only in Spam")
+	}
+}
+
+// Releasing a group the rule no longer resolves runs through the same map the
+// resolver returns, and the resolver returns nil for every group it declines.
+// Sync calls this path for each stored message, so a nil map here panics a sync.
+func TestIncrementalRefreshReleasesAGroupItNoLongerResolves(t *testing.T) {
+	f := newDuplicateFixture(t)
+	const header = "<alias@partner.test>"
+	f.storeMessage(t, f.original, f.originalInbox, 11, header, "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 11, header, "info@firma.test")
+	if err := f.db.RefreshDuplicateCopiesForMessageID(f.ctx, f.userID, header); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer == 0 {
+		t.Fatal("expected the fetched copy to start out hidden")
+	}
+	// The aggregating account gains the addressed alias, so both accounts now
+	// count as addressed and the group stops resolving.
+	db, err := f.db.dataDB(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(f.ctx, `UPDATE mail_accounts SET email = ? WHERE user_id = ? AND id = ?`,
+		"info@firma.test", f.userID, f.aggregate); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RefreshDuplicateCopiesForMessageID(f.ctx, f.userID, header); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
+		t.Fatalf("copy still points at %d after the group stopped resolving", pointer)
+	}
+}
+
+// A tenant with more duplicate groups than one pass covers has to finish by
+// repeating the call. The cursor is what makes the second pass see new groups.
+func TestDuplicateScanResumesFromItsCursor(t *testing.T) {
+	f := newDuplicateFixture(t)
+	for i := 0; i < 3; i++ {
+		header := "<paged" + string(rune('a'+i)) + "@partner.test>"
+		f.storeMessage(t, f.original, f.originalInbox, uint32(20+i), header, "info@firma.test")
+		f.storeMessage(t, f.aggregate, f.aggregateInbox, uint32(20+i), header, "info@firma.test")
+	}
+	first, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Groups != 3 || first.Hidden != 3 {
+		t.Fatalf("first pass = %+v, want all three groups hidden", first)
+	}
+	if first.Truncated || first.NextHeader != "" {
+		t.Fatalf("first pass reports more work as %+v, want it finished", first)
+	}
+	// Resuming past the first two groups must skip them instead of restarting.
+	resumed, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "<pagedb@partner.test>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Groups != 1 {
+		t.Fatalf("resumed pass saw %d groups, want only the one past the cursor", resumed.Groups)
 	}
 }

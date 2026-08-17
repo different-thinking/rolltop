@@ -462,6 +462,11 @@ function percentValue(value: number | undefined) {
   return Math.max(0, Math.min(100, Math.round(percent)));
 }
 
+// duplicateScanMaxPasses stops a rescan loop that never reports a finished
+// mailbox. It is a backstop, not the normal exit: the scan ends when the server
+// stops handing back a cursor.
+const duplicateScanMaxPasses = 200;
+
 const syncModeChoices = [
   { value: "auto", label: "Auto", description: "Sync automatically when rolltop refreshes this account." },
   { value: "manual", label: "Manual", description: "Keep the folder available, but sync only when requested." },
@@ -1558,14 +1563,14 @@ export function SettingsView({
     ].join("\n");
   }
 
-  function duplicateScanNotice(hidden: number, newlyHidden: number, revealed: number, truncated: boolean) {
+  function duplicateScanNotice(hidden: number, newlyHidden: number, revealed: number, unfinished: boolean) {
     const parts: string[] = [];
     parts.push(hidden === 0
       ? "No duplicate copies found."
       : `${hidden.toLocaleString()} ${hidden === 1 ? "copy is" : "copies are"} hidden.`);
     if (newlyHidden > 0) parts.push(`${newlyHidden.toLocaleString()} newly hidden.`);
     if (revealed > 0) parts.push(`${revealed.toLocaleString()} brought back into view.`);
-    if (truncated) parts.push("The mailbox is large enough that the scan stopped early; run it again to cover the rest.");
+    if (unfinished) parts.push("The mailbox is large enough that the scan is still not through it; run it again to continue from where it stopped.");
     return parts.join(" ");
   }
 
@@ -2430,9 +2435,22 @@ export function SettingsView({
     setDuplicateNotice("");
     setDuplicateError("");
     try {
-      const result = await api.rescanDuplicateCopies(csrf);
+      // Each pass covers a bounded number of Message-ID groups and reports where
+      // to resume. Following that cursor is what finishes a large mailbox; the
+      // pass cap only stops a runaway loop.
+      let cursor = "";
+      let newlyHidden = 0;
+      let revealed = 0;
+      let result = await api.rescanDuplicateCopies(csrf, cursor);
+      for (let pass = 0; pass < duplicateScanMaxPasses; pass++) {
+        newlyHidden += result.newly_hidden;
+        revealed += result.revealed;
+        cursor = result.next || "";
+        if (!cursor) break;
+        result = await api.rescanDuplicateCopies(csrf, cursor);
+      }
       setDuplicates({ ok: result.ok, hidden: result.hidden, accounts: result.accounts });
-      setDuplicateNotice(duplicateScanNotice(result.hidden, result.newly_hidden, result.revealed, result.truncated));
+      setDuplicateNotice(duplicateScanNotice(result.hidden, newlyHidden, revealed, Boolean(cursor)));
     } catch (err) {
       setDuplicateError(messageFromError(err));
     } finally {

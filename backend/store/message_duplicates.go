@@ -15,17 +15,22 @@ import (
 	"strings"
 )
 
-// maxDuplicateScanRows bounds one detection pass. The scan only loads envelope
-// columns, but a tenant with a decade of mail still has to stay inside a
-// predictable amount of memory, so a pass covers the newest rows and the next
-// pass picks up whatever a very large mailbox left behind.
-const maxDuplicateScanRows = 200000
+const (
+	// duplicateScanGroupPage is how many Message-IDs one query pass resolves.
+	// Paging by group rather than by row keeps a group's copies together, so a
+	// page boundary can never split the evidence a decision is made from.
+	duplicateScanGroupPage = 500
+	// maxDuplicateScanGroups bounds one call. A tenant with more duplicate
+	// groups than this resumes from the returned cursor instead of restarting,
+	// so repeated passes actually finish the mailbox.
+	maxDuplicateScanGroups = 50000
+)
 
-// duplicateSuppressibleRoles names the folders a copy may be hidden in. Sent and
+// duplicateHideableRole names the folders a copy may be hidden in. Sent and
 // Drafts copies are the user's own writing rather than a second delivery, and a
 // Trash copy is already on its way out; hiding either would be a surprise the
 // user cannot undo from the list.
-func duplicateSuppressibleRole(role string) bool {
+func duplicateHideableRole(role string) bool {
 	switch normalizeMailboxRole(role) {
 	case "sent", "drafts", "trash":
 		return false
@@ -33,16 +38,28 @@ func duplicateSuppressibleRole(role string) bool {
 	return true
 }
 
+// duplicateOriginalEligible reports whether a row can be the copy everything
+// else hides behind. Being hideable is not enough: the row also has to sit in a
+// folder the reader actually reads. Junk, Drafts, and Trash are forced out of
+// All Mail, and a user can take any other folder out of it too, so a Spam-filed
+// row standing in as the original would leave the message reachable only from
+// that account's Spam list - which is exactly the "hid the only copy" failure
+// this rule exists to prevent.
+func duplicateOriginalEligible(item DuplicateCopy) bool {
+	return item.ShowInAllMail && duplicateHideableRole(item.MailboxRole)
+}
+
 // DuplicateCopy is one message row participating in duplicate detection.
 type DuplicateCopy struct {
-	ID          int64
-	AccountID   int64
-	MailboxID   int64
-	MailboxRole string
-	MessageID   string
-	ToAddr      string
-	CCAddr      string
-	DuplicateOf int64
+	ID            int64
+	AccountID     int64
+	MailboxID     int64
+	MailboxRole   string
+	ShowInAllMail bool
+	MessageID     string
+	ToAddr        string
+	CCAddr        string
+	DuplicateOf   int64
 }
 
 // DuplicateScanStats reports what one detection pass changed.
@@ -53,15 +70,23 @@ type DuplicateScanStats struct {
 	Hidden int
 	// Revealed counts rows that stopped pointing at one.
 	Revealed int
-	// Truncated reports that the tenant has more rows than one pass reads.
+	// NextHeader is the cursor a follow-up call passes as after. It is empty
+	// once the scan has seen every group.
+	NextHeader string
+	// Truncated reports that this call stopped early and NextHeader has more.
 	Truncated bool
 }
 
-// RefreshDuplicateCopiesForUser rescans every Message-ID held by more than one
+// RefreshDuplicateCopiesForUser rescans the Message-IDs held by more than one
 // account and rewrites the duplicate pointers. It is the repair path for mail
 // that was mirrored before detection existed, and for accounts that gained an
 // alias after their mail arrived.
-func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64) (DuplicateScanStats, error) {
+//
+// after is the cursor from a previous call's NextHeader, or empty to start from
+// the beginning. A call that stops on its group budget reports where to resume,
+// so a mailbox larger than one pass is finished by repeating the call rather
+// than by re-reading the same groups forever.
+func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64, after string) (DuplicateScanStats, error) {
 	var stats DuplicateScanStats
 	if userID <= 0 {
 		return stats, nil
@@ -74,61 +99,111 @@ func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64)
 	if err != nil {
 		return stats, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id, mb.role,
-			m.message_id_header, m.to_addr, m.cc_addr, m.duplicate_of_message_id
-		FROM messages m
-		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
-		WHERE m.user_id = ? AND m.message_id_header <> ''
-			AND m.message_id_header IN (
-				SELECT message_id_header FROM messages
-				WHERE user_id = ? AND message_id_header <> ''
-				GROUP BY message_id_header
-				HAVING COUNT(DISTINCT account_id) > 1)
-		ORDER BY m.message_id_header, m.id
-		LIMIT ?`, userID, userID, maxDuplicateScanRows+1)
+	cursor := strings.TrimSpace(after)
+	for stats.Groups < maxDuplicateScanGroups {
+		headers, err := s.duplicateGroupHeaders(ctx, db, userID, cursor, duplicateScanGroupPage)
+		if err != nil {
+			return stats, err
+		}
+		if len(headers) == 0 {
+			cursor = ""
+			break
+		}
+		copies, err := s.duplicateCopiesForHeaders(ctx, db, userID, headers)
+		if err != nil {
+			return stats, err
+		}
+		updates := map[int64]int64{}
+		forEachDuplicateGroup(copies, func(group []DuplicateCopy) {
+			stats.Groups++
+			for id, original := range resolveDuplicateGroup(group, addresses) {
+				updates[id] = original
+			}
+		})
+		for _, item := range copies {
+			if _, planned := updates[item.ID]; planned {
+				continue
+			}
+			// A row the current rule no longer hides has to be released
+			// explicitly: leaving the old pointer in place would keep mail
+			// invisible after an alias, a folder role, or the winning copy's
+			// account changed.
+			if item.DuplicateOf != 0 {
+				updates[item.ID] = 0
+			}
+		}
+		hidden, revealed, err := s.applyDuplicatePointers(ctx, db, userID, copies, updates)
+		if err != nil {
+			return stats, err
+		}
+		stats.Hidden += hidden
+		stats.Revealed += revealed
+		cursor = headers[len(headers)-1]
+		if len(headers) < duplicateScanGroupPage {
+			cursor = ""
+			break
+		}
+	}
+	stats.NextHeader = cursor
+	stats.Truncated = cursor != ""
+	return stats, nil
+}
+
+// duplicateGroupHeaders pages the Message-IDs that more than one account holds.
+// Ordering by header makes the last one a usable resume cursor.
+func (s *Store) duplicateGroupHeaders(ctx context.Context, db *sql.DB, userID int64, after string, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT message_id_header FROM messages
+		WHERE user_id = ? AND message_id_header <> '' AND message_id_header > ?
+		GROUP BY message_id_header
+		HAVING COUNT(DISTINCT account_id) > 1
+		ORDER BY message_id_header
+		LIMIT ?`, userID, after, limit)
 	if err != nil {
-		return stats, err
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, limit)
+	for rows.Next() {
+		var header string
+		if err := rows.Scan(&header); err != nil {
+			return nil, err
+		}
+		out = append(out, header)
+	}
+	return out, rows.Err()
+}
+
+// duplicateCopiesForHeaders loads every copy of the given Message-IDs, ordered
+// so a caller can walk one group at a time.
+func (s *Store) duplicateCopiesForHeaders(ctx context.Context, db *sql.DB, userID int64, headers []string) ([]DuplicateCopy, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(headers)+1)
+	args = append(args, userID)
+	for _, header := range headers {
+		args = append(args, header)
+	}
+	rows, err := db.QueryContext(ctx, duplicateCopyColumns+`
+		WHERE m.user_id = ? AND m.message_id_header IN (`+sqlPlaceholders(len(headers))+`)
+		ORDER BY m.message_id_header, m.id`, args...)
+	if err != nil {
+		return nil, err
 	}
 	copies, err := scanDuplicateCopies(rows)
 	closeErr := rows.Close()
 	if err != nil {
-		return stats, err
+		return nil, err
 	}
-	if closeErr != nil {
-		return stats, closeErr
-	}
-	if len(copies) > maxDuplicateScanRows {
-		// The cut runs on a Message-ID boundary so a half-read group is never
-		// judged against the copies the limit left behind.
-		stats.Truncated = true
-		copies = trimToWholeDuplicateGroups(copies, maxDuplicateScanRows)
-	}
-	updates := map[int64]int64{}
-	forEachDuplicateGroup(copies, func(group []DuplicateCopy) {
-		stats.Groups++
-		for id, original := range resolveDuplicateGroup(group, addresses) {
-			updates[id] = original
-		}
-	})
-	for _, item := range copies {
-		if _, planned := updates[item.ID]; planned {
-			continue
-		}
-		// A row the current rule no longer hides has to be released explicitly:
-		// leaving the old pointer in place would keep mail invisible after an
-		// alias, a folder role, or the winning copy's account changed.
-		if item.DuplicateOf != 0 {
-			updates[item.ID] = 0
-		}
-	}
-	applied, revealed, err := s.applyDuplicatePointers(ctx, db, userID, copies, updates)
-	if err != nil {
-		return stats, err
-	}
-	stats.Hidden = applied
-	stats.Revealed = revealed
-	return stats, nil
+	return copies, closeErr
 }
+
+// duplicateCopyColumns is the envelope projection every detection query reads.
+// Detection never loads bodies: it decides from recipients and folder placement.
+const duplicateCopyColumns = `SELECT m.id, m.account_id, m.mailbox_id, mb.role, mb.show_in_all_mail,
+		m.message_id_header, m.to_addr, m.cc_addr, m.duplicate_of_message_id
+	FROM messages m
+	JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id`
 
 // RefreshDuplicateCopiesForMessageID rescans the copies of one Message-ID. Sync
 // calls it for each stored message, so a copy that arrives after its original is
@@ -142,22 +217,9 @@ func (s *Store) RefreshDuplicateCopiesForMessageID(ctx context.Context, userID i
 	if err != nil {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id, mb.role,
-			m.message_id_header, m.to_addr, m.cc_addr, m.duplicate_of_message_id
-		FROM messages m
-		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
-		WHERE m.user_id = ? AND m.message_id_header = ?
-		ORDER BY m.id`, userID, header)
+	copies, err := s.duplicateCopiesForHeaders(ctx, db, userID, []string{header})
 	if err != nil {
 		return err
-	}
-	copies, err := scanDuplicateCopies(rows)
-	closeErr := rows.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
 	}
 	if len(copies) < 2 {
 		return nil
@@ -166,7 +228,12 @@ func (s *Store) RefreshDuplicateCopiesForMessageID(ctx context.Context, userID i
 	if err != nil {
 		return err
 	}
-	updates := resolveDuplicateGroup(copies, addresses)
+	// resolveDuplicateGroup returns nil for every group it declines to judge, so
+	// the release pass below needs a map it can always write to.
+	updates := map[int64]int64{}
+	for id, original := range resolveDuplicateGroup(copies, addresses) {
+		updates[id] = original
+	}
 	for _, item := range copies {
 		if _, planned := updates[item.ID]; !planned && item.DuplicateOf != 0 {
 			updates[item.ID] = 0
@@ -247,7 +314,11 @@ func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[strin
 			// as unresolvable rather than trusting the stored pointer.
 			return nil
 		}
-		if messageAddressesAccount(item, addresses[item.AccountID]) {
+		// Only a row that could stand in as the original counts its account as
+		// addressed. A message the addressed account holds solely in Spam or
+		// Trash cannot cover for the copies, so its account does not get to
+		// decide the group.
+		if duplicateOriginalEligible(item) && messageAddressesAccount(item, addresses[item.AccountID]) {
 			addressed[item.AccountID] = true
 		}
 	}
@@ -260,7 +331,7 @@ func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[strin
 	}
 	original := DuplicateCopy{}
 	for _, item := range copies {
-		if item.AccountID != originalAccount || !duplicateSuppressibleRole(item.MailboxRole) {
+		if item.AccountID != originalAccount || !duplicateOriginalEligible(item) {
 			continue
 		}
 		if original.ID == 0 || preferredDuplicateOriginal(item, original) {
@@ -268,14 +339,14 @@ func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[strin
 		}
 	}
 	if original.ID == 0 {
-		// The addressed account only holds the message in Sent, Drafts, or Trash.
-		// Whatever the other accounts hold, it is not a copy of a delivery that is
-		// still visible here.
+		// The addressed account holds the message only where the reader would not
+		// find it. Whatever the other accounts hold, hiding it behind that row
+		// would take the message out of view entirely.
 		return nil
 	}
 	out := map[int64]int64{}
 	for _, item := range copies {
-		if item.AccountID == originalAccount || !duplicateSuppressibleRole(item.MailboxRole) {
+		if item.AccountID == originalAccount || !duplicateHideableRole(item.MailboxRole) {
 			continue
 		}
 		out[item.ID] = original.ID
@@ -512,7 +583,7 @@ func scanDuplicateCopies(rows *sql.Rows) ([]DuplicateCopy, error) {
 	for rows.Next() {
 		var item DuplicateCopy
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.MailboxID, &item.MailboxRole,
-			&item.MessageID, &item.ToAddr, &item.CCAddr, &item.DuplicateOf); err != nil {
+			&item.ShowInAllMail, &item.MessageID, &item.ToAddr, &item.CCAddr, &item.DuplicateOf); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -530,18 +601,4 @@ func forEachDuplicateGroup(copies []DuplicateCopy, fn func([]DuplicateCopy)) {
 		fn(copies[start:i])
 		start = i
 	}
-}
-
-// trimToWholeDuplicateGroups drops the trailing partial group a row limit cut in
-// half, so a truncated pass never judges a group by some of its copies.
-func trimToWholeDuplicateGroups(copies []DuplicateCopy, limit int) []DuplicateCopy {
-	if len(copies) <= limit {
-		return copies
-	}
-	cut := limit
-	header := copies[cut].MessageID
-	for cut > 0 && copies[cut-1].MessageID == header {
-		cut--
-	}
-	return copies[:cut]
 }

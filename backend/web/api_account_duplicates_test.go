@@ -89,7 +89,7 @@ func newDuplicateWebFixture(t *testing.T) duplicateWebFixture {
 	}
 	original := storeDuplicateMessage(t, ctx, db, owner.ID, originalAccount.ID, originalInbox.ID, 1)
 	copied := storeDuplicateMessage(t, ctx, db, owner.ID, aggregateAccount.ID, aggregateInbox.ID, 2)
-	if _, err := db.RefreshDuplicateCopiesForUser(ctx, owner.ID); err != nil {
+	if _, err := db.RefreshDuplicateCopiesForUser(ctx, owner.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 
