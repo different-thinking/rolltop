@@ -3,7 +3,15 @@
 
 package web
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"rolltop/backend/store"
+)
 
 func TestPublicAuthRoutesAreServedAsAppRoutes(t *testing.T) {
 	// isPublicAuthRoute promises these paths stay reachable without a session,
@@ -15,6 +23,47 @@ func TestPublicAuthRoutesAreServedAsAppRoutes(t *testing.T) {
 		}
 		if !isAppRoute(path) {
 			t.Fatalf("%s is a public auth route but not an app route, so it 404s", path)
+		}
+	}
+}
+
+// TestEverySPARouteIsActuallyServed closes the gap the route table exists for:
+// a declaration that no mux pattern answers is a page that 404s in production
+// while every predicate insists it is a real route.
+func TestEverySPARouteIsActuallyServed(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server, err := New(Options{
+		Store:      db,
+		MasterKey:  []byte("12345678901234567890123456789012"),
+		SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	for _, route := range spaRoutes {
+		targets := []string{}
+		if route.exact {
+			targets = append(targets, route.path)
+		}
+		if route.prefix {
+			targets = append(targets, route.path+"/child")
+		}
+		for _, target := range targets {
+			if !isAppRoute(target) {
+				t.Fatalf("%s is declared but isAppRoute rejects it", target)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+			// Without a built frontend the shell answers 503; the point is that
+			// the path reaches a handler at all rather than falling through.
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("declared SPA route %s is not registered on the mux", target)
+			}
 		}
 	}
 }

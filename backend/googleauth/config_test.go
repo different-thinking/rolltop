@@ -17,34 +17,20 @@ func requestTo(t *testing.T, target string, forwardedProto string) *http.Request
 	return req
 }
 
-func TestConfigFromEnvReadsMultipleRedirectURLs(t *testing.T) {
-	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", " client-id ")
-	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
-	t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS",
-		"https://rolltop.example.test/api/google/callback, http://localhost:8080/api/google/callback\nhttps://rolltop.example.test/api/google/callback")
-	cfg := ConfigFromEnv()
-
-	if !cfg.Configured() {
-		t.Fatal("config with client credentials reported as unconfigured")
-	}
-	if cfg.ClientID != "client-id" {
-		t.Fatalf("client id = %q, want trimmed", cfg.ClientID)
-	}
-	if len(cfg.RedirectURLs) != 2 {
-		t.Fatalf("redirect URLs = %v, want two deduplicated entries", cfg.RedirectURLs)
+func TestNewFillsDefaultScopesAndEndpoints(t *testing.T) {
+	cfg := New(" client-id ", "client-secret", []string{"https://rolltop.example.test" + CallbackPath}, nil)
+	if !cfg.Configured() || cfg.ClientID != "client-id" {
+		t.Fatalf("config = %+v, want trimmed and configured", cfg)
 	}
 	if cfg.ScopeString() == "" || cfg.Scopes[len(cfg.Scopes)-1] != ScopeMail {
 		t.Fatalf("default scopes = %v, want the mail scope included", cfg.Scopes)
 	}
-}
-
-func TestConfigFromEnvHonoursExplicitScopes(t *testing.T) {
-	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "id")
-	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "secret")
-	t.Setenv("ROLLTOP_GOOGLE_SCOPES", "openid email")
-	cfg := ConfigFromEnv()
-	if cfg.ScopeString() != "openid email" {
-		t.Fatalf("scope string = %q, want the configured scopes", cfg.ScopeString())
+	if cfg.TokenEndpoint != DefaultTokenEndpoint || cfg.UserinfoEndpoint != DefaultUserinfoEndpoint {
+		t.Fatalf("endpoints not defaulted: %+v", cfg)
+	}
+	explicit := New("id", "secret", nil, []string{"openid", "email"})
+	if explicit.ScopeString() != "openid email" {
+		t.Fatalf("scope string = %q, want the configured scopes", explicit.ScopeString())
 	}
 }
 

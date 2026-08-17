@@ -1,49 +1,61 @@
 // File overview: Minimal leveled logging on top of the standard log package.
-// Debugf lines are suppressed unless ROLLTOP_LOG_LEVEL=debug, so production
+// Debugf lines are suppressed unless the debug level is selected, so production
 // logs carry only operational messages while development keeps the verbose
 // plugin and unsubscribe traces.
+//
+// This package owns what a log level means. Nothing here reads the environment:
+// config.Load validates the operator's setting through ParseLevel and the
+// binary applies it once with SetLevel, so there is exactly one interpretation
+// of the value rather than one here and another in the config package.
 
 package logging
 
 import (
 	"fmt"
 	"log"
-	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 )
 
-var (
-	mu           sync.RWMutex
-	debugEnabled *bool
+// Levels Rolltop understands.
+const (
+	LevelInfo  = "info"
+	LevelDebug = "debug"
 )
 
-// DebugEnabled reports whether debug-level lines should be written. The first
-// call reads ROLLTOP_LOG_LEVEL from the environment; SetDebug overrides it.
-func DebugEnabled() bool {
-	mu.RLock()
-	if debugEnabled != nil {
-		enabled := *debugEnabled
-		mu.RUnlock()
-		return enabled
+// debug is false until the binary applies the configured level, so a Debugf
+// that runs before then stays quiet rather than latching an unvalidated guess.
+var debug atomic.Bool
+
+// ParseLevel validates an operator-supplied log level. Callers that read
+// configuration use it so an unknown value is rejected at startup instead of
+// silently meaning "not debug".
+func ParseLevel(value string) (string, error) {
+	switch level := strings.ToLower(strings.TrimSpace(value)); level {
+	case "":
+		return LevelInfo, nil
+	case LevelInfo, LevelDebug:
+		return level, nil
+	default:
+		return "", fmt.Errorf("log level must be %q or %q, got %q", LevelInfo, LevelDebug, value)
 	}
-	mu.RUnlock()
-	enabled := strings.EqualFold(strings.TrimSpace(os.Getenv("ROLLTOP_LOG_LEVEL")), "debug")
-	mu.Lock()
-	if debugEnabled == nil {
-		debugEnabled = &enabled
-	}
-	enabled = *debugEnabled
-	mu.Unlock()
-	return enabled
 }
 
-// SetDebug forces debug logging on or off, overriding the environment. Tests
-// use it to exercise both levels without mutating process environment state.
+// DebugEnabled reports whether debug-level lines are being written. Hot paths
+// use it to skip building expensive arguments.
+func DebugEnabled() bool {
+	return debug.Load()
+}
+
+// SetLevel applies a level returned by ParseLevel.
+func SetLevel(level string) {
+	debug.Store(level == LevelDebug)
+}
+
+// SetDebug forces debug logging on or off. Tests use it to exercise both levels
+// without mutating process environment state.
 func SetDebug(enabled bool) {
-	mu.Lock()
-	debugEnabled = &enabled
-	mu.Unlock()
+	debug.Store(enabled)
 }
 
 // Debugf logs like log.Printf with a "debug " prefix, but only when debug

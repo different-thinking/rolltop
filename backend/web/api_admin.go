@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"rolltop/backend/auth"
-	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
 )
@@ -203,7 +202,8 @@ func (s *Server) apiAdminPlugins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiAdminPlugin(w http.ResponseWriter, r *http.Request, rest string) {
-	if _, ok := s.requireAPIAdmin(w, r); !ok {
+	cu, ok := s.requireAPIAdmin(w, r)
+	if !ok {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -242,7 +242,10 @@ func (s *Server) apiAdminPlugin(w http.ResponseWriter, r *http.Request, rest str
 		return
 	}
 	defer s.notifyPluginSettingChanged(users)
-	logging.Debugf("plugin setting updated plugin_id=%s enabled=%t", pluginID, in.Enabled)
+	// An admin changing what the server runs is audit-relevant: it has to be
+	// reconstructable from an ordinary log, not only when debug happens to be
+	// on at the moment it occurs.
+	log.Printf("plugin setting updated plugin_id=%s enabled=%t admin_user_id=%d", pluginID, in.Enabled, cu.User.ID)
 	if in.Enabled {
 		if _, _, err := s.startBackendPlugin(r.Context(), pluginID); err != nil {
 			log.Printf("backend plugin %s enabled but unavailable: %v", pluginID, err)

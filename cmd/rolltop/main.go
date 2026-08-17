@@ -313,7 +313,7 @@ func run() error {
 		_ = server.Shutdown(shutdownCtx)
 		return err
 	}
-	logging.SetDebug(cfg.LogLevel == "debug")
+	logging.SetLevel(cfg.LogLevel)
 	// Name the resolved storage paths before anything opens them, so a
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
@@ -503,6 +503,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		SessionTTL:   cfg.SessionTTL,
 		CookieSecure: cfg.CookieSecure,
 		WebhookToken: cfg.WebhookToken,
+		Google:       cfg.Google,
 	})
 	if err != nil {
 		return nil, err

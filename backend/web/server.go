@@ -23,6 +23,7 @@ import (
 	"rolltop/backend/auth"
 	"rolltop/backend/blob"
 	"rolltop/backend/buildinfo"
+	"rolltop/backend/config"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/googleauth"
 	"rolltop/backend/mailparse"
@@ -59,8 +60,10 @@ type Options struct {
 	SessionTTL   time.Duration
 	CookieSecure bool
 	WebhookToken string
-	// GoogleAuth overrides the manager built from the environment. Tests set it
-	// to point the OAuth flow at a fake Google.
+	// Google carries the validated OAuth client settings from config.Load.
+	Google config.GoogleConfig
+	// GoogleAuth overrides the manager built from Google. Tests set it to point
+	// the OAuth flow at a fake Google.
 	GoogleAuth *googleauth.Manager
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
@@ -265,7 +268,9 @@ func New(opts Options) (*Server, error) {
 		opts.PluginDir = "plugins"
 	}
 	if opts.GoogleAuth == nil && opts.Store != nil {
-		opts.GoogleAuth = googleauth.NewManager(googleauth.ConfigFromEnv(), opts.Store, opts.MasterKey)
+		opts.GoogleAuth = googleauth.NewManager(
+			googleauth.New(opts.Google.ClientID, opts.Google.ClientSecret, opts.Google.RedirectURLs, opts.Google.Scopes),
+			opts.Store, opts.MasterKey)
 	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
@@ -370,30 +375,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/android/latest.json", s.handleAndroidLatest)
 	mux.HandleFunc("/android/rolltop.apk", s.handleAndroidAPK)
 	mux.HandleFunc("/android/", s.handleFrontendAsset)
-	mux.HandleFunc("/setup", s.handleApp)
-	mux.HandleFunc("/login", s.handleApp)
-	// Password reset emails link here; without a route the link 404s.
-	mux.HandleFunc("/reset-password", s.handleApp)
-	mux.HandleFunc("/mail", s.handleApp)
-	mux.HandleFunc("/mail/", s.handleApp)
-	mux.HandleFunc("/snoozes", s.handleApp)
-	mux.HandleFunc("/mailbox/", s.handleApp)
-	mux.HandleFunc("/search", s.handleApp)
-	mux.HandleFunc("/search/", s.handleApp)
-	mux.HandleFunc("/compose", s.handleApp)
-	mux.HandleFunc("/contacts", s.handleApp)
+	// Every client-side route comes from the one declaration in spa.go, so a
+	// page cannot be served without also being recognized by isAppRoute.
+	for _, route := range spaRoutes {
+		if route.exact {
+			mux.HandleFunc(route.path, s.handleApp)
+		}
+		if route.prefix && !route.ownPrefixHandler {
+			mux.HandleFunc(route.path+"/", s.handleApp)
+		}
+	}
 	mux.HandleFunc("/contacts/", s.handleContactOrApp)
 	mux.HandleFunc("/webhooks/sync", s.handleSyncWebhook)
-	mux.HandleFunc("/messages/", s.handleApp)
 	mux.HandleFunc("/attachments/", s.handleAttachment)
 	mux.HandleFunc("/blobs/", s.handleBlob)
 	mux.HandleFunc("/remote-images/", s.handleRemoteImage)
 	mux.HandleFunc("/brand-icons/", s.handleBrandIcon)
 	mux.HandleFunc("/plugins/", s.handlePluginRoute)
-	mux.HandleFunc("/sync-runs/", s.handleApp)
-	mux.HandleFunc("/settings/account", s.handleApp)
-	mux.HandleFunc("/settings/account/", s.handleApp)
-	mux.HandleFunc("/admin/users", s.handleApp)
 	return s.securityHeaders(s.withCurrentUser(mux))
 }
 

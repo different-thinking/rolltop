@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 )
 
@@ -55,13 +54,15 @@ type Config struct {
 	UserinfoEndpoint      string
 }
 
-// ConfigFromEnv reads the operator-supplied Google client configuration.
-func ConfigFromEnv() Config {
+// New builds a client configuration from the operator's validated settings.
+// Reading and validating the environment is the config package's job, so this
+// package never touches os.Getenv and cannot disagree with it.
+func New(clientID, clientSecret string, redirectURLs, scopes []string) Config {
 	cfg := Config{
-		ClientID:              strings.TrimSpace(os.Getenv("ROLLTOP_GOOGLE_CLIENT_ID")),
-		ClientSecret:          strings.TrimSpace(os.Getenv("ROLLTOP_GOOGLE_CLIENT_SECRET")),
-		RedirectURLs:          splitList(os.Getenv("ROLLTOP_GOOGLE_REDIRECT_URLS")),
-		Scopes:                splitList(os.Getenv("ROLLTOP_GOOGLE_SCOPES")),
+		ClientID:              strings.TrimSpace(clientID),
+		ClientSecret:          strings.TrimSpace(clientSecret),
+		RedirectURLs:          append([]string(nil), redirectURLs...),
+		Scopes:                append([]string(nil), scopes...),
 		AuthorizationEndpoint: DefaultAuthorizationEndpoint,
 		TokenEndpoint:         DefaultTokenEndpoint,
 		RevokeEndpoint:        DefaultRevokeEndpoint,
@@ -191,23 +192,4 @@ func requestOrigin(r *http.Request) string {
 		return ""
 	}
 	return scheme + "://" + host
-}
-
-// splitList accepts comma, whitespace, or newline separated values so operators
-// can format multi-value environment variables however reads best for them.
-func splitList(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
-	})
-	out := make([]string, 0, len(fields))
-	seen := map[string]bool{}
-	for _, field := range fields {
-		field = strings.TrimSpace(field)
-		if field == "" || seen[field] {
-			continue
-		}
-		seen[field] = true
-		out = append(out, field)
-	}
-	return out
 }

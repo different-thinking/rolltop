@@ -7,11 +7,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"rolltop/backend/logging"
 )
 
 // Config is the validated runtime configuration assembled from environment variables.
@@ -31,6 +34,7 @@ type Config struct {
 	BlobRetention     time.Duration
 	WebhookToken      string
 	LogLevel          string
+	Google            GoogleConfig
 }
 
 // Load reads environment configuration, applies defaults, and validates values needed before services start.
@@ -68,11 +72,15 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	logLevel := strings.ToLower(env("ROLLTOP_LOG_LEVEL", "info"))
-	switch logLevel {
-	case "info", "debug":
-	default:
-		return Config{}, fmt.Errorf("ROLLTOP_LOG_LEVEL must be \"info\" or \"debug\", got %q", logLevel)
+	// The logging package owns what a level means, so an unknown value is
+	// rejected here by the same parser the logger applies.
+	logLevel, err := logging.ParseLevel(os.Getenv("ROLLTOP_LOG_LEVEL"))
+	if err != nil {
+		return Config{}, fmt.Errorf("ROLLTOP_LOG_LEVEL: %w", err)
+	}
+	google, err := loadGoogleConfig()
+	if err != nil {
+		return Config{}, err
 	}
 
 	return Config{
@@ -89,7 +97,68 @@ func Load() (Config, error) {
 		BlobRetention:     blobRetention,
 		WebhookToken:      os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
 		LogLevel:          logLevel,
+		Google:            google,
 	}, nil
+}
+
+// GoogleConfig carries the operator-supplied OAuth client. It lives here rather
+// than being read straight from the environment where it is used, so a typo is
+// a startup failure instead of a 503 the first time somebody clicks Connect.
+type GoogleConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURLs []string
+	Scopes       []string
+}
+
+// Configured reports whether Google features can be offered at all.
+func (g GoogleConfig) Configured() bool {
+	return g.ClientID != "" && g.ClientSecret != ""
+}
+
+func loadGoogleConfig() (GoogleConfig, error) {
+	google := GoogleConfig{
+		ClientID:     strings.TrimSpace(os.Getenv("ROLLTOP_GOOGLE_CLIENT_ID")),
+		ClientSecret: strings.TrimSpace(os.Getenv("ROLLTOP_GOOGLE_CLIENT_SECRET")),
+		RedirectURLs: splitList(os.Getenv("ROLLTOP_GOOGLE_REDIRECT_URLS")),
+		Scopes:       splitList(os.Getenv("ROLLTOP_GOOGLE_SCOPES")),
+	}
+	// Half a credential is always a mistake, and it is one that otherwise only
+	// shows up as a failed consent long after startup.
+	if (google.ClientID == "") != (google.ClientSecret == "") {
+		return GoogleConfig{}, errors.New("ROLLTOP_GOOGLE_CLIENT_ID and ROLLTOP_GOOGLE_CLIENT_SECRET must be set together")
+	}
+	for _, raw := range google.RedirectURLs {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return GoogleConfig{}, fmt.Errorf("ROLLTOP_GOOGLE_REDIRECT_URLS: %q is not a URL: %w", raw, err)
+		}
+		if parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return GoogleConfig{}, fmt.Errorf("ROLLTOP_GOOGLE_REDIRECT_URLS: %q must be an absolute http or https URL", raw)
+		}
+	}
+	if google.Configured() && len(google.RedirectURLs) == 0 {
+		return GoogleConfig{}, errors.New("ROLLTOP_GOOGLE_REDIRECT_URLS is required when Google client credentials are set")
+	}
+	return google, nil
+}
+
+// splitList accepts comma, whitespace, or newline separated values so operators
+// can format multi-value environment variables however reads best for them.
+func splitList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, field := range fields {
+		if field == "" || seen[field] {
+			continue
+		}
+		seen[field] = true
+		out = append(out, field)
+	}
+	return out
 }
 
 // ParseMasterKey decodes the encryption key used for IMAP/SMTP secrets and enforces the required key length.

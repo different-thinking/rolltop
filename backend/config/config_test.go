@@ -81,3 +81,65 @@ func TestLoadValidatesLogLevel(t *testing.T) {
 		t.Fatal("expected error for unknown log level")
 	}
 }
+
+func TestLoadReadsGoogleSettings(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", " client-id ")
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
+	t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS",
+		"https://rolltop.example.test/api/google/callback, http://localhost:8080/api/google/callback\nhttps://rolltop.example.test/api/google/callback")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Google.Configured() || cfg.Google.ClientID != "client-id" {
+		t.Fatalf("google config = %+v", cfg.Google)
+	}
+	if len(cfg.Google.RedirectURLs) != 2 {
+		t.Fatalf("redirect URLs = %v, want two deduplicated entries", cfg.Google.RedirectURLs)
+	}
+}
+
+func TestLoadRejectsHalfAGoogleCredential(t *testing.T) {
+	// A typo in one of the two variables otherwise stays invisible until a user
+	// clicks Connect and gets a 503.
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("client id without a secret was accepted")
+	}
+}
+
+func TestLoadRequiresRedirectURLsWhenGoogleIsConfigured(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
+	t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("google credentials without a redirect URI were accepted")
+	}
+}
+
+func TestLoadRejectsUnusableRedirectURLs(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
+	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
+	for _, value := range []string{"/api/google/callback", "ftp://rolltop.example.test/cb", "://nonsense"} {
+		t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("redirect URL %q was accepted", value)
+		}
+	}
+}
+
+func TestLoadLeavesGoogleUnconfiguredByDefault(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Google.Configured() {
+		t.Fatalf("google reported as configured without credentials: %+v", cfg.Google)
+	}
+}
