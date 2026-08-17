@@ -21,6 +21,7 @@ import type { RuntimePlugin, RuntimePlugins } from "../../plugins/runtime";
 import { identitySecuritySettings } from "../../plugins/identitySecurity";
 import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/AdminRemoteImageBlocklist";
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
+import { GoogleAccountsSettings } from "./GoogleAccounts";
 import { SettingsEmpty, SettingsError, SettingsIndex, SettingsIndexRow, SettingsLoading, SettingsPage, SettingsShell } from "./SettingsUI";
 import type { SettingsSectionID } from "./SettingsUI";
 
@@ -408,7 +409,7 @@ function cloneMailIdentity(identity: MailIdentity): MailIdentity {
 }
 
 type SettingsRoute = {
-  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "preferences" | "swipes" | "search" | "plugins" | "unknown";
+  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "preferences" | "swipes" | "search" | "plugins" | "unknown";
   id: number | null;
   isNew: boolean;
 };
@@ -425,6 +426,7 @@ function settingsRouteFromPath(path: string): SettingsRoute {
   if (path === "/settings/account/general/storage") return { kind: "storage", id: null, isNew: false };
   if (path === "/settings/account/general/about") return { kind: "about", id: null, isNew: false };
   if (path === "/settings/account/mail") return { kind: "mail", id: null, isNew: false };
+  if (path === "/settings/account/google") return { kind: "google", id: null, isNew: false };
   if (path === "/settings/account/preferences") return { kind: "preferences", id: null, isNew: false };
   if (path === "/settings/account/preferences/swipes") return { kind: "swipes", id: null, isNew: false };
   if (path === "/settings/account/preferences/search") return { kind: "search", id: null, isNew: false };
@@ -677,6 +679,7 @@ export function SettingsView({
   availableThemes,
   location,
   navigate,
+  replaceRoute,
   refreshChrome,
   runtimePlugins,
   reloadRuntimePlugins,
@@ -692,6 +695,7 @@ export function SettingsView({
   availableThemes: ThemeDefinition[];
   location: LocationState;
   navigate: (url: string) => void;
+  replaceRoute: (url: string) => void;
   refreshChrome: () => Promise<Bootstrap | null>;
   runtimePlugins: RuntimePlugins;
   reloadRuntimePlugins: () => Promise<void>;
@@ -2345,6 +2349,7 @@ export function SettingsView({
     if (matchedPluginRoute) return matchedPluginRoute.section || "plugins";
     if (route.kind === "plugins" || route.kind === "unknown") return "plugins";
     if (["mail", "imap", "smtp", "identities"].includes(route.kind)) return "mail";
+    if (route.kind === "google") return "google";
     if (["preferences", "swipes", "search"].includes(route.kind)) return "preferences";
     return "general";
   };
@@ -2563,6 +2568,13 @@ export function SettingsView({
             <SettingsIndexRow icon="group" title="Identities" description={identities.length > 0 ? `${identities.length} configured outgoing ${identities.length === 1 ? "identity" : "identities"}.` : "Create the first outgoing identity."} meta={identities.length === 1 ? "1 identity" : `${identities.length} identities`} path="/settings/account/mail/identities" navigate={navigate} />
           </SettingsIndex>
         </section>
+      </SettingsPage>
+    );
+  } else if (route.kind === "google") {
+    page = (
+      <SettingsPage title="Google" description="Google accounts authorized for mail, contacts, and calendar." navigate={navigate}>
+        {noticeNode}
+        <GoogleAccountsSettings csrf={csrf} search={location.search} replaceRoute={replaceRoute} addToast={addToast} />
       </SettingsPage>
     );
   } else if (route.kind === "preferences") {

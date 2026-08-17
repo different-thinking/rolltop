@@ -6,7 +6,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import type { Navigate } from "../../appTypes";
 import { Icon } from "../../components/Icon";
 
-export type SettingsSectionID = "general" | "mail" | "preferences" | "plugins";
+export type SettingsSectionID = "general" | "mail" | "google" | "preferences" | "plugins";
 
 type SettingsTab = {
   id: SettingsSectionID;
@@ -17,6 +17,7 @@ type SettingsTab = {
 const settingsTabs: readonly SettingsTab[] = [
   { id: "general", label: "General", path: "/settings/account/general" },
   { id: "mail", label: "Mail", path: "/settings/account/mail" },
+  { id: "google", label: "Google", path: "/settings/account/google" },
   { id: "preferences", label: "Preferences", path: "/settings/account/preferences" },
   { id: "plugins", label: "Plugins", path: "/settings/account/plugins" }
 ];
