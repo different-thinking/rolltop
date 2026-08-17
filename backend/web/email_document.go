@@ -138,16 +138,18 @@ var (
 	imageURLAttrRE  = regexp.MustCompile(`(?is)\b(?:src|srcset)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
 )
 
-// A transparent 1x1 GIF keeps blocked images in the layout without a request.
-const blockedRemoteImagePixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-
 var (
-	namedImageURLAttrRE = regexp.MustCompile(`(?is)\b(src|srcset)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
-	backgroundURLAttrRE = regexp.MustCompile(`(?is)\bbackground\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
-	stylesheetLinkTagRE = regexp.MustCompile(`(?is)<link\b[^>]*>`)
-	linkHrefAttrRE      = regexp.MustCompile(`(?is)\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
-	cssRemoteURLTokenRE = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
-	remoteRefSchemes    = []string{"http://", "https://", "//"}
+	htmlTagRE        = regexp.MustCompile(`(?is)<[a-zA-Z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>`)
+	styleBlockRE     = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	tagNameRE        = regexp.MustCompile(`(?is)^<\s*([a-zA-Z][^\s/>]*)`)
+	tagAttrRE        = regexp.MustCompile(`(?is)^\s+([^\s/>=]+)(\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?`)
+	cssImportRuleRE  = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*("[^"]*"|'[^']*'|[^'")\s]*)\s*\)|("[^"]*"|'[^']*'))[^;]*;?`)
+	cssURLTokenRE    = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
+	remoteRefSchemes = []string{"http://", "https://", "//"}
+	// Attributes the browser fetches on its own. href is deliberately absent:
+	// on an anchor it is a navigation, and the only element that loads it is
+	// <link>, which is dropped whole below.
+	remoteFetchAttrs = map[string]bool{"src": true, "srcset": true, "lowsrc": true, "dynsrc": true, "poster": true, "background": true}
 )
 
 // neutralizeRemoteRefs rewrites remote references so a blocked message body
@@ -159,23 +161,55 @@ func neutralizeRemoteRefs(bodyHTML string) string {
 	if !containsRemoteRef(bodyHTML) {
 		return bodyHTML
 	}
-	bodyHTML = emailImageTagRE.ReplaceAllStringFunc(bodyHTML, neutralizeImageTagRefs)
-	bodyHTML = stylesheetLinkTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
-		if isRemoteRef(attrValue(linkHrefAttrRE, tag)) {
+	// url() is only rewritten where a browser reads it as CSS. Running it over
+	// the whole document would also rewrite url(...) inside ordinary sentences.
+	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, neutralizeRemoteCSS)
+	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, neutralizeTagRemoteRefs)
+}
+
+func neutralizeTagRemoteRefs(tag string) string {
+	if strings.EqualFold(tagName(tag), "link") && isRemoteRef(tagAttrValue(tag, "href")) {
+		return ""
+	}
+	return rewriteTagAttrs(tag, func(name, rawValue string) (string, bool) {
+		lower := strings.ToLower(name)
+		value, quote := splitAttrValue(rawValue)
+		switch {
+		case lower == "style":
+			neutralized := neutralizeRemoteCSS(value)
+			if neutralized == value {
+				return "", false
+			}
+			return "style=" + quoteAttrValue(neutralized, quote), true
+		case lower == "srcset":
+			kept, removed := withoutRemoteSrcsetCandidates(value)
+			if !removed {
+				return "", false
+			}
+			blocked := `data-rolltop-blocked-srcset="` + escapeBlockedRef(value) + `"`
+			if kept == "" {
+				return blocked, true
+			}
+			return "srcset=" + quoteAttrValue(kept, quote) + " " + blocked, true
+		case remoteFetchAttrs[lower] && isRemoteRef(value):
+			// The reference is dropped rather than replaced with a placeholder
+			// image: an element without src makes no request and still shows
+			// its alt text at its own size.
+			return `data-rolltop-blocked-` + lower + `="` + escapeBlockedRef(value) + `"`, true
+		}
+		return "", false
+	})
+}
+
+func neutralizeRemoteCSS(css string) string {
+	css = cssImportRuleRE.ReplaceAllStringFunc(css, func(rule string) string {
+		if isRemoteRef(attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)) {
 			return ""
 		}
-		return tag
+		return rule
 	})
-	bodyHTML = backgroundURLAttrRE.ReplaceAllStringFunc(bodyHTML, func(attr string) string {
-		value := attrValueFromMatch(backgroundURLAttrRE.FindStringSubmatch(attr), 2)
-		if !isRemoteRef(value) {
-			return attr
-		}
-		return `data-rolltop-blocked-background="` + escapeBlockedRef(value) + `"`
-	})
-	return cssRemoteURLTokenRE.ReplaceAllStringFunc(bodyHTML, func(token string) string {
-		value := attrValueFromMatch(cssRemoteURLTokenRE.FindStringSubmatch(token), 2)
-		if !isRemoteRef(value) {
+	return cssURLTokenRE.ReplaceAllStringFunc(css, func(token string) string {
+		if !isRemoteRef(attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)) {
 			return token
 		}
 		// "none" is the one replacement that stays inert in every context a
@@ -186,30 +220,94 @@ func neutralizeRemoteRefs(bodyHTML string) string {
 	})
 }
 
-func neutralizeImageTagRefs(tag string) string {
-	return namedImageURLAttrRE.ReplaceAllStringFunc(tag, func(attr string) string {
-		match := namedImageURLAttrRE.FindStringSubmatch(attr)
-		value := attrValueFromMatch(match, 3)
-		if strings.EqualFold(match[1], "srcset") {
-			if !hasRemoteSrcsetCandidate(value) {
-				return attr
-			}
-			return `data-rolltop-blocked-srcset="` + escapeBlockedRef(value) + `"`
+// rewriteTagAttrs walks a tag's attributes in order and lets rewrite replace
+// whole `name=value` tokens. Matching attribute patterns against the raw tag
+// instead would also match text that merely looks like an attribute inside
+// another attribute's quoted value, and rewriting that text would break the
+// quoting of the attribute it lives in.
+func rewriteTagAttrs(tag string, rewrite func(name, rawValue string) (string, bool)) string {
+	open := tagNameRE.FindString(tag)
+	if open == "" {
+		return tag
+	}
+	var b strings.Builder
+	b.WriteString(open)
+	rest := tag[len(open):]
+	for {
+		match := tagAttrRE.FindStringSubmatchIndex(rest)
+		if match == nil {
+			break
 		}
-		if !isRemoteRef(value) {
-			return attr
+		name := rest[match[2]:match[3]]
+		rawValue := ""
+		if match[6] >= 0 {
+			rawValue = rest[match[6]:match[7]]
 		}
-		return `src="` + blockedRemoteImagePixel + `" data-rolltop-blocked-src="` + escapeBlockedRef(value) + `"`
-	})
+		if replacement, ok := rewrite(name, rawValue); ok {
+			b.WriteString(" " + replacement)
+		} else {
+			b.WriteString(rest[match[0]:match[1]])
+		}
+		rest = rest[match[1]:]
+	}
+	b.WriteString(rest)
+	return b.String()
 }
 
-func hasRemoteSrcsetCandidate(value string) bool {
-	for _, candidate := range srcsetURLCandidates(value) {
-		if isRemoteRef(candidate) {
-			return true
-		}
+func tagName(tag string) string {
+	match := tagNameRE.FindStringSubmatch(tag)
+	if len(match) < 2 {
+		return ""
 	}
-	return false
+	return match[1]
+}
+
+func tagAttrValue(tag, name string) string {
+	found := ""
+	rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+		if strings.EqualFold(attrName, name) && found == "" {
+			found, _ = splitAttrValue(rawValue)
+		}
+		return "", false
+	})
+	return found
+}
+
+// splitAttrValue returns an attribute value without its quotes, plus the quote
+// character the source used so a rewritten value can keep it.
+func splitAttrValue(rawValue string) (string, string) {
+	value := strings.TrimSpace(rawValue)
+	value = strings.TrimSpace(strings.TrimPrefix(value, "="))
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+		return value[1 : len(value)-1], string(value[0])
+	}
+	return value, ""
+}
+
+func quoteAttrValue(value, quote string) string {
+	if quote == "'" && !strings.Contains(value, "'") {
+		return "'" + value + "'"
+	}
+	return `"` + strings.ReplaceAll(value, `"`, "&quot;") + `"`
+}
+
+// withoutRemoteSrcsetCandidates drops only the remote candidates, so a srcset
+// that also lists an inline attachment keeps rendering that attachment.
+func withoutRemoteSrcsetCandidates(value string) (string, bool) {
+	kept := make([]string, 0, 4)
+	removed := false
+	for _, part := range strings.Split(value, ",") {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		if isRemoteRef(fields[0]) {
+			removed = true
+			continue
+		}
+		kept = append(kept, strings.Join(fields, " "))
+	}
+	return strings.Join(kept, ", "), removed
 }
 
 func containsRemoteRef(value string) bool {
@@ -227,12 +325,8 @@ func isRemoteRef(value string) bool {
 	return false
 }
 
-func attrValue(re *regexp.Regexp, tag string) string {
-	return attrValueFromMatch(re.FindStringSubmatch(tag), 2)
-}
-
 // attrValueFromMatch reads the first non-empty alternative of a quoted or
-// unquoted attribute capture group starting at start.
+// unquoted capture group starting at start.
 func attrValueFromMatch(match []string, start int) string {
 	if len(match) <= start {
 		return ""

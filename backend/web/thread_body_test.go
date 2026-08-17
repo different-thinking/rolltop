@@ -348,39 +348,41 @@ func TestEmailDocumentAllowsRemoteStylesAndFontsWithImages(t *testing.T) {
 
 func TestEmailDocumentNeutralizesRemoteRefsWhileImagesAreBlocked(t *testing.T) {
 	body := `<link rel="stylesheet" href="https://cdn.example.test/mail.css">` +
-		`<img src="https://cdn.example.test/logo.png" srcset="https://cdn.example.test/logo@2x.png 2x">` +
-		`<td background="//cdn.example.test/tile.png"><div style="background-image:url('https://cdn.example.test/hero.jpg')">Hero</div></td>`
+		`<style>@import "https://cdn.example.test/import.css";body{background:url(https://cdn.example.test/hero.jpg)}</style>` +
+		`<picture><source srcset="https://cdn.example.test/logo@2x.png 2x"><img src="https://cdn.example.test/logo.png" alt="Logo"></picture>` +
+		`<input type="image" src="https://cdn.example.test/button.png">` +
+		`<video poster="//cdn.example.test/poster.jpg"></video>` +
+		`<td background="//cdn.example.test/tile.png"><div style="background-image:url('https://cdn.example.test/bg.jpg')">Hero</div></td>`
 	doc := emailDocument(body, "", false)
 	// The CSP still refuses remote loads, but the document must not ask for
 	// them: every live reference here would cost one console violation.
-	if strings.Contains(doc, ` src="https://cdn.example.test/logo.png"`) {
-		t.Fatalf("blocked image kept a live src: %s", doc)
+	for _, live := range []string{
+		` src="https://cdn.example.test/logo.png"`,
+		` srcset="https://cdn.example.test/logo@2x.png 2x"`,
+		` src="https://cdn.example.test/button.png"`,
+		` poster="//cdn.example.test/poster.jpg"`,
+		` background="//cdn.example.test/tile.png"`,
+		"url(https://cdn.example.test/hero.jpg)",
+		"url('https://cdn.example.test/bg.jpg')",
+		"mail.css",
+		"import.css",
+	} {
+		if strings.Contains(doc, live) {
+			t.Fatalf("document kept a live remote reference %q: %s", live, doc)
+		}
 	}
-	if !strings.Contains(doc, `src="`+blockedRemoteImagePixel+`"`) {
-		t.Fatalf("blocked image did not fall back to the inert pixel: %s", doc)
+	for _, blocked := range []string{
+		`data-rolltop-blocked-src="https://cdn.example.test/logo.png"`,
+		`data-rolltop-blocked-srcset="https://cdn.example.test/logo@2x.png 2x"`,
+		`data-rolltop-blocked-src="https://cdn.example.test/button.png"`,
+		`data-rolltop-blocked-poster="//cdn.example.test/poster.jpg"`,
+		`data-rolltop-blocked-background="//cdn.example.test/tile.png"`,
+	} {
+		if !strings.Contains(doc, blocked) {
+			t.Fatalf("blocked reference %q was not preserved: %s", blocked, doc)
+		}
 	}
-	if !strings.Contains(doc, `data-rolltop-blocked-src="https://cdn.example.test/logo.png"`) {
-		t.Fatalf("blocked image URL was not preserved: %s", doc)
-	}
-	if strings.Contains(doc, ` srcset=`) {
-		t.Fatalf("blocked image kept a live srcset: %s", doc)
-	}
-	if !strings.Contains(doc, `data-rolltop-blocked-srcset="https://cdn.example.test/logo@2x.png 2x"`) {
-		t.Fatalf("blocked srcset was not preserved: %s", doc)
-	}
-	if strings.Contains(doc, ` background="//cdn.example.test/tile.png"`) {
-		t.Fatalf("blocked background attribute kept a live URL: %s", doc)
-	}
-	if !strings.Contains(doc, `data-rolltop-blocked-background="//cdn.example.test/tile.png"`) {
-		t.Fatalf("blocked background URL was not preserved: %s", doc)
-	}
-	if strings.Contains(doc, "url(") {
-		t.Fatalf("blocked CSS background kept a url() reference: %s", doc)
-	}
-	if strings.Contains(doc, "mail.css") {
-		t.Fatalf("remote stylesheet was not dropped: %s", doc)
-	}
-	if !strings.Contains(doc, "Hero") {
+	if !strings.Contains(doc, `alt="Logo"`) || !strings.Contains(doc, "Hero") {
 		t.Fatalf("message content was lost: %s", doc)
 	}
 }
@@ -388,22 +390,41 @@ func TestEmailDocumentNeutralizesRemoteRefsWhileImagesAreBlocked(t *testing.T) {
 func TestEmailDocumentKeepsLocalRefsWhileImagesAreBlocked(t *testing.T) {
 	attachments := []store.Attachment{{ID: 7, ContentID: "hero@example.test", IsInline: true, ContentType: "image/png"}}
 	body := `<img src="cid:hero@example.test"><img src="data:image/png;base64,AAAA"><img src="/attachments/7/download">` +
-		`<div style="background-image:url(data:image/gif;base64,AAAA)">Local</div>`
+		`<img srcset="cid:hero@example.test 1x, https://cdn.example.test/hero@2x.png 2x">` +
+		`<div style="background-image:url(data:image/gif;base64,AAAA)">Local</div>` +
+		`<p>Docs at url(https://example.test/guide) explain it.</p>`
 	doc := emailDocumentWithInlineAttachments(body, "", false, nil, attachments)
-	if !strings.Contains(doc, `src="/attachments/7/inline"`) {
-		t.Fatalf("inline attachment image was neutralized: %s", doc)
+	for _, kept := range []string{
+		`src="/attachments/7/inline"`,
+		`src="data:image/png;base64,AAAA"`,
+		`src="/attachments/7/download"`,
+		`srcset="/attachments/7/inline 1x"`,
+		`url(data:image/gif;base64,AAAA)`,
+		`Docs at url(https://example.test/guide) explain it.`,
+	} {
+		if !strings.Contains(doc, kept) {
+			t.Fatalf("%q was neutralized: %s", kept, doc)
+		}
 	}
-	if !strings.Contains(doc, `src="data:image/png;base64,AAAA"`) {
-		t.Fatalf("data image was neutralized: %s", doc)
+	if strings.Contains(doc, `srcset="https://cdn.example.test/hero@2x.png 2x"`) {
+		t.Fatalf("remote srcset candidate was kept: %s", doc)
 	}
-	if !strings.Contains(doc, `src="/attachments/7/download"`) {
-		t.Fatalf("same-origin image was neutralized: %s", doc)
+	if strings.Count(doc, "data-rolltop-blocked-") != 1 {
+		t.Fatalf("local references were treated as remote: %s", doc)
 	}
-	if !strings.Contains(doc, `url(data:image/gif;base64,AAAA)`) {
-		t.Fatalf("data CSS background was neutralized: %s", doc)
+}
+
+func TestEmailDocumentDoesNotRewriteAttributeLookalikeText(t *testing.T) {
+	body := `<img alt="see src=https://cdn.example.test/x.png here" title='background="//cdn.example.test/y.png"' src="/attachments/1/inline">`
+	doc := emailDocumentWithInlineAttachments(body, "", false, nil, nil)
+	if !strings.Contains(doc, `alt="see src=https://cdn.example.test/x.png here"`) {
+		t.Fatalf("alt text was rewritten: %s", doc)
+	}
+	if !strings.Contains(doc, `title='background="//cdn.example.test/y.png"'`) {
+		t.Fatalf("title text was rewritten: %s", doc)
 	}
 	if strings.Contains(doc, "data-rolltop-blocked-") {
-		t.Fatalf("local references were treated as remote: %s", doc)
+		t.Fatalf("attribute text was treated as a reference: %s", doc)
 	}
 }
 

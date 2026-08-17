@@ -54,7 +54,10 @@ self.addEventListener("fetch", (event) => {
         // already started reading the body and clone() throws.
         if (res.ok) {
           const copy = res.clone();
-          caches.open(STATIC_CACHE).then((cache) => cache.put(req, copy)).catch(() => {});
+          // waitUntil keeps the worker alive until the write lands; without it
+          // the browser may terminate the worker first and the asset silently
+          // never reaches the cache.
+          event.waitUntil(caches.open(STATIC_CACHE).then((cache) => cache.put(req, copy)).catch(() => {}));
         }
         return res;
       })
