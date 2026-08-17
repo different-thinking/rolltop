@@ -501,6 +501,8 @@ export type Bootstrap = {
   mailboxes: Mailbox[];
   latest_sync_run?: SyncRun | null;
   active_sync_runs?: SyncRun[];
+  /** The newest move that ended leaving messages behind, if there is one. */
+  unfinished_move_run?: SyncRun | null;
   sync_running?: boolean;
   mail_generation?: number;
   swipe_preferences?: SwipePreferences;
@@ -531,6 +533,7 @@ export type ChromeEvent = {
   mailboxes: Mailbox[];
   latest_sync_run: SyncRun | null;
   active_sync_runs: SyncRun[];
+  unfinished_move_run?: SyncRun | null;
   sync_running: boolean;
   mail_generation: number;
   swipe_preferences?: SwipePreferences;

@@ -145,6 +145,49 @@ func TestRunMoveMessagesStopsAfterRepeatedFailures(t *testing.T) {
 	if !strings.Contains(finished.Error, "stopped early") {
 		t.Fatalf("run error = %q, want it to report stopping early", finished.Error)
 	}
+	// Everything past the streak was never tried, and the summary has to say so
+	// rather than leaving the remainder of the batch unaccounted for.
+	notAttempted := total - moveRunConsecutiveFailureLimit
+	if !strings.Contains(finished.Error, fmt.Sprintf("%d were not attempted", notAttempted)) {
+		t.Fatalf("run error = %q, want it to account for the %d unattempted messages", finished.Error, notAttempted)
+	}
+}
+
+// Rows that vanish between the run resolving its IDs and reaching them are not
+// failures, so they must neither be written per message nor count towards the
+// streak that stops the run.
+func TestRunMoveMessagesTreatsVanishedRowsAsHandled(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 45; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+	// Delete far more rows than the consecutive-failure limit: if they were
+	// scored as failures the run would stop before reaching the last message.
+	gone := make([]int64, 0, moveRunConsecutiveFailureLimit+5)
+	for offset := 0; offset < moveRunConsecutiveFailureLimit+5; offset++ {
+		message := addMoveTestMessage(t, fixture, uint32(100+offset))
+		gone = append(gone, message.ID)
+		if err := fixture.store.DeleteMessageForUser(context.Background(), fixture.userID, message.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := addMoveTestMessage(t, fixture, 200)
+	ids = append(ids, gone...)
+	ids = append(ids, last.ID)
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if finished.Status != "ok" || finished.Error != "" {
+		t.Fatalf("run status=%q error=%q, want vanished rows to leave a clean run", finished.Status, finished.Error)
+	}
+	if finished.MessagesStored != 5 || finished.MessagesSkipped != 0 {
+		t.Fatalf("run stored=%d skipped=%d, want the 5 real messages moved and nothing counted as failed",
+			finished.MessagesStored, finished.MessagesSkipped)
+	}
+	if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, last.ID); !store.IsNotFound(err) {
+		t.Fatalf("the run stopped before the message past the vanished rows: %v", err)
+	}
 }
 
 // A batch that moves cleanly still has to finish as a plain successful run.

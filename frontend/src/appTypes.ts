@@ -74,6 +74,8 @@ export type AppShellProps = {
   mailboxes: Mailbox[];
   latestSyncRun: import("./types").SyncRun | null;
   activeSyncRuns: import("./types").SyncRun[];
+  /** The newest move that ended leaving messages behind, if there is one. */
+  unfinishedMoveRun: import("./types").SyncRun | null;
   syncRunning: boolean;
   accountNeedsPassword: boolean;
   accountNotice: string;

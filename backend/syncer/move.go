@@ -13,6 +13,10 @@ import (
 	"rolltop/backend/store"
 )
 
+// MoveSyncRunMarker is the LatestNewFrom value a move run carries. Progress
+// displays use it to tell a user-initiated move from background mirroring.
+const MoveSyncRunMarker = "rolltop:move"
+
 // moveRunConsecutiveFailureLimit ends a move that has started failing
 // systemically — a refused login, a dropped connection, a revoked account —
 // rather than attempting every remaining message against a server that is
@@ -72,7 +76,7 @@ func (s *Service) StartMoveMessages(ctx context.Context, userID int64, messageID
 		MessagesTotal:    len(ids),
 		MailboxesTotal:   1,
 		CurrentMailbox:   "Moving to " + dest.Name,
-		LatestNewFrom:    "rolltop:move",
+		LatestNewFrom:    MoveSyncRunMarker,
 		LatestNewSubject: "Moving messages",
 	}
 	if err := s.Store.UpdateSyncRunProgress(ctx, userID, run.ID, progress); err != nil {
@@ -113,7 +117,6 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	failures := 0
 	consecutiveFailures := 0
 	firstFailure := ""
-	stoppedEarly := false
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
@@ -133,9 +136,22 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 			}
 		case store.IsNotFound(err):
 			// A row a resync has already moved or dropped has nothing left to
-			// move, so it counts as handled rather than as a failure.
+			// move, so it counts as handled rather than as a failure. Nothing was
+			// attempted, so this costs no progress write: a re-run over thousands
+			// of stale IDs would otherwise write a row per message it skips.
+			progress.MessagesSeen++
+			continue
 		default:
 			failure = err
+		}
+		// The move re-reads the message and its mailboxes, so the row can go away
+		// between the check above and the move itself. That is the same "already
+		// gone" case, not a failure, and it must not count towards the streak
+		// that stops the run.
+		if failure != nil && store.IsNotFound(failure) {
+			if _, recheck := s.Store.GetMessageForUser(ctx, userID, id); store.IsNotFound(recheck) {
+				failure = nil
+			}
 		}
 		progress.MessagesSeen++
 		if failure != nil {
@@ -159,22 +175,27 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 		// pages, so this only has to move the progress indicators.
 		s.notifyProgress(userID)
 		if consecutiveFailures >= moveRunConsecutiveFailureLimit {
-			stoppedEarly = true
 			break
 		}
 	}
 	if failures > 0 {
 		status = "failed"
-		errText = moveRunFailureSummary(progress.MessagesStored, len(ids), failures, stoppedEarly, firstFailure)
+		errText = moveRunFailureSummary(progress.MessagesStored, len(ids), failures,
+			len(ids)-progress.MessagesSeen, firstFailure)
 	}
 }
 
 // moveRunFailureSummary describes a move that left messages behind. It is the
 // only account the user gets of a background move that did not finish, so it
-// leads with how much of the batch actually moved.
-func moveRunFailureSummary(moved, total, failures int, stoppedEarly bool, firstFailure string) string {
-	summary := fmt.Sprintf("Moved %d of %d messages; %d could not be moved.", moved, total, failures)
-	if stoppedEarly {
+// leads with how much of the batch actually moved and accounts for every
+// message it did not: a run that stopped early never reached most of them.
+func moveRunFailureSummary(moved, total, failures, notAttempted int, firstFailure string) string {
+	summary := fmt.Sprintf("Moved %d of %d messages; %d could not be moved", moved, total, failures)
+	if notAttempted > 0 {
+		summary += fmt.Sprintf(" and %d were not attempted", notAttempted)
+	}
+	summary += "."
+	if notAttempted > 0 {
 		summary += " The move stopped early after repeated failures; run it again to continue."
 	}
 	if strings.TrimSpace(firstFailure) != "" {

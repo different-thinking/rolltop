@@ -158,7 +158,11 @@ type viewData struct {
 	Mailboxes      []store.MailboxSummary
 	LatestSyncRun  *store.SyncRun
 	ActiveSyncRuns []store.SyncRun
-	SyncRunning    bool
+	// UnfinishedMoveRun is the newest move that ended leaving messages behind,
+	// reported separately because it cannot be recovered from LatestSyncRun: a
+	// finished move immediately queues the mailbox refresh that supersedes it.
+	UnfinishedMoveRun *store.SyncRun
+	SyncRunning       bool
 }
 
 type threadMessageView struct {
@@ -776,10 +780,43 @@ func (s *Server) loadMailboxChrome(ctx context.Context, userID int64, data *view
 				data.ActiveSyncRuns = append(data.ActiveSyncRuns, run)
 			}
 		}
+		data.UnfinishedMoveRun = newestUnfinishedMoveRun(runs)
 	}
 	if s.syncRunner != nil {
 		data.SyncRunning = s.syncRunner.IsRunning(userID)
 	}
+}
+
+// unfinishedMoveRunMaxAge bounds how long a move that left messages behind keeps
+// reporting itself. The messages really are still there, but an indefinite notice
+// for a delete the user has long since dealt with is just noise.
+const unfinishedMoveRunMaxAge = 24 * time.Hour
+
+// newestUnfinishedMoveRun picks the move run to tell the user about: the most
+// recent one, and only when it ended having left messages behind. A move still
+// running reports itself through the ordinary progress display, and a later move
+// that succeeded means there is nothing outstanding to report.
+func newestUnfinishedMoveRun(runs []store.SyncRun) *store.SyncRun {
+	var newest *store.SyncRun
+	for i := range runs {
+		run := runs[i]
+		if strings.TrimSpace(run.LatestNewFrom) != syncer.MoveSyncRunMarker {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(run.Status), "running") {
+			return nil
+		}
+		if newest == nil || run.UpdatedAt.After(newest.UpdatedAt) {
+			newest = &runs[i]
+		}
+	}
+	if newest == nil || strings.EqualFold(strings.TrimSpace(newest.Status), "ok") {
+		return nil
+	}
+	if strings.TrimSpace(newest.Error) == "" || time.Since(newest.UpdatedAt) > unfinishedMoveRunMaxAge {
+		return nil
+	}
+	return newest
 }
 
 func (s *Server) maybeRefreshMailboxStatuses(userID int64, boxes []store.MailboxSummary) {
