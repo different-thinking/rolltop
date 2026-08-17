@@ -6,7 +6,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
 import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
-import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
+import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
@@ -852,7 +852,6 @@ export function ThreadView({
   location,
   navigate,
   mailboxes,
-  swipePreferences,
   archiveMailboxes,
   setMessagesHidden,
   enabledPlugins,
@@ -869,7 +868,6 @@ export function ThreadView({
   location: LocationState;
   navigate: (url: string) => void;
   mailboxes: Mailbox[];
-  swipePreferences: SwipePreferences;
   /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
   archiveMailboxes: AccountMailboxChoice[];
   setMessagesHidden: (messageIDs: number[], hidden: boolean) => void;
