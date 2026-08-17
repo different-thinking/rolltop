@@ -465,3 +465,47 @@ func TestUpdateRemoteEventPreservesAnswersWhenTheGuestListChanges(t *testing.T) 
 		t.Fatalf("guest answers = %v, want a guest the submitted list omits to be removed", answers)
 	}
 }
+
+// Changing the guest list reads the live event first, which is also where a
+// remote change becomes visible. The submitted edit loses -- Google is the
+// leading system -- and it loses without a PATCH that could only be rejected.
+func TestUpdateRemoteEventAdoptsARemoteChangeFoundWhileReadingTheGuestList(t *testing.T) {
+	start := fixedNow.Add(24 * time.Hour)
+	invitation := invitedEvent(start)
+	fake := &fakeCalendar{eventPages: []EventsPage{{Items: []Event{invitation}, NextSyncToken: "events-1"}}}
+	syncer, db, user, calendar := writeFixture(t, fake)
+	ctx := context.Background()
+
+	// Somebody moved the meeting at Google, so the mirror's etag is stale.
+	moved := invitedEvent(start.Add(time.Hour))
+	moved.ETag = "etag-remote"
+	moved.Summary = "Review, moved by the organizer"
+	fake.mu.Lock()
+	fake.events["e1"] = moved
+	fake.mu.Unlock()
+
+	existing := eventsOf(t, db, user.ID, calendar)[0]
+	edited := existing
+	edited.Attendees = append(append([]store.CalendarAttendee{}, existing.Attendees...),
+		store.CalendarAttendee{Email: "newcomer@example.test"})
+
+	adopted, err := syncer.UpdateRemoteEvent(ctx, user.ID, existing, edited)
+	if !errors.Is(err, ErrRemoteChanged) {
+		t.Fatalf("update against a changed event: err=%v, want ErrRemoteChanged", err)
+	}
+	if adopted.Summary != "Review, moved by the organizer" || adopted.ETag != "etag-remote" {
+		t.Fatalf("adopted event = %+v, want Google's version", adopted)
+	}
+	// The whole point of resolving it at the read: no write is attempted, so
+	// the guest list is never restated against a version it does not match.
+	if len(fake.patched) != 0 {
+		t.Fatalf("a patch was sent against a stale etag anyway: %+v", fake.patched)
+	}
+	stored, err := db.CalendarEvent(ctx, user.ID, existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Summary != "Review, moved by the organizer" {
+		t.Fatalf("stored event = %+v, want the local row replaced by Google's version", stored)
+	}
+}

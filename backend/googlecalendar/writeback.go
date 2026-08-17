@@ -98,6 +98,17 @@ func (s *Syncer) UpdateRemoteEvent(ctx context.Context, userID int64, existing s
 		if err != nil {
 			return store.CalendarEvent{}, err
 		}
+		if current.ETag != existing.ETag {
+			// The event moved on at Google since the mirror was written, so the
+			// PATCH below would be rejected on that same etag. Resolving the
+			// conflict here saves a round trip that can only fail.
+			//
+			// Substituting the etag just read is what must not happen instead:
+			// it would make the write succeed and quietly overwrite whatever
+			// changed remotely. Google is the leading system, so the submitted
+			// edit loses and the user is shown the version that won.
+			return s.applyAdopted(ctx, userID, calendar, existing, current)
+		}
 		guests := MergeAttendees(current.Attendees, edited.Attendees)
 		write.Attendees = &guests
 	}
@@ -223,21 +234,17 @@ func (s *Syncer) readRemote(ctx context.Context, userID int64, calendar store.Ca
 // deleted here too: it is gone, and leaving a mirror of it behind would
 // resurrect it on the next write.
 func (s *Syncer) adoptRemote(ctx context.Context, userID int64, calendar store.Calendar, existing store.CalendarEvent) (store.CalendarEvent, error) {
-	var current Event
-	err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
-		var callErr error
-		current, callErr = s.client().GetEvent(ctx, token, calendar.GoogleCalendarID, existing.ExternalID)
-		return callErr
-	})
-	if errors.Is(err, ErrNotFound) {
-		if delErr := s.Store.DeleteCalendarEvent(ctx, userID, existing.ID); delErr != nil && !store.IsNotFound(delErr) {
-			return store.CalendarEvent{}, delErr
-		}
-		return store.CalendarEvent{}, ErrRemoteDeleted
-	}
+	current, err := s.readRemote(ctx, userID, calendar, existing)
 	if err != nil {
 		return store.CalendarEvent{}, err
 	}
+	return s.applyAdopted(ctx, userID, calendar, existing, current)
+}
+
+// applyAdopted writes a version already read from Google over the local row. It
+// is separate from adoptRemote so a caller holding a fresh copy -- the guest
+// list read that just found a diverged etag -- does not fetch it a second time.
+func (s *Syncer) applyAdopted(ctx context.Context, userID int64, calendar store.Calendar, existing store.CalendarEvent, current Event) (store.CalendarEvent, error) {
 	if current.IsCancelled() {
 		// A cancelled occurrence is Google's tombstone, not a version to show.
 		if delErr := s.Store.DeleteCalendarEvent(ctx, userID, existing.ID); delErr != nil && !store.IsNotFound(delErr) {
