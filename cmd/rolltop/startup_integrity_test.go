@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"rolltop/backend/config"
@@ -100,5 +101,76 @@ func TestVerifyUserDatabasesAcceptsIntactTenant(t *testing.T) {
 	}
 	if db.DatabaseCorrupt(userID) {
 		t.Fatal("intact tenant was latched as corrupt")
+	}
+}
+
+func TestDamagedDatabaseWarningsNameTheFileAndTheRepairCommand(t *testing.T) {
+	warnings := damagedDatabaseWarnings([]store.DatabaseHealth{
+		{UserID: 9, Path: "/data/users/9/rolltop.db", Detail: "database disk image is malformed"},
+		{UserID: 2, Path: "/data/users/2/rolltop.db", Detail: ""},
+	})
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	// A map-ordered log would reshuffle on every start and defeat diffing.
+	if !strings.HasPrefix(warnings[0], "user 2 ") || !strings.HasPrefix(warnings[1], "user 9 ") {
+		t.Fatalf("warnings are not ordered by user: %#v", warnings)
+	}
+	// Without the path an operator cannot tell which file to back up, and
+	// without the command they cannot act on the line at all.
+	for _, want := range []string{
+		"/data/users/9/rolltop.db",
+		"database disk image is malformed",
+		`"rolltop recover-db --user-id 9 --confirm-offline"`,
+	} {
+		if !strings.Contains(warnings[1], want) {
+			t.Fatalf("warning %q is missing %q", warnings[1], want)
+		}
+	}
+	if strings.Contains(warnings[0], ": ;") {
+		t.Fatalf("a record without a detail produced a hole in the line: %q", warnings[0])
+	}
+	if damagedDatabaseWarnings(nil) != nil {
+		t.Fatal("a healthy installation produced a warning")
+	}
+}
+
+func TestDamagedTenantIsReportedAfterPrepareUserStores(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.CreateUser(ctx, "damaged@example.test", "Damaged", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UserStore(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.UserDatabaseFilePath(dataDir, user.ID), []byte("this is not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.PrepareUserStores(ctx, nil); err != nil {
+		t.Fatalf("one damaged tenant kept the installation down: %v", err)
+	}
+	// The skip is what keeps the other accounts served; the log line is the
+	// only thing that stops it from being silent.
+	warnings := damagedDatabaseWarnings(reopened.CorruptDatabases())
+	if len(warnings) != 1 {
+		t.Fatalf("skipped tenant produced %d warnings: %#v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], store.UserDatabaseFilePath(dataDir, user.ID)) {
+		t.Fatalf("warning does not name the damaged file: %q", warnings[0])
 	}
 }
