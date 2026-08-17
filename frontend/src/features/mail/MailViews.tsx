@@ -162,9 +162,13 @@ export function MailView({
       ? { mailboxID: scopeMailboxID, query: "", label: mailbox.name, total: mailbox.message_count }
       : undefined;
   // Archiving by date is offered wherever archiving a single message would make
-  // sense. Drafts, Trash, and Junk are left out: moving those into Archive
-  // would pull mail back out of the folder the user deliberately put it in.
-  const archiveOlderAvailable = view !== "drafts" && !["drafts", "trash", "junk"].includes(mailbox?.role || "");
+  // sense. Sent, Drafts, Trash, and Junk are left out: filing a received backlog
+  // is no reason to empty the user's own sent mail, and moving the others into
+  // Archive would pull mail back out of the folder it was deliberately put in.
+  // The server enforces the same rule on the folders inside a whole-account
+  // list, which this button cannot narrow.
+  const archiveOlderAvailable = view !== "drafts" && view !== "sent"
+    && !["sent", "drafts", "trash", "junk"].includes(mailbox?.role || "");
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
   const listScopeKey = `${userID}:${mailboxID || view || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;

@@ -407,9 +407,9 @@ export const api = {
       scope_query: scope.query,
       scope_view: scope.view || ""
     }),
-  // Archiving by date uses the same scope description plus the cutoff. The date
-  // is sent as a plain calendar day: the server keeps that day and moves only
-  // what is older, so the day the user names is never swept up by a timezone.
+  // Archiving by date uses the same scope description plus the cutoff. The
+  // cutoff is the exact instant the chosen day begins in the reader's own
+  // timezone, so the day they name is kept whole wherever they are.
   scopeArchiveMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView; before: string }) =>
     postJSON<ScopeMoveResponse>("/api/messages/scope-archive", csrf, {
       scope_mailbox_id: scope.mailboxID,

@@ -591,6 +591,62 @@ func TestScopeArchivePlanMovesOnlyMailOlderThanTheCutoff(t *testing.T) {
 	}
 }
 
+// A whole-account list shows Sent, Drafts, Trash, and Junk, but archiving a
+// received backlog must not empty them.
+func TestScopeArchiveLeavesTheUsersOwnFoldersAlone(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-archive-sent@example.test")
+	archive, err := db.GetOrCreateMailbox(ctx, tenant.user.ID, tenant.accountID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.GetOrCreateMailboxWithRole(ctx, tenant.user.ID, tenant.accountID, "Sent", "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, store.SwipePreferences{
+		UserID:     tenant.user.ID,
+		LeftAction: store.SwipeActionSnooze, LeftSnoozePreset: store.SwipeSnoozeTomorrow,
+		RightAction: store.SwipeActionMarkRead, RightSnoozePreset: store.SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []store.SwipeArchiveMailbox{{AccountID: tenant.accountID, MailboxID: archive.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Date(2024, time.June, 1, 0, 0, 0, 0, time.UTC)
+	received := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 921, "Received", cutoff.Add(-48*time.Hour))
+	ownMail := createScopeTestMessageDated(t, ctx, db, tenant, sent, 922, "Sent", cutoff.Add(-48*time.Hour))
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+	protected, err := server.archiveProtectedMailboxIDs(ctx, tenant.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(protected, sent.ID) || !slices.Contains(protected, tenant.trash.ID) {
+		t.Fatalf("protected mailboxes = %v, want the Sent and Trash folders %d and %d", protected, sent.ID, tenant.trash.ID)
+	}
+
+	plan, err := server.scopeArchivePlan(ctx, tenant.user, scopeSelection{
+		Filter: store.ScopeFilter{Before: cutoff, ExcludeMailboxIDs: protected},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	if len(ids) != 1 || ids[0] != received.ID {
+		t.Fatalf("planned ids = %v, want only the received message %d", ids, received.ID)
+	}
+	if slices.Contains(ids, ownMail.ID) {
+		t.Fatalf("planned ids = %v, must not archive sent mail %d", ids, ownMail.ID)
+	}
+	if plan.Matched != 1 {
+		t.Fatalf("matched = %d, want only the archivable message", plan.Matched)
+	}
+}
+
 func TestScopeArchivePlanReportsAccountsWithoutAnArchiveFolder(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
@@ -659,5 +715,14 @@ func TestParseScopeCutoffKeepsTheNamedDay(t *testing.T) {
 	}
 	if _, err := parseScopeCutoff("last tuesday"); err == nil {
 		t.Fatal("unparsable cutoff was accepted")
+	}
+	// The browser sends the instant its own calendar day begins at, which is what
+	// keeps that day whole for a reader who is not on UTC.
+	local, err := parseScopeCutoff("2024-02-29T13:00:00+13:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !local.Equal(time.Date(2024, time.February, 29, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("cutoff = %s, want the offset resolved to 29 February 00:00 UTC", local)
 	}
 }

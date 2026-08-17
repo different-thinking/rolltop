@@ -2360,4 +2360,20 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 	if len(unfiltered) != 4 {
 		t.Fatalf("unfiltered scope = %d rows, want every message", len(unfiltered))
 	}
+
+	// An excluded folder drops out of the same selection, which is how an archive
+	// pass leaves Sent, Drafts, Trash, and Junk where they are.
+	excluded, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{ExcludeMailboxIDs: []int64{inbox.ID}}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(excluded) != 0 {
+		t.Fatalf("scope excluding the only folder = %+v, want nothing", excluded)
+	}
+	if !(ScopeFilter{}).Matches(MessageRecord{MailboxID: inbox.ID, Date: cutoff}) {
+		t.Fatal("the zero filter rejected a message")
+	}
+	if (ScopeFilter{ExcludeMailboxIDs: []int64{inbox.ID}}).Matches(MessageRecord{MailboxID: inbox.ID, Date: cutoff.Add(-time.Hour)}) {
+		t.Fatal("a search-resolved message from an excluded folder was accepted")
+	}
 }

@@ -200,6 +200,12 @@ func (s *Server) apiScopeArchiveMessages(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusBadRequest, "choose the date to archive before")
 		return
 	}
+	protected, err := s.archiveProtectedMailboxIDs(r.Context(), cu.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	scope.Filter.ExcludeMailboxIDs = protected
 	plan, err := s.scopeArchivePlan(r.Context(), cu.User, scope)
 	if err != nil {
 		s.writeScopePlanError(w, r, err)
@@ -209,6 +215,30 @@ func (s *Server) apiScopeArchiveMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.respondMovePlan(w, r, cu.User.ID, plan, "archive")
+}
+
+// protectedArchiveSourceRoles names the folders a whole-filter archive must
+// leave alone. Sent and Drafts sit inside All Mail and the Inbox list, so an
+// unguarded pass over a received backlog would file the user's own mail away
+// with it; Trash and Junk would be pulled back out of the folder they were
+// deliberately put in.
+var protectedArchiveSourceRoles = map[string]bool{"sent": true, "drafts": true, "trash": true, "junk": true}
+
+// archiveProtectedMailboxIDs resolves those folders for one user. The exclusion
+// travels as IDs rather than roles so the SQL scopes and the search scope, which
+// sees messages rather than folders, can apply exactly the same rule.
+func (s *Server) archiveProtectedMailboxIDs(ctx context.Context, userID int64) ([]int64, error) {
+	mailboxes, err := s.store.ListMailboxesForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, 8)
+	for _, mailbox := range mailboxes {
+		if protectedArchiveSourceRoles[mailbox.Role] {
+			ids = append(ids, mailbox.ID)
+		}
+	}
+	return ids, nil
 }
 
 // scopeSelectionFromRequest reads the browser's current filter, plus the
@@ -241,9 +271,11 @@ func (s *Server) scopeSelectionFromRequest(w http.ResponseWriter, r *http.Reques
 	}, true
 }
 
-// parseScopeCutoff reads the "older than" date. A bare calendar date is taken as
-// the start of that day in UTC, so the day the user names is itself kept: mail
-// stamped on it is not older than it.
+// parseScopeCutoff reads the moment the "older than" selection starts from. Mail
+// stamped at or after it is not older than it, so the day the user names is
+// itself kept. The browser sends a timestamp because only it knows which
+// instant the reader's chosen day begins at; a bare calendar date from another
+// API client is read as the start of that day in UTC.
 func parseScopeCutoff(raw string) (time.Time, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {

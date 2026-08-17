@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -241,24 +242,39 @@ type ScopeFilter struct {
 	// Before keeps only mail dated before this instant, which is what an
 	// "archive everything older than" action selects.
 	Before time.Time
+	// ExcludeMailboxIDs drops mail living in these folders. An archive pass uses
+	// it to leave Sent, Drafts, Trash, and Junk alone: those lists appear inside
+	// All Mail, but filing a received backlog is not a reason to empty them.
+	ExcludeMailboxIDs []int64
 }
 
-// sql renders the filter as a WHERE fragment plus its arguments. The cutoff
-// belongs in the query rather than in a pass over the resolved rows: a
-// selection is capped, and lists are ordered newest first, so filtering
-// afterwards would spend the whole cap on mail the caller did not ask for and
-// never reach the old messages it did.
+// sql renders the filter as a WHERE fragment plus its arguments, in the order
+// the fragment names them. Both parts belong in the query rather than in a pass
+// over the resolved rows: a selection is capped, and lists are ordered newest
+// first, so filtering afterwards would spend the whole cap on mail the caller
+// did not ask for and never reach the old messages it did.
 func (f ScopeFilter) sql() (string, []any) {
-	if f.Before.IsZero() {
-		return "", nil
+	fragment := ""
+	args := make([]any, 0, len(f.ExcludeMailboxIDs)+1)
+	if !f.Before.IsZero() {
+		fragment += " AND m.date_unix < ?"
+		args = append(args, f.Before.UTC().Unix())
 	}
-	return " AND m.date_unix < ?", []any{f.Before.UTC().Unix()}
+	if len(f.ExcludeMailboxIDs) > 0 {
+		placeholders, idArgs := int64ListPlaceholders(f.ExcludeMailboxIDs)
+		fragment += " AND m.mailbox_id NOT IN (" + placeholders + ")"
+		args = append(args, idArgs...)
+	}
+	return fragment, args
 }
 
 // Matches reports whether one message record satisfies the filter. Scopes that
 // are resolved through the search index rather than SQL apply it this way.
 func (f ScopeFilter) Matches(msg MessageRecord) bool {
-	return f.Before.IsZero() || msg.Date.Before(f.Before)
+	if !f.Before.IsZero() && !msg.Date.Before(f.Before) {
+		return false
+	}
+	return !slices.Contains(f.ExcludeMailboxIDs, msg.MailboxID)
 }
 
 func scopeMessageLimit(limit int) int {

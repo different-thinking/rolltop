@@ -27,10 +27,26 @@ function dateInputValue(value: Date): string {
 }
 
 function monthsAgo(months: number): Date {
-  const value = new Date();
-  value.setHours(0, 0, 0, 0);
-  value.setMonth(value.getMonth() - months);
+  const now = new Date();
+  // Stepping the month on a date the earlier month may not have overflows into
+  // the next one: 31 May minus three months is 31 February, which JavaScript
+  // reads as 3 March. Build the month first, then clamp the day into it.
+  const value = new Date(now.getFullYear(), now.getMonth() - months, 1);
+  const lastDayOfMonth = new Date(value.getFullYear(), value.getMonth() + 1, 0).getDate();
+  value.setDate(Math.min(now.getDate(), lastDayOfMonth));
   return value;
+}
+
+/**
+ * cutoffInstant turns the chosen calendar day into the exact moment the archive
+ * starts from: local midnight, sent as a timestamp. The reader picks a day in
+ * their own calendar, so resolving it as UTC midnight would archive the first
+ * hours of the day the dialog promises to keep for anyone east of UTC.
+ */
+function cutoffInstant(day: string): string {
+  const [year, month, date] = day.split("-").map(Number);
+  if (!year || !month || !date) return day;
+  return new Date(year, month - 1, date, 0, 0, 0, 0).toISOString();
 }
 
 /** archiveCutoffPresets offer the usual "clear the backlog" cutoffs. */
@@ -102,7 +118,7 @@ export function ArchiveBeforeControl({
         mailboxID: scope.mailboxID,
         query: scope.query,
         view: scope.view,
-        before: cutoff
+        before: cutoffInstant(cutoff)
       });
       const queuedMessages = result.queued_messages || 0;
       const parts: string[] = [];
