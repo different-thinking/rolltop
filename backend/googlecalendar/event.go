@@ -124,17 +124,91 @@ func attendees(list []EventAttendee) ([]store.CalendarAttendee, string) {
 	return out, mine
 }
 
-// ToWrite renders a stored event as the body of an insert or an update.
+// ToWrite renders a stored event as the body of an insert or an update. The
+// guest list is deliberately left out: whether a write may touch it is a
+// decision only the caller can make, and getting it wrong resets every RSVP.
 func ToWrite(event store.CalendarEvent) EventWrite {
-	write := EventWrite{
+	return EventWrite{
 		Summary:     event.Summary,
 		Description: event.Description,
 		Location:    event.Location,
 		Start:       toEventDateTime(event.StartAt, event.AllDay, event.TimeZone),
 		End:         toEventDateTime(event.EndAt, event.AllDay, event.TimeZone),
-		Attendees:   toEventAttendees(event.Attendees),
 	}
-	return write
+}
+
+// MergeAttendees renders a guest list for a write. current is what Google holds
+// right now and wanted is what the dialog submitted.
+//
+// Everybody who stays on the list keeps the answer they already gave. Google
+// replaces the whole list on a write, so restating a guest without their
+// responseStatus is what would silently reset their invitation to unanswered --
+// and, because a guest list means the write notifies, mail them about it.
+func MergeAttendees(current []EventAttendee, wanted []store.CalendarAttendee) []EventAttendee {
+	existing := make(map[string]EventAttendee, len(current))
+	for _, attendee := range current {
+		existing[guestKey(attendee.Email)] = attendee
+	}
+	out := make([]EventAttendee, 0, len(wanted))
+	for _, attendee := range wanted {
+		email := strings.TrimSpace(attendee.Email)
+		if email == "" {
+			// Google addresses an attendee by mail address; one without is a
+			// row it would reject for the whole request.
+			continue
+		}
+		merged := EventAttendee{
+			Email:       email,
+			DisplayName: strings.TrimSpace(attendee.Name),
+			Optional:    attendee.Optional,
+			Resource:    attendee.Resource,
+		}
+		if previous, ok := existing[guestKey(email)]; ok {
+			merged.ResponseStatus = previous.ResponseStatus
+			merged.Organizer = previous.Organizer
+			merged.Self = previous.Self
+			if merged.DisplayName == "" {
+				merged.DisplayName = previous.DisplayName
+			}
+		}
+		out = append(out, merged)
+	}
+	return out
+}
+
+// SameGuestList reports whether two lists name the same people. It is what
+// decides whether a write has to carry the guest list at all: an edit that
+// leaves the guests alone is a strictly safer request without it.
+func SameGuestList(a, b []store.CalendarAttendee) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, attendee := range a {
+		key := guestKey(attendee.Email)
+		if key == "" {
+			continue
+		}
+		seen[key]++
+	}
+	for _, attendee := range b {
+		key := guestKey(attendee.Email)
+		if key == "" {
+			continue
+		}
+		seen[key]--
+		if seen[key] == 0 {
+			delete(seen, key)
+		}
+	}
+	return len(seen) == 0
+}
+
+// guestKey normalizes an address for comparison. Google treats an invitee's
+// address case-insensitively, and a list differing only in case is the same
+// list.
+func guestKey(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 func toEventDateTime(at time.Time, allDay bool, zone string) EventDateTime {
@@ -149,29 +223,6 @@ func toEventDateTime(at time.Time, allDay bool, zone string) EventDateTime {
 		// The timestamp already carries the instant; the zone only tells Google
 		// which one to display it in, so a recurring edit keeps its wall time.
 		out.TimeZone = zone
-	}
-	return out
-}
-
-func toEventAttendees(list []store.CalendarAttendee) []EventAttendee {
-	out := make([]EventAttendee, 0, len(list))
-	for _, attendee := range list {
-		email := strings.TrimSpace(attendee.Email)
-		if email == "" {
-			// Google addresses an attendee by mail address; one without is a
-			// row it would reject for the whole request.
-			continue
-		}
-		out = append(out, EventAttendee{
-			Email:       email,
-			DisplayName: strings.TrimSpace(attendee.Name),
-			Optional:    attendee.Optional,
-			Resource:    attendee.Resource,
-			// Organizer, self and the response status are Google's to decide.
-			// Sending them back would either be ignored or, for the response,
-			// answer on somebody else's behalf.
-			ResponseStatus: "",
-		})
 	}
 	return out
 }

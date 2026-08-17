@@ -192,14 +192,15 @@ func (c *Client) GetEvent(ctx context.Context, accessToken, calendarID, eventID 
 	return decodeEvent(body)
 }
 
-// CreateEvent adds an event to one calendar.
-func (c *Client) CreateEvent(ctx context.Context, accessToken, calendarID string, write EventWrite) (Event, error) {
+// CreateEvent adds an event to one calendar. notify decides whether Google
+// mails the guests about it.
+func (c *Client) CreateEvent(ctx context.Context, accessToken, calendarID string, write EventWrite, notify bool) (Event, error) {
 	calendar := strings.TrimSpace(calendarID)
 	if calendar == "" {
 		return Event{}, fmt.Errorf("%w: an event needs a calendar", ErrUpstream)
 	}
-	target := "/calendars/" + url.PathEscape(calendar) + "/events?" + sendUpdatesQuery(write.Attendees)
-	body, err := c.send(ctx, accessToken, http.MethodPost, target, "", normalizeWrite(write))
+	target := "/calendars/" + url.PathEscape(calendar) + "/events?" + sendUpdatesQuery(notify)
+	body, err := c.send(ctx, accessToken, http.MethodPost, target, "", write)
 	if err != nil {
 		return Event{}, err
 	}
@@ -209,7 +210,7 @@ func (c *Client) CreateEvent(ctx context.Context, accessToken, calendarID string
 // UpdateEvent overwrites the fields Rolltop's dialog owns. The etag is required
 // and is what makes a concurrent change at Google fail loudly rather than being
 // silently overwritten.
-func (c *Client) UpdateEvent(ctx context.Context, accessToken, calendarID, eventID, etag string, write EventWrite) (Event, error) {
+func (c *Client) UpdateEvent(ctx context.Context, accessToken, calendarID, eventID, etag string, write EventWrite, notify bool) (Event, error) {
 	path, err := eventPath(calendarID, eventID)
 	if err != nil {
 		return Event{}, err
@@ -218,7 +219,7 @@ func (c *Client) UpdateEvent(ctx context.Context, accessToken, calendarID, event
 		return Event{}, fmt.Errorf("%w: an update needs an etag", ErrConflict)
 	}
 	body, err := c.send(ctx, accessToken, http.MethodPatch,
-		path+"?"+sendUpdatesQuery(write.Attendees), etag, normalizeWrite(write))
+		path+"?"+sendUpdatesQuery(notify), etag, write)
 	if err != nil {
 		return Event{}, err
 	}
@@ -252,14 +253,14 @@ func (c *Client) RespondToEvent(ctx context.Context, accessToken, calendarID, ev
 
 // DeleteEvent removes an event. An event Google no longer has is the desired
 // end state, so it is reported as success.
-func (c *Client) DeleteEvent(ctx context.Context, accessToken, calendarID, eventID, etag string) error {
+func (c *Client) DeleteEvent(ctx context.Context, accessToken, calendarID, eventID, etag string, notify bool) error {
 	path, err := eventPath(calendarID, eventID)
 	if err != nil {
 		return err
 	}
 	_, err = c.do(ctx, accessToken, func() (*http.Request, error) {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodDelete,
-			c.baseURL()+path+"?sendUpdates=all", nil)
+			c.baseURL()+path+"?"+sendUpdatesQuery(notify), nil)
 		if reqErr != nil {
 			return nil, reqErr
 		}
@@ -272,24 +273,17 @@ func (c *Client) DeleteEvent(ctx context.Context, accessToken, calendarID, event
 	return err
 }
 
-// normalizeWrite makes the payload say what it means. A nil attendee slice
-// would marshal as JSON null, which Google rejects; an empty list is how an
-// event with nobody invited is expressed.
-func normalizeWrite(write EventWrite) EventWrite {
-	if write.Attendees == nil {
-		write.Attendees = []EventAttendee{}
-	}
-	return write
-}
-
 // sendUpdatesQuery decides who Google notifies. An event with guests is a
-// meeting and silently changing one leaves everybody holding a stale invitation;
-// an event with none is a private note and mailing about it would be noise.
-func sendUpdatesQuery(attendees []EventAttendee) string {
-	if len(attendees) == 0 {
-		return "sendUpdates=none"
+// meeting and silently changing one leaves everybody holding a stale
+// invitation; an event with none is a private note and mailing about it would
+// be noise. It is decided from the event, not from the payload: a write that
+// changes only the time carries no guest list and still has to reach the
+// people expected to show up.
+func sendUpdatesQuery(notify bool) string {
+	if notify {
+		return "sendUpdates=all"
 	}
-	return "sendUpdates=all"
+	return "sendUpdates=none"
 }
 
 func eventPath(calendarID, eventID string) (string, error) {

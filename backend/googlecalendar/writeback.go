@@ -51,10 +51,16 @@ func (s *Syncer) CreateRemoteEvent(ctx context.Context, userID, calendarID int64
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 
+	write := ToWrite(event)
+	// A create has no existing list to preserve, so the guest list always
+	// travels: an event with nobody invited has to be expressible too.
+	guests := MergeAttendees(nil, event.Attendees)
+	write.Attendees = &guests
+
 	var created Event
 	if err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
-		created, callErr = s.client().CreateEvent(ctx, token, calendar.GoogleCalendarID, ToWrite(event))
+		created, callErr = s.client().CreateEvent(ctx, token, calendar.GoogleCalendarID, write, len(guests) > 0)
 		return callErr
 	}); err != nil {
 		return store.CalendarEvent{}, err
@@ -78,11 +84,29 @@ func (s *Syncer) UpdateRemoteEvent(ctx context.Context, userID int64, existing s
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 
+	write := ToWrite(edited)
+	// The guests are told about any change to a meeting, including one that
+	// does not touch the list -- a moved start time is exactly what they need
+	// to hear about.
+	notify := len(existing.Attendees) > 0 || len(edited.Attendees) > 0
+	if !SameGuestList(existing.Attendees, edited.Attendees) {
+		// Only now does the list travel, and only after reading back what
+		// Google currently holds. Google replaces the list wholesale, so
+		// sending the mirror's copy would drop anybody invited since the last
+		// poll and reset the answer of everybody who stays.
+		current, err := s.readRemote(ctx, userID, calendar, existing)
+		if err != nil {
+			return store.CalendarEvent{}, err
+		}
+		guests := MergeAttendees(current.Attendees, edited.Attendees)
+		write.Attendees = &guests
+	}
+
 	var updated Event
 	err = s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
 		updated, callErr = s.client().UpdateEvent(ctx, token, calendar.GoogleCalendarID,
-			existing.ExternalID, existing.ETag, ToWrite(edited))
+			existing.ExternalID, existing.ETag, write, notify)
 		return callErr
 	})
 	if errors.Is(err, ErrConflict) {
@@ -114,7 +138,8 @@ func (s *Syncer) DeleteRemoteEvent(ctx context.Context, userID int64, event stor
 	defer cancel()
 
 	if err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
-		return s.client().DeleteEvent(ctx, token, calendar.GoogleCalendarID, event.ExternalID, event.ETag)
+		return s.client().DeleteEvent(ctx, token, calendar.GoogleCalendarID,
+			event.ExternalID, event.ETag, len(event.Attendees) > 0)
 	}); err != nil {
 		return err
 	}
@@ -146,18 +171,8 @@ func (s *Syncer) RespondToRemoteEvent(ctx context.Context, userID int64, event s
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 
-	var current Event
-	if err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
-		var callErr error
-		current, callErr = s.client().GetEvent(ctx, token, calendar.GoogleCalendarID, event.ExternalID)
-		return callErr
-	}); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			if delErr := s.Store.DeleteCalendarEvent(ctx, userID, event.ID); delErr != nil && !store.IsNotFound(delErr) {
-				return store.CalendarEvent{}, delErr
-			}
-			return store.CalendarEvent{}, ErrRemoteDeleted
-		}
+	current, err := s.readRemote(ctx, userID, calendar, event)
+	if err != nil {
 		return store.CalendarEvent{}, err
 	}
 	attendees, ok := AnswerAttendees(current, response)
@@ -179,6 +194,28 @@ func (s *Syncer) RespondToRemoteEvent(ctx context.Context, userID int64, event s
 		return store.CalendarEvent{}, err
 	}
 	return s.Store.UpsertCalendarEvent(ctx, userID, ToEvent(updated, calendar.ID))
+}
+
+// readRemote reads Google's current version of one mirrored event. An event
+// Google no longer has takes the local mirror with it and is reported as such,
+// because there is no version left for the caller to work from.
+func (s *Syncer) readRemote(ctx context.Context, userID int64, calendar store.Calendar, event store.CalendarEvent) (Event, error) {
+	var current Event
+	err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
+		var callErr error
+		current, callErr = s.client().GetEvent(ctx, token, calendar.GoogleCalendarID, event.ExternalID)
+		return callErr
+	})
+	if errors.Is(err, ErrNotFound) {
+		if delErr := s.Store.DeleteCalendarEvent(ctx, userID, event.ID); delErr != nil && !store.IsNotFound(delErr) {
+			return Event{}, delErr
+		}
+		return Event{}, ErrRemoteDeleted
+	}
+	if err != nil {
+		return Event{}, err
+	}
+	return current, nil
 }
 
 // adoptRemote replaces the local row with Google's current version of the event

@@ -112,17 +112,23 @@ type EventsPage struct {
 	TimeZone      string  `json:"timeZone"`
 }
 
-// EventWrite is the body of an insert or a full-field patch. None of its fields
-// are omitted: a PATCH that leaves a field out keeps whatever Google has, so
-// omitting the ones the dialog owns would make clearing a location or a guest
-// list impossible.
+// EventWrite is the body of an insert or a patch. The scalar fields are never
+// omitted: a PATCH that leaves one out keeps whatever Google has, so omitting
+// the ones the dialog owns would make clearing a location impossible.
+//
+// Attendees is the exception and is a pointer for a reason. Google has no merge
+// semantics for a guest list -- a payload carrying one replaces it wholesale,
+// resetting the response status of everybody it does not restate -- so a write
+// that is not changing the guests must leave the field out entirely. Otherwise
+// renaming an event would silently un-answer everyone's invitation and, with
+// sendUpdates, mail them all about it.
 type EventWrite struct {
-	Summary     string          `json:"summary"`
-	Description string          `json:"description"`
-	Location    string          `json:"location"`
-	Start       EventDateTime   `json:"start"`
-	End         EventDateTime   `json:"end"`
-	Attendees   []EventAttendee `json:"attendees"`
+	Summary     string           `json:"summary"`
+	Description string           `json:"description"`
+	Location    string           `json:"location"`
+	Start       EventDateTime    `json:"start"`
+	End         EventDateTime    `json:"end"`
+	Attendees   *[]EventAttendee `json:"attendees,omitempty"`
 }
 
 const statusCancelled = "cancelled"

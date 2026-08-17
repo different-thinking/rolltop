@@ -217,18 +217,16 @@ export function EventDialog({
   onClose: () => void;
 }) {
   const writable = useMemo(() => calendars.filter((calendar) => calendar.can_write), [calendars]);
+  // Seeded once, on mount. The dialog is remounted by its caller whenever the
+  // form should start over, so there is deliberately no effect resetting the
+  // draft here: the calendar list is reloaded on a poll, after a sync and after
+  // every write, and any reset keyed on it would wipe what the user is typing.
   const [draft, setDraft] = useState<DraftState>(() =>
     event ? draftFromEvent(event) : draftForNewEvent(day, writable[0]?.id || 0)
   );
   const [localProblem, setLocalProblem] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const titleRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    setDraft(event ? draftFromEvent(event) : draftForNewEvent(day, writable[0]?.id || 0));
-    setLocalProblem("");
-    setConfirmingDelete(false);
-  }, [day, event, writable]);
 
   useEffect(() => {
     titleRef.current?.focus();

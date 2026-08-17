@@ -36,7 +36,15 @@ const nowLineInterval = 60_000;
  * the working day below the fold on every visit. */
 const initialScrollHour = 7;
 
-type DialogState = { event: CalendarEvent | null; day: Date } | null;
+type DialogState = {
+  event: CalendarEvent | null;
+  day: Date;
+  /** formKey identifies the form's contents. The dialog is remounted whenever
+   * it changes, which is how a deliberate reset -- opening a different event,
+   * adopting the version that won a conflict -- is expressed, and how a routine
+   * reload of the calendars is kept from wiping what the user has typed. */
+  formKey: string;
+} | null;
 
 /** CalendarView renders one week of every visible calendar. */
 export function CalendarView({
@@ -63,23 +71,34 @@ export function CalendarView({
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
 
-  const rangeStart = days[0];
-  const rangeEnd = addDays(days[6], 1);
+  // Memoized together with the days, because a fresh Date on every render would
+  // give every loader a new identity, and a loader in an effect's dependencies
+  // that changes on every render is an unbounded refetch loop.
+  const range = useMemo(() => ({ start: days[0], end: addDays(days[6], 1) }), [days]);
 
-  const loadCalendars = useCallback(async () => {
-    const data = await api.calendars();
-    setCalendars(data.calendars || []);
-  }, []);
+  // One monotonically increasing token for every load, so a slow answer for a
+  // week the user has already navigated away from is discarded instead of
+  // drawing the wrong week over the right one.
+  const loadTokenRef = useRef(0);
 
-  const loadEvents = useCallback(async () => {
-    const data = await api.calendarEvents(rangeStart, rangeEnd);
-    setEvents(data.events || []);
-  }, [rangeEnd, rangeStart]);
+  const reload = useCallback(
+    async (what: "all" | "events") => {
+      const token = ++loadTokenRef.current;
+      const [calendarData, eventData] = await Promise.all([
+        what === "all" ? api.calendars() : Promise.resolve(null),
+        api.calendarEvents(range.start, range.end)
+      ]);
+      if (token !== loadTokenRef.current) return;
+      if (calendarData) setCalendars(calendarData.calendars || []);
+      setEvents(eventData.events || []);
+    },
+    [range]
+  );
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void Promise.all([loadCalendars(), loadEvents()])
+    void reload("all")
       .catch((err) => {
         if (!cancelled) addToast(messageFromError(err), "error");
       })
@@ -89,7 +108,7 @@ export function CalendarView({
     return () => {
       cancelled = true;
     };
-  }, [addToast, loadCalendars, loadEvents]);
+  }, [addToast, reload]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), nowLineInterval);
@@ -119,7 +138,7 @@ export function CalendarView({
     try {
       const data = await api.setCalendarSelected(csrf, calendar.id, !calendar.selected);
       setCalendars((current) => current.map((item) => (item.id === calendar.id ? data.calendar : item)));
-      await loadEvents();
+      await reload("events");
     } catch (err) {
       setCalendars((current) =>
         current.map((item) => (item.id === calendar.id ? { ...item, selected: calendar.selected } : item))
@@ -132,16 +151,27 @@ export function CalendarView({
     const connectionIDs = Array.from(new Set(calendars.map((calendar) => calendar.connection_id))).filter(Boolean);
     if (connectionIDs.length === 0) return;
     setSyncing(true);
-    try {
-      for (const connectionID of connectionIDs) {
+    // Each account is synced on its own: one revoked grant must not stop the
+    // others, and it must not cost the refresh that shows what the accounts
+    // that did sync came back with.
+    const failures: string[] = [];
+    for (const connectionID of connectionIDs) {
+      try {
         await api.syncGoogleCalendar(csrf, connectionID);
+      } catch (err) {
+        failures.push(messageFromError(err));
       }
-      await Promise.all([loadCalendars(), loadEvents()]);
+    }
+    try {
+      await reload("all");
     } catch (err) {
-      addToast(messageFromError(err), "error");
+      failures.push(messageFromError(err));
     } finally {
       setSyncing(false);
     }
+    // One toast however many accounts failed: a user with four connected
+    // accounts and an expired grant does not need four copies of the same line.
+    if (failures.length > 0) addToast(failures[0], "error");
   };
 
   const closeDialog = () => {
@@ -162,7 +192,20 @@ export function CalendarView({
         const winner = err.payload.event as CalendarEvent | undefined;
         if (winner) {
           setEvents((current) => current.map((item) => (item.id === winner.id ? winner : item)));
-          setDialog({ event: winner, day: startOfDay(new Date(winner.start_at)) });
+          // A new form key: the submitted values lost, and the form has to show
+          // the version that won rather than the one that was rejected.
+          setDialog({
+            event: winner,
+            day: startOfDay(new Date(winner.start_at)),
+            formKey: `adopted-${winner.id}-${winner.start_at}`
+          });
+        } else {
+          // A conflict with no winning version -- a rejected delete -- leaves
+          // the week showing state Google has moved on from.
+          void reload("events").catch(() => {
+            // The message below is what the user acts on; a failed refresh on
+            // top of it is not worth a second one.
+          });
         }
       }
       setDialogProblem(messageFromError(err));
@@ -175,7 +218,7 @@ export function CalendarView({
     runWrite(async () => {
       if (dialog?.event) await api.updateCalendarEvent(csrf, dialog.event.id, input);
       else await api.createCalendarEvent(csrf, input);
-      await loadEvents();
+      await reload("events");
       closeDialog();
     });
 
@@ -183,7 +226,7 @@ export function CalendarView({
     runWrite(async () => {
       if (!dialog?.event) return;
       await api.deleteCalendarEvent(csrf, dialog.event.id);
-      await loadEvents();
+      await reload("events");
       closeDialog();
       addToast("Event deleted in Google too.", "success");
     });
@@ -193,7 +236,9 @@ export function CalendarView({
       if (!dialog?.event) return;
       const data = await api.respondToCalendarEvent(csrf, dialog.event.id, response);
       setEvents((current) => current.map((item) => (item.id === data.event.id ? data.event : item)));
-      setDialog({ event: data.event, day: dialog.day });
+      // The same form key: only the answer changed, and remounting the dialog
+      // would throw away an edit the user had started alongside it.
+      setDialog({ event: data.event, day: dialog.day, formKey: dialog.formKey });
     });
 
   const writableCalendars = calendars.filter((calendar) => calendar.can_write);
@@ -238,7 +283,7 @@ export function CalendarView({
               title={writableCalendars.length === 0 ? "No calendar you can write to is connected" : undefined}
               onClick={() => {
                 setDialogProblem("");
-                setDialog({ event: null, day: days[0] });
+                setDialog({ event: null, day: days[0], formKey: `new-${days[0].getTime()}` });
               }}
             >
               <Icon name="add" />
@@ -278,7 +323,7 @@ export function CalendarView({
                     style={{ background: color, color: readableTextColor(color) }}
                     onClick={() => {
                       setDialogProblem("");
-                      setDialog({ event, day });
+                      setDialog({ event, day, formKey: `event-${event.id}` });
                     }}
                   >
                     {event.summary || "(No title)"}
@@ -308,7 +353,8 @@ export function CalendarView({
                 onDoubleClick={(mouseEvent) => {
                   if (writableCalendars.length === 0) return;
                   setDialogProblem("");
-                  setDialog({ event: null, day: dayAtOffset(day, mouseEvent) });
+                  const start = dayAtOffset(day, mouseEvent);
+                  setDialog({ event: null, day: start, formKey: `new-${start.getTime()}` });
                 }}
               >
                 {Array.from({ length: 24 }, (_, hour) => (
@@ -338,7 +384,7 @@ export function CalendarView({
                       title={eventTooltip(placed.event, calendar)}
                       onClick={() => {
                         setDialogProblem("");
-                        setDialog({ event: placed.event, day });
+                        setDialog({ event: placed.event, day, formKey: `event-${placed.event.id}` });
                       }}
                     >
                       <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
@@ -358,6 +404,7 @@ export function CalendarView({
 
       {dialog ? (
         <EventDialog
+          key={dialog.formKey}
           event={dialog.event}
           day={dialog.day}
           calendars={calendars}

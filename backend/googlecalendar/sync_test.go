@@ -90,7 +90,10 @@ func (f *fakeCalendar) serveEventList(w http.ResponseWriter, r *http.Request) {
 		created := Event{
 			ID: "created-1", ETag: "etag-created", Status: "confirmed",
 			Summary: write.Summary, Description: write.Description, Location: write.Location,
-			Start: write.Start, End: write.End, Attendees: write.Attendees,
+			Start: write.Start, End: write.End,
+		}
+		if write.Attendees != nil {
+			created.Attendees = *write.Attendees
 		}
 		f.events[created.ID] = created
 		_ = json.NewEncoder(w).Encode(created)

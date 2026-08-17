@@ -598,6 +598,14 @@ func (s *Server) writeCalendarError(w http.ResponseWriter, r *http.Request, err 
 			"This event was deleted in Google while you were editing it, so the change was not saved.")
 	case errors.Is(err, googlecalendar.ErrRemoteChanged):
 		writeAPIError(w, http.StatusConflict, "This event was changed in Google while you were editing it.")
+	// A bare conflict is a write Google refused on a stale etag that no caller
+	// resolved into one of the two above -- a delete is the case that reaches
+	// here. Without this it would fall through to the server-error branch and
+	// be logged as an internal fault, which it is not: the event simply moved
+	// on since the last poll.
+	case errors.Is(err, googlecalendar.ErrConflict):
+		writeAPIError(w, http.StatusConflict,
+			"This event was changed in Google since it was last synced. Reload the week and try again.")
 	case errors.Is(err, googlecalendar.ErrUnauthorized):
 		writeAPIError(w, http.StatusConflict, "This Google account needs to be authorized again.")
 	case errors.Is(err, googlecalendar.ErrNotFound), store.IsNotFound(err):

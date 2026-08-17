@@ -89,12 +89,12 @@ func TestCreateRemoteEventNotifiesGuests(t *testing.T) {
 	if len(fake.sendUpdates) != 1 || fake.sendUpdates[0] != "all" {
 		t.Fatalf("sendUpdates = %v, want the guests notified", fake.sendUpdates)
 	}
-	if len(fake.created) != 1 || len(fake.created[0].Attendees) != 1 {
+	if len(fake.created) != 1 || fake.created[0].Attendees == nil || len(*fake.created[0].Attendees) != 1 {
 		t.Fatalf("create payload = %+v, want the guest list forwarded", fake.created)
 	}
 	// The answer belongs to the invitee; sending one would answer for them.
-	if fake.created[0].Attendees[0].ResponseStatus != "" {
-		t.Fatalf("attendee = %+v, want no response status invented", fake.created[0].Attendees[0])
+	if guest := (*fake.created[0].Attendees)[0]; guest.ResponseStatus != "" {
+		t.Fatalf("attendee = %+v, want no response status invented", guest)
 	}
 }
 
@@ -360,4 +360,108 @@ func readOnly(ctx context.Context, db *store.Store, userID, calendarID int64) er
 		AccessRole:         "reader",
 	})
 	return err
+}
+
+// invitedEvent is a meeting with two guests who have already answered.
+func invitedEvent(start time.Time) Event {
+	event := timedEvent("e1", "etag-1", "Review", start)
+	event.Attendees = []EventAttendee{
+		{Email: "owner@gmail.example.test", Self: true, ResponseStatus: store.CalendarResponseAccepted},
+		{Email: "guest@example.test", DisplayName: "Guest", ResponseStatus: store.CalendarResponseTentative},
+	}
+	return event
+}
+
+// Renaming a meeting must not touch its guest list. Google replaces the list
+// wholesale, so a payload restating it would reset every answer to unanswered
+// and, because the write notifies, mail everyone about it.
+func TestUpdateRemoteEventLeavesAnUnchangedGuestListAlone(t *testing.T) {
+	start := fixedNow.Add(24 * time.Hour)
+	invitation := invitedEvent(start)
+	fake := &fakeCalendar{eventPages: []EventsPage{{Items: []Event{invitation}, NextSyncToken: "events-1"}}}
+	syncer, db, user, calendar := writeFixture(t, fake)
+	ctx := context.Background()
+	fake.mu.Lock()
+	fake.events["e1"] = invitation
+	fake.mu.Unlock()
+
+	existing := eventsOf(t, db, user.ID, calendar)[0]
+	edited := existing
+	edited.Summary = "Review, renamed"
+	if _, err := syncer.UpdateRemoteEvent(ctx, user.ID, existing, edited); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.patched) != 1 {
+		t.Fatalf("patches = %+v, want exactly one", fake.patched)
+	}
+	if _, sent := fake.patched[0]["attendees"]; sent {
+		t.Fatalf("patch carried the guest list: %+v", fake.patched[0])
+	}
+	// The guests still have to hear that the meeting changed.
+	if len(fake.sendUpdates) != 1 || fake.sendUpdates[0] != "all" {
+		t.Fatalf("sendUpdates = %v, want the guests notified about the change", fake.sendUpdates)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, attendee := range fake.events["e1"].Attendees {
+		if attendee.ResponseStatus == "" || attendee.ResponseStatus == store.CalendarResponseNeedsAction {
+			t.Fatalf("attendee %+v lost their answer to a rename", attendee)
+		}
+	}
+}
+
+// Adding a guest does send the list, and everybody who stays keeps the answer
+// they already gave. The list is read back from Google first, so somebody
+// invited since the last poll is not dropped either.
+func TestUpdateRemoteEventPreservesAnswersWhenTheGuestListChanges(t *testing.T) {
+	start := fixedNow.Add(24 * time.Hour)
+	invitation := invitedEvent(start)
+	fake := &fakeCalendar{eventPages: []EventsPage{{Items: []Event{invitation}, NextSyncToken: "events-1"}}}
+	syncer, db, user, calendar := writeFixture(t, fake)
+	ctx := context.Background()
+
+	// Somebody was invited at Google after the last poll, so the mirror's copy
+	// of the list is already out of date.
+	fake.mu.Lock()
+	current := invitation
+	current.Attendees = append(append([]EventAttendee{}, invitation.Attendees...),
+		EventAttendee{Email: "latecomer@example.test", ResponseStatus: store.CalendarResponseAccepted})
+	fake.events["e1"] = current
+	fake.mu.Unlock()
+
+	existing := eventsOf(t, db, user.ID, calendar)[0]
+	edited := existing
+	edited.Attendees = append(append([]store.CalendarAttendee{}, existing.Attendees...),
+		store.CalendarAttendee{Email: "newcomer@example.test", Name: "Newcomer"})
+	if _, err := syncer.UpdateRemoteEvent(ctx, user.ID, existing, edited); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.patched) != 1 {
+		t.Fatalf("patches = %+v, want exactly one", fake.patched)
+	}
+	sent, ok := fake.patched[0]["attendees"].([]any)
+	if !ok {
+		t.Fatalf("patch did not carry the guest list: %+v", fake.patched[0])
+	}
+	answers := map[string]string{}
+	for _, raw := range sent {
+		entry, _ := raw.(map[string]any)
+		email, _ := entry["email"].(string)
+		response, _ := entry["responseStatus"].(string)
+		answers[email] = response
+	}
+	if answers["guest@example.test"] != store.CalendarResponseTentative {
+		t.Fatalf("guest answers = %v, want the existing answer preserved", answers)
+	}
+	if answers["owner@gmail.example.test"] != store.CalendarResponseAccepted {
+		t.Fatalf("guest answers = %v, want the account's own answer preserved", answers)
+	}
+	if _, added := answers["newcomer@example.test"]; !added {
+		t.Fatalf("guest answers = %v, want the new guest added", answers)
+	}
+	// The mirror never knew about this one; dropping them is what reading the
+	// live list prevents -- but only for guests the edit did not remove.
+	if _, kept := answers["latecomer@example.test"]; kept {
+		t.Fatalf("guest answers = %v, want a guest the submitted list omits to be removed", answers)
+	}
 }
