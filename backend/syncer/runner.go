@@ -24,6 +24,14 @@ const liveInboxSyncTurnTimeout = 90 * time.Second
 // account-wide pass (and its visible sync run) alive forever; the next
 // scheduled pass resumes from the durable UID checkpoint.
 const ordinaryMailboxSyncTurnTimeout = 3 * time.Minute
+
+// A first mirror of a large folder needs many turns, and every turn pays for its
+// own plan: STATUS, a remote UID listing, and the local UID set. A folder that
+// has already paused on its budget therefore earns a longer next turn, doubling
+// up to this ceiling, so the time goes into fetching bodies instead of
+// replanning. The ceiling keeps one folder from owning the account pass, and the
+// budget drops back to the freshness timeout as soon as a turn finishes cleanly.
+const maxMailboxSyncTurnTimeout = 10 * time.Minute
 const senderStatsRefreshTimeout = 2 * time.Minute
 
 // Attachment indexing is derived, replayable work. Most stages honor cancellation,
@@ -52,6 +60,7 @@ type Runner struct {
 	workActivities             map[string]runnerWorkActivity
 	mailboxPending             map[string]bool
 	accountMailboxPending      map[string]bool
+	mailboxTurnBudgets         map[string]time.Duration
 	foregroundRunning          map[int64]int
 	foregroundDone             map[int64]chan struct{}
 	foregroundDeferredAuto     map[int64]bool
@@ -122,6 +131,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		workActivities:             map[string]runnerWorkActivity{},
 		mailboxPending:             map[string]bool{},
 		accountMailboxPending:      map[string]bool{},
+		mailboxTurnBudgets:         map[string]time.Duration{},
 		foregroundRunning:          map[int64]int{},
 		foregroundDone:             map[int64]chan struct{}{},
 		foregroundDeferredAuto:     map[int64]bool{},
@@ -916,6 +926,80 @@ func (r *Runner) markPending(userID int64, mailboxes []string) {
 	}
 }
 
+// mailboxTurnBudgetKey names the one folder a turn's outcome can be attributed
+// to. A job that reserved several folders shares one timeout, so a pause cannot
+// say which folder needed it and a clean finish cannot say which folder is done.
+// Those jobs leave the earned budgets alone: their reruns are reserved per
+// folder, so the follow-up turns account for themselves.
+func mailboxTurnBudgetKey(keys []string) (string, bool) {
+	if len(keys) != 1 {
+		return "", false
+	}
+	return keys[0], true
+}
+
+// mailboxTurnTimeout applies the escalated budget a folder earned by pausing on
+// an earlier turn. A folder that keeps up with its freshness timeout never has
+// an entry and keeps the short turn.
+func (r *Runner) mailboxTurnTimeout(keys []string, base time.Duration) time.Duration {
+	key, ok := mailboxTurnBudgetKey(keys)
+	if !ok {
+		return base
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if earned := r.mailboxTurnBudgets[key]; earned > base {
+		return earned
+	}
+	return base
+}
+
+// escalateMailboxTurnBudget doubles the next turn for a folder that mirrored
+// what it could and still had history left, up to maxMailboxSyncTurnTimeout.
+func (r *Runner) escalateMailboxTurnBudget(keys []string, spent time.Duration) {
+	key, ok := mailboxTurnBudgetKey(keys)
+	if !ok || spent <= 0 {
+		return
+	}
+	next := spent * 2
+	if next > maxMailboxSyncTurnTimeout {
+		next = maxMailboxSyncTurnTimeout
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.mailboxTurnBudgets == nil {
+		r.mailboxTurnBudgets = map[string]time.Duration{}
+	}
+	if next > r.mailboxTurnBudgets[key] {
+		r.mailboxTurnBudgets[key] = next
+	}
+}
+
+// clearMailboxTurnBudget returns a folder to its freshness timeout once a turn
+// ends without asking for more time - including a turn that never got to run -
+// which also keeps the map from retaining folders that are done.
+func (r *Runner) clearMailboxTurnBudget(keys []string) {
+	key, ok := mailboxTurnBudgetKey(keys)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.mailboxTurnBudgets, key)
+}
+
+func (r *Runner) markAccountMailboxesPending(userID, accountID int64, mailboxes []string) {
+	keys := accountMailboxKeys(userID, accountID, mailboxes)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accountMailboxPending == nil {
+		r.accountMailboxPending = map[string]bool{}
+	}
+	for _, key := range keys {
+		r.accountMailboxPending[key] = true
+	}
+}
+
 func (r *Runner) deferForegroundMailboxesLocked(userID int64, mailboxes []string) {
 	if r.foregroundDeferredBoxes == nil {
 		r.foregroundDeferredBoxes = map[int64]map[string]string{}
@@ -1025,12 +1109,25 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 			timeout = liveInboxSyncTurnTimeout
 		}
 	}
+	timeout = r.mailboxTurnTimeout(keys, timeout)
+	// Only a paused turn keeps its folder on a longer budget. Every other way out
+	// of this turn, including one that never reaches the sync, hands the folder
+	// back to its freshness timeout.
+	turnPaused := false
+	defer func() {
+		if turnPaused {
+			r.escalateMailboxTurnBudget(keys, timeout)
+			return
+		}
+		r.clearMailboxTurnBudget(keys)
+	}()
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	ctx = withSyncTurnBudget(ctx)
 	r.setMailboxWorkActivitiesPhase(keys, "waiting_attachment")
 	if err := r.waitForAttachmentIndex(ctx, userID); err != nil {
 		return err
@@ -1043,6 +1140,15 @@ func (r *Runner) runReservedMailboxes(userID int64, mailboxes []string, keys []s
 		onRunStarted:     func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 		onRunFinished:    r.unregisterSyncRunControl,
 	}); err != nil {
+		if errors.Is(err, ErrSyncTurnPaused) {
+			// The folder still has remote history to mirror. Give the follow-up turn
+			// more time and queue it through the reservation this job is about to
+			// release, so a large backfill continues immediately instead of waiting
+			// for the next poll.
+			turnPaused = true
+			r.markPending(userID, mailboxes)
+			return nil
+		}
 		// A corrupt tenant database fails every mailbox in the same way, so the
 		// log has to name the file and the repair command rather than repeat a
 		// bare driver message once per sync turn.
@@ -1081,12 +1187,22 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 			timeout = liveInboxSyncTurnTimeout
 		}
 	}
+	timeout = r.mailboxTurnTimeout(keys, timeout)
+	turnPaused := false
+	defer func() {
+		if turnPaused {
+			r.escalateMailboxTurnBudget(keys, timeout)
+			return
+		}
+		r.clearMailboxTurnBudget(keys)
+	}()
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	ctx = withSyncTurnBudget(ctx)
 	r.setMailboxWorkActivitiesPhase(keys, "waiting_attachment")
 	if err := r.waitForAttachmentIndex(ctx, userID); err != nil {
 		return err
@@ -1104,6 +1220,14 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 			onRunStarted:      func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 			onRunFinished:     r.unregisterSyncRunControl,
 		}); err != nil {
+		if errors.Is(err, ErrSyncTurnPaused) {
+			// Resume this account's folder right after the reservation is released
+			// instead of reporting a failure: the UID checkpoint is durable and a
+			// large backfill needs many bounded turns, each longer than the last.
+			turnPaused = true
+			r.markAccountMailboxesPending(userID, accountID, mailboxes)
+			return nil
+		}
 		log.Printf("sync user_id=%d account_id=%d mailboxes=%s: %v", userID, accountID, strings.Join(mailboxes, ","), err)
 		return err
 	}

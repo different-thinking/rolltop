@@ -312,14 +312,15 @@ operator check.
 3. Each user logs in and configures their own IMAP account at `/settings/account`.
 4. The user clicks `Sync now`, chooses per-folder `auto`, `manual`, or `never`, or scheduled sync runs on `ROLLTOP_SYNC_INTERVAL`.
 5. Sync runs are planned per mailbox, with INBOX prioritized before background folders. Each mailbox task estimates pending work from IMAP `STATUS`, streams messages in UID batches, and updates current folder, UID, seen, total, stored, and skipped counts.
-6. Message bodies, attachment names, and searchable text-like attachments are indexed with the current user's `user_id`.
-7. SQLite stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
-8. Raw `.eml` blobs are retained for `ROLLTOP_BLOB_RETENTION` only, defaulting to 14 days. Set it to `0` to keep all raw blobs.
-9. Attachment bytes are read from the raw `.eml` while indexing and are not stored as separate blobs for new syncs.
-10. `/mail`, folder views, `/search`, and `/messages/{id}` only return current-user records.
-11. Folder counts show unread messages.
-12. Dragging a message onto a folder immediately removes it from the current view, shows a moving toast, and then applies the IMAP move.
-13. Snooze is local and conversation-scoped: future snoozes are hidden from normal lists and search, then resurface at the top without moving or deleting remote mail. A genuinely new incremental reply clears the active snooze.
+6. Every mailbox turn is time-bounded so one folder cannot hold the account-wide pass forever. A turn that runs out of time stops at a message boundary, commits what it mirrored, and is rescheduled immediately: a first mirror of a large folder therefore completes over many turns and is recorded as a series of normal runs rather than a failure. Each paused turn doubles the next one, up to ten minutes, so a backfill spends its time fetching instead of replanning the same folder; the folder returns to the short freshness budget as soon as a turn finishes cleanly. A turn that spends its whole budget without mirroring anything is still reported as an error.
+7. Message bodies, attachment names, and searchable text-like attachments are indexed with the current user's `user_id`.
+8. SQLite stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
+9. Raw `.eml` blobs are retained for `ROLLTOP_BLOB_RETENTION` only, defaulting to 14 days. Set it to `0` to keep all raw blobs.
+10. Attachment bytes are read from the raw `.eml` while indexing and are not stored as separate blobs for new syncs.
+11. `/mail`, folder views, `/search`, and `/messages/{id}` only return current-user records.
+12. Folder counts show unread messages.
+13. Dragging a message onto a folder immediately removes it from the current view, shows a moving toast, and then applies the IMAP move.
+14. Snooze is local and conversation-scoped: future snoozes are hidden from normal lists and search, then resurface at the top without moving or deleting remote mail. A genuinely new incremental reply clears the active snooze.
 
 In account settings, `Folder scope` can be:
 
