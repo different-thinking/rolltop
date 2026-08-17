@@ -241,14 +241,21 @@ func scopeMessageLimit(limit int) int {
 	return limit
 }
 
-// archivedMailboxExclusion hides messages sitting in each account's chosen
-// Archive folder (the swipe/row Archive destination). The role guard mirrors
-// GetSwipePreferences: a mapped folder that has since become a system folder
-// no longer counts as an Archive. The fragment takes one user_id argument.
-const archivedMailboxExclusion = ` AND m.mailbox_id NOT IN (
-			SELECT sam.mailbox_id FROM swipe_archive_mailboxes sam
-			JOIN mailboxes smb ON smb.user_id = sam.user_id AND smb.id = sam.mailbox_id AND smb.role = ''
-			WHERE sam.user_id = ?)`
+// archivedMailboxExclusion renders the SQL that keeps each account's effective
+// Archive folder out of a list, along with its arguments. Requesting the
+// exclusion when nothing is configured yields an empty fragment, so Unarchived
+// simply equals All Mail until an Archive folder exists.
+func (s *Store) archivedMailboxExclusion(ctx context.Context, userID int64, exclude bool) (string, []any, error) {
+	if !exclude {
+		return "", nil, nil
+	}
+	ids, err := s.ArchiveMailboxIDsForUser(ctx, userID)
+	if err != nil || len(ids) == 0 {
+		return "", nil, err
+	}
+	placeholders, args := int64ListPlaceholders(ids)
+	return " AND m.mailbox_id NOT IN (" + placeholders + ")", args, nil
+}
 
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
 // covers: every unsnoozed message in a folder All Mail shows. Rows the list
@@ -269,12 +276,13 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
-	exclusion := ""
-	args := []any{userID}
-	if excludeArchived {
-		exclusion = archivedMailboxExclusion
-		args = append(args, userID)
+	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
+	if err != nil {
+		return nil, err
 	}
+	args := make([]any, 0, len(exclusionArgs)+3)
+	args = append(args, userID)
+	args = append(args, exclusionArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
@@ -441,12 +449,13 @@ func (s *Store) listLatestThreadMessagesForUser(ctx context.Context, userID int6
 		limit = 50
 	}
 	direction := order.sortDirection()
-	exclusion := ""
-	args := []any{userID}
-	if excludeArchived {
-		exclusion = archivedMailboxExclusion
-		args = append(args, userID)
+	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
+	if err != nil {
+		return nil, err
 	}
+	args := make([]any, 0, len(exclusionArgs)+4)
+	args = append(args, userID)
+	args = append(args, exclusionArgs...)
 	args = append(args, nowUnix(), limit, offset)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`WITH keyed AS (
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,

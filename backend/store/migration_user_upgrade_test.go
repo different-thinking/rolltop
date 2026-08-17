@@ -535,6 +535,7 @@ func currentUserMigrationSetsForUpgradeTest() []migrationSet {
 		userMessageImportCompletionMigrationSet(),
 		userSearchProgressIndexMigrationSet(),
 		userGoogleConnectionMigrationSet(),
+		userIdentityArchiveMailboxMigrationSet(),
 	)
 }
 

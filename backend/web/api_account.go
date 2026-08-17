@@ -820,6 +820,7 @@ func (s *Server) apiMailIdentity(w http.ResponseWriter, r *http.Request) {
 		IMAPAccountID:    in.IMAPAccountID,
 		SentMailboxID:    in.SentMailboxID,
 		DraftsMailboxID:  in.DraftsMailboxID,
+		ArchiveMailboxID: in.ArchiveMailboxID,
 		Email:            in.Email,
 		DisplayName:      in.DisplayName,
 		Signature:        in.Signature,

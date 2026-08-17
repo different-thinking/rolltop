@@ -83,6 +83,7 @@ type MailIdentity struct {
 	IMAPAccountID    int64
 	SentMailboxID    int64
 	DraftsMailboxID  int64
+	ArchiveMailboxID int64
 	Email            string
 	DisplayName      string
 	Signature        string

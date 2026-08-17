@@ -103,6 +103,14 @@ func (s *Server) addTenantBootstrap(r *http.Request, userID int64, resp map[stri
 		return err
 	}
 	resp["swipe_preferences"] = apiSwipePreferencesFromStore(swipePreferences)
+	// The mail views need the folder the Archive action actually files into,
+	// which an identity may override; swipe_preferences stays the raw stored
+	// mapping so the settings form keeps editing what it saved.
+	archiveMailboxes, err := s.store.ArchiveMailboxesForUser(r.Context(), userID)
+	if err != nil {
+		return err
+	}
+	resp["effective_archive_mailboxes"] = apiAccountMailboxChoices(archiveMailboxes)
 	var chrome viewData
 	s.loadMailboxChrome(r.Context(), userID, &chrome)
 	resp["mailboxes"] = apiMailboxes(chrome.Mailboxes)
@@ -132,6 +140,7 @@ func (s *Server) addTenantBootstrap(r *http.Request, userID int64, resp map[stri
 func applyUnavailableTenantBootstrap(userID int64, resp map[string]any) {
 	resp["database_unavailable"] = true
 	resp["swipe_preferences"] = apiSwipePreferencesFromStore(store.DefaultSwipePreferences(userID))
+	resp["effective_archive_mailboxes"] = []apiAccountMailboxChoice{}
 	resp["mailboxes"] = []apiMailbox{}
 	resp["latest_sync_run"] = nil
 	resp["active_sync_runs"] = []apiSyncRun{}

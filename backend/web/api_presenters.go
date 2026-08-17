@@ -36,10 +36,19 @@ func safeUser(user store.User) apiUser {
 	}
 }
 
+// apiAccountMailboxChoices renders per-account folder choices for the browser.
+func apiAccountMailboxChoices(choices []store.SwipeArchiveMailbox) []apiAccountMailboxChoice {
+	out := make([]apiAccountMailboxChoice, 0, len(choices))
+	for _, choice := range choices {
+		out = append(out, apiAccountMailboxChoice{AccountID: choice.AccountID, MailboxID: choice.MailboxID})
+	}
+	return out
+}
+
 func apiSwipePreferencesFromStore(preferences store.SwipePreferences) apiSwipePreferences {
-	archiveMailboxes := make([]apiSwipeArchiveMailbox, 0, len(preferences.ArchiveMailboxes))
+	archiveMailboxes := make([]apiAccountMailboxChoice, 0, len(preferences.ArchiveMailboxes))
 	for _, mailbox := range preferences.ArchiveMailboxes {
-		archiveMailboxes = append(archiveMailboxes, apiSwipeArchiveMailbox{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
+		archiveMailboxes = append(archiveMailboxes, apiAccountMailboxChoice{AccountID: mailbox.AccountID, MailboxID: mailbox.MailboxID})
 	}
 	return apiSwipePreferences{
 		LeftAction:        preferences.LeftAction,
@@ -169,6 +178,7 @@ func apiMailIdentityFromStore(identity store.MailIdentity) apiMailIdentity {
 		SMTPAccountID:    identity.SMTPAccountID,
 		IMAPAccountID:    identity.IMAPAccountID,
 		SentMailboxID:    identity.SentMailboxID,
+		ArchiveMailboxID: identity.ArchiveMailboxID,
 		DraftsMailboxID:  identity.DraftsMailboxID,
 		Email:            identity.Email,
 		DisplayName:      identity.DisplayName,

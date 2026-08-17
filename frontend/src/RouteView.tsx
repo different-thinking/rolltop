@@ -2,7 +2,7 @@
 // into feature views while passing only the shared state each view needs.
 
 import type { AddToast, LocationState, SecurityUnlockState } from "./appTypes";
-import type { Bootstrap, Mailbox, SwipePreferences, SyncRun, ThemeDefinition, User } from "./types";
+import type { AccountMailboxChoice, Bootstrap, Mailbox, SwipePreferences, SyncRun, ThemeDefinition, User } from "./types";
 import { MailView, SearchView, SnoozedView } from "./features/mail/MailViews";
 import { ThreadView } from "./features/mail/ThreadView";
 import { ComposePage } from "./features/compose/ComposeViews";
@@ -26,6 +26,7 @@ export function RouteView({
   syncRunning,
   mailGeneration,
   swipePreferences,
+  archiveMailboxes,
   enabledPlugins,
   availableThemes,
   location,
@@ -48,6 +49,7 @@ export function RouteView({
   syncRunning: boolean;
   mailGeneration: number;
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   enabledPlugins: string[];
   availableThemes: ThemeDefinition[];
   location: LocationState;
@@ -120,6 +122,7 @@ export function RouteView({
       activeSyncRuns={activeSyncRuns}
       mailGeneration={mailGeneration}
       swipePreferences={swipePreferences}
+      archiveMailboxes={archiveMailboxes}
       refreshChrome={refreshChrome}
       addToast={addToast}
       messageSecurityPlugins={runtimePlugins.all}

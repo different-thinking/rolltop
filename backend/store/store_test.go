@@ -549,6 +549,100 @@ func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 	}
 }
 
+func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, account, inbox, blob := testMailbox(t, ctx, db)
+	swipeTarget, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityTarget, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Ablage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:     user.ID,
+		LeftAction: SwipeActionSnooze, LeftSnoozePreset: SwipeSnoozeTomorrow,
+		RightAction: SwipeActionMarkRead, RightSnoozePreset: SwipeSnoozeTomorrow,
+		ArchiveMailboxes: []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: swipeTarget.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no identity choice the stored swipe mapping still answers.
+	resolved, err := db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].MailboxID != swipeTarget.ID {
+		t.Fatalf("resolved archive = %+v, want the swipe mapping %d", resolved, swipeTarget.ID)
+	}
+
+	identity, err := db.CreateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		Email: "archive-owner@example.test", DisplayName: "Archive Owner",
+		IMAPAccountID: account.ID, ArchiveMailboxID: identityTarget.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ArchiveMailboxID != identityTarget.ID {
+		t.Fatalf("identity archive mailbox = %d, want %d", identity.ArchiveMailboxID, identityTarget.ID)
+	}
+
+	// The identity is the more specific setting, so it wins over the mapping.
+	resolved, err = db.ArchiveMailboxesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].MailboxID != identityTarget.ID {
+		t.Fatalf("resolved archive = %+v, want the identity choice %d", resolved, identityTarget.ID)
+	}
+
+	// Unarchived follows the same resolution: the identity's folder is what is
+	// hidden, and the folder it replaced comes back into view.
+	base := time.Unix(1700000000, 0)
+	create := func(mailbox Mailbox, uid uint32) MessageRecord {
+		t.Helper()
+		message, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<archive-%d@example.test>", uid), Subject: "Archive test",
+			Date: base.Add(time.Duration(uid) * time.Minute), UID: uid, BlobPath: blob.Path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message
+	}
+	inboxMessage := create(inbox, 1)
+	swipeMessage := create(swipeTarget, 2)
+	identityMessage := create(identityTarget, 3)
+	rows, err := db.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := messageIDsOf(rows)
+	if len(got) != 2 || !slices.Contains(got, inboxMessage.ID) || !slices.Contains(got, swipeMessage.ID) {
+		t.Fatalf("unarchived rows = %v, want the inbox and swipe-folder messages %d and %d",
+			got, inboxMessage.ID, swipeMessage.ID)
+	}
+	if slices.Contains(got, identityMessage.ID) {
+		t.Fatalf("unarchived rows = %v, must not include the identity's archive folder message %d", got, identityMessage.ID)
+	}
+
+	// An identity cannot point Archive at a folder that already means something
+	// else, matching the choices settings offers.
+	if _, err := db.UpdateMailIdentityForUser(ctx, user.ID, MailIdentity{
+		ID: identity.ID, IMAPAccountID: account.ID, ArchiveMailboxID: inbox.ID,
+	}); err == nil {
+		t.Fatal("an identity was allowed to archive into the Inbox")
+	}
+}
+
 func messageIDsOf(messages []MessageRecord) []int64 {
 	ids := make([]int64, 0, len(messages))
 	for _, msg := range messages {

@@ -6,7 +6,7 @@ import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, To
 import { Star } from "@phosphor-icons/react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
-import type { Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
+import type { AccountMailboxChoice, Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
@@ -75,6 +75,7 @@ export function MailView({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes,
   latestSyncRun,
   activeSyncRuns,
   mailGeneration,
@@ -92,6 +93,7 @@ export function MailView({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  archiveMailboxes: AccountMailboxChoice[];
   latestSyncRun: SyncRun | null;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -133,7 +135,7 @@ export function MailView({
   // Each named view counts the folders it actually reads, mirroring how the
   // server builds it: Sent and Drafts are the folders carrying that role, and
   // Unarchived is All Mail minus every account's chosen Archive folder.
-  const archiveMailboxIDs = new Set(swipePreferences.archive_mailboxes.map((item) => item.mailbox_id));
+  const archiveMailboxIDs = new Set(archiveMailboxes.map((item) => item.mailbox_id));
   const viewRole = view === "sent" ? "sent" : view === "drafts" ? "drafts" : "";
   const roleMailboxIDSet = useMemo(
     () => viewRole ? roleMailboxIDs(mailboxes, viewRole) : new Set<number>(),
@@ -445,6 +447,7 @@ export function MailView({
                 mailboxes={mailboxes}
                 currentMailboxID={mailbox?.id || 0}
                 swipePreferences={swipePreferences}
+                archiveMailboxes={archiveMailboxes}
                 highlightMessageIDs={newMessageIDs}
                 showRecipients={Boolean(viewRole) || mailbox?.role === "sent" || mailbox?.role === "drafts"}
                 openAsDraft={view === "drafts" || mailbox?.role === "drafts"}
@@ -1229,6 +1232,7 @@ function MessageList({
   hiddenMessageIDs,
   mailboxes,
   swipePreferences,
+  archiveMailboxes = [],
   highlightMessageIDs,
   showRecipients = false,
   openAsDraft = false,
@@ -1252,6 +1256,8 @@ function MessageList({
   hiddenMessageIDs: Set<number>;
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
+  /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
+  archiveMailboxes?: AccountMailboxChoice[];
   highlightMessageIDs?: Set<number>;
   showRecipients?: boolean;
   openAsDraft?: boolean;
@@ -2083,7 +2089,7 @@ function MessageList({
     const target = action === "trash"
       ? trashMailboxForAccount(mailboxes, accountID)
       : (() => {
-          const preference = effectiveSwipePreferences.archive_mailboxes.find((item) => item.account_id === accountID);
+          const preference = archiveMailboxes.find((item) => item.account_id === accountID);
           return preference
             ? mailboxes.find((mailbox) => mailbox.id === preference.mailbox_id && mailbox.account_id === accountID && isArchiveMailboxChoice(mailbox))
             : undefined;
