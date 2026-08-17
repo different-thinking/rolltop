@@ -2,7 +2,7 @@
 // beside each client because both clients test the same retry contract, and two
 // copies of the stub drift the moment that contract changes.
 
-package xoauth2
+package googletoken
 
 import (
 	"context"

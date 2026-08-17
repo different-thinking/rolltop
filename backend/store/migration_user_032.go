@@ -1,45 +1,50 @@
-// File overview: Message categories. Every message carries one category decided
-// from its own headers, and a per-sender override records the corrections the
-// user makes so the same sender keeps landing where they put it.
+// File overview: Contact provenance and Google People sync state. A contact
+// gains a source, an optional link to the Google connection that owns it, and
+// the remote identifiers a two-way sync needs; a companion table holds the sync
+// token per connection.
 
 package store
 
-func userMessageCategoryMigrationSet() migrationSet {
+func userGoogleContactMigrationSet() migrationSet {
 	return migrationSet{
 		Scope:   "user",
 		Version: UserSchemaVersion032,
-		Label:   "user schema 032 message categories",
+		Label:   "user schema 032 google contacts",
 		Statements: []string{
-			// The empty default means "not classified yet" rather than a
-			// category of its own: it is what the backfill selects on, and what
-			// keeps every existing row out of the category lists until it has
-			// actually been read.
-			`ALTER TABLE messages ADD COLUMN category TEXT NOT NULL DEFAULT ''`,
-			// The bare sender address, kept beside the display form the list
-			// renders. A correction is remembered per sender, and matching it
-			// against the display form would mean normalizing addresses in SQL
-			// on every row instead of once when the message is stored.
-			`ALTER TABLE messages ADD COLUMN sender_address TEXT NOT NULL DEFAULT ''`,
-			`CREATE INDEX IF NOT EXISTS idx_messages_user_sender_address ON messages(user_id, sender_address)`,
-			// The category lists page by date within one tenant's category, so
-			// the index carries the sort column and the lists never fall back to
-			// scanning every message the user owns.
-			`CREATE INDEX IF NOT EXISTS idx_messages_user_category_date ON messages(user_id, category, date_unix)`,
-			// The backfill's own lookup. A partial index stays small once the
-			// backfill has drained, which is the state the app spends its life
-			// in, and it costs nothing to maintain for already-classified rows.
-			`CREATE INDEX IF NOT EXISTS idx_messages_category_pending ON messages(user_id, id) WHERE category = ''`,
-			`CREATE TABLE IF NOT EXISTS category_sender_overrides (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
+			// 'local' is the pre-existing state: every contact in an installed
+			// database was typed in, imported from a vCard, or captured from a
+			// sender. Only the sync promotes rows to 'google'.
+			`ALTER TABLE contacts ADD COLUMN source TEXT NOT NULL DEFAULT 'local'`,
+			// Plain integer, as in user-030: SQLite cannot add a column with a
+			// REFERENCES clause unless the default is NULL. 0 means "not linked".
+			`ALTER TABLE contacts ADD COLUMN google_connection_id INTEGER NOT NULL DEFAULT 0`,
+			// The People API resource name, e.g. people/c1234567890123456789.
+			`ALTER TABLE contacts ADD COLUMN external_id TEXT NOT NULL DEFAULT ''`,
+			// Google's optimistic-concurrency token. Writing back without the
+			// current etag either fails or silently clobbers a newer remote
+			// edit, so it is stored alongside every synced contact.
+			`ALTER TABLE contacts ADD COLUMN etag TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE contacts ADD COLUMN remote_updated_at INTEGER NOT NULL DEFAULT 0`,
+			// Partial index: unlinked contacts all share the empty external id,
+			// and there can be any number of those. It doubles as the lookup a
+			// delta sync performs for every changed person.
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_google_external
+				ON contacts(user_id, google_connection_id, external_id)
+				WHERE external_id <> ''`,
+			// One row per connection. The sync token is Google's cursor, not a
+			// credential, so unlike the tokens in google_connections it is
+			// stored as it arrives.
+			`CREATE TABLE IF NOT EXISTS google_people_sync (
 				user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-				-- The bare, lowercased address. Display names change and differ
-				-- between messages from the same sender, so they cannot be part
-				-- of the key a correction is remembered under.
-				sender TEXT NOT NULL,
-				category TEXT NOT NULL,
+				connection_id INTEGER NOT NULL,
+				sync_token TEXT NOT NULL DEFAULT '',
+				last_sync_at INTEGER NOT NULL DEFAULT 0,
+				last_success_at INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT '',
+				status_detail TEXT NOT NULL DEFAULT '',
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL,
-				UNIQUE(user_id, sender)
+				PRIMARY KEY (user_id, connection_id)
 			)`,
 		},
 	}

@@ -321,7 +321,10 @@ export function ComposeBox({
     });
     if (editorRef.current) {
       editorRef.current.innerHTML = initialHTML;
-      placeInitialCaret(editorRef.current);
+      // Answering an existing message lands in the body: the recipient and
+      // subject are already decided, so there is nothing else to fill in first.
+      // A blank message keeps its caret free for the To field instead.
+      placeInitialCaret(editorRef.current, initial.in_reply_to_id > 0);
     }
     const recovered = loadComposeRecovery(userID, localComposeContext);
     if (recovered && !composeContentEqual(recoveryContent(recovered), baseline)) {
@@ -839,13 +842,13 @@ export function ComposeBox({
           </div>
         )}
         {inline && showCc ? (
-          <div className="inline-reply-meta">
+          <div className="inline-reply-field">
             <span>Cc</span>
             <RecipientInput value={form.cc} onChange={(value) => setField("cc", value)} />
           </div>
         ) : null}
         {inline && showBcc ? (
-          <div className="inline-reply-meta">
+          <div className="inline-reply-field">
             <span>Bcc</span>
             <RecipientInput value={form.bcc} onChange={(value) => setField("bcc", value)} />
           </div>
@@ -1223,12 +1226,19 @@ function stripLeadingBreaks(html: string): string {
   return html.replace(/^(?:\s|<br\s*\/?>|<div><br><\/div>|<p><br><\/p>)+/i, "");
 }
 
-function placeInitialCaret(editor: HTMLDivElement) {
+/**
+ * placeInitialCaret puts the caret where the answer goes. A forward carries an
+ * explicit marker above the quoted original; a reply has no marker, because the
+ * server already leaves the blank line, so the caret goes to the start of the
+ * body. Both focus without scrolling: a popover must not yank the page, and the
+ * thread view scrolls its own composer into view.
+ */
+function placeInitialCaret(editor: HTMLDivElement, focusWithoutMarker = false) {
   const marker = editor.querySelector<HTMLElement>("[data-compose-caret-start]");
-  if (!marker) return;
+  if (!marker && !focusWithoutMarker) return;
   editor.focus({ preventScroll: true });
   const range = document.createRange();
-  range.selectNodeContents(marker);
+  range.selectNodeContents(marker || editor);
   range.collapse(true);
   const selection = window.getSelection();
   selection?.removeAllRanges();

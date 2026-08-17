@@ -9,6 +9,7 @@ import type {
   ContactAutocomplete,
   DatabaseMaintenanceJob,
   DatabaseOverview,
+  DuplicateCopyReport,
   ComposeAttachmentUpload,
   ComposeForm,
   ComposeIdentity,
@@ -42,9 +43,15 @@ import { clearOtherCollapsedAccounts } from "./lib/sidebarLocal";
 export class ApiError extends Error {
   status: number;
 
-  constructor(status: number, message: string) {
+  /** payload is the decoded response body. A few failures carry data the caller
+   * needs -- a rejected contact edit answers with the version that won -- and
+   * without this the only way to get it would be to re-fetch. */
+  payload: Record<string, unknown>;
+
+  constructor(status: number, message: string, payload: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -64,7 +71,7 @@ async function parse<T>(res: Response): Promise<T> {
     }
   }
   if (!res.ok) {
-    throw new ApiError(res.status, typeof data.error === "string" ? data.error : res.statusText);
+    throw new ApiError(res.status, typeof data.error === "string" ? data.error : res.statusText, data);
   }
   return data as T;
 }
@@ -464,9 +471,15 @@ export const api = {
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
     return postForm<{ ok: boolean; message_id: number }>("/api/compose/draft", csrf, body);
   },
-  contacts: (query = "") => {
-    const q = query.trim() ? `?${new URLSearchParams({ q: query.trim() })}` : "";
-    return getJSON<{ contacts: Contact[] }>(`/api/contacts${q}`);
+  // source is "", "all", "local", or "google:<connection id>". It is a server
+  // parameter rather than a filter over the answer because the listing is
+  // capped, and filtering afterwards would hide contacts the cap already cut.
+  contacts: (query = "", source = "") => {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("q", query.trim());
+    if (source && source !== "all") params.set("source", source);
+    const suffix = params.size > 0 ? `?${params}` : "";
+    return getJSON<{ contacts: Contact[] }>(`/api/contacts${suffix}`);
   },
   contactAutocomplete: (query: string) =>
     getJSON<{ contacts: ContactAutocomplete[] }>(`/api/contacts/autocomplete?${new URLSearchParams({ q: query })}`),
@@ -482,7 +495,7 @@ export const api = {
   importContacts: (csrf: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return postForm<{ ok: boolean; imported: number; updated: number }>("/api/contacts/import", csrf, form);
+    return postForm<{ ok: boolean; imported: number; updated: number; failed: number }>("/api/contacts/import", csrf, form);
   },
   /**
    * setMessageCategory files every message from one sender into a category and
@@ -561,6 +574,13 @@ export const api = {
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/search-index/purge`, csrf),
   purgeFolderLocalReferences: (csrf: string, id: number) =>
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/local-references/purge`, csrf),
+  duplicateCopies: () => getJSON<DuplicateCopyReport>("/api/account/duplicates"),
+  rescanDuplicateCopies: (csrf: string, after = "") =>
+    postJSON<DuplicateCopyReport & { groups: number; newly_hidden: number; revealed: number; truncated: boolean; next: string }>(
+      "/api/account/duplicates/rescan", csrf, { after }),
+  trashDuplicateCopies: (csrf: string) =>
+    postJSON<{ ok: boolean; queued: boolean; matched: number; skipped: number; queued_messages?: number; truncated: boolean; partial_error?: string }>(
+      "/api/account/duplicates/trash", csrf),
   users: () => getJSON<{ users: User[]; password_reset_from_address?: string }>("/api/admin/users"),
   createUser: (csrf: string, body: { email: string; name: string; password: string; is_admin: boolean }) =>
     postJSON<{ ok: boolean }>("/api/admin/users", csrf, body),

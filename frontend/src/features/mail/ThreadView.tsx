@@ -6,7 +6,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
 import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
-import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, MailCategorySummary, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, SwipePreferences, ThreadMessage } from "../../types";
+import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, MailCategorySummary, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
@@ -852,7 +852,6 @@ export function ThreadView({
   location,
   navigate,
   mailboxes,
-  swipePreferences,
   archiveMailboxes,
   mailCategories,
   setMessagesHidden,
@@ -870,7 +869,6 @@ export function ThreadView({
   location: LocationState;
   navigate: (url: string) => void;
   mailboxes: Mailbox[];
-  swipePreferences: SwipePreferences;
   /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
   archiveMailboxes: AccountMailboxChoice[];
   mailCategories: MailCategorySummary[];
@@ -921,6 +919,7 @@ export function ThreadView({
   const canExplainSearch = highlightQuery.trim() !== "";
   const brandDomainKey = useMemo(() => brandDomainKeyForThread(thread, pluginSet), [thread, pluginSet]);
   const [brandIcons, setBrandIcons] = useState<Record<string, string>>({});
+  const inlineReplyRowRef = useRef<HTMLDivElement | null>(null);
   const autoPGPVerificationRef = useRef<Set<string>>(new Set());
   const pgpWasUnlockedRef = useRef(false);
   const pgpBodiesRef = useRef<Record<number, PGPBodyState>>({});
@@ -1577,6 +1576,25 @@ export function ThreadView({
       addToast(messageFromError(err), "error");
     }
   }
+
+  // The composer opens under the message it answers, which on a long thread is
+  // usually well below the fold. Its editor focuses itself without scrolling —
+  // deliberately, so the popover cannot yank the page — so the reply looked like
+  // it had done nothing. Opening one now brings it into view. Closing and
+  // reopening on the same message flips the key back through 0, so the second
+  // reply scrolls too. `nearest` leaves an already-visible composer alone, and
+  // the row's scroll-margin keeps it clear of the sticky top bar.
+  const inlineReplyTargetID = inlineReply ? inlineReply.in_reply_to_id : 0;
+  useEffect(() => {
+    if (!inlineReplyTargetID) return;
+    const row = inlineReplyRowRef.current;
+    if (!row) return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const frame = window.requestAnimationFrame(() => {
+      row.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [inlineReplyTargetID]);
 
   function toggleMessage(messageID: number) {
     setExpanded((current) => {
@@ -2257,7 +2275,7 @@ export function ThreadView({
                   </div>
                 ) : null}
                 {inlineReply && inlineReply.in_reply_to_id === item.message.id ? (
-                  <div className="inline-reply-row">
+                  <div className="inline-reply-row" ref={inlineReplyRowRef}>
                     <div className="avatar inline-reply-avatar">{composeInitial}</div>
                     <ComposeBox
                       userID={userID}

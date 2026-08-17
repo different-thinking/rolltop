@@ -521,10 +521,14 @@ func apiContactFromStore(c store.Contact) apiContact {
 		Categories:     c.Categories,
 		IsMe:           c.IsMe,
 		IsPrimary:      c.IsPrimary,
+		Source:         contactSource(c),
 		Emails:         make([]apiContactEmail, 0, len(c.Emails)),
 		Phones:         make([]apiContactPhone, 0, len(c.Phones)),
 		Addresses:      make([]apiContactAddress, 0, len(c.Addresses)),
 		URLs:           make([]apiContactURL, 0, len(c.URLs)),
+	}
+	if c.IsGoogleContact() {
+		out.GoogleConnectionID = c.GoogleConnectionID
 	}
 	if c.Icon != nil {
 		out.IconURL = fmt.Sprintf("/contacts/%d/icon", c.ID)

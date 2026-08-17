@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
-	"rolltop/backend/xoauth2"
 )
 
 // fakeSMTPServer accepts one message per connection and records the credentials
@@ -167,7 +167,7 @@ func sendTestMessage(sender *Sender, account store.MailAccount) error {
 
 func TestSendRawAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 	server := startFakeSMTPServer(t, "good-token")
-	sender := &Sender{Tokens: &xoauth2.StubTokenSource{Tokens: []string{"good-token"}}}
+	sender := &Sender{Tokens: &googletoken.StubTokenSource{Tokens: []string{"good-token"}}}
 	if err := sendTestMessage(sender, server.account(t)); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestSendRawAuthenticatesGoogleAccountsWithXOAUTH2(t *testing.T) {
 // turn this into a duplicate send.
 func TestSendRawRetriesOnceWithARefreshedTokenAndDeliversOnce(t *testing.T) {
 	server := startFakeSMTPServer(t, "fresh-token")
-	tokens := &xoauth2.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
+	tokens := &googletoken.StubTokenSource{Tokens: []string{"stale-token", "fresh-token"}}
 	if err := sendTestMessage(&Sender{Tokens: tokens}, server.account(t)); err != nil {
 		t.Fatalf("send after refresh: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestSendRawRetriesOnceWithARefreshedTokenAndDeliversOnce(t *testing.T) {
 
 func TestSendRawReportsASenderThatCannotMintTokens(t *testing.T) {
 	server := startFakeSMTPServer(t, "good-token")
-	if err := sendTestMessage(&Sender{}, server.account(t)); !errors.Is(err, xoauth2.ErrNoTokenSource) {
-		t.Fatalf("send without a token source = %v, want xoauth2.ErrNoTokenSource", err)
+	if err := sendTestMessage(&Sender{}, server.account(t)); !errors.Is(err, googletoken.ErrNoTokenSource) {
+		t.Fatalf("send without a token source = %v, want googletoken.ErrNoTokenSource", err)
 	}
 }

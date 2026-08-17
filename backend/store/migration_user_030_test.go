@@ -68,3 +68,20 @@ func TestGoogleMailAccountMigrationLeavesExistingAccountsUntouched(t *testing.T)
 		t.Fatalf("existing SMTP account migrated to auth_type=%q connection=%d, want password/0", authType, connectionID)
 	}
 }
+
+// A migration that ships after its successor would apply its ALTERs to a table
+// that already has the columns, so the recorded order matters as much as the
+// statements do.
+func TestUser030RunsAfterUser029(t *testing.T) {
+	sets := currentUserMigrationSetsForUpgradeTest()
+	for i, set := range sets {
+		if set.Version != UserSchemaVersion030 {
+			continue
+		}
+		if i == 0 || sets[i-1].Version != UserSchemaVersion029 {
+			t.Fatalf("user-030 predecessor=%v, want %q", sets[max(0, i-1):i], UserSchemaVersion029)
+		}
+		return
+	}
+	t.Fatalf("%s missing from current user migrations", UserSchemaVersion030)
+}

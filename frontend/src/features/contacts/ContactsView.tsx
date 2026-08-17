@@ -3,13 +3,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { api } from "../../api";
+import { ApiError, api } from "../../api";
 import type { Contact, ContactAddress, ContactEmail, ContactPhone, ContactURL } from "../../types";
 import type { Toast } from "../../appTypes";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { contactKeyEditors } from "../../plugins/contactDetails";
+import { loadGoogleConnections, type GoogleConnection } from "../settings/googleConnections";
+
+// "Everything" and "Only Rolltop" are the two source filters that are not a
+// connection; a connection's own id is used for the rest.
+const SOURCE_ALL = "all";
+const SOURCE_LOCAL = "local";
 
 /** ContactsView manages the user address book and Me contacts used by compose/reply identity logic. */
 export function ContactsView({
@@ -23,6 +29,8 @@ export function ContactsView({
 }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [query, setQuery] = useState("");
+  const [googleAccounts, setGoogleAccounts] = useState<GoogleConnection[]>([]);
+  const [source, setSource] = useState<string>(SOURCE_ALL);
   const [selectedID, setSelectedID] = useState<number | "new" | null>(null);
   const [draft, setDraft] = useState<Contact>(() => blankContact());
   const [loading, setLoading] = useState(true);
@@ -32,7 +40,7 @@ export function ContactsView({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.contacts(query);
+      const data = await api.contacts(query, source);
       const nextContacts = data.contacts || [];
       setContacts(nextContacts);
       if (selectedID === null) {
@@ -55,13 +63,35 @@ export function ContactsView({
     } finally {
       setLoading(false);
     }
-  }, [query, selectedID]);
+  }, [query, source, selectedID]);
 
   useEffect(() => {
     void load().catch((err) => addToast(messageFromError(err), "error"));
   }, [addToast, load]);
 
+  // Only accounts that granted contact access can hold a contact. Offering the
+  // others would produce a save that fails at Google every time.
+  useEffect(() => {
+    let cancelled = false;
+    void loadGoogleConnections()
+      .then((data) => {
+        if (cancelled) return;
+        setGoogleAccounts(data.connections.filter((item) => item.has_contacts_scope && !item.needs_reauth));
+      })
+      .catch(() => {
+        // An install without Google configured is the normal case here, and the
+        // address book works the same either way.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selected = useMemo(() => contacts.find((contact) => contact.id === selectedID) || null, [contacts, selectedID]);
+  const accountEmail = useCallback(
+    (connectionID: number) => googleAccounts.find((item) => item.id === connectionID)?.email || "Google",
+    [googleAccounts]
+  );
 
   function choose(contact: Contact) {
     setSelectedID(contact.id);
@@ -82,11 +112,26 @@ export function ContactsView({
     setSaving(true);
     try {
       const data = draft.id ? await api.updateContact(csrf, draft) : await api.createContact(csrf, draft);
-      addToast("Contact saved.");
+      addToast(draft.google_connection_id ? "Contact saved to Google." : "Contact saved.");
       setSelectedID(data.contact.id);
       setDraft(cloneContact(data.contact));
       await load();
     } catch (err) {
+      // A rejected edit answers with the version that won at Google. Showing it
+      // beats leaving the form full of values that exist nowhere. A conflict
+      // that carries no contact means Google no longer has it at all, so the
+      // list still has to be reloaded, just with nothing to select.
+      if (err instanceof ApiError && err.status === 409) {
+        const adopted = conflictContact(err);
+        if (adopted) {
+          setSelectedID(adopted.id);
+          setDraft(cloneContact(adopted));
+        } else {
+          setSelectedID("new");
+          setDraft(blankContact());
+        }
+        await load();
+      }
       addToast(messageFromError(err), "error");
     } finally {
       setSaving(false);
@@ -95,6 +140,13 @@ export function ContactsView({
 
   async function deleteContact() {
     if (!draft.id) return;
+    if (draft.google_connection_id) {
+      const confirmed = window.confirm(
+        `Delete ${draft.display_name || "this contact"}?\n\n` +
+          `This also deletes the contact in ${accountEmail(draft.google_connection_id)}. It cannot be undone from Rolltop.`
+      );
+      if (!confirmed) return;
+    }
     try {
       await api.deleteContact(csrf, draft.id);
       addToast("Contact deleted.");
@@ -134,7 +186,15 @@ export function ContactsView({
     if (!file) return;
     try {
       const data = await api.importContacts(csrf, file);
-      addToast(`Imported ${data.imported}, updated ${data.updated}.`);
+      // A contact whose merge could not reach Google is reported rather than
+      // rolled into "updated": the file was applied in part, and silence there
+      // would leave the user believing the whole import landed.
+      const summary = `Imported ${data.imported}, updated ${data.updated}.`;
+      if (data.failed > 0) {
+        addToast(`${summary} ${data.failed} could not be saved to Google.`, "error");
+      } else {
+        addToast(summary);
+      }
       await load();
     } catch (err) {
       addToast(messageFromError(err), "error");
@@ -172,6 +232,20 @@ export function ContactsView({
             <Icon name="search" />
             <input value={query} placeholder="Search contacts" onChange={(event) => setQuery(event.target.value)} />
           </div>
+          {googleAccounts.length > 0 ? (
+            <label className="contacts-source-filter">
+              Source
+              <select value={source} onChange={(event) => setSource(event.target.value)}>
+                <option value={SOURCE_ALL}>All contacts</option>
+                <option value={SOURCE_LOCAL}>Rolltop only</option>
+                {googleAccounts.map((account) => (
+                  <option key={account.id} value={`google:${account.id}`}>
+                    {account.email}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           {loading ? <div className="muted">Loading contacts...</div> : null}
           <div className="contacts-list-items">
             {contacts.map((contact) => (
@@ -186,7 +260,14 @@ export function ContactsView({
                   <strong>{contact.display_name || primaryEmail(contact) || "Unnamed contact"}</strong>
                   <small>{primaryEmail(contact) || contact.organization}</small>
                 </span>
-                {contact.is_me ? <em>Me</em> : null}
+                <span className="contact-row-badges">
+                  {contact.source === "google" ? (
+                    <em className="contact-source-badge" title={`Synced with ${accountEmail(contact.google_connection_id)}`}>
+                      Google
+                    </em>
+                  ) : null}
+                  {contact.is_me ? <em>Me</em> : null}
+                </span>
               </button>
             ))}
           </div>
@@ -232,6 +313,32 @@ export function ContactsView({
               </div>
             </section>
           </div>
+          {googleAccounts.length > 0 ? (
+            <div className="contact-storage">
+              {draft.id ? (
+                <p className="muted">
+                  {draft.google_connection_id
+                    ? `Synced with ${accountEmail(draft.google_connection_id)}. Changes are saved to that account.`
+                    : "Stored in Rolltop only."}
+                </p>
+              ) : (
+                <label>
+                  Save to
+                  <select
+                    value={String(draft.google_connection_id || 0)}
+                    onChange={(event) => setField("google_connection_id", Number(event.target.value))}
+                  >
+                    <option value="0">Rolltop only</option>
+                    {googleAccounts.map((account) => (
+                      <option key={account.id} value={String(account.id)}>
+                        {account.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          ) : null}
           <div className="contact-flags">
             <label><input type="checkbox" checked={draft.is_me} onChange={(event) => setField("is_me", event.target.checked)} /> Me identity</label>
             <label><input type="checkbox" checked={draft.is_primary} disabled={!draft.is_me} onChange={(event) => setField("is_primary", event.target.checked)} /> Primary From identity</label>
@@ -397,6 +504,8 @@ function blankContact(): Contact {
     categories: "",
     is_me: false,
     is_primary: false,
+    source: "local",
+    google_connection_id: 0,
     emails: [{ label: "Email", email: "", is_primary: true }],
     phones: [],
     addresses: [],
@@ -408,6 +517,15 @@ function blankContact(): Contact {
 
 function cloneContact(contact: Contact): Contact {
   return JSON.parse(JSON.stringify(contact)) as Contact;
+}
+
+/** conflictContact pulls the winning version out of a rejected save. Google is
+ * the leading system for its contacts, so a 409 carries the record as it now
+ * stands there rather than just an error string. */
+function conflictContact(error: ApiError): Contact | null {
+  const contact = error.payload.contact;
+  if (!contact || typeof contact !== "object") return null;
+  return contact as Contact;
 }
 
 function primaryEmail(contact: Contact): string {

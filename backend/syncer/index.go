@@ -128,6 +128,12 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		_, cleanupErr := s.deleteUnreferencedBlob(ctx, userID, blobRec.ID, blobPath)
 		return store.MessageRecord{}, parsed, nil, errors.Join(err, cleanupErr)
 	}
+	// Detection runs before the arrival is classified, so a copy an aggregating
+	// account fetched is already hidden when the notification decision is made.
+	generationRecoveryPhase(ctx, "sqlite-duplicate-copies", "")
+	if err := s.Store.RefreshDuplicateCopiesForMessageID(ctx, userID, msg.MessageIDHeader); err != nil {
+		return store.MessageRecord{}, parsed, nil, err
+	}
 	if msg.LanguageCode != languageCode {
 		msg.LanguageCode = languageCode
 		if err := s.Store.UpdateMessageLanguage(ctx, userID, msg.ID, languageCode); err != nil {

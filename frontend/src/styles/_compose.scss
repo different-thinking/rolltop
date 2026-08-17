@@ -1,5 +1,17 @@
 @use "mixins/components" as *;
 
+// Inline composer labels ("From", "To", "Cc") are set apart from their values by
+// weight and colour rather than by the row rules that used to divide them.
+@mixin compose-field-label {
+  width: 42px;
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
 .compose-page {
   min-height: calc(100vh - 170px);
   display: flex;
@@ -68,14 +80,6 @@
   min-height: 180px;
 }
 
-.inline-compose {
-  margin: 0 20px 20px 76px;
-  width: auto;
-  min-height: 260px;
-  border-radius: 8px;
-  box-shadow: none;
-}
-
 .inline-reply-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -84,59 +88,82 @@
   padding: 18px 20px 22px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+
+  // Opening a reply scrolls this row into view. The top bar is sticky and 64px
+  // tall, so without the margin the composer lands underneath it.
+  scroll-margin-top: 84px;
+  scroll-margin-bottom: 20px;
 }
 
 .inline-reply-avatar {
   margin-top: 1px;
 }
 
+// The inline composer reads as its own card rather than as more thread surface.
+// On a dark ground a border and a lifted surface are what separate "the message
+// you are reading" from "the message you are writing"; without them both sat on
+// the same colour with only a hairline between them.
 .inline-reply {
   margin: 0;
   min-width: 0;
-  background: var(--surface);
   display: flex;
   flex-direction: column;
-  min-height: 328px;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+
+  // The thread page scrolls, so the reply grows with what is typed. It used to
+  // be a 178px window around a 224px editor, which meant every reply started
+  // with its own scrollbar and showed a few lines at a time.
+  > .compose-scroll-region {
+    overflow: visible;
+    flex: none;
+    gap: 12px;
+  }
 
   .compose-body {
-    flex: 1 1 190px;
-    min-height: 178px;
+    flex: none;
+    overflow: visible;
     padding: 0;
     color: var(--text);
   }
 
-  .compose-format {
-    min-height: 42px;
-    margin: 0;
+  // The writing area is the one part that has to look editable, so it carries
+  // the field colour the rest of the app uses for inputs.
+  .compose-editor {
+    min-height: 260px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--surface-subtle);
-    color: var(--text-soft);
+    background: var(--field);
+  }
 
-    button {
-      color: var(--text-soft);
-    }
+  .compose-format {
+    min-height: 44px;
+    margin: 0;
   }
 
   .compose-sendbar {
-    padding: 8px 0 0;
-    min-height: 48px;
+    padding: 0;
+    min-height: 44px;
     color: var(--text);
   }
 }
 
 .inline-reply-meta {
-  min-height: 36px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px 10px;
   color: var(--text-soft);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
 
   > .inline-reply-from,
   > .inline-reply-to {
     min-width: 0;
+    min-height: 38px;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -160,9 +187,7 @@
 
   > .inline-reply-from > span:first-child,
   > .inline-reply-to > span:first-child {
-    width: 32px;
-    flex: none;
-    color: var(--muted);
+    @include compose-field-label;
   }
 
   > .inline-reply-from > input,
@@ -178,23 +203,63 @@
   > .inline-reply-from > strong,
   > .inline-reply-to > strong {
     @include truncate;
+    color: var(--text);
+    font-weight: 600;
   }
 
+  // Recipient and identity controls keep the app's field styling. They were
+  // transparent and border-free, which left them indistinguishable from static
+  // text and gave the identity menu no surface of its own to open against.
   input,
   select {
-    border: 0;
-    border-radius: 0;
-    background: transparent;
     min-width: 0;
     width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--field);
+    color: var(--text);
+  }
+}
+
+// Cc and Bcc are a label and one control, so they are a plain row rather than
+// the two-column grid the From/To header needs.
+.inline-reply-field {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-soft);
+
+  > span:first-child {
+    @include compose-field-label;
   }
 
-  input {
-    padding: 8px 0;
+  > * {
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
-  select {
-    padding: 8px 0;
+  // Chips and caret sit inside one bordered field rather than each drawing a box
+  // of its own.
+  .recipient-input-control {
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--field);
+  }
+
+  // Named through .recipient-input so these outrank that block's own metrics,
+  // which size a compose-window row and would leave Cc and Bcc standing taller
+  // than the From and To rows above them. The caret sets the height here, so it
+  // has to come down with the list for the field to match the identity control.
+  .recipient-input .recipient-chip-list {
+    min-height: 32px;
+    padding: 2px 0;
+
+    > input {
+      min-height: 28px;
+    }
   }
 }
 
@@ -309,12 +374,17 @@
     gap: 5px;
     padding: 4px 0;
 
+    // The chips and the caret share one surface, so the input itself stays
+    // invisible and whatever wraps this list draws the field.
     > input {
       flex: 1 1 120px;
       min-width: 90px;
       width: auto;
       min-height: 32px;
       padding: 4px 2px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
   }
 
@@ -507,11 +577,6 @@
   white-space: pre-wrap;
   transition: opacity .28s ease, filter .28s ease, transform .28s ease;
 
-  .inline-compose &,
-  .inline-reply & {
-    min-height: 224px;
-  }
-
   &:empty::before {
     content: attr(data-placeholder);
     color: var(--muted);
@@ -645,16 +710,16 @@
   background: var(--surface-subtle);
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: 2px;
+  padding: 5px 8px;
   color: var(--text-soft);
   overflow: visible;
 
   button {
-    min-width: 32px;
-    width: 32px;
-    min-height: 32px;
-    height: 32px;
+    min-width: 34px;
+    width: 34px;
+    min-height: 34px;
+    height: 34px;
     padding: 0;
     border-radius: 6px;
     background: transparent;
@@ -670,6 +735,24 @@
     &:focus-visible {
       outline: 2px solid var(--focus);
       outline-offset: 2px;
+    }
+  }
+
+  // The bare glyphs ran together as one strip. A hairline after the character
+  // styles and after the list styles groups them the way a toolbar should read.
+  > button:nth-child(4),
+  > button:nth-child(6) {
+    margin-right: 8px;
+    position: relative;
+
+    &::after {
+      content: "";
+      position: absolute;
+      right: -5px;
+      top: 6px;
+      bottom: 6px;
+      width: 1px;
+      background: var(--separator);
     }
   }
 }

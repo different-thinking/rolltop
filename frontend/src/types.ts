@@ -391,6 +391,12 @@ export type Contact = {
   categories: string;
   is_me: boolean;
   is_primary: boolean;
+  /** source is "local" or "google". A Google contact is a mirror: edits and
+   * deletions travel to that account, and the sync overwrites it. */
+  source: string;
+  /** google_connection_id names the account that owns the contact, and on a
+   * create it asks for the contact to be saved there. Zero means local. */
+  google_connection_id: number;
   emails: ContactEmail[];
   phones: ContactPhone[];
   addresses: ContactAddress[];
@@ -781,4 +787,23 @@ export type ServerLogLine = {
   time: string;
   message: string;
   error: boolean;
+};
+
+/** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */
+export type DuplicateAccountSummary = {
+  account_id: number;
+  email: string;
+  label: string;
+  hidden: number;
+};
+
+/**
+ * DuplicateCopyReport lists the copies an aggregating account fetched of mail
+ * another account was addressed in. They are hidden from every list; the report
+ * is what makes them visible as a number.
+ */
+export type DuplicateCopyReport = {
+  ok: boolean;
+  hidden: number;
+  accounts: DuplicateAccountSummary[];
 };

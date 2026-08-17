@@ -5,6 +5,7 @@ package googleauth
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,9 @@ func TestNewFillsDefaultScopesAndEndpoints(t *testing.T) {
 	if !cfg.Configured() || cfg.ClientID != "client-id" {
 		t.Fatalf("config = %+v, want trimmed and configured", cfg)
 	}
-	if cfg.ScopeString() == "" || cfg.Scopes[len(cfg.Scopes)-1] != ScopeMail {
-		t.Fatalf("default scopes = %v, want the mail scope included", cfg.Scopes)
+	scopes := cfg.ScopeString()
+	if !strings.Contains(scopes, ScopeMail) || !strings.Contains(scopes, ScopeContacts) {
+		t.Fatalf("default scopes = %v, want the mail and contacts scopes included", cfg.Scopes)
 	}
 	if cfg.TokenEndpoint != DefaultTokenEndpoint || cfg.UserinfoEndpoint != DefaultUserinfoEndpoint {
 		t.Fatalf("endpoints not defaulted: %+v", cfg)

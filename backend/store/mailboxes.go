@@ -381,8 +381,8 @@ func (s *Store) ListMailboxesForUser(ctx context.Context, userID int64) ([]Mailb
 				count(m.id),
 				COALESCE(sum(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END), 0),
 				COALESCE(sum(CASE WHEN m.blob_path != '' AND b.kind IN ('message', 'message-cache') AND b.size > 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(sum(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
-				COALESCE(sum(CASE WHEN sn.id IS NOT NULL AND m.is_read = 0 THEN 1 ELSE 0 END), 0)
+				COALESCE(sum(CASE WHEN sn.id IS NOT NULL OR m.duplicate_of_message_id <> 0 THEN 1 ELSE 0 END), 0),
+				COALESCE(sum(CASE WHEN (sn.id IS NOT NULL OR m.duplicate_of_message_id <> 0) AND m.is_read = 0 THEN 1 ELSE 0 END), 0)
 			FROM mailboxes mb
 			JOIN mail_accounts ma ON ma.id = mb.account_id AND ma.user_id = mb.user_id
 			LEFT JOIN messages m ON m.user_id = mb.user_id AND m.mailbox_id = mb.id
@@ -565,7 +565,14 @@ func (s *Store) UpdateMailboxSettings(ctx context.Context, userID, mailboxID int
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Role and All Mail visibility are exactly what decides whether a row may
+	// stand in as the original a duplicate hides behind. Moving a folder to Junk
+	// or out of All Mail would otherwise leave its copies hidden behind a row the
+	// reader can no longer reach, until someone happened to run a full rescan.
+	return s.RefreshDuplicateCopiesForMailbox(ctx, userID, mailboxID)
 }
 
 // EffectiveMailboxSyncMode resolves inherit/auto/manual/never for a mailbox under its account defaults.

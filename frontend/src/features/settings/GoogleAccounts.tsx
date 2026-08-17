@@ -48,6 +48,35 @@ function messageFromCallback(search: string): { text: string; kind: Toast["kind"
   return { text: "Connecting the Google account failed. Try again.", kind: "error" };
 }
 
+/** ContactsSyncLine describes what contact sync is doing for one connection.
+ *
+ * A connection authorized before contact sync existed still works for mail, so
+ * the missing scope is stated as something to fix rather than as a fault. */
+function ContactsSyncLine({ connection }: { connection: GoogleConnection }) {
+  if (!connection.has_contacts_scope) {
+    return <small className="muted">Contacts are not synced. Reauthorize this account to include them.</small>;
+  }
+  const sync = connection.contacts_sync;
+  // A failure is reported before anything else. A connection whose syncs have
+  // only ever failed -- the People API not enabled for the project is the usual
+  // reason -- has never succeeded either, and "not synced yet" would hide the
+  // one line that says what to fix.
+  if (sync && sync.status === "error") {
+    return <small className="settings-status-error">{sync.status_detail || "The last contact sync failed."}</small>;
+  }
+  if (!sync || !sync.ever_synced) {
+    return <small className="muted">Contacts have not been synced yet.</small>;
+  }
+  const count = `${sync.contact_count.toLocaleString()} contact${sync.contact_count === 1 ? "" : "s"}`;
+  return <small className="muted">{count} synced from Google. Last sync {formatSyncTime(sync.last_success_at)}.</small>;
+}
+
+function formatSyncTime(value: string): string {
+  const parsed = new Date(value);
+  if (!value || Number.isNaN(parsed.getTime())) return "at an unknown time";
+  return parsed.toLocaleString();
+}
+
 /** GoogleAccountsSettings lists Google connections and manages their lifecycle. */
 export function GoogleAccountsSettings({
   csrf,
@@ -68,7 +97,7 @@ export function GoogleAccountsSettings({
   // whichever request finished first, re-enabling buttons still in flight.
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const isBusy = (connectionID: number) =>
-    Boolean(busy[`test:${connectionID}`] || busy[`disconnect:${connectionID}`]);
+    Boolean(busy[`test:${connectionID}`] || busy[`disconnect:${connectionID}`] || busy[`contacts:${connectionID}`]);
   const setOperationBusy = (key: string, running: boolean) =>
     setBusy((current) => {
       if (!running) {
@@ -140,6 +169,28 @@ export function GoogleAccountsSettings({
       addToast(messageFromError(error), "error");
     } finally {
       setOperationBusy(key, false);
+    }
+  }
+
+  async function syncContacts(connection: GoogleConnection) {
+    const key = `contacts:${connection.id}`;
+    setOperationBusy(key, true);
+    try {
+      const result = await postJSON<{ created: number; updated: number; deleted: number }>(
+        `/api/google/connections/${connection.id}/contacts/sync`,
+        csrf
+      );
+      addToast(
+        `${connection.email}: ${result.created} added, ${result.updated} updated, ${result.deleted} removed.`,
+        "success"
+      );
+    } catch (error) {
+      addToast(messageFromError(error), "error");
+    } finally {
+      setOperationBusy(key, false);
+      // Reload either way: a failed sync is recorded against the connection and
+      // that record is the thing the user needs to see.
+      await load();
     }
   }
 
@@ -223,9 +274,24 @@ export function GoogleAccountsSettings({
                           ))}
                         </span>
                       ) : null}
+                      {connection.needs_reauth ? null : <ContactsSyncLine connection={connection} />}
                     </span>
                     <span className="settings-connection-actions">
-                      {connection.needs_reauth ? (
+                      {!connection.needs_reauth && connection.has_contacts_scope ? (
+                        <button
+                          className="secondary"
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() => void syncContacts(connection)}
+                        >
+                          {busy[`contacts:${connection.id}`] ? "Syncing..." : "Sync contacts"}
+                        </button>
+                      ) : null}
+                      {/* A healthy connection missing the contacts scope needs
+                          the same button: consent is the only way to add a
+                          scope, and telling the user to reauthorize without
+                          giving them the control would be a dead end. */}
+                      {connection.needs_reauth || !connection.has_contacts_scope ? (
                         <button
                           className="secondary"
                           type="button"
@@ -234,7 +300,8 @@ export function GoogleAccountsSettings({
                         >
                           Reauthorize
                         </button>
-                      ) : (
+                      ) : null}
+                      {connection.needs_reauth ? null : (
                         <button className="secondary" type="button" disabled={rowBusy} onClick={() => void testConnection(connection)}>
                           {busy[`test:${connection.id}`] ? "Testing..." : "Test connection"}
                         </button>

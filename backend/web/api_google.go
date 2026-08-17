@@ -19,28 +19,34 @@ import (
 const googleSettingsPath = "/settings/account/google"
 
 type apiGoogleConnection struct {
-	ID            int64    `json:"id"`
-	Email         string   `json:"email"`
-	Scopes        []string `json:"scopes"`
-	Status        string   `json:"status"`
-	StatusDetail  string   `json:"status_detail"`
-	NeedsReauth   bool     `json:"needs_reauth"`
-	HasMailScope  bool     `json:"has_mail_scope"`
-	ConnectedAt   string   `json:"connected_at"`
-	LastUpdatedAt string   `json:"last_updated_at"`
+	ID           int64    `json:"id"`
+	Email        string   `json:"email"`
+	Scopes       []string `json:"scopes"`
+	Status       string   `json:"status"`
+	StatusDetail string   `json:"status_detail"`
+	NeedsReauth  bool     `json:"needs_reauth"`
+	HasMailScope bool     `json:"has_mail_scope"`
+	// HasContactsScope is false for connections authorized before contact sync
+	// existed. Those grants stay valid for mail; the settings page uses this to
+	// offer re-authorization rather than letting contact sync fail at Google.
+	HasContactsScope bool                   `json:"has_contacts_scope"`
+	ContactsSync     *apiGoogleContactsSync `json:"contacts_sync"`
+	ConnectedAt      string                 `json:"connected_at"`
+	LastUpdatedAt    string                 `json:"last_updated_at"`
 }
 
 func apiGoogleConnectionFromStore(connection store.GoogleConnection) apiGoogleConnection {
 	return apiGoogleConnection{
-		ID:            connection.ID,
-		Email:         connection.GoogleEmail,
-		Scopes:        connection.GrantedScopes,
-		Status:        connection.Status,
-		StatusDetail:  connection.StatusDetail,
-		NeedsReauth:   connection.NeedsReauth(),
-		HasMailScope:  connection.HasScope(googleauth.ScopeMail),
-		ConnectedAt:   timeString(connection.CreatedAt),
-		LastUpdatedAt: timeString(connection.UpdatedAt),
+		ID:               connection.ID,
+		Email:            connection.GoogleEmail,
+		Scopes:           connection.GrantedScopes,
+		Status:           connection.Status,
+		StatusDetail:     connection.StatusDetail,
+		NeedsReauth:      connection.NeedsReauth(),
+		HasMailScope:     connection.HasScope(googleauth.ScopeMail),
+		HasContactsScope: connection.HasScope(googleauth.ScopeContacts),
+		ConnectedAt:      timeString(connection.CreatedAt),
+		LastUpdatedAt:    timeString(connection.UpdatedAt),
 	}
 }
 
@@ -67,7 +73,11 @@ func (s *Server) apiGoogleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiGoogleConnection, 0, len(connections))
 	for _, connection := range connections {
-		out = append(out, apiGoogleConnectionFromStore(connection))
+		item := apiGoogleConnectionFromStore(connection)
+		if item.HasContactsScope {
+			item.ContactsSync = s.googleContactsSyncState(r.Context(), cu.User.ID, connection.ID)
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, map[string]any{
 		"configured":  s.googleAuth.Configured(),
@@ -211,6 +221,8 @@ func (s *Server) apiGoogleConnectionByID(w http.ResponseWriter, r *http.Request,
 	switch {
 	case action == "test" && r.Method == http.MethodPost:
 		s.googleConnectionTest(w, r, cu.User.ID, connectionID)
+	case action == "contacts/sync" && r.Method == http.MethodPost:
+		s.googleContactsSyncNow(w, r, cu.User.ID, connectionID)
 	case action == "" && r.Method == http.MethodDelete:
 		s.googleConnectionDisconnect(w, r, cu.User.ID, connectionID)
 	default:

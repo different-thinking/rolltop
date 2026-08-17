@@ -324,14 +324,25 @@ type Contact struct {
 	Categories     string
 	IsMe           bool
 	IsPrimary      bool
-	Emails         []ContactEmail
-	Phones         []ContactPhone
-	Addresses      []ContactAddress
-	URLs           []ContactURL
-	PGPKeys        []ContactPGPPublicKey
-	Icon           *ContactIcon
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Source is ContactSourceLocal or ContactSourceGoogle. A Google contact is
+	// a mirror: the sync overwrites it, and edits made here are pushed back.
+	Source string
+	// GoogleConnectionID, ExternalID, ETag and RemoteUpdatedAt are the remote
+	// identity. They are written only by the sync and the write-back path --
+	// UpdateContact deliberately leaves them alone so an ordinary edit cannot
+	// detach a contact from the account that owns it.
+	GoogleConnectionID int64
+	ExternalID         string
+	ETag               string
+	RemoteUpdatedAt    time.Time
+	Emails             []ContactEmail
+	Phones             []ContactPhone
+	Addresses          []ContactAddress
+	URLs               []ContactURL
+	PGPKeys            []ContactPGPPublicKey
+	Icon               *ContactIcon
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // ContactEmail is one email address attached to a contact and optionally marked primary.
