@@ -727,7 +727,7 @@ export default function App() {
           if (data.queued) {
             updateToast(toastID, `Copy task started for ${messageCountLabel(ids.length)}.`, "success");
           } else {
-            updateToast(toastID, `Copied ${messageCountLabel(data.copied || ids.length)} to ${mailbox.name}.`, "success");
+            updateToast(toastID, `Copied ${messageCountLabel(data.copied ?? ids.length)} to ${mailbox.name}.`, "success");
           }
           return;
         }
@@ -737,7 +737,7 @@ export default function App() {
         if (data.queued) {
           updateToast(toastID, `Move task started for ${messageCountLabel(ids.length)}.`, "success");
         } else {
-          updateToast(toastID, `Moved ${messageCountLabel(data.moved || ids.length)} to ${mailbox.name}.`, "success");
+          updateToast(toastID, `Moved ${messageCountLabel(data.moved ?? ids.length)} to ${mailbox.name}.`, "success");
         }
       } catch (err) {
         if (!copying) {

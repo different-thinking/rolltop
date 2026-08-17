@@ -88,3 +88,12 @@ export function nodeContainsMailbox(node: FolderNode, id: string | null): boolea
 export function trashMailboxForAccount(mailboxes: Mailbox[], accountID: number): Mailbox | undefined {
   return mailboxes.find((mailbox) => mailbox.account_id === accountID && mailbox.role === "trash");
 }
+
+/** trashMailboxesByAccount indexes each account's Trash-role mailbox by account ID. */
+export function trashMailboxesByAccount(mailboxes: Mailbox[]): Map<number, Mailbox> {
+  const byAccount = new Map<number, Mailbox>();
+  for (const mailbox of mailboxes) {
+    if (mailbox.role === "trash" && !byAccount.has(mailbox.account_id)) byAccount.set(mailbox.account_id, mailbox);
+  }
+  return byAccount;
+}

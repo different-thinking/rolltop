@@ -380,6 +380,7 @@ export function MailView({
                 conversations={displayConversations}
                 hiddenMessageIDs={hiddenMessageIDs}
                 mailboxes={mailboxes}
+                currentMailboxID={mailbox?.id || 0}
                 swipePreferences={swipePreferences}
                 highlightMessageIDs={newMessageIDs}
                 showRecipients={mailbox?.role === "sent" || mailbox?.role === "drafts"}
@@ -935,7 +936,7 @@ function messageDragPreview(conversations: Conversation[], ids: number[]) {
   const count = ids.length;
   const title = document.createElement("div");
   title.className = "message-drag-preview-count";
-  title.textContent = count === 1 ? "1 message" : `${count.toLocaleString()} messages`;
+  title.textContent = messageCountLabel(count);
   preview.appendChild(title);
   rows.slice(0, 4).forEach((conversation) => {
     const line = document.createElement("div");
@@ -979,12 +980,13 @@ type ConversationReadState = {
 /** TrashMoveGroup collects the selected rows headed for one Trash mailbox. */
 type TrashMoveGroup = {
   target: Mailbox;
+  messageIDs: number[];
   items: { rowID: number; messageIDs: number[] }[];
 };
 
-// The backend rejects bulk-move batches above 1000 message IDs and queues a
-// background run above 5, where partial progress is no longer reported.
-const bulkMoveChunkLimit = 1000;
+// The backend queues a background run for bulk moves above 5 message IDs and
+// stops reporting per-message progress; smaller moves run one message at a
+// time so a partial failure restores only the rows that did not move.
 const inlineMoveMessageLimit = 5;
 
 const messageSwipeMaxDistance = 112;
@@ -1044,6 +1046,7 @@ function MessageList({
   onReadStatesChange,
   onMessagesMoved,
   snoozedView = false,
+  currentMailboxID = 0,
   emptyState
 }: {
   csrf: string;
@@ -1064,13 +1067,17 @@ function MessageList({
   onReadStatesChange: (states: ConversationReadState[]) => void;
   onMessagesMoved: (messageIDs: number[]) => void;
   snoozedView?: boolean;
+  /** The mailbox this list is showing, so Delete can skip rows already in it. */
+  currentMailboxID?: number;
   emptyState?: ReactNode;
 }) {
   const [selectedIDs, setSelectedIDs] = useState<Set<number>>(() => new Set());
   const [dismissedIDs, setDismissedIDs] = useState<Set<number>>(() => new Set());
   const [readStateBusy, setReadStateBusy] = useState(false);
   const [snoozeBusy, setSnoozeBusy] = useState(false);
-  const [trashBusy, setTrashBusy] = useState(false);
+  // A counter rather than a boolean: deferred delete commits can overlap when
+  // a second selection is deleted during the first commit's undo window.
+  const [trashOps, setTrashOps] = useState(0);
   const [swipeActionBusy, setSwipeActionBusy] = useState(false);
   const [pendingSwipeMoveIDs, setPendingSwipeMoveIDs] = useState<Set<number>>(() => new Set());
   const [pendingSwipeSnoozeIDs, setPendingSwipeSnoozeIDs] = useState<Set<number>>(() => new Set());
@@ -1088,7 +1095,7 @@ function MessageList({
   const suppressRowClickUntil = useRef(0);
   // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
   // so concurrent moves cannot race each other on the same rows.
-  const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || trashBusy;
+  const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || trashOps > 0;
   const visible = conversations
     .filter((conversation) => !dismissedIDs.has(conversation.message.id))
     .map((conversation) => {
@@ -1294,11 +1301,15 @@ function MessageList({
   // behind an undo toast; the commit tracks per-message progress so a partial
   // failure only restores rows whose messages did not move.
   function deleteSelected() {
-    const selected = visible.filter((conversation) => selectedIDs.has(conversation.message.id));
-    if (selected.length === 0 || selectionBusy) return;
-    const trashByAccount = new Map<number, Mailbox | undefined>();
+    if (selectionBusy) return;
+    const selected = visible.filter((conversation) =>
+      selectedIDs.has(conversation.message.id) && !pendingSwipeActionIDs.current.has(conversation.message.id));
+    if (selected.length === 0) {
+      if (selectedIDs.size > 0) addToast("Selected messages are still finishing another action.", "error");
+      return;
+    }
     const groups = new Map<number, TrashMoveGroup>();
-    const skippedNames = new Set<string>();
+    let alreadyInTrashName = "";
     let alreadyInTrash = 0;
     for (const conversation of selected) {
       const accountIDs = conversationTransferAccountIDs(conversation);
@@ -1306,103 +1317,120 @@ function MessageList({
         addToast("Cannot delete a conversation containing messages from multiple accounts.", "error");
         return;
       }
-      if (!trashByAccount.has(accountIDs[0])) trashByAccount.set(accountIDs[0], trashMailboxForAccount(mailboxes, accountIDs[0]));
-      const target = trashByAccount.get(accountIDs[0]);
+      const target = trashMailboxForAccount(mailboxes, accountIDs[0]);
       if (!target) {
         addToast("Choose a Trash folder for this account before deleting messages.", "error");
         return;
       }
-      const messageIDs = conversationTransferMessageIDs(conversation);
-      if (messageIDs.length === 1 && conversation.message.mailbox_id === target.id) {
+      if (target.id === currentMailboxID) {
         alreadyInTrash++;
-        skippedNames.add(target.name);
+        alreadyInTrashName = target.name;
         continue;
       }
-      const group = groups.get(target.id) || { target, items: [] };
+      const group = groups.get(target.id) || { target, messageIDs: [], items: [] };
+      const messageIDs = conversationTransferMessageIDs(conversation);
       group.items.push({ rowID: conversation.message.id, messageIDs });
+      group.messageIDs.push(...messageIDs);
       groups.set(target.id, group);
     }
-    const skippedLabel = skippedNames.size === 1 ? Array.from(skippedNames)[0] : "Trash";
     if (groups.size === 0) {
-      addToast(alreadyInTrash === 1 ? `Message is already in ${skippedLabel}.` : `Messages are already in ${skippedLabel}.`);
+      addToast(alreadyInTrash === 1 ? `Message is already in ${alreadyInTrashName}.` : `Messages are already in ${alreadyInTrashName}.`);
       return;
     }
     const entries = Array.from(groups.values());
+    for (const entry of entries) entry.messageIDs = uniquePositiveIDs(entry.messageIDs);
     const destLabel = entries.length === 1 ? entries[0].target.name : "Trash";
     const rowIDs = entries.flatMap((entry) => entry.items.map((item) => item.rowID));
-    const totalMessages = entries.reduce((sum, entry) => sum + uniquePositiveIDs(entry.items.flatMap((item) => item.messageIDs)).length, 0);
+    // Dismiss every thread message ID too, so sibling rows of the same thread
+    // are hidden and locked during the undo window, matching the swipe path.
+    const dismissIDs = uniquePositiveIDs([...rowIDs, ...entries.flatMap((entry) => entry.messageIDs)]);
+    const totalMessages = entries.reduce((sum, entry) => sum + entry.messageIDs.length, 0);
     const registered = deferSwipeMutation(
       rowIDs[0],
       `Moved ${messageCountLabel(totalMessages)} to ${destLabel}.`,
       () => {
-        removePendingSwipeMoveIDs(rowIDs);
-        restoreDismissed(rowIDs);
+        removePendingSwipeMoveIDs(dismissIDs);
+        restoreDismissed(dismissIDs);
         setSelectedIDs((current) => new Set([...current, ...rowIDs]));
       },
-      (keepalive) => commitTrashMove(entries, rowIDs, destLabel, keepalive)
+      (keepalive) => commitTrashMove(entries, dismissIDs, destLabel, keepalive)
     );
     if (!registered) return;
-    if (alreadyInTrash > 0) {
-      addToast(alreadyInTrash === 1
-        ? `Skipped 1 message already in ${skippedLabel}.`
-        : `Skipped ${alreadyInTrash.toLocaleString()} messages already in ${skippedLabel}.`);
-    }
-    setPendingSwipeMoveIDs((current) => new Set([...current, ...rowIDs]));
-    optimisticallyDismiss(rowIDs);
+    setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissIDs]));
+    optimisticallyDismiss(dismissIDs);
     clearSelection();
   }
 
-  async function commitTrashMove(entries: TrashMoveGroup[], rowIDs: number[], destLabel: string, keepalive: boolean) {
+  async function commitTrashMove(entries: TrashMoveGroup[], dismissIDs: number[], destLabel: string, keepalive: boolean) {
+    // On a background commit the unsnooze requests must reach the browser
+    // before any await, or the unload cancels them; deleting a snoozed message
+    // includes dismissing its reminder, so this does not wait for the moves.
+    if (snoozedView && keepalive) {
+      void Promise.allSettled(entries.flatMap((entry) =>
+        entry.items.map((item) => api.unsnoozeMessage(csrf, item.rowID, { keepalive: true }))));
+    }
     const movedMessageIDs: number[] = [];
-    const restoreRowIDs: number[] = [];
+    const movedRowIDs: number[] = [];
+    const restoreIDs: number[] = [];
+    const reselectRowIDs: number[] = [];
     let queuedMessages = 0;
     let firstError: unknown;
-    setTrashBusy(true);
+    setTrashOps((count) => count + 1);
     try {
       await Promise.all(entries.map(async (entry) => {
-        const messageIDs = uniquePositiveIDs(entry.items.flatMap((item) => item.messageIDs));
-        const movedIDs: number[] = [];
-        let queued = false;
-        try {
-          if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
-            for (let start = 0; start < messageIDs.length; start += bulkMoveChunkLimit) {
-              const chunk = messageIDs.slice(start, start + bulkMoveChunkLimit);
-              const data = await api.bulkMoveMessages(csrf, chunk, entry.target.id, keepalive ? { keepalive: true } : undefined);
-              if (data.queued) queued = true;
-              movedIDs.push(...chunk);
-            }
-          } else {
-            for (const messageID of messageIDs) {
-              await api.moveMessage(csrf, messageID, entry.target.id);
-              movedIDs.push(messageID);
-            }
-          }
-        } catch (err) {
-          if (firstError === undefined) firstError = err;
-        }
-        if (queued) queuedMessages += movedIDs.length;
+        const { movedIDs, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive);
+        if (error !== undefined && firstError === undefined) firstError = error;
+        queuedMessages += queuedCount;
         movedMessageIDs.push(...movedIDs);
         const movedSet = new Set(movedIDs);
         for (const item of entry.items) {
-          if (!item.messageIDs.some((id) => movedSet.has(id))) restoreRowIDs.push(item.rowID);
-        }
-        if (snoozedView && movedIDs.length > 0) {
-          await Promise.allSettled(entry.items
-            .filter((item) => item.messageIDs.some((id) => movedSet.has(id)))
-            .map((item) => api.unsnoozeMessage(csrf, item.rowID)));
+          if (item.messageIDs.some((id) => movedSet.has(id))) {
+            movedRowIDs.push(item.rowID);
+          } else {
+            restoreIDs.push(item.rowID, ...item.messageIDs);
+            reselectRowIDs.push(item.rowID);
+          }
         }
       }));
     } finally {
-      setTrashBusy(false);
+      setTrashOps((count) => Math.max(0, count - 1));
+    }
+    if (snoozedView && !keepalive && movedRowIDs.length > 0) {
+      void Promise.allSettled(movedRowIDs.map((rowID) => api.unsnoozeMessage(csrf, rowID)));
     }
     if (movedMessageIDs.length > 0) onMessagesMoved(movedMessageIDs);
-    removePendingSwipeMoveIDs(rowIDs);
-    if (restoreRowIDs.length > 0) {
-      restoreDismissed(restoreRowIDs);
-      setSelectedIDs((current) => new Set([...current, ...restoreRowIDs]));
+    removePendingSwipeMoveIDs(dismissIDs);
+    if (restoreIDs.length > 0) {
+      restoreDismissed(uniquePositiveIDs(restoreIDs));
+      setSelectedIDs((current) => new Set([...current, ...reselectRowIDs]));
     }
     if (queuedMessages > 0) addToast(`Move to ${destLabel} started for ${messageCountLabel(queuedMessages)}.`);
     if (firstError !== undefined) addToast(`Delete failed: ${messageFromError(firstError)}`, "error");
+  }
+
+  // executeMailboxMove pushes messageIDs into the target mailbox and reports
+  // which messages moved (or were queued as a background run) so callers can
+  // reconcile rows without guessing. Shared by swipe moves and bulk delete.
+  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean): Promise<{ movedIDs: number[]; queuedCount: number; error?: unknown }> {
+    if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
+      try {
+        const data = await api.bulkMoveMessages(csrf, messageIDs, target.id, keepalive ? { keepalive: true } : undefined);
+        return { movedIDs: messageIDs, queuedCount: data.queued ? messageIDs.length : 0 };
+      } catch (err) {
+        return { movedIDs: [], queuedCount: 0, error: err };
+      }
+    }
+    const movedIDs: number[] = [];
+    let error: unknown;
+    for (const messageID of messageIDs) {
+      try {
+        await api.moveMessage(csrf, messageID, target.id);
+        movedIDs.push(messageID);
+      } catch (err) {
+        if (error === undefined) error = err;
+      }
+    }
+    return { movedIDs, queuedCount: 0, error };
   }
 
   function optimisticallyDismiss(ids: number[]) {
@@ -1530,7 +1558,11 @@ function MessageList({
 
   async function snoozeConversations(items: Conversation[], until: Date) {
     const ids = uniquePositiveIDs(items.map((conversation) => conversation.message.id));
-    if (ids.length === 0 || selectionBusy) return;
+    if (ids.length === 0) return;
+    if (selectionBusy) {
+      addToast("Another action is still running. Try snoozing again in a moment.", "error");
+      return;
+    }
     if (!snoozedView) optimisticallyDismiss(ids);
     clearSelection();
     setSnoozeBusy(true);
@@ -1553,7 +1585,11 @@ function MessageList({
 
   async function unsnoozeConversations(items: Conversation[]) {
     const ids = uniquePositiveIDs(items.map((conversation) => conversation.message.id));
-    if (ids.length === 0 || selectionBusy) return;
+    if (ids.length === 0) return;
+    if (selectionBusy) {
+      addToast("Another action is still running. Try unsnoozing again in a moment.", "error");
+      return;
+    }
     optimisticallyDismiss(ids);
     clearSelection();
     setSnoozeBusy(true);
@@ -1685,29 +1721,19 @@ function MessageList({
         restoreDismissed(dismissedIDs);
       },
       async (keepalive) => {
-        const movedIDs: number[] = [];
-        try {
-          if (keepalive) {
-            await api.bulkMoveMessages(csrf, messageIDs, target.id, { keepalive: true });
-            movedIDs.push(...messageIDs);
-          } else {
-            for (const messageID of messageIDs) {
-              await api.moveMessage(csrf, messageID, target.id);
-              movedIDs.push(messageID);
-            }
-          }
+        const { movedIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
+        removePendingSwipeMoveIDs(dismissedIDs);
+        if (error === undefined) {
           onMessagesMoved(messageIDs);
-          removePendingSwipeMoveIDs(dismissedIDs);
-        } catch (err) {
-          removePendingSwipeMoveIDs(dismissedIDs);
-          if (movedIDs.length > 0) onMessagesMoved(movedIDs);
-          else {
-            cancelSwipeDismiss(conversation.message.id);
-            restoreDismissed(dismissedIDs);
-          }
-          const partial = movedIDs.length > 0 ? `${movedIDs.length.toLocaleString()} moved, but the remaining action failed` : `${action === "trash" ? "Move to trash" : "Archive"} failed`;
-          addToast(`${partial}: ${messageFromError(err)}`, "error");
+          return;
         }
+        if (movedIDs.length > 0) onMessagesMoved(movedIDs);
+        else {
+          cancelSwipeDismiss(conversation.message.id);
+          restoreDismissed(dismissedIDs);
+        }
+        const partial = movedIDs.length > 0 ? `${movedIDs.length.toLocaleString()} moved, but the remaining action failed` : `${action === "trash" ? "Move to trash" : "Archive"} failed`;
+        addToast(`${partial}: ${messageFromError(error)}`, "error");
       }
     );
     if (!registered) return false;
