@@ -156,5 +156,11 @@ func (s *Server) writeMaintenanceStartError(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusNotFound, "That user does not exist.")
 		return
 	}
-	writeAPIError(w, http.StatusConflict, err.Error())
+	if errors.Is(err, errMaintenanceJobRunning) {
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
+	// An I/O failure or an unreadable installation database must not be
+	// reported to the admin as "another job is already running".
+	s.serverError(w, r, err)
 }

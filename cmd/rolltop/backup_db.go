@@ -52,6 +52,11 @@ func runBackupDatabase(ctx context.Context, args []string, stdout, stderr io.Wri
 	if strings.TrimSpace(*output) == "" {
 		return fmt.Errorf("--output must name a directory to write the backup into")
 	}
+	// A negative id matches neither the all-databases nor the single-tenant
+	// branch below, so without this it would silently back up everything.
+	if *userID < 0 {
+		return fmt.Errorf("--user-id must be a positive numeric local user ID")
+	}
 
 	cfg, err := config.Load()
 	if err != nil {

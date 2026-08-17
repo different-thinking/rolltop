@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -197,6 +198,12 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 	if !s.split || userID == 0 {
 		return s, nil
 	}
+	// UserStore and UserDB reach this without going through dataDB, so the
+	// latch has to be honored here too; otherwise every request re-opens and
+	// re-migrates a database that is known to be unreadable.
+	if health, corrupt := s.databaseHealth(userID); corrupt {
+		return nil, newCorruptionError(userID, health.Path, errors.New(health.Detail))
+	}
 	s.mu.Lock()
 	if us := s.userStores[userID]; us != nil {
 		s.mu.Unlock()
@@ -254,9 +261,6 @@ func (s *Store) dataDB(ctx context.Context, userID int64) (*sql.DB, error) {
 	if !s.split || userID == 0 {
 		return s.db, nil
 	}
-	if health, corrupt := s.databaseHealth(userID); corrupt {
-		return nil, newCorruptionError(userID, health.Path, errors.New(health.Detail))
-	}
 	return s.UserDB(ctx, userID)
 }
 
@@ -267,6 +271,12 @@ func (s *Store) dataDB(ctx context.Context, userID int64) (*sql.DB, error) {
 func (s *Store) mustDataDB(ctx context.Context, userID int64) *sql.DB {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
+		// Corruption already reported itself when it was latched. Anything else
+		// would be lost entirely, because the caller only sees the generic
+		// statement failure the unavailable handle produces.
+		if !IsCorrupt(err) {
+			log.Printf("resolve user %d database: %v", userID, err)
+		}
 		return unavailableDB()
 	}
 	return db

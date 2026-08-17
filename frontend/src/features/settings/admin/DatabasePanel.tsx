@@ -56,6 +56,7 @@ export function AdminDatabaseView({
   const [busy, setBusy] = useState(false);
   const [confirmRepair, setConfirmRepair] = useState<DatabaseStatus | null>(null);
   const mounted = useRef(true);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -104,6 +105,18 @@ export function AdminDatabaseView({
     };
   }, [load]);
 
+  // aria-modal tells assistive technology the page behind the overlay is
+  // inert, so focus has to move into the dialog and Escape has to leave it.
+  useEffect(() => {
+    if (!confirmRepair) return;
+    cancelRef.current?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) setConfirmRepair(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmRepair, busy]);
+
   async function runCheck(scope: string, userID: number) {
     setBusy(true);
     try {
@@ -140,7 +153,9 @@ export function AdminDatabaseView({
           ? "Repair scheduled. Rolltop is restarting to run it."
           : "Repair scheduled. It runs the next time Rolltop starts."
       );
-      await load();
+      // The server is already going down; a reload here would only surface a
+      // fetch error right after the success toast.
+      if (!result.restarting) await load();
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
@@ -240,7 +255,7 @@ export function AdminDatabaseView({
                       {database.last_repair ? (
                         <small className="database-detail">
                           {database.last_repair.succeeded
-                            ? `Last repair ${formatTimestamp(database.last_repair.finished_at, datePrefs)}: ${database.last_repair.report.rows_copied} rows recovered, ${database.last_repair.report.rows_skipped} unreadable, ${database.last_repair.report.gaps} damaged range(s).`
+                            ? `Last repair ${formatTimestamp(database.last_repair.finished_at, datePrefs) || "recently"}: ${database.last_repair.report.rows_copied} rows recovered, ${database.last_repair.report.rows_skipped} unreadable, ${database.last_repair.report.gaps} damaged range(s).`
                             : `Last repair failed: ${database.last_repair.error || "unknown error"}`}
                         </small>
                       ) : null}
@@ -263,7 +278,7 @@ export function AdminDatabaseView({
                         <button
                           type="button"
                           className="secondary danger"
-                          disabled={busy || database.missing}
+                          disabled={busy || jobRunning || database.missing}
                           onClick={() => setConfirmRepair(database)}
                         >
                           Repair…
@@ -335,7 +350,7 @@ export function AdminDatabaseView({
             </p>
             <p className="settings-hint">Create a backup first if you have not already.</p>
             <div className="database-confirm-actions">
-              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmRepair(null)}>
+              <button ref={cancelRef} type="button" className="secondary" disabled={busy} onClick={() => setConfirmRepair(null)}>
                 Cancel
               </button>
               <button type="button" className="secondary danger" disabled={busy} onClick={() => void scheduleRepair(confirmRepair)}>

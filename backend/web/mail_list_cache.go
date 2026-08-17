@@ -221,6 +221,12 @@ func (s *Server) warmAllMailFirstPageAsync(userID int64) {
 	if s == nil || s.store == nil || s.mailListCache == nil || userID <= 0 {
 		return
 	}
+	// This runs on every mail-list generation change, so without the same guard
+	// the synchronous warmer has, a latched tenant re-logs its corruption line
+	// on every change and buries the one that carries the repair command.
+	if s.store.DatabaseCorrupt(userID) {
+		return
+	}
 	s.mailWarmMu.Lock()
 	if s.mailWarmRunning == nil {
 		s.mailWarmRunning = map[int64]bool{}

@@ -39,10 +39,37 @@ func claimRunningMarker(dataDir string) bool {
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		log.Printf("inspect shutdown marker %s: %v", path, statErr)
 	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+	if err := writeMarkerDurably(path, dataDir); err != nil {
 		log.Printf("write shutdown marker %s: %v", path, err)
 	}
 	return unclean
+}
+
+// writeMarkerDurably persists the marker and its directory entry. os.WriteFile
+// alone returns before either reaches stable storage, so a power cut could lose
+// the marker — the exact failure the marker exists to detect.
+func writeMarkerDurably(path, dataDir string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(file, "%d\n", os.Getpid()); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	dir, err := os.Open(dataDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // releaseRunningMarker records that this process closed its databases. It must

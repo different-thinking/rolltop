@@ -33,10 +33,14 @@ func newDatabaseAdminServer(t *testing.T) (*Server, store.User, string) {
 	if _, err := db.UserStore(ctx, admin.ID); err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(Options{Store: db, DataDir: dataDir, DatabasePath: databasePath, PluginDir: t.TempDir()})
+	server, err := New(Options{
+		Store: db, DataDir: dataDir, DatabasePath: databasePath, PluginDir: t.TempDir(),
+		DisableBackgroundWorkers: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
 	return server, admin, dataDir
 }
 
@@ -254,16 +258,20 @@ func TestDatabaseOverviewReportsScheduledRepairAndLastOutcome(t *testing.T) {
 
 func TestAdminDatabaseCheckRefusesMissingTenantFileWithoutCreatingIt(t *testing.T) {
 	server, admin, dataDir := newDatabaseAdminServer(t)
-	path := store.UserDatabaseFilePath(dataDir, admin.ID)
-	// Unlink the tenant file the way a moved-aside database would be gone. The
-	// installation database stays open so the user lookup still succeeds.
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		_ = os.Remove(path + suffix)
+	// A user that exists but whose tenant store has never been opened has no
+	// database file yet, which is the case that must not be papered over.
+	fresh, err := server.store.CreateUser(context.Background(), "fresh@example.test", "Fresh", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.UserDatabaseFilePath(dataDir, fresh.ID)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("fixture already has a tenant database: %v", err)
 	}
 
 	recorder := httptest.NewRecorder()
 	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/check",
-		map[string]any{"scope": "user", "user_id": admin.ID}), "check")
+		map[string]any{"scope": "user", "user_id": fresh.ID}), "check")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -348,5 +356,79 @@ func TestIntegrityCheckClearsALatchedTenantThatVerifiesClean(t *testing.T) {
 	waitForMaintenanceJob(t, server)
 	if server.store.DatabaseCorrupt(admin.ID) {
 		t.Fatal("a clean full scan did not release the latched tenant")
+	}
+}
+
+func TestAdminDatabaseActionRejectsWrongMethodAndMissingCSRF(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodGet, "/api/admin/database/check", nil), "check")
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET on an action status = %d", recorder.Code)
+	}
+
+	// Same request, but without the CSRF token an admin mutation must not run.
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/database/check", bytes.NewReader([]byte(`{}`)))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(context.WithValue(request.Context(), userContextKey, currentUser{User: admin}))
+	recorder = httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, request, "check")
+	if recorder.Code == http.StatusOK {
+		t.Fatal("an admin mutation ran without a CSRF token")
+	}
+	if job := server.maintenance.snapshot(); job != nil {
+		t.Fatalf("a job started for a rejected request: %+v", job)
+	}
+}
+
+func TestAdminDatabaseSystemScopeIgnoresAStrayUserID(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/check",
+		map[string]any{"scope": "system", "user_id": admin.ID}), "check")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	job := waitForMaintenanceJob(t, server)
+	for _, line := range job.Log {
+		if strings.Contains(line, "user ") {
+			t.Fatalf("explicit system scope checked a tenant: %q", line)
+		}
+	}
+}
+
+func TestBackupPublishesOnlyAfterEveryCopySucceeds(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+
+	recorder := httptest.NewRecorder()
+	server.apiAdminDatabaseAction(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/database/backup", map[string]any{}), "backup")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	waitForMaintenanceJob(t, server)
+
+	// A published backup carries no staging suffix, and no staging directory
+	// survives a finished job.
+	staged, err := filepath.Glob(filepath.Join(server.backupDirectory(), "*"+stagingBackupSuffix))
+	if err != nil || len(staged) != 0 {
+		t.Fatalf("staging directory survived: %v %v", staged, err)
+	}
+	backups := server.listBackups()
+	if len(backups) != 1 || strings.HasSuffix(backups[0].Name, stagingBackupSuffix) {
+		t.Fatalf("backups = %+v", backups)
+	}
+}
+
+func TestListBackupsIgnoresAnUnfinishedStagingDirectory(t *testing.T) {
+	server, _, _ := newDatabaseAdminServer(t)
+	staging := filepath.Join(server.backupDirectory(), "20260817T090000Z"+stagingBackupSuffix)
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted job leaves this behind; it is not a backup.
+	if backups := server.listBackups(); len(backups) != 0 {
+		t.Fatalf("an unfinished backup was listed: %+v", backups)
 	}
 }

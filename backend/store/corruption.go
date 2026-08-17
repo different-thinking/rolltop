@@ -193,6 +193,9 @@ func (s *Store) databaseHealth(userID int64) (DatabaseHealth, bool) {
 // CorruptDatabases returns every latched corruption record, for admin and
 // startup diagnostics.
 func (s *Store) CorruptDatabases() []DatabaseHealth {
+	if s == nil {
+		return nil
+	}
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
 	records := make([]DatabaseHealth, 0, len(s.health))

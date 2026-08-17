@@ -686,9 +686,17 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		pluginHost: webServer, db: db, search: searchSvc, handler: webServer.Handler(),
 		restartRequired: restartRequired,
 		markSearchRecovery: func() {
-			for _, user := range users {
-				if err := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); err != nil {
-					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, err)
+			// Read the list at call time: a tenant created after startup is not
+			// in the startup snapshot, and its index needs the marker just as
+			// much. This runs before db.Close().
+			current, err := db.ListUsers(context.Background())
+			if err != nil {
+				log.Printf("list users for search recovery markers: %v", err)
+				current = users
+			}
+			for _, user := range current {
+				if markErr := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); markErr != nil {
+					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, markErr)
 				}
 			}
 		},

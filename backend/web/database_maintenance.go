@@ -26,6 +26,8 @@ import (
 const (
 	maintenanceJobLogLines = 200
 	backupDirectoryName    = "backups"
+	// A backup under this suffix is still being written and is not a backup yet.
+	stagingBackupSuffix = ".incomplete"
 )
 
 // errMaintenanceJobRunning reports the single job slot is taken.
@@ -37,6 +39,7 @@ type maintenanceJobKind string
 const (
 	maintenanceJobCheck  maintenanceJobKind = "check"
 	maintenanceJobBackup maintenanceJobKind = "backup"
+	maintenanceJobRepair maintenanceJobKind = "repair"
 )
 
 // maintenanceJob is the observable state of one running or finished job. Only
@@ -94,6 +97,38 @@ func (m *maintenanceState) start(kind maintenanceJobKind, userID int64, now time
 	}
 	copied := *m.current
 	return &copied, true
+}
+
+// reserveExclusive takes the job slot for work that has no job of its own, such
+// as the restart a scheduled repair triggers. It reports the running kind when
+// the slot is already taken.
+func (m *maintenanceState) reserveExclusive(now time.Time) (maintenanceJobKind, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.Running {
+		return m.current.Kind, false
+	}
+	m.nextID++
+	m.current = &maintenanceJob{
+		ID:        m.nextID,
+		Kind:      maintenanceJobRepair,
+		Running:   true,
+		StartedAt: now.UTC(),
+		Detail:    "scheduling repair",
+		Log:       []string{},
+	}
+	return maintenanceJobRepair, true
+}
+
+// releaseExclusive gives the slot back when the reserved work did not start.
+func (m *maintenanceState) releaseExclusive() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.Kind == maintenanceJobRepair {
+		m.current.Running = false
+		m.current.FinishedAt = time.Now().UTC()
+		m.current.Detail = "repair could not be scheduled"
+	}
 }
 
 func (m *maintenanceState) appendLog(id int64, detail string) {
@@ -251,7 +286,7 @@ func (s *Server) listBackups() []backupEntry {
 	}
 	backups := make([]backupEntry, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasSuffix(entry.Name(), stagingBackupSuffix) {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
@@ -333,18 +368,22 @@ func (s *Server) startBackup(scope maintenanceScope, userID int64) (*maintenance
 		return nil, errMaintenanceJobRunning
 	}
 	destination := filepath.Join(s.backupDirectory(), time.Now().UTC().Format("20060102T150405Z"))
+	// Copies are written to a sibling that listBackups ignores and published by
+	// rename once every target succeeded. A process that exits mid-VACUUM then
+	// leaves a staging directory, not something that looks like a backup.
+	staging := destination + stagingBackupSuffix
 	go func() {
 		ctx := context.Background()
-		if err := os.MkdirAll(destination, 0o700); err != nil {
+		if err := os.MkdirAll(staging, 0o700); err != nil {
 			s.maintenance.finish(job.ID, "failed", 0, err)
 			return
 		}
 		failures := 0
 		var total int64
 		for _, target := range targets {
-			dest := filepath.Join(destination, "rolltop.db")
+			dest := filepath.Join(staging, "rolltop.db")
 			if target.userID > 0 {
-				dest = filepath.Join(destination, "users", fmt.Sprintf("%d", target.userID), "rolltop.db")
+				dest = filepath.Join(staging, "users", fmt.Sprintf("%d", target.userID), "rolltop.db")
 			}
 			size, err := store.BackupDatabaseFile(ctx, target.path, dest)
 			if err != nil {
@@ -355,12 +394,20 @@ func (s *Server) startBackup(scope maintenanceScope, userID int64) (*maintenance
 			total += size
 			s.maintenance.appendLog(job.ID, fmt.Sprintf("%s: %d bytes", target.label, size))
 		}
-		s.maintenance.appendLog(job.ID, fmt.Sprintf("written to %s", destination))
 		if failures > 0 {
+			// An incomplete set is never published; the staging directory is
+			// removed so nothing suggests a usable backup exists.
+			_ = os.RemoveAll(staging)
 			s.maintenance.finish(job.ID, "finished with failures", failures,
 				fmt.Errorf("%d of %d database(s) could not be backed up", failures, len(targets)))
 			return
 		}
+		if err := os.Rename(staging, destination); err != nil {
+			_ = os.RemoveAll(staging)
+			s.maintenance.finish(job.ID, "failed", 0, fmt.Errorf("publish backup %s: %w", destination, err))
+			return
+		}
+		s.maintenance.appendLog(job.ID, fmt.Sprintf("written to %s", destination))
 		s.maintenance.finish(job.ID, fmt.Sprintf("backed up %d database(s), %d bytes", len(targets), total), 0, nil)
 	}()
 	return job, nil
@@ -387,7 +434,7 @@ const (
 // limits the job to that tenant; zero covers the installation database and
 // every tenant.
 func (s *Server) maintenanceTargets(ctx context.Context, scope maintenanceScope, userID int64) ([]maintenanceTarget, error) {
-	if scope == maintenanceScopeUser || userID > 0 {
+	if scope == maintenanceScopeUser || (scope == maintenanceScopeAll && userID > 0) {
 		user, err := s.store.GetUserByID(ctx, userID)
 		if err != nil {
 			return nil, err
@@ -438,14 +485,20 @@ func (s *Server) scheduleDatabaseRepair(ctx context.Context, userID int64, reque
 	}
 	// The restart below kills whatever a running job is in the middle of, and a
 	// VACUUM INTO cut short leaves a partial file that later looks like a
-	// complete backup.
-	if job := s.maintenance.snapshot(); job != nil && job.Running {
-		return fmt.Errorf("%w: wait for the running %s to finish", errMaintenanceJobRunning, job.Kind)
+	// complete backup. Reserving the slot under one lock closes the window
+	// between checking and restarting.
+	kind, reserved := s.maintenance.reserveExclusive(time.Now())
+	if !reserved {
+		return fmt.Errorf("%w: wait for the running %s to finish", errMaintenanceJobRunning, kind)
 	}
 	if err := store.ScheduleUserDatabaseRepair(s.dataDir, userID, requestedBy, time.Now()); err != nil {
+		s.maintenance.releaseExclusive()
 		return err
 	}
 	if s.requestRestart == nil {
+		// Nothing will restart this process, so the repair waits for the next
+		// start and the slot must not stay reserved until then.
+		s.maintenance.releaseExclusive()
 		return nil
 	}
 	s.requestRestart(userID, fmt.Sprintf("database repair requested for user %d", userID))

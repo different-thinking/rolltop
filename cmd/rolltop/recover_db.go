@@ -72,11 +72,11 @@ func runCheckDatabase(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return err
 	}
-	users, err := listMaintenanceUsers(ctx, cfg, manifests, *userID)
-	if err != nil {
-		return err
-	}
 
+	// The installation database is verified before any store opens it: opening
+	// applies migrations, and this command promises to change nothing. A
+	// damaged installation database also stops the run, because the tenant list
+	// would come from exactly that file.
 	damaged := 0
 	if *userID == 0 {
 		problems, err := store.CheckDatabaseFile(ctx, cfg.DatabasePath)
@@ -84,8 +84,12 @@ func runCheckDatabase(ctx context.Context, args []string, stdout, stderr io.Writ
 			return fmt.Errorf("check installation database %s: %w", cfg.DatabasePath, err)
 		}
 		if reportIntegrity(stdout, "installation database", cfg.DatabasePath, problems) {
-			damaged++
+			return fmt.Errorf("the installation database is damaged; repair it before checking tenant databases")
 		}
+	}
+	users, err := listMaintenanceUsers(ctx, cfg, manifests, *userID)
+	if err != nil {
+		return err
 	}
 	for _, id := range users {
 		path := store.UserDatabaseFilePath(cfg.DataDir, id)
@@ -171,15 +175,17 @@ func runRecoverDatabase(ctx context.Context, args []string, stdout, stderr io.Wr
 	outcome, err := repairUserDatabase(ctx, cfg.DataDir, *userID, manifests, time.Now(), func(message string) {
 		fmt.Fprintf(stdout, "  %s\n", message)
 	})
+	// The report is written for both outcomes, so a failed recovery leaves the
+	// same record on the admin Database page that a scheduled repair would.
+	if writeErr := store.WriteUserDatabaseRepairReport(cfg.DataDir, *userID, outcome); writeErr != nil {
+		log.Printf("persist repair report for user %d: %v", *userID, writeErr)
+	}
 	if err != nil {
 		return err
 	}
 	// A repair scheduled from the admin UI is now redundant.
 	if clearErr := store.ClearUserDatabaseRepair(cfg.DataDir, *userID); clearErr != nil {
 		log.Printf("clear repair marker for user %d: %v", *userID, clearErr)
-	}
-	if writeErr := store.WriteUserDatabaseRepairReport(cfg.DataDir, *userID, outcome); writeErr != nil {
-		log.Printf("persist repair report for user %d: %v", *userID, writeErr)
 	}
 	writeSalvageReport(stdout, *userID, outcome.Report, store.UserDatabaseFilePath(cfg.DataDir, *userID), outcome.QuarantinePath)
 	return nil

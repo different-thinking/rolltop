@@ -401,3 +401,49 @@ func TestSalvageReportSerializesWithStableFieldNames(t *testing.T) {
 		}
 	}
 }
+
+func TestSalvageRefusesAnExistingDestination(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "rolltop.db")
+	destination := filepath.Join(root, "recovered.db")
+	writeSalvageFixture(t, source, 5)
+	writeSalvageFixture(t, destination, 5)
+
+	// Reusing a destination would let INSERT OR IGNORE count existing rows as
+	// dropped duplicates and understate what the salvage actually recovered.
+	if _, err := SalvageUserDatabase(context.Background(), source, destination, nil, nil); err == nil {
+		t.Fatal("salvage reused an existing destination")
+	}
+}
+
+func TestForeignKeyRepairAcceptsADatabaseCleanedByTheLastPass(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rolltop.db")
+	db, err := open(path, "", false, schemaUser, nil, defaultPluginCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	now := nowUnix()
+	// One orphaned mailbox: the first pass deletes it, and the verification
+	// pass has to confirm the result instead of reporting non-convergence.
+	if _, err := conn.ExecContext(ctx, `INSERT INTO mailboxes (id, user_id, account_id, name, created_at, updated_at)
+		VALUES (1, 99, 99, 'INBOX', ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := repairForeignKeys(ctx, conn)
+	if err != nil {
+		t.Fatalf("foreign key repair reported failure for a repaired database: %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("dropped = %d, want 1", dropped)
+	}
+}

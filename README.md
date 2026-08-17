@@ -143,7 +143,7 @@ recovery (below) is not a crash and is not recorded as one.
 damaged, so every operation for that tenant fails until the file is repaired.
 Rolltop names the damaged file and the repair command in its logs, for example:
 
-```
+```text
 sync user_id=1 mailboxes=INBOX: store message mailbox "INBOX" UID 48882: user 1
 database /data/users/1/rolltop.db is corrupt: database disk image is malformed;
 stop rolltop and run "rolltop recover-db --user-id 1 --confirm-offline"

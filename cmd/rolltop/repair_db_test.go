@@ -209,3 +209,19 @@ func TestQuarantineRollbackKeepsTheDatabaseAndItsWALTogether(t *testing.T) {
 		t.Fatalf("rollback left the WAL at the quarantine path: %v", err)
 	}
 }
+
+func TestClaimRunningMarkerSurvivesWithoutBufferedWrites(t *testing.T) {
+	dataDir := t.TempDir()
+	if claimRunningMarker(dataDir) {
+		t.Fatal("first start reported an unclean previous shutdown")
+	}
+	// The marker only helps if it reached the disk before the power cut it is
+	// meant to detect, so the write path must fsync the file and its directory.
+	raw, err := os.ReadFile(runningMarkerPath(dataDir))
+	if err != nil {
+		t.Fatalf("marker was not written: %v", err)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		t.Fatal("marker is empty")
+	}
+}

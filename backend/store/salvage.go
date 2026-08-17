@@ -12,8 +12,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"strings"
 
@@ -96,6 +98,13 @@ func SalvageUserDatabase(ctx context.Context, sourcePath, destPath string, manif
 	if sourcePath == destPath {
 		return report, fmt.Errorf("salvage destination must differ from the corrupt database")
 	}
+	// open() below would happily reuse an existing file, and INSERT OR IGNORE
+	// would then count its rows as dropped duplicates, understating the loss.
+	if _, err := os.Lstat(destPath); err == nil {
+		return report, fmt.Errorf("salvage destination already exists: %s", destPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return report, fmt.Errorf("inspect salvage destination %s: %w", destPath, err)
+	}
 
 	source, err := sql.Open("sqlite3", sourcePath+"?_busy_timeout=5000")
 	if err != nil {
@@ -143,6 +152,9 @@ func SalvageUserDatabase(ctx context.Context, sourcePath, destPath string, manif
 	}
 
 	writer := &salvageWriter{conn: writerConn}
+	// Any error return below can leave a batch transaction open on the reserved
+	// connection; a commit later makes this a no-op.
+	defer writer.rollback()
 	for _, table := range tables {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -264,6 +276,18 @@ func (w *salvageWriter) closePrepared() {
 	}
 	_ = w.prepared.Close()
 	w.prepared, w.preparedText = nil, ""
+}
+
+// rollback abandons an unfinished batch. It is a no-op after a commit.
+func (w *salvageWriter) rollback() {
+	if w.tx == nil {
+		return
+	}
+	w.closePrepared()
+	tx := w.tx
+	w.tx = nil
+	w.pending = 0
+	_ = tx.Rollback()
 }
 
 func (w *salvageWriter) commit(ctx context.Context) error {
@@ -455,7 +479,10 @@ func insertRow(ctx context.Context, writer *salvageWriter, insert string, values
 // database satisfies the constraints the schema declares.
 func repairForeignKeys(ctx context.Context, conn *sql.Conn) (int64, error) {
 	var dropped int64
-	for pass := 0; pass < salvageForeignKeyPasses; pass++ {
+	// The extra iteration is check-only: without it a final pass that removed
+	// the last violations would still report non-convergence, and the caller
+	// would discard a database that is in fact repaired.
+	for pass := 0; pass <= salvageForeignKeyPasses; pass++ {
 		type violation struct {
 			table string
 			rowID int64
@@ -465,6 +492,10 @@ func repairForeignKeys(ctx context.Context, conn *sql.Conn) (int64, error) {
 			return dropped, err
 		}
 		var violations []violation
+		// One row can violate several foreign keys at once and is then reported
+		// once per key. Deleting it repeatedly would inflate the loss the report
+		// shows the operator.
+		seen := map[violation]bool{}
 		for rows.Next() {
 			var table string
 			var rowID sql.NullInt64
@@ -477,7 +508,12 @@ func repairForeignKeys(ctx context.Context, conn *sql.Conn) (int64, error) {
 			if !rowID.Valid {
 				continue
 			}
-			violations = append(violations, violation{table: table, rowID: rowID.Int64})
+			item := violation{table: table, rowID: rowID.Int64}
+			if seen[item] {
+				continue
+			}
+			seen[item] = true
+			violations = append(violations, item)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -486,6 +522,9 @@ func repairForeignKeys(ctx context.Context, conn *sql.Conn) (int64, error) {
 		rows.Close()
 		if len(violations) == 0 {
 			return dropped, nil
+		}
+		if pass == salvageForeignKeyPasses {
+			break
 		}
 		for _, item := range violations {
 			if _, err := conn.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE rowid = ?`, quoteIdentifier(item.table)), item.rowID); err != nil {
