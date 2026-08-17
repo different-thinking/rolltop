@@ -920,20 +920,26 @@ func inboxAutoTargets(ctx context.Context, db *store.Store) ([]inboxAutoTarget, 
 	}
 	var targets []inboxAutoTarget
 	for _, userID := range userIDs {
+		// Every failure below is reported through NoteError: this runs once a
+		// minute per user, so a tenant whose database is damaged has to be
+		// latched on the first pass. Latching names the file and its repair
+		// command once and drops the tenant from ListUserIDsWithAccounts, rather
+		// than logging the same unactionable driver message every minute until
+		// the process is restarted.
 		accounts, err := db.ListMailAccountsForUser(ctx, userID)
 		if err != nil {
-			log.Printf("inbox account list user_id=%d: %v", userID, err)
+			log.Printf("inbox account list user_id=%d: %v", userID, db.NoteError(userID, err))
 			continue
 		}
 		for _, account := range accounts {
 			mb, err := inboxMailbox(ctx, db, userID, account)
 			if err != nil {
-				log.Printf("inbox mailbox user_id=%d account_id=%d: %v", userID, account.ID, err)
+				log.Printf("inbox mailbox user_id=%d account_id=%d: %v", userID, account.ID, db.NoteError(userID, err))
 				continue
 			}
 			mode, err := db.EffectiveMailboxSyncMode(ctx, userID, account.ID, mb)
 			if err != nil {
-				log.Printf("inbox mailbox mode user_id=%d account_id=%d mailbox=%s: %v", userID, account.ID, mb.Name, err)
+				log.Printf("inbox mailbox mode user_id=%d account_id=%d mailbox=%s: %v", userID, account.ID, mb.Name, db.NoteError(userID, err))
 				continue
 			}
 			if mode != "auto" {

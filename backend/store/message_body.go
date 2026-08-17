@@ -80,28 +80,21 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
 		total := 0
 		remaining := limit
-		for _, user := range users {
+		err := s.forEachServiceableUser(ctx, "compact message bodies", func(_ User, us *Store) error {
 			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
+				return errSweepDone
 			}
 			n, err := us.CompactMessageBodiesBefore(ctx, cutoff, previewLimit, remaining)
 			if err != nil {
-				return total, err
+				return err
 			}
 			total += n
 			remaining -= n
-		}
-		return total, nil
+			return nil
+		})
+		return total, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, body_text FROM messages
 		WHERE date_unix < ? AND (body_html != '' OR length(body_text) > ?)
@@ -164,24 +157,19 @@ func (s *Store) ListMessagesWithPrunableBlobs(ctx context.Context, cutoff time.T
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
 		out := make([]MessageRecord, 0, limit)
-		for _, user := range users {
+		if err := s.forEachServiceableUser(ctx, "list prunable blobs", func(_ User, us *Store) error {
 			if len(out) >= limit {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
+				return errSweepDone
 			}
 			items, err := us.ListMessagesWithPrunableBlobs(ctx, cutoff, limit-len(out))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			out = append(out, items...)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		return out, nil
 	}
@@ -201,24 +189,19 @@ func (s *Store) ListMessagesWithExpiredCachedBlobs(ctx context.Context, cutoff t
 		limit = 500
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
 		out := make([]MessageRecord, 0, limit)
-		for _, user := range users {
+		if err := s.forEachServiceableUser(ctx, "list expired cached blobs", func(_ User, us *Store) error {
 			if len(out) >= limit {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
+				return errSweepDone
 			}
 			items, err := us.ListMessagesWithExpiredCachedBlobs(ctx, cutoff, limit-len(out))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			out = append(out, items...)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		return out, nil
 	}

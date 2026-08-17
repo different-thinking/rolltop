@@ -588,26 +588,21 @@ type PendingMailboxGenerationRebuild struct {
 // broadening a resume to same-named mailboxes on another account or tenant.
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
 		var out []PendingMailboxGenerationRebuild
-		for _, user := range users {
-			userStore, err := s.UserStore(ctx, user.ID)
+		if err := s.forEachServiceableUser(ctx, "list pending mailbox generation rebuilds", func(user User, us *Store) error {
+			items, err := us.ListPendingMailboxGenerationRebuilds(ctx)
 			if err != nil {
-				return nil, err
-			}
-			items, err := userStore.ListPendingMailboxGenerationRebuilds(ctx)
-			if err != nil {
-				return nil, err
+				return err
 			}
 			for _, item := range items {
 				if item.UserID != user.ID {
-					return nil, errors.New("mailbox generation rebuild crossed tenant boundary")
+					return errors.New("mailbox generation rebuild crossed tenant boundary")
 				}
 			}
 			out = append(out, items...)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		sort.Slice(out, func(i, j int) bool {
 			if out[i].UserID != out[j].UserID {

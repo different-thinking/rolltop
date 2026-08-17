@@ -286,7 +286,11 @@ func (r *Runner) Start(userID int64) bool {
 		}
 		mailboxes, err := r.Service.AutoMailboxNames(ctx, userID)
 		if err != nil {
-			log.Printf("plan sync user_id=%d: %v", userID, err)
+			// Planning is the first tenant read of every scheduled sync, so on a
+			// damaged database this is the line an operator sees most often. It
+			// has to carry the file and the repair command, and latching here
+			// keeps the scheduler from replanning a tenant that cannot answer.
+			log.Printf("plan sync user_id=%d: %v", userID, r.noteStoreError(userID, err))
 			return
 		}
 		releasePlanning()
@@ -1104,6 +1108,10 @@ func (r *Runner) runReservedAccountMailboxes(userID, accountID int64, mailboxes 
 			onRunStarted:      func(runID int64) { r.registerSyncRunControl(userID, runID, keys, diagnostics) },
 			onRunFinished:     r.unregisterSyncRunControl,
 		}); err != nil {
+		// Same reason as the user-level path above: a corrupt tenant database
+		// fails every account the same way, so the log has to name the file and
+		// the repair command instead of repeating a bare driver message.
+		err = r.noteStoreError(userID, err)
 		log.Printf("sync user_id=%d account_id=%d mailboxes=%s: %v", userID, accountID, strings.Join(mailboxes, ","), err)
 		return err
 	}

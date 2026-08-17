@@ -31,23 +31,16 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 		return 0, fmt.Errorf("stale sync run age must be positive")
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
 		var total int64
-		for _, user := range users {
-			userStore, err := s.UserStore(ctx, user.ID)
+		err := s.forEachServiceableUser(ctx, "reconcile stale sync runs", func(_ User, us *Store) error {
+			n, err := us.InterruptStaleSyncRuns(ctx, maxAge)
 			if err != nil {
-				return total, err
-			}
-			n, err := userStore.InterruptStaleSyncRuns(ctx, maxAge)
-			if err != nil {
-				return total, err
+				return err
 			}
 			total += n
-		}
-		return total, nil
+			return nil
+		})
+		return total, err
 	}
 	now := nowUnix()
 	cutoff := time.Now().Add(-maxAge).Unix()
@@ -64,23 +57,16 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 // MarkRunningSyncRunsInterrupted marks stale running jobs interrupted during startup recovery.
 func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context) (int64, error) {
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
 		var total int64
-		for _, user := range users {
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
-			}
+		err := s.forEachServiceableUser(ctx, "interrupt running sync runs", func(_ User, us *Store) error {
 			n, err := us.MarkRunningSyncRunsInterrupted(ctx)
 			if err != nil {
-				return total, err
+				return err
 			}
 			total += n
-		}
-		return total, nil
+			return nil
+		})
+		return total, err
 	}
 	now := nowUnix()
 	res, err := s.db.ExecContext(ctx, `UPDATE sync_runs
@@ -295,19 +281,19 @@ func syncRunNoopFolderKey(run SyncRun) string {
 // ListUserIDsWithAccounts returns user IDs that have IMAP accounts for background scheduling.
 func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
 		var ids []int64
-		for _, user := range users {
+		err := s.forEachServiceableUser(ctx, "list users with accounts", func(user User, us *Store) error {
 			var count int
-			if err := s.mustDataDB(ctx, user.ID).QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_accounts WHERE user_id = ?`, user.ID).Scan(&count); err != nil {
-				return nil, err
+			if err := us.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_accounts WHERE user_id = ?`, user.ID).Scan(&count); err != nil {
+				return err
 			}
 			if count > 0 {
 				ids = append(ids, user.ID)
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 		return ids, nil
 	}

@@ -255,3 +255,81 @@ func TestGenericBlobCleanupRejectsUnownedOrMalformedVirtualRemotePaths(t *testin
 		})
 	}
 }
+
+func TestDrainPendingBlobCleanupsSkipsADamagedTenant(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	dbPath := filepath.Join(dataDir, "rolltop.db")
+	db, err := store.OpenServer(dbPath, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted by email, so the damaged tenant is swept first and everything the
+	// healthy one needs done sits behind it.
+	damaged, err := db.CreateUser(ctx, "a-damaged@example.test", "Damaged", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := db.CreateUser(ctx, "b-healthy@example.test", "Healthy", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Queue a cleanup for the healthy tenant by making the first delete fail on
+	// the filesystem, then clearing the obstruction so the drain can finish it.
+	rel := filepath.Join("users", fmt.Sprintf("%d", healthy.ID), "blobs", "queued.eml")
+	abs := filepath.Join(root, rel)
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(abs, "blocks-remove"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blobRecord, err := db.CreateBlob(ctx, store.BlobRecord{
+		UserID: healthy.ID, Kind: "message-remote", Path: rel, SHA256: "queued-sha", Size: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Store: db, Blobs: blob.New(root)}
+	if deleted, err := service.deleteUnreferencedBlob(ctx, healthy.ID, blobRecord.ID, rel); err == nil || deleted {
+		t.Fatalf("filesystem failure deleted=%v err=%v, want queued failure", deleted, err)
+	}
+	if _, err := db.UserStore(ctx, damaged.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(abs); err != nil {
+		t.Fatal(err)
+	}
+	// Leave the other tenant with a file SQLite cannot read.
+	if err := os.WriteFile(store.UserDatabaseFilePath(dataDir, damaged.ID), []byte("this is not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := store.OpenServer(dbPath, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	service = &Service{Store: reopened, Blobs: blob.New(root)}
+	completed, _, err := service.DrainPendingBlobCleanups(ctx, 10)
+	if err != nil {
+		t.Fatalf("one damaged tenant ended the drain: %v", err)
+	}
+	// The healthy tenant sits behind the damaged one, so aborting the drain used
+	// to leave its queued cleanup untouched on every startup.
+	if completed != 1 {
+		t.Fatalf("drain completed %d cleanups, want the healthy tenant's 1", completed)
+	}
+	entries, err := reopened.ListBlobCleanupQueueForUser(ctx, healthy.ID, 10)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("healthy tenant queue=%+v err=%v, want it drained", entries, err)
+	}
+	if !reopened.DatabaseCorrupt(damaged.ID) {
+		t.Fatal("the damaged tenant was not latched")
+	}
+}

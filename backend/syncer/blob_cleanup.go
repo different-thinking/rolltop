@@ -117,9 +117,18 @@ func (s *Service) DrainPendingBlobCleanups(ctx context.Context, limitPerUser int
 		done, failedForUser, err := s.drainPendingBlobCleanupsForUser(ctx, user.ID, limitPerUser)
 		completed += done
 		failed += failedForUser
-		if err != nil {
-			return completed, failed, err
+		if err == nil {
+			continue
 		}
+		// A tenant whose database cannot answer is latched and skipped rather
+		// than ending the drain: the journal keeps its pending rows for after
+		// the repair, and every tenant behind it still gets cleaned up. Latching
+		// also drops it from the next drain's serviceable set.
+		if noted := s.Store.NoteError(user.ID, err); store.IsCorrupt(noted) {
+			log.Printf("generic blob cleanup user_id=%d: %v", user.ID, noted)
+			continue
+		}
+		return completed, failed, err
 	}
 	return completed, failed, nil
 }

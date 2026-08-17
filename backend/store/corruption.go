@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,8 +105,16 @@ type DatabaseHealth struct {
 // corruption are returned unchanged, so callers can wrap every store error they
 // already log without changing existing behavior.
 func (s *Store) NoteError(userID int64, err error) error {
+	noted, _ := s.noteError(userID, err)
+	return noted
+}
+
+// noteError is NoteError plus whether this call is the one that took the latch.
+// Sweeps use that to report a newly damaged tenant exactly once instead of once
+// per tick for as long as the process runs.
+func (s *Store) noteError(userID int64, err error) (error, bool) {
 	if s == nil || err == nil || !IsCorrupt(err) {
-		return err
+		return err, false
 	}
 	path := s.DatabaseFileForUser(userID)
 	corrupt := newCorruptionError(userID, path, err)
@@ -118,8 +127,7 @@ func (s *Store) NoteError(userID int64, err error) error {
 			corrupt = newCorruptionError(userID, corrupt.Path, corrupt.Err)
 		}
 	}
-	s.latchCorruption(userID, path, corrupt.Err.Error())
-	return corrupt
+	return corrupt, s.latchCorruption(userID, path, corrupt.Err.Error())
 }
 
 // MarkCorrupt latches corruption that was found by inspecting a file rather
@@ -135,15 +143,17 @@ func (s *Store) MarkCorrupt(userID int64, detail string) error {
 }
 
 // latchCorruption records the first corruption seen for one tenant. Later
-// reports do not overwrite it, so the log keeps the original evidence.
-func (s *Store) latchCorruption(userID int64, path, detail string) {
+// reports do not overwrite it, so the log keeps the original evidence. It
+// reports whether this call is the one that latched, which is how concurrent
+// sweeps agree on which of them logs the tenant.
+func (s *Store) latchCorruption(userID int64, path, detail string) bool {
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
 	if s.health == nil {
 		s.health = make(map[int64]DatabaseHealth)
 	}
 	if _, latched := s.health[userID]; latched {
-		return
+		return false
 	}
 	s.health[userID] = DatabaseHealth{
 		UserID:     userID,
@@ -151,6 +161,7 @@ func (s *Store) latchCorruption(userID int64, path, detail string) {
 		Detail:     summarizeProblem(detail),
 		DetectedAt: time.Now().UTC(),
 	}
+	return true
 }
 
 // summarizeProblem collapses a multi-line SQLite report to its first line plus
@@ -250,6 +261,63 @@ func (s *Store) ServiceableUsers(ctx context.Context) ([]User, error) {
 		serviceable = append(serviceable, user)
 	}
 	return serviceable, nil
+}
+
+// errSweepDone ends a forEachServiceableUser walk early without reporting a
+// failure. Budgeted sweeps return it once they have filled their batch.
+var errSweepDone = errors.New("sweep finished early")
+
+// forEachServiceableUser runs fn against every tenant that can still answer
+// queries, and is how every split-mode sweep in this package fans out.
+//
+// A tenant that reports corruption from inside the walk is latched and skipped
+// instead of aborting it. Two separate failures depend on that. Returning the
+// first tenant's error left every tenant behind it unvisited, so one damaged
+// file silently stopped stale-run reconciliation, retention, and scheduling for
+// the whole installation. And nothing latched the tenant, because corruption
+// raised by a statement on an already-open handle never passes through the
+// open path that calls NoteError — so ServiceableUsers kept returning it and a
+// per-minute sweep reopened the same unreadable file forever, logging a bare
+// "database disk image is malformed" with no tenant, path, or repair command.
+//
+// Errors that are not corruption still abort the sweep. A tenant is only
+// skipped on the evidence that its file cannot answer at all, never because one
+// query happened to fail.
+func (s *Store) forEachServiceableUser(ctx context.Context, sweep string, fn func(user User, us *Store) error) error {
+	users, err := s.ServiceableUsers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		us, err := s.UserStore(ctx, user.ID)
+		if err == nil {
+			err = fn(user, us)
+		}
+		switch {
+		case err == nil:
+		case errors.Is(err, errSweepDone):
+			return nil
+		case s.noteSweepCorruption(sweep, user.ID, err):
+		default:
+			return err
+		}
+	}
+	return nil
+}
+
+// noteSweepCorruption latches a tenant whose database failed a sweep with
+// corruption and reports whether the sweep may carry on without it. Whichever
+// call takes the latch writes the operator line, so the damaged file and its
+// repair command are named once rather than by every sweep that trips over it.
+func (s *Store) noteSweepCorruption(sweep string, userID int64, err error) bool {
+	noted, latched := s.noteError(userID, err)
+	if !IsCorrupt(noted) {
+		return false
+	}
+	if latched {
+		log.Printf("%s: %v", sweep, noted)
+	}
+	return true
 }
 
 // DatabaseFileForUser returns the SQLite file that holds one tenant's mail

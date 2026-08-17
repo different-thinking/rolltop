@@ -18,28 +18,21 @@ func (s *Store) BackfillThreadKeys(ctx context.Context, limit int) (int, error) 
 		limit = 10000
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
 		total := 0
 		remaining := limit
-		for _, user := range users {
+		err := s.forEachServiceableUser(ctx, "backfill thread keys", func(_ User, us *Store) error {
 			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
+				return errSweepDone
 			}
 			n, err := us.BackfillThreadKeys(ctx, remaining)
 			if err != nil {
-				return total, err
+				return err
 			}
 			total += n
 			remaining -= n
-		}
-		return total, nil
+			return nil
+		})
+		return total, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, message_id_header, in_reply_to, references_header, subject
 		FROM messages WHERE thread_key = '' ORDER BY id LIMIT ?`, limit)
@@ -83,29 +76,22 @@ func (s *Store) BackfillThreadHeadersFromBlobs(ctx context.Context, dataDir stri
 		limit = 1000
 	}
 	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, 0, err
-		}
 		totalChecked, totalUpdated := 0, 0
 		remaining := limit
-		for _, user := range users {
+		err := s.forEachServiceableUser(ctx, "backfill thread headers", func(_ User, us *Store) error {
 			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return totalChecked, totalUpdated, err
+				return errSweepDone
 			}
 			checked, updated, err := us.BackfillThreadHeadersFromBlobs(ctx, dataDir, remaining)
 			if err != nil {
-				return totalChecked, totalUpdated, err
+				return err
 			}
 			totalChecked += checked
 			totalUpdated += updated
 			remaining -= checked
-		}
-		return totalChecked, totalUpdated, nil
+			return nil
+		})
+		return totalChecked, totalUpdated, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, blob_path, message_id_header, in_reply_to, references_header, subject, thread_key
 		FROM messages WHERE thread_headers_checked_at = 0 AND blob_path != '' ORDER BY id LIMIT ?`, limit)
