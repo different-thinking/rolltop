@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	index := filepath.Join(frontendDistDir, "index.html")
 	contents, err := os.ReadFile(index)
 	if err != nil {
+		log.Printf("read frontend index: %v", err)
 		http.Error(w, "frontend has not been built; run npm run build", http.StatusServiceUnavailable)
 		return
 	}
@@ -59,6 +61,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		}
 		injected, injectErr := injectStartupBootstrap(contents, payload)
 		if injectErr != nil {
+			log.Printf("inject startup bootstrap: %v", injectErr)
 			http.Error(w, "frontend startup marker is missing", http.StatusInternalServerError)
 			return
 		}
@@ -122,6 +125,7 @@ func (s *Server) handleAndroidLatest(w http.ResponseWriter, r *http.Request) {
 	}
 	var metadata androidLatestMetadata
 	if err := json.Unmarshal(data, &metadata); err != nil {
+		log.Printf("parse android update metadata %s: %v", full, err)
 		http.Error(w, "invalid android update metadata", http.StatusInternalServerError)
 		return
 	}

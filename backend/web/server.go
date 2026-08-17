@@ -1092,6 +1092,7 @@ func (s *Server) serverError(w http.ResponseWriter, err error) {
 		http.Error(w, "request canceled", http.StatusRequestTimeout)
 		return
 	}
+	log.Printf("server error: %v", err)
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 

@@ -3,6 +3,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -69,6 +70,7 @@ func (s *Server) apiPushSubscription(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.DeleteWebPushSubscription(r.Context(), cu.User.ID, in.Endpoint); err != nil {
+			log.Printf("delete web push subscription user_id=%d: %v", cu.User.ID, err)
 			writeAPIError(w, http.StatusInternalServerError, "failed to delete web push subscription")
 			return
 		}
