@@ -94,9 +94,25 @@ func TestActiveWriterStallSurvivesCallerCancellation(t *testing.T) {
 		t.Fatalf("coordinator active leases for user 17 = %d, want 1 until Bleve returns", coordinatorActive)
 	}
 
-	output := logs.String()
+	// watchActiveWriter notifies the stall handler before it writes its
+	// diagnostics, and the handler channel is buffered, so the watchdog can be
+	// descheduled between the two. Waiting on stalledUsers above therefore does
+	// not prove the log line exists yet. Wait for it instead of assuming it.
+	const stallLine = `bleve active writer stalled operation="index-batch"`
+	var output string
+	for deadline := time.Now().Add(time.Second); ; {
+		output = logs.String()
+		if strings.Contains(output, stallLine) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stall diagnostics missing %q: %q", stallLine, output)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The remaining fields come from the same single Printf call as stallLine,
+	// so one snapshot covers them all.
 	for _, want := range []string{
-		`bleve active writer stalled operation="index-batch"`,
 		`user_id=17 account_id=4 mailbox_id=34 documents=1`,
 		`first_document_id=912 last_document_id=912 document_ids=[912]`,
 		`marker_written=true restart_required=true`,
