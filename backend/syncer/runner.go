@@ -1464,6 +1464,11 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 	go func() {
 		drainMore := false
 		indexFailed := false
+		// Classification changes what the category lists hold, so the browser
+		// has to be told. Telling it per batch would rebuild every connected
+		// tab's chrome hundreds of times during a first backfill, so the
+		// announcement waits until this drain has nothing left to do.
+		categorizedAny := false
 		defer func() {
 			r.mu.Lock()
 			delete(r.mailboxRunning, key)
@@ -1486,6 +1491,9 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			if !indexFailed {
 				r.scheduleNextAttachmentIndexRetry(userID)
 			}
+			if categorizedAny && !drainMore && r.context().Err() == nil {
+				r.Service.notify(userID)
+			}
 			if handoffSenderStats && r.context().Err() == nil {
 				r.RefreshSenderStats(userID)
 			} else if restart {
@@ -1498,17 +1506,23 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			if ctx.Err() == nil {
 				log.Printf("attachment index user_id=%d: %v", userID, r.noteStoreError(userID, err))
 			}
-			return
-		}
-		drainMore = n == attachmentIndexBatchSize
-		if n > 0 {
-			log.Printf("attachment index user_id=%d processed=%d", userID, n)
+		} else {
+			drainMore = n == attachmentIndexBatchSize
+			if n > 0 {
+				log.Printf("attachment index user_id=%d processed=%d", userID, n)
+			}
 		}
 		// Category classification rides the same turn: it reads stored raw
 		// messages just as attachment indexing does, so it inherits the
 		// yielding, cancellation, and retry scheduling already built around
 		// this worker instead of competing with it for the user's database.
-		categorized, err := r.classifyPendingCategoriesForUser(ctx, userID, categoryBackfillBatchSize)
+		// It runs even when attachment indexing just failed, because the two
+		// read the same blobs for unrelated reasons: one message this tenant
+		// can never index must not leave every category list permanently empty.
+		if ctx.Err() != nil {
+			return
+		}
+		categorized, err := r.classifyPendingCategoriesForUser(ctx, userID, store.CategoryBackfillLimit)
 		if err != nil {
 			indexFailed = true
 			if ctx.Err() == nil {
@@ -1518,9 +1532,9 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 		}
 		if categorized > 0 {
 			log.Printf("category backfill user_id=%d classified=%d", userID, categorized)
-			r.Service.notify(userID)
+			categorizedAny = true
 		}
-		drainMore = drainMore || categorized == categoryBackfillBatchSize
+		drainMore = drainMore || categorized == store.CategoryBackfillLimit
 	}()
 	return true
 }

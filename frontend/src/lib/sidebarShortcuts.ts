@@ -2,6 +2,7 @@
 // lists, and the badge hint that appears while both modifiers are held.
 
 import { useEffect, useRef, useState } from "react";
+import { editableTarget } from "./keyboard";
 
 /** SidebarShortcut is one numbered destination, in the order the sidebar shows it. */
 export type SidebarShortcut = {
@@ -19,25 +20,18 @@ export const maxSidebarShortcuts = 9;
  * digitFromEvent reads the number key by physical position rather than by the
  * character it produces. Shift+1 is "!" on a US layout and "!" again on a
  * German one, and on several layouts the digits need AltGr — the key's position
- * is the only stable way to mean "the 1 key" while Shift is held.
+ * is the only stable way to mean "the 1 key" while Shift is held. Both the
+ * number row and the keypad count, because the badges advertise a number rather
+ * than a particular key for it.
  */
 function digitFromEvent(event: KeyboardEvent): number {
-  const match = /^Digit([1-9])$/.exec(event.code);
+  const match = /^(?:Digit|Numpad)([1-9])$/.exec(event.code);
   return match ? Number(match[1]) : 0;
 }
 
 /** shortcutModifiersHeld reports the exact Ctrl+Shift chord, with no others along. */
 function shortcutModifiersHeld(event: KeyboardEvent): boolean {
   return event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
-}
-
-/**
- * editingRichText reports a target that owns its own Ctrl+Shift chords. The
- * message body is the one place in the app where these combinations already
- * mean formatting, so navigation stays out of it.
- */
-function editingRichText(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest("[contenteditable='true']"));
 }
 
 /**
@@ -48,20 +42,25 @@ function editingRichText(target: EventTarget | null): boolean {
  */
 export function useSidebarShortcuts(shortcuts: SidebarShortcut[], open: (url: string) => void): boolean {
   const [hintsVisible, setHintsVisible] = useState(false);
-  const urls = shortcuts.slice(0, maxSidebarShortcuts).map((shortcut) => shortcut.url).join("\n");
-  // The navigate callback is read through a ref so the listeners survive the
-  // chrome re-renders that arrive while a chord is being held.
+  // The destinations and the navigate callback are both read through refs, so
+  // the listeners are installed once and survive the chrome re-renders that
+  // arrive while a chord is being held.
+  const targets = useRef<string[]>([]);
+  targets.current = shortcuts.slice(0, maxSidebarShortcuts).map((shortcut) => shortcut.url);
   const openRef = useRef(open);
   openRef.current = open;
 
   useEffect(() => {
-    const targets = urls ? urls.split("\n") : [];
     function onKeyDown(event: KeyboardEvent) {
       if (!shortcutModifiersHeld(event)) return;
+      // A field that owns the keystroke also owns the chord: navigating away
+      // mid-sentence would abandon whatever was being typed, so the badges stay
+      // hidden there too rather than advertising a shortcut that will not fire.
+      if (editableTarget(event.target)) return;
       setHintsVisible(true);
-      if (event.defaultPrevented || event.repeat || editingRichText(event.target)) return;
+      if (event.defaultPrevented || event.repeat) return;
       const digit = digitFromEvent(event);
-      const url = digit > 0 ? targets[digit - 1] : "";
+      const url = digit > 0 ? targets.current[digit - 1] : "";
       if (!url) return;
       event.preventDefault();
       setHintsVisible(false);
@@ -83,7 +82,7 @@ export function useSidebarShortcuts(shortcuts: SidebarShortcut[], open: (url: st
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", hide);
     };
-  }, [urls]);
+  }, []);
 
   return hintsVisible;
 }

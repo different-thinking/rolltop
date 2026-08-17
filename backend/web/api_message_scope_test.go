@@ -56,6 +56,16 @@ func newScopeTestTenant(t *testing.T, ctx context.Context, db *store.Store, emai
 
 func createScopeTestMessage(t *testing.T, ctx context.Context, db *store.Store, tenant scopeTestTenant, mailbox store.Mailbox, uid uint32, subject string) store.MessageRecord {
 	t.Helper()
+	return createScopeTestMessageFrom(t, ctx, db, tenant, mailbox, uid, subject, "sender@example.test", "")
+}
+
+// createScopeTestMessageFrom is the same fixture with the sender and category a
+// test cares about. Both are properties of the stored row rather than of the
+// scope machinery, so they stay optional for the tests that do not set them.
+func createScopeTestMessageFrom(t *testing.T, ctx context.Context, db *store.Store, tenant scopeTestTenant,
+	mailbox store.Mailbox, uid uint32, subject, from, category string,
+) store.MessageRecord {
+	t.Helper()
 	if subject == "" {
 		subject = fmt.Sprintf("Scope %d", uid)
 	}
@@ -69,7 +79,7 @@ func createScopeTestMessage(t *testing.T, ctx context.Context, db *store.Store, 
 	}
 	message, err := db.CreateMessage(ctx, store.CreateMessage{
 		UserID: tenant.user.ID, AccountID: tenant.accountID, MailboxID: mailbox.ID, BlobID: blob.ID,
-		FromAddr: "sender@example.test", Subject: subject,
+		FromAddr: from, Subject: subject, Category: category,
 		Date: time.Now().UTC(), InternalDate: time.Now().UTC(), UID: uid, BlobPath: blob.Path,
 	})
 	if err != nil {

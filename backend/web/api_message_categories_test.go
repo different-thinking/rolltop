@@ -1,12 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"context"
-	"fmt"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
-	"time"
 
 	"rolltop/backend/mailparse"
 	"rolltop/backend/store"
@@ -16,23 +19,7 @@ func createCategoryTestMessage(t *testing.T, ctx context.Context, db *store.Stor
 	mailbox store.Mailbox, uid uint32, from, category string,
 ) store.MessageRecord {
 	t.Helper()
-	blob, err := db.CreateBlob(ctx, store.BlobRecord{
-		UserID: tenant.user.ID, Kind: "message",
-		Path:   fmt.Sprintf("users/%d/category-%d.eml", tenant.user.ID, uid),
-		SHA256: fmt.Sprintf("category-%d-%d", tenant.user.ID, uid), Size: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	message, err := db.CreateMessage(ctx, store.CreateMessage{
-		UserID: tenant.user.ID, AccountID: tenant.accountID, MailboxID: mailbox.ID, BlobID: blob.ID,
-		FromAddr: from, Subject: fmt.Sprintf("Category %d", uid), Category: category,
-		Date: time.Now().UTC(), InternalDate: time.Now().UTC(), UID: uid, BlobPath: blob.Path,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return message
+	return createScopeTestMessageFrom(t, ctx, db, tenant, mailbox, uid, "", from, category)
 }
 
 func TestMailViewNamesResolveOnlyToListsThisServerRenders(t *testing.T) {
@@ -134,4 +121,71 @@ func TestCategoryChromeCountsWhatTheListShows(t *testing.T) {
 	if !slices.Equal(names, mailparse.Categories()) {
 		t.Fatalf("category names = %v, want %v", names, mailparse.Categories())
 	}
+}
+
+func categoryRequest(t *testing.T, server *Server, user store.User, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/mail/category", bytes.NewReader([]byte(body)))
+	request = request.WithContext(context.WithValue(request.Context(), userContextKey, currentUser{User: user}))
+	const csrfBase = "message-category-csrf"
+	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfBase})
+	request.Header.Set("X-CSRF-Token", server.csrfForBase(csrfBase))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.apiMessageCategory(response, request)
+	return response
+}
+
+// A correction has to be aimed at a message the caller can see. Accepting an
+// address from the request body instead would let overrides be minted for
+// senders the tenant has never received mail from.
+func TestCategoryCorrectionOnlyFilesSendersTheCallerCanSee(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "correction@example.test")
+	other := newScopeTestTenant(t, ctx, db, "correction-other@example.test")
+	message := createCategoryTestMessage(t, ctx, db, tenant, tenant.inbox, 901, "news@example.test", mailparse.CategoryNewsletters)
+	strangers := createCategoryTestMessage(t, ctx, db, other, other.inbox, 902, "stranger@example.test", mailparse.CategoryRelevant)
+	server := &Server{store: db, masterKey: bytes.Repeat([]byte{9}, 32), events: newEventHub(), mailListCache: newMailListCache(),
+		mailCategoryCache: newMailCategoryChromeCache()}
+
+	if response := categoryRequest(t, server, tenant.user, `{"category":"forums"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("naming no message = %d, want 400; body %s", response.Code, response.Body.String())
+	}
+	if response := categoryRequest(t, server, tenant.user, `{"message_id":`+itoa(strangers.ID)+`,"category":"forums"}`); response.Code != http.StatusNotFound {
+		t.Fatalf("another tenant's message = %d, want 404", response.Code)
+	}
+	if response := categoryRequest(t, server, tenant.user, `{"message_id":`+itoa(message.ID)+`,"category":"everything"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown category = %d, want 400", response.Code)
+	}
+
+	response := categoryRequest(t, server, tenant.user, `{"message_id":`+itoa(message.ID)+`,"category":"forums"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filing the sender = %d, body %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Category string `json:"category"`
+		Sender   string `json:"sender"`
+		Moved    int64  `json:"moved"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Category != mailparse.CategoryForums || result.Sender != "news@example.test" || result.Moved != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if pinned, err := db.SenderCategoryOverride(ctx, tenant.user.ID, "news@example.test"); err != nil || pinned != mailparse.CategoryForums {
+		t.Fatalf("stored override = %q err=%v", pinned, err)
+	}
+	if pinned, err := db.SenderCategoryOverride(ctx, other.user.ID, "news@example.test"); err != nil || pinned != "" {
+		t.Fatalf("other tenant override = %q err=%v, want empty", pinned, err)
+	}
+}
+
+func itoa(v int64) string {
+	return strconv.FormatInt(v, 10)
 }

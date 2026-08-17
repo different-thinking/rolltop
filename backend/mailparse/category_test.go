@@ -39,6 +39,17 @@ func TestCategorizePrefersTheMoreSpecificHeaderClaim(t *testing.T) {
 			want:   CategoryNewsletters,
 		},
 		{
+			// RFC 2369's own example spells the read-only value with a trailing
+			// comment, so the comment has to come off before comparing.
+			name: "read-only list with the RFC's trailing comment is still a newsletter",
+			header: mail.Header{
+				"List-Id":   []string{"<news.example.test>"},
+				"List-Post": []string{"NO (posting not allowed on this list)"},
+			},
+			from: "news@example.test",
+			want: CategoryNewsletters,
+		},
+		{
 			name:   "unsubscribe route alone is a newsletter",
 			header: mail.Header{"List-Unsubscribe": []string{"<https://example.test/unsub>"}},
 			from:   "marketing@example.test",
@@ -80,6 +91,27 @@ func TestCategorizePrefersTheMoreSpecificHeaderClaim(t *testing.T) {
 	}
 }
 
+func TestBareAddressIsTheOneKeyClassificationAndCorrectionsShare(t *testing.T) {
+	// Both the classifier's address fallback and the per-sender correction key
+	// on this, so a value either works for both or for neither.
+	cases := map[string]string{
+		`"Shop" <Offers@Example.test>`: "offers@example.test",
+		"ada@example.test":             "ada@example.test",
+		"  ADA@example.test  ":         "ada@example.test",
+		"Two <a@x.test>, <b@x.test>":   "a@x.test",
+		// An unterminated bracket is malformed but still names a sender;
+		// rejecting it would leave that sender impossible to file.
+		"Jane Doe <jane@x.test": "jane@x.test",
+		"":                      "",
+		"not-an-address":        "",
+	}
+	for input, want := range cases {
+		if got := BareAddress(input); got != want {
+			t.Fatalf("BareAddress(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestCategorizeAddressKeepsUnrecognizedSendersRelevant(t *testing.T) {
 	cases := map[string]string{
 		"ada@example.test":                 CategoryRelevant,
@@ -109,6 +141,28 @@ func TestCategorizeReaderFallsBackWhenHeadersCannotBeRead(t *testing.T) {
 	}
 	if got := CategorizeReader(nil, "ada@example.test"); got != CategoryRelevant {
 		t.Fatalf("CategorizeReader(nil) = %q, want %q", got, CategoryRelevant)
+	}
+}
+
+func TestCategoryRegistryIsTheOnlyPlaceTheSetIsDefined(t *testing.T) {
+	registry := CategoryRegistry()
+	names := Categories()
+	if len(registry) != len(names) {
+		t.Fatalf("registry has %d entries but Categories() has %d", len(registry), len(names))
+	}
+	for i, entry := range registry {
+		if entry.Name != names[i] {
+			t.Fatalf("registry entry %d = %q, Categories()[%d] = %q", i, entry.Name, i, names[i])
+		}
+		if entry.Label == "" || entry.Icon == "" {
+			t.Fatalf("category %q has no display text: %+v", entry.Name, entry)
+		}
+		if !ValidCategory(entry.Name) {
+			t.Fatalf("category %q is listed but rejected by ValidCategory", entry.Name)
+		}
+	}
+	if ValidCategory("everything") || ValidCategory("") {
+		t.Fatal("ValidCategory accepted a name that is not in the registry")
 	}
 }
 

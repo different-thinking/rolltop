@@ -155,10 +155,14 @@ export function MailView({
     if (item.show_in_all_mail === false) return false;
     return !excludesArchived || !archiveMailboxIDs.has(item.id);
   });
+  // A category's size is only knowable from the chrome payload. Leaving it
+  // undefined when that has not arrived keeps "unknown" distinct from "empty":
+  // reporting 0 would both hide the whole-view affordance and put a wrong number
+  // into the delete confirmation behind it.
   const totalCount = mailbox
     ? mailbox.message_count
     : activeCategory
-      ? categorySummary?.total || 0
+      ? categorySummary?.total
       : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
   const viewLabel = activeCategory
     ? categorySummary?.label || activeCategory

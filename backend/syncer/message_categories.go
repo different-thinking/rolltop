@@ -12,12 +12,6 @@ import (
 	"rolltop/backend/store"
 )
 
-// categoryBackfillBatchSize is how many stored messages one pass re-opens. The
-// pass runs on the same turn as attachment indexing and yields between batches,
-// so this trades how quickly the category lists fill against how long a single
-// turn holds the user's database.
-const categoryBackfillBatchSize = 200
-
 // ClassifyPendingCategoriesForUser gives a category to messages that do not have
 // one yet, reading the stored raw message for the list and automation headers.
 // It returns how many rows it filed so the caller knows whether to come back.
@@ -31,7 +25,7 @@ func (s *Service) ClassifyPendingCategoriesForUser(ctx context.Context, userID i
 		return 0, nil
 	}
 	if limit <= 0 {
-		limit = categoryBackfillBatchSize
+		limit = store.CategoryBackfillLimit
 	}
 	candidates, err := s.Store.ListMessagesNeedingCategory(ctx, userID, limit)
 	if err != nil || len(candidates) == 0 {

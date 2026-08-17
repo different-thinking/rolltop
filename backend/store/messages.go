@@ -87,29 +87,23 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 	if strings.TrimSpace(m.MessageIDHash) == "" {
 		m.MessageIDHash = HashedMessageID(m.MessageIDHeader)
 	}
-	// A correction the user made for this sender outranks what the headers say,
-	// so incoming mail lands where they put the sender's last message rather
-	// than being re-decided and moved back.
 	senderAddress := NormalizeCategorySender(m.FromAddr)
 	category := strings.ToLower(strings.TrimSpace(m.Category))
 	if !mailparse.ValidCategory(category) {
 		category = ""
 	}
-	if category != "" && senderAddress != "" {
-		var pinned string
-		err := tx.QueryRowContext(ctx, `SELECT category FROM category_sender_overrides
-			WHERE user_id = ? AND sender = ?`, m.UserID, senderAddress).Scan(&pinned)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return MessageRecord{}, err
-		}
-		if mailparse.ValidCategory(pinned) {
-			category = pinned
-		}
-	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO messages
 			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, import_completed_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, category, m.ToAddr, m.CCAddr,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			-- A correction the user made for this sender outranks what the
+			-- headers say, so incoming mail lands where they put the sender's
+			-- last message rather than being re-decided and moved back. The
+			-- guard keeps an unclassified message pending: it has to be read
+			-- before any category, corrected or not, can apply to it.
+			COALESCE((SELECT o.category FROM category_sender_overrides o
+				WHERE o.user_id = ? AND o.sender = ? AND ? <> ''), ?),
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, m.UserID, senderAddress, category, category, m.ToAddr, m.CCAddr,
 		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), importCompletedAt, ts, ts)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: messages.user_id, messages.account_id, messages.mailbox_id, messages.uid") {

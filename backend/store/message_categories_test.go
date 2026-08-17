@@ -209,18 +209,52 @@ func TestCategoryDataStaysInsideOneTenant(t *testing.T) {
 	}
 }
 
-func TestNormalizeCategorySenderKeepsOnlyAnAddress(t *testing.T) {
-	cases := map[string]string{
-		`"Shop" <Offers@Example.test>`: "offers@example.test",
-		"ada@example.test":             "ada@example.test",
-		"  ADA@example.test  ":         "ada@example.test",
-		"":                             "",
-		"not-an-address":               "",
-		"Two <a@x.test>, <b@x.test>":   "a@x.test",
-	}
-	for input, want := range cases {
-		if got := NormalizeCategorySender(input); got != want {
-			t.Fatalf("NormalizeCategorySender(%q) = %q, want %q", input, got, want)
+func TestNormalizeCategorySenderMatchesTheClassifiersOwnReading(t *testing.T) {
+	// The correction key and the classifier's address fallback must agree, or a
+	// sender the classifier files is a sender the user cannot correct. Sharing
+	// one reader is how that is guaranteed; this checks the two have not drifted
+	// apart again behind separate implementations.
+	for _, from := range []string{
+		`"Shop" <Offers@Example.test>`,
+		"ada@example.test",
+		"  ADA@example.test  ",
+		"Two <a@x.test>, <b@x.test>",
+		"Jane Doe <jane@x.test",
+		"",
+		"not-an-address",
+	} {
+		if got, want := NormalizeCategorySender(from), mailparse.BareAddress(from); got != want {
+			t.Fatalf("NormalizeCategorySender(%q) = %q, want the classifier's %q", from, got, want)
 		}
+	}
+}
+
+func TestPendingCountDescribesOnlyMailTheCategoryListsCanShow(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	trash, err := f.db.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := f.create(t, f.inbox, 1, "news@example.test", "")
+	f.create(t, f.archive, 2, "news@example.test", "")
+	f.create(t, trash, 3, "news@example.test", "")
+
+	// The worker still classifies every message it finds, but a count that
+	// included folders no category list draws from would leave the browser
+	// reporting work the user can never see finish.
+	count, err := f.db.CountMessagesNeedingCategory(ctx, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("pending count = %d, want only the inbox message %d", count, shown.ID)
+	}
+	candidates, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("backfill queue = %d rows, want all three regardless of folder", len(candidates))
 	}
 }

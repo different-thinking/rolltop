@@ -1109,8 +1109,9 @@ export function ThreadView({
       const result = await api.setMessageCategory(csrf, item.message.id, category.name);
       const moved = result.moved > 1 ? ` ${result.moved.toLocaleString()} messages moved.` : "";
       addToast(`${result.sender || "Sender"} now files under ${category.label}.${moved}`);
-      await refreshChrome();
-      await load(showImages);
+      // Neither refresh needs the other's result, so they overlap rather than
+      // making the user wait for the sum of two round trips.
+      await Promise.all([refreshChrome(), load(showImages)]);
     } catch (err) {
       addToast(messageFromError(err), "error");
     }

@@ -1,7 +1,7 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar, mobile
 // drawer, drag-to-folder handling, sync status, and the mobile compose affordance.
 
-import { Fragment, useCallback, useMemo, useState, useEffect, useRef } from "react";
+import { Fragment, useMemo, useState, useEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { AppShellProps, LocationState, MessageTransferAction, MoveTarget, SecurityUnlockState } from "../../appTypes";
@@ -12,7 +12,6 @@ import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
-import type { MailView } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, saveCollapsedAccounts } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
@@ -870,12 +869,10 @@ function Sidebar({
   const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
   const snoozedActive = currentPath === "/snoozes";
   const accountGroups = useMemo(() => sidebarAccountGroups(mailboxes), [mailboxes]);
-  // Stable across renders so the keyboard listener is not torn down and rebuilt
-  // on every chrome update while a chord is being held.
-  const openList = useCallback((url: string) => {
+  function openList(url: string) {
     navigate(url);
     onClose();
-  }, [navigate, onClose]);
+  }
   // One ordered list drives both the links and their numbers, so a shortcut can
   // never point at a different entry than the badge beside it claims.
   const namedLists: NamedListEntry[] = [
@@ -885,7 +882,7 @@ function Sidebar({
     { url: "/mail/drafts", label: "Drafts", icon: "draft", active: draftsActive, unread: 0, title: "Drafts across every account" },
     { url: "/snoozes", label: "Snoozed", icon: "clock", active: snoozedActive, unread: 0, title: "Threads waiting to come back" },
     ...mailCategories.map((category, index) => ({
-      url: mailURL(null, 1, category.name as MailView),
+      url: mailURL(null, 1, category.name),
       label: category.label,
       icon: category.icon || "label",
       active: listRoute.view === category.name,

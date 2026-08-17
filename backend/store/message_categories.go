@@ -9,7 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/mail"
+	"sort"
 	"strings"
 
 	"rolltop/backend/mailparse"
@@ -24,34 +24,16 @@ type CategoryCandidate struct {
 	BlobPath string
 }
 
-// CategoryBackfillLimit bounds one backfill pass. The pass opens a stored
-// message per row, so the ceiling is about how long the worker holds its turn,
-// not about how much SQLite can return.
-const CategoryBackfillLimit = 500
+// CategoryBackfillLimit bounds one backfill pass, and is the batch size the
+// worker uses. The pass opens a stored message per row, so the ceiling is about
+// how long the worker holds its turn, not about how much SQLite can return.
+const CategoryBackfillLimit = 200
 
 // NormalizeCategorySender reduces a From header to the key a correction is
-// remembered under. Display names vary between messages from the same sender and
-// address case is not significant, so neither may reach the stored key.
+// remembered under. It is the classifier's own address reading, so a sender the
+// classifier can file is always a sender the user can correct.
 func NormalizeCategorySender(from string) string {
-	value := strings.TrimSpace(from)
-	if value == "" {
-		return ""
-	}
-	// A From header naming several addresses is degenerate but legal. The first
-	// one is taken so the key stays stable, rather than depending on where the
-	// scan happened to stop.
-	if parsed, err := mail.ParseAddressList(value); err == nil && len(parsed) > 0 {
-		value = parsed[0].Address
-	} else if start := strings.Index(value, "<"); start >= 0 {
-		if end := strings.Index(value[start:], ">"); end > 0 {
-			value = value[start+1 : start+end]
-		}
-	}
-	value = strings.TrimSpace(strings.ToLower(value))
-	if !strings.Contains(value, "@") || strings.ContainsAny(value, " \t") {
-		return ""
-	}
-	return value
+	return mailparse.BareAddress(from)
 }
 
 // validCategoryOrError keeps unknown names out of every query. Category names
@@ -92,15 +74,30 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 	return out, rows.Err()
 }
 
-// CountMessagesNeedingCategory reports how much of the backfill is left, which
-// is what tells the browser its category lists are still filling up.
+// CountMessagesNeedingCategory reports how much of the backfill is still to
+// come, counted over the folders the category lists actually draw from. The
+// worker classifies every message it finds, including Trash and Junk, but
+// counting those here would leave the browser reporting tens of thousands of
+// messages still to sort long after every list it can render is complete.
+//
+// Snoozed threads are counted: they are hidden for now, not out of scope, and
+// they will want a category when they come back.
 func (s *Store) CountMessagesNeedingCategory(ctx context.Context, userID int64) (int, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return 0, err
 	}
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, true, " AND m.category = ''")
+	if err != nil {
+		return 0, err
+	}
+	args := make([]any, 0, len(predicateArgs)+1)
+	args = append(args, userID)
+	args = append(args, predicateArgs...)
 	var n int
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE user_id = ? AND category = ''`, userID).Scan(&n)
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM messages m`+allMailSource+`
+		WHERE m.user_id = ?`+predicate, args...).Scan(&n)
 	return n, err
 }
 
@@ -114,21 +111,44 @@ type MessageCategoryUpdate struct {
 	Category  string
 }
 
-// SetMessageCategories records classified categories for one batch. Corrections
-// the user already made are applied here rather than left for the caller to
-// remember, so every path that files a message honours them the same way.
+// SetMessageCategories records classified categories for one batch. The stored
+// correction for each sender is read inside the same transaction that does the
+// write, and wins: reading it beforehand would let a correction made while the
+// batch was in flight be overwritten by the classifier and then never revisited,
+// because the row is no longer pending once it has a category.
+//
+// Rows are grouped by the answer they get rather than updated one by one. A
+// backfill batch is dominated by repeat senders, so a batch of 200 messages is
+// usually a handful of statements.
 func (s *Store) SetMessageCategories(ctx context.Context, userID int64, updates []MessageCategoryUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	senders := make([]string, 0, len(updates))
+	type categoryGroup struct {
+		sender   string
+		category string
+	}
+	groups := map[categoryGroup][]int64{}
 	for _, update := range updates {
-		senders = append(senders, update.FromAddr)
+		normalized, err := validCategoryOrError(update.Category)
+		if err != nil {
+			return err
+		}
+		key := categoryGroup{sender: NormalizeCategorySender(update.FromAddr), category: normalized}
+		groups[key] = append(groups[key], update.MessageID)
 	}
-	overrides, err := s.SenderCategoryOverridesFor(ctx, userID, senders)
-	if err != nil {
-		return err
+	keys := make([]categoryGroup, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	// Map order is deliberately not the write order: a stable order keeps the
+	// statements a failing batch issued reproducible.
+	sort.Slice(keys, func(a, b int) bool {
+		if keys[a].sender == keys[b].sender {
+			return keys[a].category < keys[b].category
+		}
+		return keys[a].sender < keys[b].sender
+	})
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return err
@@ -139,79 +159,23 @@ func (s *Store) SetMessageCategories(ctx context.Context, userID int64, updates 
 	}
 	defer tx.Rollback()
 	ts := nowUnix()
-	for _, update := range updates {
-		sender := NormalizeCategorySender(update.FromAddr)
-		category := update.Category
-		if pinned, ok := overrides[sender]; ok {
-			category = pinned
+	for _, key := range keys {
+		ids := groups[key]
+		args := make([]any, 0, len(ids)+6)
+		args = append(args, userID, key.sender, key.category, key.sender, ts, userID)
+		for _, id := range ids {
+			args = append(args, id)
 		}
-		normalized, err := validCategoryOrError(category)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET category = ?, sender_address = ?, updated_at = ?
-			WHERE user_id = ? AND id = ?`, normalized, sender, ts, userID, update.MessageID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET
+			category = COALESCE((SELECT o.category FROM category_sender_overrides o
+				WHERE o.user_id = ? AND o.sender = ?), ?),
+			sender_address = ?,
+			updated_at = ?
+			WHERE user_id = ? AND id IN (`+sqlPlaceholders(len(ids))+`)`, args...); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
-}
-
-// SenderCategoryOverridesFor looks up the corrections covering a batch of
-// senders in one query. Classification consults this before writing, so a
-// sender the user has already moved keeps landing where they put it.
-func (s *Store) SenderCategoryOverridesFor(ctx context.Context, userID int64, senders []string) (map[string]string, error) {
-	unique := make([]string, 0, len(senders))
-	seen := make(map[string]bool, len(senders))
-	for _, sender := range senders {
-		normalized := NormalizeCategorySender(sender)
-		if normalized == "" || seen[normalized] {
-			continue
-		}
-		seen[normalized] = true
-		unique = append(unique, normalized)
-	}
-	out := map[string]string{}
-	if len(unique) == 0 {
-		return out, nil
-	}
-	db, err := s.dataDB(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	const chunkSize = 200
-	for start := 0; start < len(unique); start += chunkSize {
-		end := start + chunkSize
-		if end > len(unique) {
-			end = len(unique)
-		}
-		chunk := unique[start:end]
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+1)
-		args = append(args, userID)
-		for i, sender := range chunk {
-			placeholders[i] = "?"
-			args = append(args, sender)
-		}
-		rows, err := db.QueryContext(ctx, `SELECT sender, category FROM category_sender_overrides
-			WHERE user_id = ? AND sender IN (`+strings.Join(placeholders, ",")+`)`, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var sender, category string
-			if err := rows.Scan(&sender, &category); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			out[sender] = category
-		}
-		err = errors.Join(rows.Err(), rows.Close())
-		if err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
 }
 
 // SenderCategoryOverride reads the category the user pinned one sender to, if
