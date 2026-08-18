@@ -151,9 +151,11 @@ export function MailView({
   // Inbox and the categories both describe mail that is still in play, so both
   // leave each account's Archive folder out.
   const excludesArchived = view === "inbox" || Boolean(activeCategory);
+  // Junk is out of these lists by role on the server, whatever its All Mail
+  // setting says, so counting it here would promise rows the list cannot show.
   const viewMailboxes = mailboxes.filter((item) => {
     if (viewRole) return roleMailboxIDSet.has(item.id);
-    if (item.show_in_all_mail === false) return false;
+    if (item.role === "junk" || item.show_in_all_mail === false) return false;
     return !excludesArchived || !archiveMailboxIDs.has(item.id);
   });
   // A category's size is only knowable from the chrome payload. Leaving it

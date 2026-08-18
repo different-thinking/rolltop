@@ -1,7 +1,7 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar, mobile
 // drawer, drag-to-folder handling, sync status, and the mobile compose affordance.
 
-import { Fragment, useMemo, useState, useEffect, useRef } from "react";
+import { Fragment, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { AppShellProps, LocationState, MailCategoryTarget, MessageTransferAction, MoveTarget, SecurityUnlockState } from "../../appTypes";
@@ -70,9 +70,15 @@ export function AppShell({
   const onMoveMessagesRef = useRef(onMoveMessages);
   const onFileMessagesInCategoryRef = useRef(onFileMessagesInCategory);
 
-  mobileSidebarOpenRef.current = mobileSidebarOpen;
-  onMoveMessagesRef.current = onMoveMessages;
-  onFileMessagesInCategoryRef.current = onFileMessagesInCategory;
+  // The Android touch listeners are installed once and read these refs when a
+  // drop lands, so they have to hold committed values. Writing them during
+  // render would let a discarded render hand a drop a callback or a sidebar
+  // state that never reached the screen.
+  useLayoutEffect(() => {
+    mobileSidebarOpenRef.current = mobileSidebarOpen;
+    onMoveMessagesRef.current = onMoveMessages;
+    onFileMessagesInCategoryRef.current = onFileMessagesInCategory;
+  });
 
   useEffect(() => {
     return () => {
@@ -541,8 +547,10 @@ function draggedMessages(event: DragEvent): { ids: number[]; accountIDs: number[
       // Same here: an unreadable list is no list, not a failed drop.
     }
   }
-  const raw = event.dataTransfer.getData("application/x-rolltop-message") || event.dataTransfer.getData("text/plain");
-  const messageID = Number.parseInt(raw, 10);
+  // Only Rolltop's own formats are read back. The drag also carries text/plain
+  // so mail can be dropped into other apps, but accepting it here would let any
+  // dragged text that happens to parse as a number file or move that message.
+  const messageID = Number.parseInt(event.dataTransfer.getData("application/x-rolltop-message"), 10);
   return { ids: Number.isFinite(messageID) && messageID > 0 ? [messageID] : [], accountIDs: [] };
 }
 
