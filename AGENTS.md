@@ -61,10 +61,12 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   second of them unstorable and failed the whole sync rather than one row. One
   contact still carries an address once; saving dedupes by normalized address,
   because two rows for one address are two answers to a question that has one.
-- An outgoing identity is created by hand and never derived. The user asks for
-  one in the identity editor, or gets one for a mailbox they just configured
-  (`Store.EnsureMailIdentityForEmail` is the only other caller); nothing else
-  may add one. Deriving them from the Me contact's addresses -- which is what
+- An outgoing identity is created by hand and never derived. It comes from the
+  identity editor, from adding a mailbox, or from provisioning a user (sign-up,
+  OIDC) -- `Store.EnsureMailIdentityForEmail` is the only door, and every caller
+  is an act where the user named the address. Editing an existing mailbox is not
+  one of them: it would hand back an identity the user removed. Nothing else may
+  add one. Deriving them from the Me contact's addresses -- which is what
   `SyncMailIdentitiesForMeContacts` used to do -- let the address book decide
   what the From menu offered, so every address a Google sync or a vCard import
   put on the reader's own card became a sending identity they never chose. The
@@ -72,9 +74,13 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - An identity points at a `contact_emails` row and cascades on its deletion, so
   saving a contact must not give its addresses new ids. `replaceContactEmails`
   matches them by normalized address and updates in place for exactly that
-  reason; the other detail lists have no dependents and are still rewritten
-  wholesale. `SyncMailIdentitiesForMeContacts` re-binds an identity to the
-  current row by the address it stores as a second line of defence.
+  reason -- and records the submitted order in `sort_order`, which the ids used
+  to carry by accident; the other detail lists have no dependents and are still
+  rewritten wholesale. `SyncMailIdentitiesForMeContacts` re-binds an identity by
+  the address it stores as a second line of defence, but only when its
+  `contact_email_id` no longer resolves: doing it for any unbound address would
+  let a second Me card carrying the same address steal the first card's
+  identity, and deleting that card would then cascade the identity away.
 - Which holder answers for a shared address is decided in exactly one place,
   `contactEmailOwnerOrder`: the reader's own contact, then whoever carries it as
   their primary address, then the oldest. Resolve with

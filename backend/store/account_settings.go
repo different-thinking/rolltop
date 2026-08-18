@@ -183,13 +183,29 @@ func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int6
 	if err != nil {
 		return err
 	}
+	// Which contact_emails rows still exist decides whether an identity is an
+	// orphan. Without it the by-address fallback would fire for any Me address
+	// that simply has no identity of its own, and a second Me card carrying an
+	// address the first one already has would walk the first card's identity
+	// over to itself.
+	liveEmailIDs := map[int64]bool{}
+	for _, contact := range contacts {
+		for _, email := range contact.Emails {
+			if email.ID != 0 {
+				liveEmailIDs[email.ID] = true
+			}
+		}
+	}
 	byEmailID := map[int64]MailIdentity{}
-	byAddress := map[string]MailIdentity{}
+	orphanByAddress := map[string]MailIdentity{}
 	for _, identity := range identities {
 		byEmailID[identity.ContactEmailID] = identity
+		if liveEmailIDs[identity.ContactEmailID] {
+			continue
+		}
 		if key := NormalizeContactEmail(identity.Email); key != "" {
-			if _, seen := byAddress[key]; !seen {
-				byAddress[key] = identity
+			if _, seen := orphanByAddress[key]; !seen {
+				orphanByAddress[key] = identity
 			}
 		}
 	}
@@ -205,7 +221,7 @@ func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int6
 			}
 			identity, ok := byEmailID[email.ID]
 			if !ok {
-				identity, ok = byAddress[NormalizeContactEmail(address)]
+				identity, ok = orphanByAddress[NormalizeContactEmail(address)]
 			}
 			if !ok || kept[identity.ID] {
 				continue

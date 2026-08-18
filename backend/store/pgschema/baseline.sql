@@ -137,7 +137,8 @@ CREATE TABLE contact_emails (
   normalized_email text COLLATE "C" NOT NULL,
   is_primary bigint NOT NULL DEFAULT 0,
   created_at bigint NOT NULL,
-  updated_at bigint NOT NULL
+  updated_at bigint NOT NULL,
+  sort_order bigint NOT NULL DEFAULT 0
 );
 
 -- table contact_icons

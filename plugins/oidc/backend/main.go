@@ -493,6 +493,11 @@ func createOIDCUser(ctx context.Context, st *store.Store, email, name string) (s
 		return store.User{}, err
 	}
 	_, _ = st.EnsureMeContactForEmail(ctx, user.ID, user.Email, firstNonEmpty(user.Name, user.Email))
+	// Identities are never derived from the Me contact, so a provisioned user
+	// needs the one for the address they sign in with asked for here. Without
+	// it compose falls back to a synthetic identity that carries no SMTP
+	// server, signature or Sent folder.
+	_ = st.EnsureMailIdentityForEmail(ctx, user.ID, user.Email)
 	return user, nil
 }
 

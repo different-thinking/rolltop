@@ -961,6 +961,10 @@ func (s *Store) loadContactDetails(ctx context.Context, userID int64, c *Contact
 // address and updated in place, so an id outlives every edit that keeps the
 // address, and only an address the user really removed takes its identity with
 // it.
+//
+// Keeping the rows means their ids no longer follow the submitted order, so the
+// order is written to `sort_order` instead. Reordering a contact's addresses used
+// to work by accident, through the re-insert this replaces.
 func replaceContactEmails(ctx context.Context, tx *sql.Tx, userID, contactID int64, emails []ContactEmail, ts int64) error {
 	rows, err := tx.QueryContext(ctx, `SELECT id, normalized_email FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY id`, userID, contactID)
 	if err != nil {
@@ -990,6 +994,7 @@ func replaceContactEmails(ctx context.Context, tx *sql.Tx, userID, contactID int
 
 	needsPrimary := !anyPrimary(emails, func(item ContactEmail) bool { return item.IsPrimary })
 	kept := map[int64]bool{}
+	sortOrder := 0
 	for _, email := range emails {
 		email.Email = strings.TrimSpace(email.Email)
 		email.NormalizedEmail = NormalizeContactEmail(email.Email)
@@ -999,16 +1004,17 @@ func replaceContactEmails(ctx context.Context, tx *sql.Tx, userID, contactID int
 		primary := boolInt(email.IsPrimary || needsPrimary)
 		needsPrimary = false
 		label := strings.TrimSpace(email.Label)
+		sortOrder++
 		if id, ok := stored[email.NormalizedEmail]; ok && !kept[id] {
-			if _, err := tx.ExecContext(ctx, `UPDATE contact_emails SET label = ?, email = ?, normalized_email = ?, is_primary = ?, updated_at = ?
-				WHERE user_id = ? AND id = ?`, label, email.Email, email.NormalizedEmail, primary, ts, userID, id); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE contact_emails SET label = ?, email = ?, normalized_email = ?, is_primary = ?, sort_order = ?, updated_at = ?
+				WHERE user_id = ? AND id = ?`, label, email.Email, email.NormalizedEmail, primary, sortOrder, ts, userID, id); err != nil {
 				return err
 			}
 			kept[id] = true
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_emails (user_id, contact_id, label, email, normalized_email, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, label, email.Email, email.NormalizedEmail, primary, ts, ts); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_emails (user_id, contact_id, label, email, normalized_email, is_primary, sort_order, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, label, email.Email, email.NormalizedEmail, primary, sortOrder, ts, ts); err != nil {
 			return err
 		}
 	}
@@ -1088,7 +1094,7 @@ func anyPrimary[T any](items []T, primary func(T) bool) bool {
 
 func (s *Store) listContactEmails(ctx context.Context, userID, contactID int64) ([]ContactEmail, error) {
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT id, user_id, contact_id, label, email, normalized_email, is_primary, created_at, updated_at
-		FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY is_primary DESC, id`, userID, contactID)
+		FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY is_primary DESC, sort_order, id`, userID, contactID)
 	if err != nil {
 		return nil, err
 	}

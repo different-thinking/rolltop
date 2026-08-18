@@ -146,3 +146,109 @@ func TestDeleteMailIdentityLeavesTheMeAddress(t *testing.T) {
 		t.Fatalf("delete missing identity err = %v, want not found", err)
 	}
 }
+
+// TestSharedMeAddressKeepsItsOwnIdentity pins which identity a Me address
+// belongs to. The by-address re-binding exists for an orphan whose
+// contact_emails row was rewritten; a second Me card that merely carries the
+// same address must not walk the first card's identity over to itself, because
+// deleting that card would then cascade the identity away with it.
+func TestSharedMeAddressKeepsItsOwnIdentity(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "shared-me@example.test", "Shared Me", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := db.EnsureMeContactForEmail(ctx, user.ID, user.Email, user.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
+	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identities) != 1 {
+		t.Fatalf("identities = %+v, want one", identities)
+	}
+	before := identities[0]
+	second, err := db.CreateContact(ctx, user.ID, Contact{
+		DisplayName: "Second Card",
+		IsMe:        true,
+		Emails:      []ContactEmail{{Email: user.Email, IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities, err = db.ListMailIdentitiesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identities) != 1 || identities[0].ID != before.ID || identities[0].ContactID != owner.ID || identities[0].ContactEmailID != before.ContactEmailID {
+		t.Fatalf("identity after a second Me card = %+v, want it still on contact %d", identities, owner.ID)
+	}
+	if err := db.DeleteContactForUser(ctx, user.ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	identities, err = db.ListMailIdentitiesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identities) != 1 || identities[0].ID != before.ID {
+		t.Fatalf("identity after removing the second Me card = %+v, want %d kept", identities, before.ID)
+	}
+}
+
+// TestContactEmailOrderSurvivesASave covers the ordering the stable rows would
+// otherwise lose: the ids no longer follow the submitted order, so sort_order
+// carries it instead.
+func TestContactEmailOrderSurvivesASave(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "ordered@example.test", "Ordered", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contact, err := db.CreateContact(ctx, user.ID, Contact{
+		DisplayName: "Ordered",
+		Emails: []ContactEmail{
+			{Label: "one", Email: "one@example.test", IsPrimary: true},
+			{Label: "two", Email: "two@example.test"},
+			{Label: "three", Email: "three@example.test"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contact.Emails = []ContactEmail{
+		{Label: "three", Email: "three@example.test", IsPrimary: true},
+		{Label: "two", Email: "two@example.test"},
+		{Label: "one", Email: "one@example.test"},
+	}
+	if _, err := db.UpdateContact(ctx, user.ID, contact.ID, contact); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetContactForUser(ctx, user.ID, contact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"three@example.test", "two@example.test", "one@example.test"}
+	if len(stored.Emails) != len(want) {
+		t.Fatalf("stored emails = %+v, want %v", stored.Emails, want)
+	}
+	for i, address := range want {
+		if stored.Emails[i].Email != address {
+			t.Fatalf("stored emails = %+v, want %v", stored.Emails, want)
+		}
+	}
+}
