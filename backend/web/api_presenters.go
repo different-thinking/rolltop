@@ -292,6 +292,7 @@ func apiMessageFromRecord(msg store.MessageRecord, snippet string) apiMessage {
 		HasAttachments: msg.HasAttachments,
 		IsEncrypted:    msg.IsEncrypted,
 		IsSigned:       msg.IsSigned,
+		Category:       msg.Category,
 		Snippet:        snippet,
 	}
 }

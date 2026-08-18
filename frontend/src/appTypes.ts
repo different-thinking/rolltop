@@ -81,6 +81,10 @@ export type AppShellProps = {
   accountNotice: string;
   databaseUnavailable: boolean;
   enabledPlugins: string[];
+  /** Sidebar category entries with the counts their lists hold. */
+  mailCategories: import("./types").MailCategorySummary[];
+  /** Messages still waiting to be read for their category headers. */
+  mailCategoriesPending: number;
   serverStartedAt: string;
   serverUptimeSeconds: number;
   buildVersion: string;

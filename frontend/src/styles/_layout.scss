@@ -494,6 +494,27 @@
   text-align: right;
 }
 
+// Shown only while Ctrl+Shift is held, in the slot the unread count normally
+// occupies, so revealing the numbering never reflows the sidebar.
+.folder-shortcut {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-subtle);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.sidebar-note {
+  padding: 4px 13px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .folder-tree,
 .folder-children {
   display: grid;
