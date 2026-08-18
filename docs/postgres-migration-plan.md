@@ -105,12 +105,30 @@ everywhere else. Human-facing sorting that wants locale rules should opt in
 explicitly rather than the reverse. The single `COLLATE NOCASE` site becomes
 `lower(...)` or `citext`.
 
-On the managed offering the database may be provisioned by the hoster, so
-this needs coordination *before* provisioning: either the hoster creates the
-database with `LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`, or our
-database user gets `CREATEDB` and we create it ourselves. Startup verifies
-`pg_database.datcollate = 'C'` and fails fast otherwise, so a wrongly
-provisioned database is caught before the first write.
+Hoster constraint (2026-08): databases are created with the cluster default
+locale, not configurable per database. That is acceptable, for two reasons:
+
+1. **Equality is safe regardless.** Under any *deterministic* collation —
+   which every libc locale collation is — Postgres compares text equality
+   byte-wise. The 58 `COLLATE BINARY` comparison sites and every implicit
+   `=` on hashes/message-ids therefore keep SQLite semantics even under the
+   cluster default. Only a nondeterministic ICU default would break this;
+   the preflight script checks `collisdeterministic` and fails if so.
+2. **Ordering is pinned per column.** The WP2 baseline declares
+   `COLLATE "C"` on text columns instead of relying on a database-level
+   default (`key text COLLATE "C"`), which also applies to their indexes.
+   This confines the locale question to the DDL in one place. Queries that
+   `ORDER BY` an expression rather than a bare column add
+   `COLLATE "C"` explicitly where byte order matters (keyset pagination);
+   purely human-facing sort order may use the locale default deliberately.
+
+`scripts/pg-preflight.sql` verifies all of this against the actual target
+database (version/encoding gate, deterministic default, column- and
+index-level `COLLATE "C"` byte ordering, extensions, UTF-8 strictness, and
+the SQL features WP3 relies on). Run it via the SSH bastion before phase 1;
+it was validated against a stock Postgres 16 with a non-C cluster default.
+The startup fail-fast check becomes: default collation is deterministic and
+the baseline's own `COLLATE "C"` columns are present.
 
 ## 4. Work packages
 
@@ -488,10 +506,13 @@ Hoster answers received 2026-08-18:
    stored off-platform. §8.6 updated accordingly; the in-app backup button
    is dropped (WP5).
 
-Still open:
+4. ~~Collation of the provisioned database~~ **Resolved** — the hoster
+   cannot set a per-database locale, so §3.4 switches to per-column
+   `COLLATE "C"` in the baseline DDL. Equality stays byte-exact under any
+   deterministic default collation, so this narrows the concern to
+   ordering, which the column collation pins. Verified end-to-end by
+   `scripts/pg-preflight.sql`; run it against the provisioned database
+   before phase 1 starts.
 
-4. **Collation of the provisioned database** (§3.4): the managed database
-   must be created with `LC_COLLATE 'C'` (template0), or our user needs
-   `CREATEDB`. Coordinate with the hoster before provisioning; startup
-   fail-fast check guards against a mismatch.
+Still open:
 5. ~~Timing of phase 0~~ **Done** — shipped on `main` (see §5, phase 0).
