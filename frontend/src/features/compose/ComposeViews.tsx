@@ -393,12 +393,18 @@ export function ComposeBox({
   }, [dirty, form, editorRevision, localComposeContext, userID]);
 
   // Android WebView can report the keyboard through VisualViewport before dvh
-  // catches up. Size the composer within its container so the persistent mobile
-  // app bar remains visible and the action bar stays above the IME.
+  // catches up. The popover sizes itself within its container so the persistent
+  // mobile app bar remains visible and the action bar stays above the IME. The
+  // inline composer sits in the page flow and only needs the height the reader
+  // can actually see, which is what its own cap is measured against.
   useEffect(() => {
-    if (inline) return;
     const viewport = window.visualViewport;
     const updateViewport = () => {
+      if (inline) {
+        const visible = Math.max(1, Math.round(viewport?.height || window.innerHeight));
+        formRef.current?.style.setProperty("--compose-visible-height", `${visible}px`);
+        return;
+      }
       const viewportTop = viewport?.offsetTop || 0;
       const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
       const containerTop = formRef.current?.parentElement?.getBoundingClientRect().top || 0;

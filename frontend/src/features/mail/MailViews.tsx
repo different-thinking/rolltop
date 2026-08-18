@@ -5,7 +5,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
-import type { AccountMailboxChoice, Bootstrap, Conversation, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
+import type { AccountMailboxChoice, Bootstrap, Conversation, MailCategorySummary, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
@@ -20,7 +20,7 @@ import { mailPageSize } from "../../lib/constants";
 import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
 import type { MailSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
-import { mailRoute, mailURL, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
+import { mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
 import type { RuntimePlugin } from "../../plugins/runtime";
@@ -128,6 +128,7 @@ export function MailView({
   mailboxes,
   swipePreferences,
   archiveMailboxes,
+  mailCategories,
   latestSyncRun,
   activeSyncRuns,
   mailGeneration,
@@ -146,6 +147,7 @@ export function MailView({
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
   archiveMailboxes: AccountMailboxChoice[];
+  mailCategories: MailCategorySummary[];
   latestSyncRun: SyncRun | null;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -193,15 +195,30 @@ export function MailView({
     () => viewRole ? roleMailboxIDs(mailboxes, viewRole) : new Set<number>(),
     [mailboxes, viewRole]
   );
+  // A category is decided per message rather than per folder, so its size is
+  // the count the server reports for the list; folder arithmetic cannot answer it.
+  const activeCategory = mailViewCategory(view);
+  const categorySummary = activeCategory ? mailCategories.find((item) => item.name === activeCategory) : undefined;
+  // Inbox and the categories both describe mail that is still in play, so both
+  // leave each account's Archive folder out.
+  const excludesArchived = view === "inbox" || Boolean(activeCategory);
   const viewMailboxes = mailboxes.filter((item) => {
     if (viewRole) return roleMailboxIDSet.has(item.id);
     if (item.show_in_all_mail === false) return false;
-    return view !== "inbox" || !archiveMailboxIDs.has(item.id);
+    return !excludesArchived || !archiveMailboxIDs.has(item.id);
   });
+  // A category's size is only knowable from the chrome payload. Leaving it
+  // undefined when that has not arrived keeps "unknown" distinct from "empty":
+  // reporting 0 would both hide the whole-view affordance and put a wrong number
+  // into the delete confirmation behind it.
   const totalCount = mailbox
     ? mailbox.message_count
-    : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
-  const viewLabel = view === "inbox" ? "Inbox" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
+    : activeCategory
+      ? categorySummary?.total
+      : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
+  const viewLabel = activeCategory
+    ? categorySummary?.label || activeCategory
+    : view === "inbox" ? "Inbox" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the

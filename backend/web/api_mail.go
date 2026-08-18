@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
 )
@@ -42,6 +43,16 @@ func (v mailView) role() string {
 	}
 }
 
+// category maps the views named after a message category onto that category.
+// The view name and the stored category are deliberately the same string, so
+// there is no table here to fall out of step with the classifier.
+func (v mailView) category() string {
+	if mailparse.ValidCategory(string(v)) {
+		return string(v)
+	}
+	return ""
+}
+
 // parseMailView resolves a view name. The bool reports whether the value names
 // a list this server can render: an unknown name is a request for a view that
 // does not exist rather than a silent fall back to All Mail.
@@ -50,12 +61,15 @@ func parseMailView(raw string) (mailView, bool) {
 	if legacy, ok := mailViewLegacyNames[name]; ok {
 		return legacy, true
 	}
-	switch view := mailView(name); view {
+	view := mailView(name)
+	switch view {
 	case mailViewAll, mailViewInbox, mailViewSent, mailViewDrafts:
 		return view, true
-	default:
-		return mailViewAll, false
 	}
+	if view.category() != "" {
+		return view, true
+	}
+	return mailViewAll, false
 }
 
 // mailViewFromRequest reads the named view from the URL.
@@ -158,9 +172,11 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 		hydrateDone()
 	} else {
 		hydrateDone := timing.measure(&timing.hydrate)
-		switch role := view.role(); {
+		switch role, category := view.role(), view.category(); {
 		case role != "":
 			messages, err = s.store.ListRoleLatestThreadMessagesForUser(ctx, user.ID, role, fetchLimit, offset, order)
+		case category != "":
+			messages, err = s.store.ListCategoryLatestThreadMessagesForUser(ctx, user.ID, category, fetchLimit, offset, order)
 		case view == mailViewInbox:
 			messages, err = s.store.ListUnarchivedLatestThreadMessagesForUser(ctx, user.ID, fetchLimit, offset, order)
 		default:

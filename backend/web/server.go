@@ -124,6 +124,7 @@ type Server struct {
 	mailWarmMu                sync.Mutex
 	mailWarmRunning           map[int64]bool
 	mailListCache             *mailListCache
+	mailCategoryCache         *mailCategoryChromeCache
 	attachmentRepairMu        sync.Mutex
 	attachmentRepairRunning   map[int64]map[int64]bool
 	senderContactIconMu       sync.Mutex
@@ -364,6 +365,7 @@ func New(opts Options) (*Server, error) {
 		statusRefreshBlockedUntil: map[int64]time.Time{},
 		deletingIMAPAccounts:      map[int64]map[int64]bool{},
 		mailListCache:             newMailListCache(),
+		mailCategoryCache:         newMailCategoryChromeCache(),
 		mailWarmRunning:           map[int64]bool{},
 		attachmentRepairRunning:   map[int64]map[int64]bool{},
 		senderContactIconCache:    map[int64]map[string]senderContactIconCacheEntry{},

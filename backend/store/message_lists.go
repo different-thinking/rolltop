@@ -22,7 +22,7 @@ func (s *Store) ListMessagesForUser(ctx context.Context, userID int64, limit, of
 		limit = 50
 	}
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
-			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
+			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at, m.category
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
@@ -46,7 +46,7 @@ func (s *Store) ListMessagesForMailbox(ctx context.Context, userID, mailboxID in
 		limit = 50
 	}
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
-			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
+			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at, m.category
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
@@ -209,7 +209,7 @@ func (s *Store) ListRecentSearchEnabledMessagesForUser(ctx context.Context, user
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
-			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at
+			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at, m.category
 		FROM messages m
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		WHERE m.user_id = ? AND mb.include_in_search = 1
@@ -300,6 +300,30 @@ func (s *Store) archivedMailboxExclusion(ctx context.Context, userID int64, excl
 	return " AND m.mailbox_id NOT IN (" + placeholders + ")", args, nil
 }
 
+// allMailSource and snoozeJoin are the FROM text every "mail still in play"
+// query shares. Keeping them in one place is what lets a list and the whole-view
+// selection made from it stay over the same rows.
+const allMailSource = "\n\t\t\tJOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id"
+
+const snoozeJoin = `LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
+			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)`
+
+// inPlayMailScope renders the predicate for mail a whole-account list shows:
+// folders that opt into All Mail, minus the hidden cross-account duplicates,
+// optionally minus each account's Archive folder, plus whatever narrows the
+// particular list. Its arguments belong between the leading user_id and the
+// trailing snooze timestamp.
+func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchived bool, extra string, extraArgs ...any) (string, []any, error) {
+	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
+	if err != nil {
+		return "", nil, err
+	}
+	args := make([]any, 0, len(extraArgs)+len(exclusionArgs))
+	args = append(args, extraArgs...)
+	args = append(args, exclusionArgs...)
+	return extra + " AND mb.show_in_all_mail = 1 AND m.duplicate_of_message_id = 0" + exclusion, args, nil
+}
+
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
 // covers: every unsnoozed message in a folder All Mail shows. Rows the list
 // hides (Trash, Junk, Drafts, snoozed threads) stay out of the selection.
@@ -319,23 +343,20 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
-	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, excludeArchived, "")
 	if err != nil {
 		return nil, err
 	}
 	filterSQL, filterArgs := filter.sql()
-	args := make([]any, 0, len(exclusionArgs)+len(filterArgs)+3)
+	args := make([]any, 0, len(predicateArgs)+len(filterArgs)+3)
 	args = append(args, userID)
-	args = append(args, exclusionArgs...)
+	args = append(args, predicateArgs...)
 	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
-		FROM messages m
-		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
-		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
-			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND mb.show_in_all_mail = 1`+exclusion+filterSQL+` AND m.duplicate_of_message_id = 0
-			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		FROM messages m`+allMailSource+`
+		`+snoozeJoin+`
+		WHERE m.user_id = ?`+predicate+filterSQL+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
 	if err != nil {
@@ -499,7 +520,7 @@ func (s *Store) ListUnarchivedLatestThreadMessagesForUser(ctx context.Context, u
 // reads these in order, so the two only stay in step while there is a single
 // copy of the list to change.
 const messageColumns = `m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
-		m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at`
+		m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at, m.category`
 
 // latestThreadMessagesQuery renders the one-row-per-conversation query the mail
 // lists share. Callers supply only what makes their list different: extra FROM
@@ -538,18 +559,15 @@ func (s *Store) listLatestThreadMessagesForUser(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
-	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, excludeArchived, "")
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, 0, len(exclusionArgs)+4)
+	args := make([]any, 0, len(predicateArgs)+4)
 	args = append(args, userID)
-	args = append(args, exclusionArgs...)
+	args = append(args, predicateArgs...)
 	args = append(args, nowUnix(), threadListLimit(limit), offset)
-	query := latestThreadMessagesQuery(
-		"\n\t\t\tJOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id",
-		" AND mb.show_in_all_mail = 1"+exclusion,
-		order.sortDirection())
+	query := latestThreadMessagesQuery(allMailSource, predicate, order.sortDirection())
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -600,6 +618,118 @@ func (s *Store) ListRoleLatestThreadMessagesForUser(ctx context.Context, userID 
 	return scanMessages(rows)
 }
 
+// ListCategoryLatestThreadMessagesForUser renders one category view. A category
+// answers "what kind of mail is this", which is a different question from "is it
+// still on my plate", so the list is the Unarchived list narrowed to one
+// category: mail already filed away does not come back through a category.
+func (s *Store) ListCategoryLatestThreadMessagesForUser(ctx context.Context, userID int64, category string, limit, offset int, order ThreadListOrder) ([]MessageRecord, error) {
+	normalized, err := validCategoryOrError(category)
+	if err != nil {
+		return nil, err
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, true, " AND m.category = ?", normalized)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]any, 0, len(predicateArgs)+4)
+	args = append(args, userID)
+	args = append(args, predicateArgs...)
+	args = append(args, nowUnix(), threadListLimit(limit), offset)
+	query := latestThreadMessagesQuery(allMailSource, predicate, order.sortDirection())
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+// ListCategoryMailScopeMessagesForUser lists what a whole-view selection over a
+// category covers, so acting on everything a category shows reaches exactly the
+// rows it shows and no archived mail behind them.
+func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID int64, category string, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
+	normalized, err := validCategoryOrError(category)
+	if err != nil {
+		return nil, err
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, true, " AND m.category = ?", normalized)
+	if err != nil {
+		return nil, err
+	}
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(predicateArgs)+len(filterArgs)+3)
+	args = append(args, userID)
+	args = append(args, predicateArgs...)
+	args = append(args, filterArgs...)
+	args = append(args, nowUnix(), scopeMessageLimit(limit))
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
+		FROM messages m`+allMailSource+`
+		`+snoozeJoin+`
+		WHERE m.user_id = ?`+predicate+filterSQL+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		ORDER BY m.date_unix DESC, m.id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScopeMessages(rows)
+}
+
+// CategoryCounts is what one category view holds, counted in messages over the
+// folders that view draws from. The list itself renders one row per
+// conversation, so a category with five messages in two threads reports five
+// beside two rows — the same relationship every folder in the sidebar already
+// has, and the number the whole-view delete needs, because that acts on
+// messages rather than on conversations.
+type CategoryCounts struct {
+	Total  int
+	Unread int
+}
+
+// CountMessagesByCategoryForUser returns each category's totals for the sidebar.
+func (s *Store) CountMessagesByCategoryForUser(ctx context.Context, userID int64) (map[string]CategoryCounts, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, true, " AND m.category <> ''")
+	if err != nil {
+		return nil, err
+	}
+	args := make([]any, 0, len(predicateArgs)+2)
+	args = append(args, userID)
+	args = append(args, predicateArgs...)
+	args = append(args, nowUnix())
+	rows, err := db.QueryContext(ctx, `SELECT m.category, COUNT(*), SUM(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END)
+		FROM messages m`+allMailSource+`
+		`+snoozeJoin+`
+		WHERE m.user_id = ?`+predicate+`
+			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		GROUP BY m.category`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]CategoryCounts{}
+	for rows.Next() {
+		var category string
+		var entry CategoryCounts
+		if err := rows.Scan(&category, &entry.Total, &entry.Unread); err != nil {
+			return nil, err
+		}
+		counts[category] = entry
+	}
+	return counts, rows.Err()
+}
+
 // ListMessagesByIDsForUser bulk-loads messages by ID while preserving user ownership checks.
 func (s *Store) ListMessagesByIDsForUser(ctx context.Context, userID int64, ids []int64) ([]MessageRecord, error) {
 	if len(ids) == 0 {
@@ -643,7 +773,7 @@ func (s *Store) ListThreadMessagesForUser(ctx context.Context, userID int64, msg
 		return []MessageRecord{msg}, nil
 	}
 	rows, err := db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
-			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at
+			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at, category
 		FROM messages WHERE user_id = ? AND thread_key = ? AND duplicate_of_message_id = 0
 		ORDER BY date_unix ASC, id ASC`, userID, key)
 	if err != nil {
@@ -703,7 +833,7 @@ func (s *Store) ListThreadMessagesByKeysForUser(ctx context.Context, userID int6
 			args = append(args, key)
 		}
 		rows, err := db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
-			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at
+			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at, category
 		FROM messages WHERE user_id = ? AND thread_key IN (`+strings.Join(placeholders, ",")+`) AND duplicate_of_message_id = 0
 			ORDER BY thread_key ASC, date_unix ASC, id ASC`, args...)
 		if err != nil {

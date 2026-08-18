@@ -105,6 +105,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		ReferencesHeader: parsed.References,
 		Subject:          parsed.Subject,
 		LanguageCode:     languageCode,
+		Category:         parsed.Category,
 		FromAddr:         parsed.From,
 		ToAddr:           parsed.To,
 		CCAddr:           parsed.CC,

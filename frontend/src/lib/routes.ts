@@ -29,12 +29,17 @@ function decodePathSegment(value = ""): string {
 }
 
 /**
- * MailView names a whole-account list. All Mail is the unnamed default; the
- * others live under /mail/<view> and never combine with a single mailbox.
+ * MailView names a whole-account list. All Mail is the unnamed default, and the
+ * rest live under /mail/<view>. The fixed views are spelled out because the
+ * frontend builds those links itself; category views are any other name, since
+ * the server owns that set and publishes it in the chrome payload. Listing the
+ * categories here as well would mean a category could exist in the sidebar and
+ * still 404 in the router until this file was edited to match.
  */
-export type MailView = "" | "inbox" | "sent" | "drafts";
+export type MailView = string;
 
-const mailViews: MailView[] = ["inbox", "sent", "drafts"];
+/** The views this frontend constructs on its own, rather than reading from chrome. */
+const fixedMailViews = ["inbox", "sent", "drafts"];
 
 /**
  * legacyMailViews keeps older URLs working. The Inbox list shipped as
@@ -45,6 +50,14 @@ const mailViews: MailView[] = ["inbox", "sent", "drafts"];
  */
 const legacyMailViews = new Map<string, MailView>([["unarchived", "inbox"]]);
 
+/** mailViewCategory reports the category a view names, or "" for the rest. */
+export function mailViewCategory(view: MailView): string {
+  return view && !fixedMailViews.includes(view) ? view : "";
+}
+
+/** pageSegment matches the /pN marker, which is the one thing in the view slot that is not a view. */
+const pageSegment = /^p\d+$/;
+
 /** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
 export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {
   const parts = path.split("/").filter(Boolean);
@@ -52,11 +65,15 @@ export function mailRoute(path: string): { mailboxID: string | null; page: numbe
     const id = positiveInt(parts[1], 0);
     return { mailboxID: id > 0 ? String(id) : null, page: positiveInt(parts[2], 1), view: "" };
   }
-  const named = parts[0] === "mail"
-    ? mailViews.find((view) => parts[1] === view) || legacyMailViews.get(parts[1] || "")
-    : undefined;
+  if (parts[0] !== "mail") return { mailboxID: null, page: 1, view: "" };
+  // Anything in the view slot that is not a page marker is a view name, mapped
+  // through the legacy names first. The server decides whether the name is a
+  // list it renders, which is what keeps this router from needing its own copy
+  // of the category set.
+  const segment = parts[1] && !pageSegment.test(parts[1]) ? parts[1] : "";
+  const named = segment ? legacyMailViews.get(segment) || segment : "";
   if (named) return { mailboxID: null, page: positiveInt(parts[2], 1), view: named };
-  return { mailboxID: null, page: parts[0] === "mail" ? positiveInt(parts[1], 1) : 1, view: "" };
+  return { mailboxID: null, page: positiveInt(parts[1], 1), view: "" };
 }
 
 /** mailURL builds the friendly mailbox or whole-account list URL for a page. */

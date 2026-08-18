@@ -111,6 +111,12 @@ func (s *Server) addTenantBootstrap(r *http.Request, userID int64, resp map[stri
 		return err
 	}
 	resp["effective_archive_mailboxes"] = apiAccountMailboxChoices(archiveMailboxes)
+	categories, categoriesPending, err := s.mailCategoryChrome(r.Context(), userID)
+	if err != nil {
+		return err
+	}
+	resp["mail_categories"] = categories
+	resp["mail_categories_pending"] = categoriesPending
 	var chrome viewData
 	s.loadMailboxChrome(r.Context(), userID, &chrome)
 	resp["mailboxes"] = apiMailboxes(chrome.Mailboxes)
@@ -142,6 +148,8 @@ func applyUnavailableTenantBootstrap(userID int64, resp map[string]any) {
 	resp["database_unavailable"] = true
 	resp["swipe_preferences"] = apiSwipePreferencesFromStore(store.DefaultSwipePreferences(userID))
 	resp["effective_archive_mailboxes"] = []apiAccountMailboxChoice{}
+	resp["mail_categories"] = emptyMailCategories()
+	resp["mail_categories_pending"] = 0
 	resp["mailboxes"] = []apiMailbox{}
 	resp["latest_sync_run"] = nil
 	resp["active_sync_runs"] = []apiSyncRun{}

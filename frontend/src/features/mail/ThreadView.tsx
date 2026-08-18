@@ -6,7 +6,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
 import { api } from "../../api";
 import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
-import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
+import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, MailCategorySummary, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
@@ -854,6 +854,7 @@ export function ThreadView({
   navigate,
   mailboxes,
   archiveMailboxes,
+  mailCategories,
   setMessagesHidden,
   enabledPlugins,
   refreshChrome,
@@ -871,6 +872,7 @@ export function ThreadView({
   mailboxes: Mailbox[];
   /** Effective Archive folder per account: identity choice first, swipe mapping otherwise. */
   archiveMailboxes: AccountMailboxChoice[];
+  mailCategories: MailCategorySummary[];
   setMessagesHidden: (messageIDs: number[], hidden: boolean) => void;
   enabledPlugins: string[];
   refreshChrome: () => Promise<Bootstrap | null>;
@@ -1095,6 +1097,21 @@ export function ThreadView({
       const data = await api.addSenderContact(csrf, item.message.id);
       addToast(data.created ? "Sender added to contacts." : "Sender is already in contacts.");
       await load(showImages);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  }
+
+  // Filing a sender is a correction about the sender, not about this one
+  // message, so the toast says how much mail actually moved.
+  async function fileSenderInCategory(item: ThreadMessage, category: MailCategorySummary) {
+    try {
+      const result = await api.setMessageCategory(csrf, item.message.id, category.name);
+      const moved = result.moved > 1 ? ` ${result.moved.toLocaleString()} messages moved.` : "";
+      addToast(`${result.sender || "Sender"} now files under ${category.label}.${moved}`);
+      // Neither refresh needs the other's result, so they overlap rather than
+      // making the user wait for the sum of two round trips.
+      await Promise.all([refreshChrome(), load(showImages)]);
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -2080,6 +2097,22 @@ export function ThreadView({
                           <Icon name="group" />
                           Add sender to contacts
                         </button>
+                        {mailCategories.map((category) => (
+                          item.message.category === category.name ? null : (
+                            <button
+                              key={category.name}
+                              type="button"
+                              title={`File this sender under ${category.label}, now and for future mail`}
+                              onClick={(event) => {
+                                event.currentTarget.closest("details")?.removeAttribute("open");
+                                void fileSenderInCategory(item, category);
+                              }}
+                            >
+                              <Icon name={category.icon || "label"} />
+                              File sender under {category.label}
+                            </button>
+                          )
+                        ))}
                         <OneClickUnsubscribeMenuAction
                           item={item}
                           plugins={pluginSet}

@@ -236,6 +236,10 @@ type MessageRecord struct {
 	AttachmentIndexedAt time.Time
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+	// Category is empty until classification has read the message. The category
+	// lists only ever ask for a named category, so an unclassified row is
+	// simply not in any of them yet.
+	Category string
 }
 
 // MessageSimilarityCandidate is the minimal SQLite envelope needed to validate

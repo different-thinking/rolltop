@@ -87,6 +87,8 @@ export type Message = {
   has_attachments: boolean;
   is_encrypted: boolean;
   is_signed: boolean;
+  /** Empty until classification has read the message's headers. */
+  category?: string;
   snippet: string;
   annotations?: MessageAnnotation[];
 };
@@ -506,6 +508,18 @@ export type FolderProgress = {
 /** StorageStats is a flexible storage usage payload keyed by backend stat names. */
 export type StorageStats = Record<string, unknown>;
 
+/**
+ * MailCategorySummary is one category sidebar entry. The name is the server's
+ * stored category and doubles as the view name in /mail/<name>.
+ */
+export type MailCategorySummary = {
+  name: string;
+  label: string;
+  icon: string;
+  total: number;
+  unread: number;
+};
+
 /** Bootstrap is the first API payload that establishes auth, chrome, CSRF, and plugin state. */
 export type Bootstrap = {
   users_exist: boolean;
@@ -524,6 +538,10 @@ export type Bootstrap = {
    * own choice has overridden the stored swipe mapping.
    */
   effective_archive_mailboxes?: AccountMailboxChoice[];
+  /** The category sidebar entries with the counts each of their lists holds. */
+  mail_categories?: MailCategorySummary[];
+  /** How many messages still have to be read before the categories are complete. */
+  mail_categories_pending?: number;
   account_needs_password?: boolean;
   account_notice?: string;
   database_unavailable?: boolean;
@@ -556,6 +574,8 @@ export type ChromeEvent = {
   mail_generation: number;
   swipe_preferences?: SwipePreferences;
   effective_archive_mailboxes?: AccountMailboxChoice[];
+  mail_categories?: MailCategorySummary[];
+  mail_categories_pending?: number;
   server_started_at?: string;
   server_uptime_seconds?: number;
   build_version?: string;
