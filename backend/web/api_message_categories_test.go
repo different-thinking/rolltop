@@ -195,3 +195,83 @@ func TestCategoryCorrectionOnlyFilesSendersTheCallerCanSee(t *testing.T) {
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
+
+// Dropping a selection onto a category names messages; the correction is still
+// about their senders, so every distinct sender behind the drop is filed once.
+func TestCategoryDropFilesEverySenderBehindTheSelection(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "category-drop@example.test")
+	other := newScopeTestTenant(t, ctx, db, "category-drop-other@example.test")
+	first := createCategoryTestMessage(t, ctx, db, tenant, tenant.inbox, 911, `"Shop" <offers@example.test>`, mailparse.CategoryNewsletters)
+	second := createCategoryTestMessage(t, ctx, db, tenant, tenant.inbox, 912, "offers@example.test", mailparse.CategoryNewsletters)
+	third := createCategoryTestMessage(t, ctx, db, tenant, tenant.inbox, 913, "list@example.test", mailparse.CategoryNewsletters)
+	strangers := createCategoryTestMessage(t, ctx, db, other, other.inbox, 914, "stranger@example.test", mailparse.CategoryRelevant)
+	server := &Server{store: db, masterKey: bytes.Repeat([]byte{9}, 32), events: newEventHub(), mailListCache: newMailListCache(),
+		mailCategoryCache: newMailCategoryChromeCache()}
+
+	// One unreachable message fails the whole drop. Filing the rest would look
+	// finished while quietly covering less mail than the user aimed at.
+	body := `{"message_ids":[` + itoa(first.ID) + `,` + itoa(strangers.ID) + `],"category":"forums"}`
+	if response := categoryRequest(t, server, tenant.user, body); response.Code != http.StatusNotFound {
+		t.Fatalf("drop including another tenant's message = %d, want 404", response.Code)
+	}
+	if pinned, err := db.SenderCategoryOverride(ctx, tenant.user.ID, "offers@example.test"); err != nil || pinned != "" {
+		t.Fatalf("override written by a failed drop = %q err=%v, want none", pinned, err)
+	}
+
+	// Two of the three rows share a sender, so the drop files two senders and
+	// moves all three messages.
+	body = `{"message_ids":[` + itoa(first.ID) + `,` + itoa(second.ID) + `,` + itoa(third.ID) + `],"category":"forums"}`
+	response := categoryRequest(t, server, tenant.user, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("drop = %d, body %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Category string   `json:"category"`
+		Sender   string   `json:"sender"`
+		Senders  []string `json:"senders"`
+		Moved    int64    `json:"moved"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Senders, []string{"offers@example.test", "list@example.test"}) {
+		t.Fatalf("senders = %v, want the two distinct addresses in the order they were dropped", result.Senders)
+	}
+	if result.Category != mailparse.CategoryForums || result.Sender != "offers@example.test" || result.Moved != 3 {
+		t.Fatalf("result = %+v, want 3 messages moved under forums", result)
+	}
+	for _, sender := range result.Senders {
+		if pinned, err := db.SenderCategoryOverride(ctx, tenant.user.ID, sender); err != nil || pinned != mailparse.CategoryForums {
+			t.Fatalf("override for %q = %q err=%v", sender, pinned, err)
+		}
+	}
+	for _, id := range []int64{first.ID, second.ID, third.ID} {
+		stored, err := db.GetMessageForUser(ctx, tenant.user.ID, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Category != mailparse.CategoryForums {
+			t.Fatalf("message %d category = %q, want %q", id, stored.Category, mailparse.CategoryForums)
+		}
+	}
+	// The single-message field older clients send still works, and naming the
+	// same message through both fields files its sender once rather than twice.
+	body = `{"message_id":` + itoa(third.ID) + `,"message_ids":[` + itoa(third.ID) + `],"category":"notifications"}`
+	response = categoryRequest(t, server, tenant.user, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("legacy field = %d, body %s", response.Code, response.Body.String())
+	}
+	result.Senders = nil
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Senders, []string{"list@example.test"}) || result.Moved != 1 {
+		t.Fatalf("legacy result = %+v, want the one sender filed once", result)
+	}
+}

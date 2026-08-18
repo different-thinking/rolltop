@@ -38,6 +38,16 @@ export type MoveTarget = {
 
 export type MessageTransferAction = "move" | "copy";
 
+/**
+ * MailCategoryTarget is a category a drop can file mail into. It carries the
+ * label alongside the stored name so a toast can say what the user aimed at
+ * rather than the identifier behind it.
+ */
+export type MailCategoryTarget = {
+  name: string;
+  label: string;
+};
+
 export type UnlockedSecurityKey = {
   id: number;
   identity_id: number;
@@ -94,6 +104,7 @@ export type AppShellProps = {
   location: LocationState;
   navigate: Navigate;
   onMoveMessages: (messageIDs: number[], mailbox: MoveTarget, action?: MessageTransferAction) => void;
+  onFileMessagesInCategory: (messageIDs: number[], category: MailCategoryTarget) => void;
   openCompose: (query?: string) => void;
   refreshChrome: RefreshChrome;
   notificationsEnabled: boolean;

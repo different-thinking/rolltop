@@ -1,10 +1,10 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar, mobile
 // drawer, drag-to-folder handling, sync status, and the mobile compose affordance.
 
-import { Fragment, useMemo, useState, useEffect, useRef } from "react";
+import { Fragment, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
 import { api } from "../../api";
-import type { AppShellProps, LocationState, MessageTransferAction, MoveTarget, SecurityUnlockState } from "../../appTypes";
+import type { AppShellProps, LocationState, MailCategoryTarget, MessageTransferAction, MoveTarget, SecurityUnlockState } from "../../appTypes";
 import type { Bootstrap, Mailbox, MailCategorySummary, SyncRun, User } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/androidNative";
@@ -45,6 +45,7 @@ export function AppShell({
   location,
   navigate,
   onMoveMessages,
+  onFileMessagesInCategory,
   openCompose,
   refreshChrome,
   notificationsEnabled,
@@ -59,7 +60,7 @@ export function AppShell({
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [messageDragActive, setMessageDragActive] = useState(false);
   const [touchDragPreview, setTouchDragPreview] = useState<TouchDragPreview | null>(null);
-  const [touchDropID, setTouchDropID] = useState<number | null>(null);
+  const [touchDrop, setTouchDrop] = useState<TouchDropTarget | null>(null);
   const [touchRevealedAccounts, setTouchRevealedAccounts] = useState<string[]>([]);
   const appRef = useRef<HTMLDivElement>(null);
   const dragOpenedSidebar = useRef(false);
@@ -67,9 +68,17 @@ export function AppShell({
   const nativeDragActivationTimer = useRef<number | null>(null);
   const mobileSidebarOpenRef = useRef(mobileSidebarOpen);
   const onMoveMessagesRef = useRef(onMoveMessages);
+  const onFileMessagesInCategoryRef = useRef(onFileMessagesInCategory);
 
-  mobileSidebarOpenRef.current = mobileSidebarOpen;
-  onMoveMessagesRef.current = onMoveMessages;
+  // The Android touch listeners are installed once and read these refs when a
+  // drop lands, so they have to hold committed values. Writing them during
+  // render would let a discarded render hand a drop a callback or a sidebar
+  // state that never reached the screen.
+  useLayoutEffect(() => {
+    mobileSidebarOpenRef.current = mobileSidebarOpen;
+    onMoveMessagesRef.current = onMoveMessages;
+    onFileMessagesInCategoryRef.current = onFileMessagesInCategory;
+  });
 
   useEffect(() => {
     return () => {
@@ -161,7 +170,7 @@ export function AppShell({
       removeTouchDragClassAfterEvent();
       setMessageDragActive(false);
       setTouchDragPreview(null);
-      setTouchDropID(null);
+      setTouchDrop(null);
       setTouchRevealedAccounts((current) => current.length > 0 ? [] : current);
       closeAutoOpenedSidebar();
       expireCompatibilityClickGuard();
@@ -241,7 +250,7 @@ export function AppShell({
       if (Math.hypot(touch.clientX - session.startX, touch.clientY - session.startY) > androidTouchDragSlop) {
         session.movedAfterActivation = true;
       }
-      setTouchDropID(session.movedAfterActivation ? touchDropTargetAt(touch.clientX, touch.clientY)?.id ?? null : null);
+      setTouchDrop(session.movedAfterActivation ? touchDropTargetAt(touch.clientX, touch.clientY) : null);
       // Touch drags cannot fire dragenter, so dwelling on a collapsed account
       // header is what opens it up as a drop target.
       const accountKey = session.movedAfterActivation ? touchAccountKeyAt(touch.clientX, touch.clientY) : null;
@@ -264,6 +273,10 @@ export function AppShell({
       const accountIDs = session.accountIDs;
       resetTouchDrag();
       if (!dropTarget) return;
+      if (dropTarget.kind === "category") {
+        onFileMessagesInCategoryRef.current(messageIDs, { name: dropTarget.name, label: dropTarget.label });
+        return;
+      }
       const crossAccount = accountIDs.some((accountID) => dropTarget.accountID > 0 && accountID !== dropTarget.accountID);
       onMoveMessagesRef.current(messageIDs, { id: dropTarget.id, name: dropTarget.name }, crossAccount ? "copy" : "move");
     }
@@ -435,9 +448,10 @@ export function AppShell({
           openCompose={openCompose}
           refreshChrome={refreshChrome}
           onMoveMessages={onMoveMessages}
+          onFileMessagesInCategory={onFileMessagesInCategory}
           mobileOpen={mobileSidebarOpen}
           dragActive={messageDragActive}
-          touchDropID={touchDropID}
+          touchDrop={touchDrop}
           touchRevealedAccounts={touchRevealedAccounts}
           onClose={closeMobileSidebar}
         />
@@ -496,11 +510,53 @@ type AndroidTouchDragSession = {
   holdTimer: number | null;
 };
 
-type TouchDropTarget = {
-  id: number;
-  name: string;
-  accountID: number;
-};
+/**
+ * TouchDropTarget is what a finger is currently over. A folder takes the mail
+ * itself; a category takes a statement about its senders, so the two carry
+ * different identities rather than a shared numeric ID.
+ */
+type TouchDropTarget =
+  | { kind: "mailbox"; id: number; name: string; accountID: number }
+  | { kind: "category"; name: string; label: string };
+
+/**
+ * draggedMessages reads what a message drag carries. The three payload formats
+ * are tried in order of how much they say: the full transfer object, the bare ID
+ * list, then the single-ID fallback that a drop from an older tab still uses.
+ */
+function draggedMessages(event: DragEvent): { ids: number[]; accountIDs: number[] } {
+  const transfer = event.dataTransfer.getData("application/x-rolltop-message-transfer");
+  if (transfer) {
+    try {
+      const parsed = JSON.parse(transfer) as { ids?: unknown; account_ids?: unknown };
+      const ids = Array.isArray(parsed.ids) ? numericIDs(parsed.ids) : [];
+      if (ids.length > 0) {
+        return { ids, accountIDs: Array.isArray(parsed.account_ids) ? numericIDs(parsed.account_ids) : [] };
+      }
+    } catch {
+      // A malformed payload falls through to the simpler formats below.
+    }
+  }
+  const bulk = event.dataTransfer.getData("application/x-rolltop-messages");
+  if (bulk) {
+    try {
+      const parsed = JSON.parse(bulk) as unknown;
+      const ids = Array.isArray(parsed) ? numericIDs(parsed) : [];
+      if (ids.length > 0) return { ids, accountIDs: [] };
+    } catch {
+      // Same here: an unreadable list is no list, not a failed drop.
+    }
+  }
+  // Only Rolltop's own formats are read back. The drag also carries text/plain
+  // so mail can be dropped into other apps, but accepting it here would let any
+  // dragged text that happens to parse as a number file or move that message.
+  const messageID = Number.parseInt(event.dataTransfer.getData("application/x-rolltop-message"), 10);
+  return { ids: Number.isFinite(messageID) && messageID > 0 ? [messageID] : [], accountIDs: [] };
+}
+
+function numericIDs(values: unknown[]): number[] {
+  return values.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0);
+}
 
 function positiveIDs(raw: string | undefined): number[] {
   if (!raw) return [];
@@ -517,12 +573,20 @@ function touchWithIdentifier(touches: TouchList, identifier: number): Touch | nu
 }
 
 function touchDropTargetAt(x: number, y: number): TouchDropTarget | null {
-  const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-rolltop-drop-mailbox-id]");
+  const element = document.elementFromPoint(x, y);
+  const category = element?.closest<HTMLElement>("[data-rolltop-drop-category]");
+  if (category) {
+    const name = category.dataset.rolltopDropCategory || "";
+    if (!name) return null;
+    return { kind: "category", name, label: category.dataset.rolltopDropCategoryLabel || name };
+  }
+  const target = element?.closest<HTMLElement>("[data-rolltop-drop-mailbox-id]");
   if (!target) return null;
   const id = Number.parseInt(target.dataset.rolltopDropMailboxId || "", 10);
   if (!Number.isFinite(id) || id <= 0) return null;
   const accountID = Number.parseInt(target.dataset.rolltopDropAccountId || "", 10);
   return {
+    kind: "mailbox",
     id,
     name: target.dataset.rolltopDropMailboxName || "Folder",
     accountID: Number.isFinite(accountID) && accountID > 0 ? accountID : 0
@@ -817,9 +881,10 @@ function Sidebar({
   openCompose,
   refreshChrome,
   onMoveMessages,
+  onFileMessagesInCategory,
   mobileOpen,
   dragActive,
-  touchDropID,
+  touchDrop,
   touchRevealedAccounts,
   onClose
 }: {
@@ -843,13 +908,19 @@ function Sidebar({
   openCompose: (query?: string) => void;
   refreshChrome: () => Promise<Bootstrap | null>;
   onMoveMessages: (messageIDs: number[], mailbox: MoveTarget, action?: MessageTransferAction) => void;
+  onFileMessagesInCategory: (messageIDs: number[], category: MailCategoryTarget) => void;
   mobileOpen: boolean;
   dragActive: boolean;
-  touchDropID: number | null;
+  touchDrop: TouchDropTarget | null;
   touchRevealedAccounts: string[];
   onClose: () => void;
 }) {
   const [dropID, setDropID] = useState<number | null>(null);
+  const [dropCategory, setDropCategory] = useState<string | null>(null);
+  // A touch drag reports its target from the shell, so the two drop kinds are
+  // unpacked once here rather than re-tested at every link that draws itself.
+  const touchDropMailboxID = touchDrop?.kind === "mailbox" ? touchDrop.id : null;
+  const touchDropCategory = touchDrop?.kind === "category" ? touchDrop.name : null;
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   const [collapsedAccounts, setCollapsedAccounts] = useState<Set<string>>(() => loadCollapsedAccounts(userID));
   const [dragRevealedAccounts, setDragRevealedAccounts] = useState<Set<string>>(() => new Set());
@@ -887,8 +958,9 @@ function Sidebar({
       icon: category.icon || "label",
       active: listRoute.view === category.name,
       unread: category.unread,
-      title: `${category.label}: ${messageCountLabel(category.total)}, decided from each message's own headers and excluding archived mail`,
-      section: index === 0 ? "Categories" : undefined
+      title: `${category.label}: ${messageCountLabel(category.total)}, decided from each message's own headers and excluding archived mail. Drop mail here to file its sender under ${category.label}.`,
+      section: index === 0 ? "Categories" : undefined,
+      category: { name: category.name, label: category.label }
     }))
   ];
   const shortcutHintsVisible = useSidebarShortcuts(namedLists, openList);
@@ -897,6 +969,7 @@ function Sidebar({
   useEffect(() => {
     if (dragActive) return;
     setDropID(null);
+    setDropCategory(null);
     setDragRevealedAccounts((current) => current.size > 0 ? new Set() : current);
   }, [dragActive]);
 
@@ -937,43 +1010,44 @@ function Sidebar({
     setDropID((current) => current === mailboxID ? null : current);
   }
 
+  function onCategoryDragEnter(event: DragEvent, category: MailCategoryTarget) {
+    if (!canAcceptDraggedMessages(event)) return;
+    event.preventDefault();
+    setDropCategory(category.name);
+  }
+
+  // Filing is a statement about the senders, not a transfer, so a category drop
+  // has no copy variant: the modifier keys make no difference to what it does.
+  function onCategoryDragOver(event: DragEvent, category: MailCategoryTarget) {
+    if (!canAcceptDraggedMessages(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropCategory(category.name);
+  }
+
+  function onCategoryDragLeave(event: DragEvent, category: MailCategoryTarget) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setDropCategory((current) => current === category.name ? null : current);
+  }
+
+  function onCategoryDrop(event: DragEvent, category: MailCategoryTarget) {
+    event.preventDefault();
+    setDropCategory(null);
+    const { ids } = draggedMessages(event);
+    if (ids.length === 0) return;
+    onFileMessagesInCategory(ids, category);
+    onClose();
+  }
+
   function onDrop(event: DragEvent, mailbox: Mailbox) {
     event.preventDefault();
     setDropID(null);
-    const transfer = event.dataTransfer.getData("application/x-rolltop-message-transfer");
-    const bulk = event.dataTransfer.getData("application/x-rolltop-messages");
-    let ids: number[] = [];
-    let sourceAccountIDs: number[] = [];
-    if (transfer) {
-      try {
-        const parsed = JSON.parse(transfer) as { ids?: unknown; account_ids?: unknown };
-        if (Array.isArray(parsed.ids)) ids = parsed.ids.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
-        if (Array.isArray(parsed.account_ids)) {
-          sourceAccountIDs = parsed.account_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
-        }
-      } catch {
-        ids = [];
-        sourceAccountIDs = [];
-      }
-    }
-    if (ids.length === 0 && bulk) {
-      try {
-        const parsed = JSON.parse(bulk) as unknown;
-        if (Array.isArray(parsed)) ids = parsed.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
-      } catch {
-        ids = [];
-      }
-    }
-    if (ids.length === 0) {
-      const raw = event.dataTransfer.getData("application/x-rolltop-message") || event.dataTransfer.getData("text/plain");
-      const messageID = Number.parseInt(raw, 10);
-      if (Number.isFinite(messageID) && messageID > 0) ids = [messageID];
-    }
-    if (ids.length > 0) {
-      const crossAccount = sourceAccountIDs.some((accountID) => mailbox.account_id > 0 && accountID !== mailbox.account_id);
-      onMoveMessages(ids, { id: mailbox.id, name: mailbox.name }, crossAccount || dragCopyRequested(event) ? "copy" : "move");
-      onClose();
-    }
+    const { ids, accountIDs } = draggedMessages(event);
+    if (ids.length === 0) return;
+    const crossAccount = accountIDs.some((accountID) => mailbox.account_id > 0 && accountID !== mailbox.account_id);
+    onMoveMessages(ids, { id: mailbox.id, name: mailbox.name }, crossAccount || dragCopyRequested(event) ? "copy" : "move");
+    onClose();
   }
 
   function toggleGroup(key: string) {
@@ -1016,7 +1090,7 @@ function Sidebar({
     return (
       <a
         href={url}
-        className={`folder message-drop-target ${depth > 0 ? "folder-child" : ""} ${active ? "active" : ""} ${dropID === mailbox.id || touchDropID === mailbox.id ? "drop-target" : ""}`}
+        className={`folder message-drop-target ${depth > 0 ? "folder-child" : ""} ${active ? "active" : ""} ${dropID === mailbox.id || touchDropMailboxID === mailbox.id ? "drop-target" : ""}`}
         data-rolltop-drop-mailbox-id={mailbox.id}
         data-rolltop-drop-mailbox-name={mailbox.name}
         data-rolltop-drop-account-id={mailbox.account_id}
@@ -1044,7 +1118,7 @@ function Sidebar({
     return (
       <div className="folder-tree" key={node.mailbox.id}>
         <div
-          className={`folder folder-parent message-drop-target ${depth > 0 ? "folder-child" : ""} ${active ? "active" : ""} ${dropID === node.mailbox.id || touchDropID === node.mailbox.id ? "drop-target" : ""}`}
+          className={`folder folder-parent message-drop-target ${depth > 0 ? "folder-child" : ""} ${active ? "active" : ""} ${dropID === node.mailbox.id || touchDropMailboxID === node.mailbox.id ? "drop-target" : ""}`}
           data-rolltop-drop-mailbox-id={node.mailbox.id}
           data-rolltop-drop-mailbox-name={node.mailbox.name}
           data-rolltop-drop-account-id={node.mailbox.account_id}
@@ -1090,27 +1164,37 @@ function Sidebar({
         Compose
       </a>
       <div className="sidebar-scroll">
-        {namedLists.map((entry, index) => (
-          <Fragment key={entry.url}>
-            {entry.section ? <div className="side-section">{entry.section}</div> : null}
-            <a
-              href={entry.url}
-              className={`folder ${entry.active ? "active" : ""}`}
-              title={entry.title}
-              onClick={(event) => open(event, entry.url)}
-            >
-              <span className="folder-name">
-                <Icon name={entry.icon} weight={entry.active ? "bold" : undefined} />
-                {entry.label}
-              </span>
-              {shortcutHintsVisible && index < maxSidebarShortcuts ? (
-                <span className="folder-shortcut" aria-hidden="true">{index + 1}</span>
-              ) : entry.unread > 0 ? (
-                <span className="folder-count">{entry.unread.toLocaleString()}</span>
-              ) : null}
-            </a>
-          </Fragment>
-        ))}
+        {namedLists.map((entry, index) => {
+          const category = entry.category;
+          const dropping = category ? dropCategory === category.name || touchDropCategory === category.name : false;
+          return (
+            <Fragment key={entry.url}>
+              {entry.section ? <div className="side-section">{entry.section}</div> : null}
+              <a
+                href={entry.url}
+                className={`folder ${category ? "message-drop-target" : ""} ${entry.active ? "active" : ""} ${dropping ? "drop-target" : ""}`}
+                title={entry.title}
+                data-rolltop-drop-category={category?.name}
+                data-rolltop-drop-category-label={category?.label}
+                onClick={(event) => open(event, entry.url)}
+                onDragEnter={category ? (event) => onCategoryDragEnter(event, category) : undefined}
+                onDragOver={category ? (event) => onCategoryDragOver(event, category) : undefined}
+                onDragLeave={category ? (event) => onCategoryDragLeave(event, category) : undefined}
+                onDrop={category ? (event) => onCategoryDrop(event, category) : undefined}
+              >
+                <span className="folder-name">
+                  <Icon name={entry.icon} weight={entry.active ? "bold" : undefined} />
+                  {entry.label}
+                </span>
+                {shortcutHintsVisible && index < maxSidebarShortcuts ? (
+                  <span className="folder-shortcut" aria-hidden="true">{index + 1}</span>
+                ) : entry.unread > 0 ? (
+                  <span className="folder-count">{entry.unread.toLocaleString()}</span>
+                ) : null}
+              </a>
+            </Fragment>
+          );
+        })}
         {mailCategoriesPending > 0 ? (
           <div className="sidebar-note" title="Stored mail is still being read for its category headers">
             Sorting {mailCategoriesPending.toLocaleString()} more {mailCategoriesPending === 1 ? "message" : "messages"} into categories
@@ -1196,6 +1280,12 @@ type NamedListEntry = {
   title: string;
   /** Section heading rendered above this entry, when it starts a new group. */
   section?: string;
+  /**
+   * The category this entry lists, when it is one. Only these entries take a
+   * drop: a folder is somewhere mail can be put, while Inbox, All Mail, Sent,
+   * Drafts and Snoozed are questions about mail that dropping cannot answer.
+   */
+  category?: MailCategoryTarget;
 };
 
 type SidebarAccountGroup = {

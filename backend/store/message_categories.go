@@ -206,9 +206,31 @@ func (s *Store) SenderCategoryOverride(ctx context.Context, userID int64, sender
 // stored are rewritten in the same transaction, because a correction that only
 // applied to future mail would leave the list the user is looking at unchanged.
 func (s *Store) SetSenderCategoryOverride(ctx context.Context, userID int64, sender, category string) (int64, error) {
-	normalizedSender := NormalizeCategorySender(sender)
-	if normalizedSender == "" {
-		return 0, fmt.Errorf("message category override: %q has no address to key on", sender)
+	return s.SetSenderCategoryOverrides(ctx, userID, []string{sender}, category)
+}
+
+// SetSenderCategoryOverrides pins several senders to one category at once. One
+// transaction covers the whole set on purpose: a drop that named five senders
+// either files all five or none. Committing them one by one would let a failure
+// halfway through leave some senders corrected and some not, with the caller
+// reporting a failure it cannot undo and no way for the user to tell which half
+// took.
+func (s *Store) SetSenderCategoryOverrides(ctx context.Context, userID int64, senders []string, category string) (int64, error) {
+	normalizedSenders := make([]string, 0, len(senders))
+	seen := make(map[string]struct{}, len(senders))
+	for _, sender := range senders {
+		normalized := NormalizeCategorySender(sender)
+		if normalized == "" {
+			return 0, fmt.Errorf("message category override: %q has no address to key on", sender)
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		normalizedSenders = append(normalizedSenders, normalized)
+	}
+	if len(normalizedSenders) == 0 {
+		return 0, nil
 	}
 	normalizedCategory, err := validCategoryOrError(category)
 	if err != nil {
@@ -224,18 +246,24 @@ func (s *Store) SetSenderCategoryOverride(ctx context.Context, userID int64, sen
 	}
 	defer tx.Rollback()
 	ts := nowUnix()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO category_sender_overrides (user_id, sender, category, created_at, updated_at)
+	for _, sender := range normalizedSenders {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO category_sender_overrides (user_id, sender, category, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, sender) DO UPDATE SET category = excluded.category, updated_at = excluded.updated_at`,
-		userID, normalizedSender, normalizedCategory, ts, ts); err != nil {
-		return 0, err
+			userID, sender, normalizedCategory, ts, ts); err != nil {
+			return 0, err
+		}
 	}
 	// Messages the backfill has not reached yet keep their empty category on
 	// purpose: the override is applied when they are classified, and filing them
 	// here would take them out of the queue without ever reading them.
+	args := make([]any, 0, len(normalizedSenders)+4)
+	args = append(args, normalizedCategory, ts, userID, normalizedCategory)
+	for _, sender := range normalizedSenders {
+		args = append(args, sender)
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE messages SET category = ?, updated_at = ?
-		WHERE user_id = ? AND category <> '' AND category <> ? AND sender_address = ?`,
-		normalizedCategory, ts, userID, normalizedCategory, normalizedSender)
+		WHERE user_id = ? AND category <> '' AND category <> ? AND sender_address IN (`+sqlPlaceholders(len(normalizedSenders))+`)`, args...)
 	if err != nil {
 		return 0, err
 	}

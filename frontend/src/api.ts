@@ -519,11 +519,13 @@ export const api = {
   /**
    * setMessageCategory files every message from one sender into a category and
    * keeps future mail from that sender there. It is a correction about the
-   * sender, so it deliberately reaches beyond the message that prompted it.
+   * sender, so it deliberately reaches beyond the messages that prompted it.
+   * Several messages may be named at once — dropping a multi-row selection onto
+   * a category does — and the server files each distinct sender behind them.
    */
-  setMessageCategory: (csrf: string, messageID: number, category: string) =>
-    postJSON<{ category: string; sender: string; moved: number }>("/api/mail/category", csrf, {
-      message_id: messageID,
+  setMessageCategory: (csrf: string, messageIDs: number | number[], category: string) =>
+    postJSON<{ category: string; sender: string; senders: string[]; moved: number }>("/api/mail/category", csrf, {
+      message_ids: Array.isArray(messageIDs) ? messageIDs : [messageIDs],
       category
     }),
   calendars: () => getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars"),

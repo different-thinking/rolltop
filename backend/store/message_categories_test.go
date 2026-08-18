@@ -258,3 +258,121 @@ func TestPendingCountDescribesOnlyMailTheCategoryListsCanShow(t *testing.T) {
 		t.Fatalf("backfill queue = %d rows, want all three regardless of folder", len(candidates))
 	}
 }
+
+func TestReportedSpamLeavesEveryWholeAccountList(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	junk, err := f.db.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Junk", "junk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A Junk folder that opts into All Mail is the case this guards: the folder
+	// setting must not be able to put reported spam back in front of the user,
+	// because Report spam promises the message is gone from these lists.
+	if err := f.db.UpdateMailboxSettings(ctx, f.user.ID, junk.ID, MailboxSettings{
+		SyncMode: "full", Role: "junk", ShowInSidebar: true, ShowInAllMail: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kept := f.create(t, f.inbox, 1, "ada@example.test", mailparse.CategoryRelevant)
+	spam := f.create(t, junk, 2, "spammer@example.test", mailparse.CategoryNewsletters)
+
+	inbox, err := f.db.ListUnarchivedLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != kept.ID {
+		t.Fatalf("inbox = %v, want only %d (spam %d must stay out)", messageIDsOf(inbox), kept.ID, spam.ID)
+	}
+	all, err := f.db.ListLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != kept.ID {
+		t.Fatalf("all mail = %v, want only %d", messageIDsOf(all), kept.ID)
+	}
+	newsletters, err := f.db.ListCategoryLatestThreadMessagesForUser(ctx, f.user.ID, mailparse.CategoryNewsletters, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newsletters) != 0 {
+		t.Fatalf("newsletters = %v, want nothing: %d is spam now", messageIDsOf(newsletters), spam.ID)
+	}
+	counts, err := f.db.CountMessagesByCategoryForUser(ctx, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[mailparse.CategoryNewsletters].Total != 0 {
+		t.Fatalf("newsletters badge = %+v, want nothing counted", counts[mailparse.CategoryNewsletters])
+	}
+	// A whole-view selection has to cover exactly what the list showed, or
+	// acting on "everything here" would reach the spam the list hid.
+	scope, err := f.db.ListUnarchivedMailScopeMessagesForUser(ctx, f.user.ID, ScopeFilter{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].ID != kept.ID {
+		t.Fatalf("inbox scope = %+v, want only %d", scope, kept.ID)
+	}
+	// The folder itself still lists its own mail: hiding spam from the combined
+	// views is not the same as making it unreachable.
+	folder, err := f.db.ListLatestThreadMessagesForMailbox(ctx, f.user.ID, junk.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder) != 1 || folder[0].ID != spam.ID {
+		t.Fatalf("junk folder = %v, want %d", messageIDsOf(folder), spam.ID)
+	}
+}
+
+func TestFilingSeveralSendersLandsWholeOrNotAtAll(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	f.create(t, f.inbox, 1, `"Shop" <offers@example.test>`, mailparse.CategoryNewsletters)
+	f.create(t, f.inbox, 2, "offers@example.test", mailparse.CategoryNewsletters)
+	f.create(t, f.inbox, 3, "list@example.test", mailparse.CategoryNewsletters)
+
+	// A sender with no address to key on, or a category that does not exist,
+	// fails the call before anything is written. Filing the senders that did
+	// parse would leave the user with a correction that covered part of what
+	// they dropped and no way to tell which part.
+	for _, broken := range []struct {
+		senders  []string
+		category string
+	}{
+		{senders: []string{"offers@example.test", "   "}, category: mailparse.CategoryForums},
+		{senders: []string{"offers@example.test", "list@example.test"}, category: "everything"},
+	} {
+		if _, err := f.db.SetSenderCategoryOverrides(ctx, f.user.ID, broken.senders, broken.category); err == nil {
+			t.Fatalf("SetSenderCategoryOverrides(%v, %q) succeeded, want a rejection", broken.senders, broken.category)
+		}
+		for _, sender := range []string{"offers@example.test", "list@example.test"} {
+			if pinned, err := f.db.SenderCategoryOverride(ctx, f.user.ID, sender); err != nil || pinned != "" {
+				t.Fatalf("override for %q after a rejected call = %q err=%v, want none", sender, pinned, err)
+			}
+		}
+	}
+
+	// The same address named twice is one sender, and the count reports the
+	// messages that actually changed category rather than the rows examined.
+	moved, err := f.db.SetSenderCategoryOverrides(ctx, f.user.ID,
+		[]string{"Shop <offers@example.test>", "offers@example.test", "list@example.test"}, mailparse.CategoryForums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 3 {
+		t.Fatalf("moved = %d, want all 3 messages", moved)
+	}
+	for _, sender := range []string{"offers@example.test", "list@example.test"} {
+		if pinned, err := f.db.SenderCategoryOverride(ctx, f.user.ID, sender); err != nil || pinned != mailparse.CategoryForums {
+			t.Fatalf("override for %q = %q err=%v", sender, pinned, err)
+		}
+	}
+	forums, err := f.db.ListCategoryLatestThreadMessagesForUser(ctx, f.user.ID, mailparse.CategoryForums, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forums) != 3 {
+		t.Fatalf("forums = %v, want all three messages", messageIDsOf(forums))
+	}
+}

@@ -12,7 +12,7 @@ import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
 import { dateGroupLabel, displaySnoozeUntil, displayTime, localDayKey, messageCountLabel } from "../../lib/format";
 import { displayInitial, stableHash } from "../../lib/senderIdentity";
-import { archiveMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
+import { archiveMailboxForAccount, junkMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
@@ -202,9 +202,11 @@ export function MailView({
   // Inbox and the categories both describe mail that is still in play, so both
   // leave each account's Archive folder out.
   const excludesArchived = view === "inbox" || Boolean(activeCategory);
+  // Junk is out of these lists by role on the server, whatever its All Mail
+  // setting says, so counting it here would promise rows the list cannot show.
   const viewMailboxes = mailboxes.filter((item) => {
     if (viewRole) return roleMailboxIDSet.has(item.id);
-    if (item.show_in_all_mail === false) return false;
+    if (item.role === "junk" || item.show_in_all_mail === false) return false;
     return !excludesArchived || !archiveMailboxIDs.has(item.id);
   });
   // A category's size is only knowable from the chrome payload. Leaving it
@@ -1231,6 +1233,43 @@ function conversationTransferAccountIDs(conversation: Conversation): number[] {
   return uniquePositiveIDs(ids);
 }
 
+/**
+ * RowMoveAction names the row commands that relocate a whole conversation into
+ * one folder. Spam is a move like the other two: reporting it files the mail in
+ * the account's Junk folder, which is what keeps it out of Inbox, All Mail, and
+ * every category list.
+ */
+type RowMoveAction = "trash" | "archive" | "spam";
+
+/** rowMoveVerb names an action inside a sentence about what could not be done. */
+function rowMoveVerb(action: RowMoveAction): string {
+  return action === "spam" ? "report" : action;
+}
+
+/** rowMoveLabel names a failed action the way its button did. */
+function rowMoveLabel(action: RowMoveAction): string {
+  switch (action) {
+  case "trash":
+    return "Move to trash";
+  case "spam":
+    return "Report spam";
+  default:
+    return "Archive";
+  }
+}
+
+/** rowMoveMissingTargetHint says which folder is missing and where to set it. */
+function rowMoveMissingTargetHint(action: RowMoveAction): string {
+  switch (action) {
+  case "trash":
+    return "Choose a Trash folder for this account before moving messages to Trash.";
+  case "spam":
+    return "This account has no Junk folder to report spam into.";
+  default:
+    return "Choose an Archive folder for this account in swipe settings.";
+  }
+}
+
 type ConversationReadState = {
   id: number;
   read: boolean;
@@ -2181,23 +2220,20 @@ function MessageList({
   // Shared single-row move for swipes and the pointer row actions. `direction`
   // picks the dismissal: a swipe slides the row out toward the finger, while a
   // row action (direction null) collapses it the way bulk delete does.
-  function moveConversation(conversation: Conversation, action: "trash" | "archive", direction: "start" | "end" | null): boolean {
+  function moveConversation(conversation: Conversation, action: RowMoveAction, direction: "start" | "end" | null): boolean {
     const accountIDs = conversationTransferAccountIDs(conversation);
     if (accountIDs.length !== 1) {
-      addToast(`Cannot ${action} a conversation containing messages from multiple accounts.`, "error");
+      addToast(`Cannot ${rowMoveVerb(action)} a conversation containing messages from multiple accounts.`, "error");
       return false;
     }
     const accountID = accountIDs[0];
     const target = action === "trash"
       ? trashMailboxForAccount(mailboxes, accountID)
-      : archiveMailboxForAccount(mailboxes, archiveMailboxes, accountID);
+      : action === "spam"
+        ? junkMailboxForAccount(mailboxes, accountID)
+        : archiveMailboxForAccount(mailboxes, archiveMailboxes, accountID);
     if (!target) {
-      addToast(
-        action === "trash"
-          ? "Choose a Trash folder for this account before moving messages to Trash."
-          : "Choose an Archive folder for this account in swipe settings.",
-        "error"
-      );
+      addToast(rowMoveMissingTargetHint(action), "error");
       return false;
     }
     if (conversation.message.mailbox_id === target.id) {
@@ -2219,7 +2255,9 @@ function MessageList({
         // commit the request has to leave before any await, or unload cancels
         // it — but only once the move itself fits the keepalive chunk budget,
         // so a truncated move never drops the reminder of a message that stays.
-        const unsnooze = snoozedView && action === "trash";
+        // Trash and spam end a conversation, so they dismiss its snooze reminder
+        // too; archive only files it away, and a reminder there still makes sense.
+        const unsnooze = snoozedView && action !== "archive";
         const keepaliveMoveComplete = messageIDs.length <= bulkMessageIDLimit * keepaliveMoveChunkBudget;
         if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         const { movedIDs, queuedIDs, queuedRunIDs, error } = await executeMailboxMove(target, messageIDs, keepalive);
@@ -2241,7 +2279,7 @@ function MessageList({
           cancelSwipeDismiss(conversation.message.id);
           restoreDismissed(dismissedIDs);
         }
-        const partial = movedIDs.length > 0 ? `${movedIDs.length.toLocaleString()} moved, but the remaining action failed` : `${action === "trash" ? "Move to trash" : "Archive"} failed`;
+        const partial = movedIDs.length > 0 ? `${movedIDs.length.toLocaleString()} moved, but the remaining action failed` : `${rowMoveLabel(action)} failed`;
         addToast(`${partial}: ${messageFromError(error)}`, "error");
       }
     );
@@ -2389,7 +2427,7 @@ function MessageList({
     navigate(`/compose?reply=${conversation.message.id}`);
   }
 
-  function moveConversationByRowAction(conversation: Conversation, action: "trash" | "archive") {
+  function moveConversationByRowAction(conversation: Conversation, action: RowMoveAction) {
     if (rowActionBlocked(conversation)) return;
     moveConversation(conversation, action, null);
   }
@@ -2575,6 +2613,14 @@ function MessageList({
         const touchAccountIDs = selected && selectedDragAccountIDs.length > 0 ? selectedDragAccountIDs : conversationTransferAccountIDs(conversation);
         const movingOut = hiddenMessageIDs.has(msg.id);
         const rowActionsDisabled = selectionBusy || scopeSelected || movingOut || pendingSwipeActionIDs.current.has(msg.id);
+        // Report spam stays visible with its reason in the tooltip when it
+        // cannot run, rather than appearing on some rows and not others.
+        const rowJunkMailbox = junkMailboxForAccount(mailboxes, msg.account_id);
+        const rowSpamState = !rowJunkMailbox
+          ? { disabled: true, title: "This account has no Junk folder to report spam into" }
+          : msg.mailbox_id === rowJunkMailbox.id
+            ? { disabled: true, title: `Already in ${rowJunkMailbox.name}` }
+            : { disabled: rowActionsDisabled, title: `Report spam (${rowJunkMailbox.name})` };
         const activeSwipe = swipeState?.id === msg.id ? swipeState : null;
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));
@@ -2701,6 +2747,18 @@ function MessageList({
         <button className="message-row-action row-action-delete" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "trash")} title="Move to trash" aria-label="Move to trash">
           <Icon name="delete" />
         </button>
+        {openAsDraft ? null : (
+          <button
+            className="message-row-action"
+            type="button"
+            disabled={rowSpamState.disabled}
+            onClick={() => moveConversationByRowAction(conversation, "spam")}
+            title={rowSpamState.title}
+            aria-label="Report spam"
+          >
+            <Icon name="spam" />
+          </button>
+        )}
         {openAsDraft ? null : (
           <button
             className="message-row-action"

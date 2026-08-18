@@ -122,11 +122,21 @@ func (s *Server) mailCategoryChrome(ctx context.Context, userID int64) ([]apiMai
 	return categories, pending, nil
 }
 
+// maxCategoryMessageIDs caps one correction request. Dropping a selection onto a
+// category names messages, not senders, and a hundred rows from a mailing list
+// collapse to one address — so the cap is about how much mail a single drag can
+// point at, not about how many overrides it may write.
+const maxCategoryMessageIDs = 1000
+
 // apiMessageCategory moves every message from one sender into a category and
 // remembers the choice. Corrections are per sender rather than per message
 // because the misclassification is a property of the sender: filing one message
 // by hand and watching the next twenty arrive in the same wrong list is not a
 // correction the user would call finished.
+//
+// A request may name several messages, which is what dragging a multi-row
+// selection onto a category sends. Each distinct sender behind those rows is
+// filed once.
 func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -140,8 +150,9 @@ func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		MessageID int64  `json:"message_id"`
-		Category  string `json:"category"`
+		MessageID  int64   `json:"message_id"`
+		MessageIDs []int64 `json:"message_ids"`
+		Category   string  `json:"category"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -151,15 +162,20 @@ func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "unknown category")
 		return
 	}
-	// The request names the row the user acted on and the server reads its
-	// sender, so a correction can only ever be aimed at an address that appears
+	// The request names the rows the user acted on and the server reads their
+	// senders, so a correction can only ever be aimed at an address that appears
 	// in the caller's own mail. Taking an address from the request body instead
 	// would let overrides be created for senders the tenant never heard from.
-	if in.MessageID <= 0 {
+	messageIDs := distinctPositiveIDs(append(in.MessageIDs, in.MessageID))
+	if len(messageIDs) == 0 {
 		writeAPIError(w, http.StatusBadRequest, "message_id is required")
 		return
 	}
-	msg, err := s.store.GetMessageEnvelopeForUser(r.Context(), cu.User.ID, in.MessageID)
+	if len(messageIDs) > maxCategoryMessageIDs {
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "too many messages selected")
+		return
+	}
+	senders, err := s.categorySendersOf(r.Context(), cu.User.ID, messageIDs)
 	if err != nil {
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
@@ -168,12 +184,14 @@ func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	sender := store.NormalizeCategorySender(msg.FromAddr)
-	if sender == "" {
+	if len(senders) == 0 {
 		writeAPIError(w, http.StatusBadRequest, "no sender address to file under")
 		return
 	}
-	moved, err := s.store.SetSenderCategoryOverride(r.Context(), cu.User.ID, sender, category)
+	// One call rather than one per sender: the store commits the whole set in a
+	// single transaction, so a failure leaves nothing corrected and the error
+	// below is the truth about every sender the drop named.
+	moved, err := s.store.SetSenderCategoryOverrides(r.Context(), cu.User.ID, senders, category)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -184,7 +202,52 @@ func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"category": category,
-		"sender":   sender,
+		"sender":   senders[0],
+		"senders":  senders,
 		"moved":    moved,
 	})
+}
+
+// categorySendersOf reads the sender address behind each named message, in the
+// order the addresses first appear and without repeats. A message the tenant
+// does not own fails the whole request rather than being skipped: a correction
+// that silently covered less mail than it was aimed at would look finished.
+func (s *Server) categorySendersOf(ctx context.Context, userID int64, messageIDs []int64) ([]string, error) {
+	seen := make(map[string]struct{}, len(messageIDs))
+	senders := make([]string, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		msg, err := s.store.GetMessageEnvelopeForUser(ctx, userID, id)
+		if err != nil {
+			return nil, err
+		}
+		sender := store.NormalizeCategorySender(msg.FromAddr)
+		if sender == "" {
+			continue
+		}
+		if _, ok := seen[sender]; ok {
+			continue
+		}
+		seen[sender] = struct{}{}
+		senders = append(senders, sender)
+	}
+	return senders, nil
+}
+
+// distinctPositiveIDs keeps the usable message IDs of a request in their given
+// order. The legacy single-ID field is folded in by the caller, so a client that
+// sends both forms does not file the same sender twice.
+func distinctPositiveIDs(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
