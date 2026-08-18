@@ -504,6 +504,13 @@
     padding-left: 12px;
   }
 
+  // Narrow rows stack the sender line above the subject block, so one row is
+  // taller than the wide layout's. The arrival animation shifts following rows
+  // by this height, and the wide value would leave a visible jump.
+  .message-table {
+    --new-mail-row-height: 77px;
+  }
+
   .message-select {
     grid-column: 1;
     grid-row: 1;
@@ -528,33 +535,8 @@
     grid-column: 3 / 4;
   }
 
-  // Gmail's phone rows keep the subject to one ellipsized line with the
-  // preview on its own line below, instead of wrapping the subject.
   .subject {
     grid-column: 3 / 4;
-    flex-wrap: wrap;
-    white-space: normal;
-
-    strong {
-      flex: 1 1 100%;
-      max-width: 100%;
-    }
-  }
-
-  .snippet {
-    display: -webkit-box;
-    flex-basis: 100%;
-    margin-left: 0;
-    overflow: hidden;
-    white-space: normal;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 1;
-  }
-
-  // The preview sits on its own line here, so the dash has nothing left to
-  // separate and would just open every second line with a stray "— ".
-  .snippet-separator {
-    display: none;
   }
 
   .thread-summary {
@@ -588,6 +570,17 @@
   .date {
     grid-column: 4 / 5;
     grid-row: 1;
+
+    // Narrow rows put the date right beside the text with no toolbar between
+    // them, so it needs the gap even more than a wide one does.
+    margin-left: 12px;
+  }
+
+  // The snoozed date carries a button beside the time and already fills its
+  // 64px column; the gap that helps a plain date would push these controls
+  // into the subject.
+  .snoozed-date {
+    margin-left: 0;
   }
 
   .message-details {

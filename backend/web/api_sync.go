@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -154,6 +155,13 @@ func (s *Server) apiSyncRun(w http.ResponseWriter, r *http.Request, rest string)
 		http.NotFound(w, r)
 		return
 	}
+	// DELETE is dispatched before the run is looked up: a run that is already
+	// gone is the outcome a delete asks for, and answering 404 would turn a
+	// harmless double-click into an error toast.
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		s.deleteSyncRun(w, r, cu.User.ID, id)
+		return
+	}
 	run, err := s.store.GetSyncRunForUser(r.Context(), cu.User.ID, id)
 	if store.IsNotFound(err) {
 		http.NotFound(w, r)
@@ -194,6 +202,29 @@ func (s *Server) apiSyncRun(w http.ResponseWriter, r *http.Request, rest string)
 		live = syncRunLiveDetail{Active: details.Active, Cancellable: details.Cancellable || run.Status == "running", Phase: details.Phase, Detail: details.Detail, PhaseStartedAt: timeString(details.PhaseStartedAt)}
 	}
 	writeJSONCached(w, r, map[string]any{"sync_run": apiSyncRunFrom(run), "live": live})
+}
+
+// deleteSyncRun removes one finished run from the history, so a run is
+// cancelled and deleted at the same address. A run still in flight is refused
+// with the instruction that can actually be followed; a run already gone is a
+// success from the user's point of view and answers as one.
+func (s *Server) deleteSyncRun(w http.ResponseWriter, r *http.Request, userID, runID int64) {
+	if !s.verifyCSRF(w, r) {
+		return
+	}
+	err := s.store.DeleteSyncRunForUser(r.Context(), userID, runID)
+	if errors.Is(err, store.ErrSyncRunRunning) {
+		writeAPIError(w, http.StatusConflict, "This sync run is still running. Cancel it first.")
+		return
+	}
+	if err != nil && !store.IsNotFound(err) {
+		s.serverError(w, r, err)
+		return
+	}
+	// No Notify here: the chrome payload other tabs read barely reflects one
+	// deleted history row, and each Notify rebuilds it for every open tab. The
+	// clear-all action keeps its single Notify.
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 type syncRunLiveDetail struct {

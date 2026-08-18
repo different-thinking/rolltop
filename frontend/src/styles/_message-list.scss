@@ -252,7 +252,7 @@
   // The height one arriving row adds: .message-row's min-height plus its
   // bottom border. The arrival animation lifts the rows below by exactly this,
   // so it has to follow the row box.
-  --new-mail-row-height: 49px;
+  --new-mail-row-height: 61px;
 
   background: transparent;
 
@@ -281,7 +281,7 @@
   grid-template-columns: 22px 40px minmax(140px, 220px) minmax(0, 1fr) max-content;
   column-gap: 8px;
   row-gap: 0;
-  min-height: 48px;
+  min-height: 60px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--separator);
   color: var(--text);
@@ -846,9 +846,37 @@
 }
 
 
-.sender,
-.subject {
+.sender {
   @include truncate;
+}
+
+// Two lines per row: what the message is on the first, what it says on the
+// second. The subject and its label share the first line because they answer
+// the same question at a glance, and the preview gets a full line of its own
+// instead of the tail end of the subject's.
+.subject {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.subject-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+
+  strong {
+    @include truncate;
+    flex: 0 1 auto;
+    font-weight: 700;
+  }
+
+  .icon {
+    color: var(--muted);
+    margin-left: 7px;
+  }
 }
 
 .sender {
@@ -862,28 +890,9 @@
   @include truncate;
 }
 
-.subject {
-  display: flex;
-  align-items: center;
-
-  strong {
-    @include truncate;
-    flex: 0 0 auto;
-    max-width: min(56ch, 62%);
-    font-weight: 700;
-  }
-
-  .icon {
-    color: var(--muted);
-    margin-left: 7px;
-  }
-}
-
 .snippet {
   @include truncate;
-  flex: 1 1 auto;
   color: var(--muted);
-  margin-left: 6px;
   font-weight: 400;
 }
 
@@ -949,6 +958,9 @@
 }
 
 .date {
+  // The column gap alone leaves the date reading as part of the text it sits
+  // beside, especially once a subject or preview fills its line right up to it.
+  margin-left: 16px;
   color: var(--muted);
   font-size: 12px;
   text-align: right;

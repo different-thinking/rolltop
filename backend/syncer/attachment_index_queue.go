@@ -10,6 +10,12 @@ import (
 const (
 	attachmentIndexRetryCooldown            = 5 * time.Minute
 	defaultAttachmentIndexContinuationDelay = time.Second
+	// attachmentIndexStrandedRetryDelay is how long a turn that left work
+	// behind waits before trying again on its own. It is the fallback for the
+	// cases nothing else wakes: a failed turn, and one that yielded its slot to
+	// a foreground job. Long enough that a persistent failure is not a busy
+	// loop, short enough that a user watching the pending counter sees it move.
+	attachmentIndexStrandedRetryDelay = time.Minute
 )
 
 type attachmentIndexRetryKey struct {

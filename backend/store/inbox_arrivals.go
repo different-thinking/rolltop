@@ -107,9 +107,17 @@ func (s *Store) HoldOrClassifyInboxArrival(ctx context.Context, userID, syncRunI
 	}
 	if syncRunID > 0 {
 		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sync_runs
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM sync_runs
 			WHERE user_id = ? AND account_id = ? AND id = ?`, userID,
-			arrivalMessage.Message.AccountID, syncRunID).Scan(&exists); err != nil {
+			arrivalMessage.Message.AccountID, syncRunID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The run row is gone -- the user cleared their run history while
+			// this worker was still writing. Every schema reference to a run
+			// degrades to NULL on delete, so the arrival does the same: it is
+			// recorded without a run attribution rather than failing the
+			// message it belongs to.
+			syncRunID = 0
+		} else if err != nil {
 			return InboxArrivalDecision{}, err
 		}
 	}

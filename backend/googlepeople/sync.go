@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"rolltop/backend/blob"
@@ -55,6 +56,23 @@ type Syncer struct {
 	// Injected rather than imported so this package does not depend on the
 	// OAuth configuration.
 	ScopeGranted func(store.GoogleConnection) bool
+
+	// running holds one gate per connection, keyed by user and connection id.
+	// Two syncs of the same address book each look a person up and then create
+	// the missing row, so running them at once makes both miss and both insert.
+	// The poll and the button in settings are exactly that pair, and the loser
+	// of the race fails the whole run on a unique-constraint error.
+	running sync.Map
+}
+
+// connectionRunGate returns the one-slot channel that serializes a connection's
+// syncs. A channel rather than a mutex so a waiter can also watch its context:
+// a caller whose deadline expires while another sync holds the gate should walk
+// away, not stand in line for a turn it can no longer use.
+func (s *Syncer) connectionRunGate(userID, connectionID int64) chan struct{} {
+	key := [2]int64{userID, connectionID}
+	existing, _ := s.running.LoadOrStore(key, make(chan struct{}, 1))
+	return existing.(chan struct{})
 }
 
 // ConnectionLister is the slice of the Google auth manager the sync needs.
@@ -154,6 +172,19 @@ func (s *Syncer) SyncConnection(ctx context.Context, userID, connectionID int64)
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 
+	// One sync per connection at a time. Waiting is right here rather than
+	// returning early: the caller is either the poll, which has nothing else to
+	// do with this connection, or a user who pressed Sync now and is owed a
+	// current answer. The select keeps the wait honest -- a context that
+	// expires in line returns now instead of after the running sync finishes.
+	gate := s.connectionRunGate(userID, connectionID)
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+
 	result, err := s.run(ctx, userID, connectionID)
 	s.recordOutcome(ctx, userID, connectionID, result, err)
 	return result, err
@@ -221,6 +252,10 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 
 	pageToken := ""
 	nextSyncToken := ""
+	// applyErr remembers the first contact that could not be stored. The read
+	// keeps going past it, and the error is returned at the end so the caller
+	// leaves the cursor alone and comes back for what is still missing.
+	var applyErr error
 	for {
 		var page ConnectionsPage
 		err := s.withToken(ctx, userID, connectionID, func(token string) error {
@@ -235,6 +270,9 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 			return result, "", err
 		}
 		for _, person := range page.People {
+			if err := ctx.Err(); err != nil {
+				return result, "", err
+			}
 			resourceName := strings.TrimSpace(person.ResourceName)
 			if resourceName == "" {
 				continue
@@ -243,7 +281,9 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 			if person.IsDeleted() {
 				removed, err := s.removeMirror(ctx, userID, connectionID, resourceName)
 				if err != nil {
-					return result, "", err
+					applyErr = firstError(applyErr, err)
+					log.Printf("google contact sync user_id=%d connection_id=%d %s: %v", userID, connectionID, resourceName, err)
+					continue
 				}
 				if removed {
 					result.Deleted++
@@ -252,7 +292,13 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 			}
 			outcome, err := s.applyPerson(ctx, userID, connectionID, person)
 			if err != nil {
-				return result, "", err
+				// One contact Rolltop cannot store must not cost the user the
+				// rest of their address book. The failure is remembered so the
+				// cursor is not stored and the next run tries this person
+				// again, while everyone else is already mirrored.
+				applyErr = firstError(applyErr, err)
+				log.Printf("google contact sync user_id=%d connection_id=%d %s: %v", userID, connectionID, resourceName, err)
+				continue
 			}
 			switch outcome {
 			case outcomeCreated:
@@ -270,6 +316,13 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 		pageToken = page.NextPageToken
 	}
 
+	if applyErr != nil {
+		// Pruning is the one irreversible step here, and this read did not
+		// manage to account for every person Google returned. Deleting on the
+		// strength of it could remove a contact that only looks absent.
+		return result, "", applyErr
+	}
+
 	// Whatever the full read never mentioned no longer exists at Google.
 	for _, ref := range known {
 		if err := s.Store.DeleteContactForUser(ctx, userID, ref.ContactID); err != nil && !store.IsNotFound(err) {
@@ -278,6 +331,15 @@ func (s *Syncer) pull(ctx context.Context, userID, connectionID int64, syncToken
 		result.Deleted++
 	}
 	return result, nextSyncToken, nil
+}
+
+// firstError keeps the earliest failure of a run. Later ones are logged where
+// they happen; what the caller acts on is that something failed at all.
+func firstError(existing, err error) error {
+	if existing != nil {
+		return existing
+	}
+	return err
 }
 
 // applyOutcome is what one person did to the local address book. "Unchanged"
@@ -323,15 +385,39 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 		// Promotion is the one merge that is right: this row was entered here
 		// and Google has never seen the details it carries, so dropping them
 		// would delete data Google never had a chance to keep.
-		return outcomeUpdated, s.overwrite(ctx, userID, local, incoming, person, keepLocalExtras)
+		err := s.overwrite(ctx, userID, local, incoming, person, keepLocalExtras)
+		if store.IsUniqueConstraint(err) {
+			return s.applyToExistingMirror(ctx, userID, connectionID, incoming, person)
+		}
+		if err != nil {
+			return outcomeUnchanged, err
+		}
+		return outcomeUpdated, nil
 	}
 
 	created, err := s.Store.CreateContact(ctx, userID, incoming)
+	if store.IsUniqueConstraint(err) {
+		return s.applyToExistingMirror(ctx, userID, connectionID, incoming, person)
+	}
 	if err != nil {
 		return outcomeUnchanged, err
 	}
 	s.importPhoto(ctx, userID, created.ID, person)
 	return outcomeCreated, nil
+}
+
+// applyToExistingMirror finishes a person whose mirror turned out to exist after
+// the lookup said it did not. The write-back path creates mirrors too, and a
+// sync in another process is not covered by this one's run lock, so the row can
+// appear between the lookup and the insert. Reading it again and overwriting it
+// is the same work the ordinary path would have done, and it keeps one lost race
+// from failing a whole address book instead of one contact.
+func (s *Syncer) applyToExistingMirror(ctx context.Context, userID, connectionID int64, incoming store.Contact, person Person) (applyOutcome, error) {
+	existing, err := s.Store.GetContactByGoogleResourceForUser(ctx, userID, connectionID, incoming.ExternalID)
+	if err != nil {
+		return outcomeUnchanged, err
+	}
+	return outcomeUpdated, s.overwrite(ctx, userID, existing, incoming, person, replaceLocal)
 }
 
 // mergePolicy says what happens to the version already stored locally.
@@ -357,10 +443,11 @@ func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming
 	}
 	merged.IsMe = existing.IsMe
 	merged.IsPrimary = existing.IsPrimary
-	if _, err := s.Store.UpdateContact(ctx, userID, existing.ID, merged); err != nil {
-		return err
-	}
-	if err := s.Store.SetContactGoogleLink(ctx, userID, existing.ID, store.ContactGoogleLink{
+	// Data and provenance travel in one transaction. Written separately, a
+	// link that lost to the unique index over the resource name would leave a
+	// contact already rewritten with Google's fields but still local -- and a
+	// promotion that fails must leave the local contact exactly as it was.
+	if _, err := s.Store.UpdateContactAsGoogleMirror(ctx, userID, existing.ID, merged, store.ContactGoogleLink{
 		ConnectionID:    incoming.GoogleConnectionID,
 		ExternalID:      incoming.ExternalID,
 		ETag:            incoming.ETag,

@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -352,4 +353,75 @@ func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// ErrSyncRunRunning reports a deletion refused because the run is still in
+// flight. It is distinct from ErrNotFound so the caller can tell "cancel it
+// first" apart from "already gone" -- the second is a success from the user's
+// point of view, and telling them to cancel a run that no longer exists is an
+// instruction that cannot be followed.
+var ErrSyncRunRunning = errors.New("sync run is still running")
+
+// DeleteSyncRunForUser removes one finished run from the history. A running run
+// is refused rather than deleted: the worker behind it would keep writing
+// progress to a row that no longer exists, and what the user wants for a run
+// still in flight is to cancel it.
+//
+// Rows that point at a run -- pending arrivals, rebuild state -- hold it with
+// ON DELETE SET NULL, so removing a run drops the reference and nothing else;
+// an interrupted run whose worker is still winding down writes its remaining
+// arrivals without attribution rather than failing on the missing row.
+func (s *Store) DeleteSyncRunForUser(ctx context.Context, userID, id int64) error {
+	if userID <= 0 || id <= 0 {
+		return ErrNotFound
+	}
+	// Two attempts, not one: the first delete can lose to a run that finishes
+	// between it and the status lookup, and answering "still running" for a
+	// row that is finished by the time we say so would strand it in history
+	// behind a response that claimed success.
+	for attempt := 0; attempt < 2; attempt++ {
+		res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+			`DELETE FROM sync_runs WHERE user_id = ? AND id = ? AND status <> 'running'`, userID, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			return nil
+		}
+		// Nothing deleted: either the row is gone or it is still running. The
+		// two deserve different answers, so look once more.
+		var status string
+		err = s.mustDataDB(ctx, userID).QueryRowContext(ctx,
+			`SELECT status FROM sync_runs WHERE user_id = ? AND id = ?`, userID, id).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status == "running" {
+			return ErrSyncRunRunning
+		}
+		// The run finished after the delete ran. Loop and delete it for real.
+	}
+	return ErrNotFound
+}
+
+// DeleteFinishedSyncRunsForUser clears one user's finished run history and
+// reports how many rows went. Running rows stay, for the same reason a single
+// delete refuses them.
+func (s *Store) DeleteFinishedSyncRunsForUser(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`DELETE FROM sync_runs WHERE user_id = ? AND status <> 'running'`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

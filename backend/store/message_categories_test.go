@@ -376,3 +376,54 @@ func TestFilingSeveralSendersLandsWholeOrNotAtAll(t *testing.T) {
 		t.Fatalf("forums = %v, want all three messages", messageIDsOf(forums))
 	}
 }
+
+// The pending counter beside the category lists counts only mail those lists
+// can show, so a queue ordered purely by id lets the counter sit still while
+// the worker spends its batches on a Trash folder nobody is looking at. What
+// the user is waiting for goes first; the rest is queued behind it, not
+// dropped.
+func TestBackfillQueueFilesVisibleMailBeforeTheBacklog(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	trash, err := f.db.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every backlog row is older than the visible one, so id order alone would
+	// put the message the counter describes last.
+	for uid := uint32(1); uid <= 5; uid++ {
+		f.create(t, trash, uid, "news@example.test", "")
+	}
+	f.create(t, f.archive, 6, "news@example.test", "")
+	shown := f.create(t, f.inbox, 7, "news@example.test", "")
+
+	candidates, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 7 {
+		t.Fatalf("backfill queue = %d rows, want all seven regardless of folder", len(candidates))
+	}
+	if candidates[0].ID != shown.ID {
+		t.Fatalf("first candidate = %d, want the inbox message %d that the pending count describes",
+			candidates[0].ID, shown.ID)
+	}
+
+	// A batch smaller than the queue must still reach it, which is the case
+	// that leaves the counter stuck when the order is wrong.
+	batch, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 1 || batch[0].ID != shown.ID {
+		t.Fatalf("first batch = %v, want only the inbox message %d", candidateIDsOf(batch), shown.ID)
+	}
+}
+
+func candidateIDsOf(candidates []CategoryCandidate) []int64 {
+	out := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.ID)
+	}
+	return out
+}

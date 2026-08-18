@@ -1484,12 +1484,30 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			}
 			restart := r.attachmentPending[userID] && !indexFailed && !handoffSenderStats &&
 				!r.senderStatsRunning[userID] && !r.userForegroundRunningLocked(userID)
+			// Work this turn could not finish and nothing else is going to pick
+			// up. A failed turn schedules no retry of its own, and a turn that
+			// yielded to a foreground job is only resumed if that job remembers
+			// to, so without a timer here the leftovers -- unindexed
+			// attachments, unclassified messages -- wait for the next sync that
+			// happens to come along. On an idle mailbox that is never.
+			stranded := r.attachmentPending[userID] && !restart && !handoffSenderStats &&
+				!r.attachmentResumeAfterStats[userID]
 			r.mu.Unlock()
 			close(done)
 			r.refreshGenerationRecoveryGateForUser(r.context(), userID)
 			r.wakeMailboxGenerationRebuildRecovery()
 			if !indexFailed {
 				r.scheduleNextAttachmentIndexRetry(userID)
+			}
+			if stranded && r.context().Err() == nil {
+				// The stranded fallback is a ceiling, not a replacement: a
+				// per-message cooldown or continuation wake that is already
+				// due sooner keeps its earlier slot.
+				retryAt := time.Now().Add(attachmentIndexStrandedRetryDelay)
+				if wake, ok := r.Service.nextAttachmentIndexWake(userID); ok && wake.Before(retryAt) {
+					retryAt = wake
+				}
+				r.scheduleAttachmentIndexRetry(userID, retryAt)
 			}
 			if categorizedAny && !drainMore && r.context().Err() == nil {
 				r.Service.notify(userID)

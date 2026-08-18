@@ -584,3 +584,149 @@
   .sync-run-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sync-run-facts > div:nth-child(odd) { border-left: 0; }
 }
+
+// The Activity view. One row shape for every kind of work -- a sync run, a
+// background worker, a connected service -- because a reader scanning for the
+// thing that is stuck should not have to learn three layouts to do it.
+.activity-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-section {
+  margin-bottom: 16px;
+
+  h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+}
+
+.activity-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+
+  &.running {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+
+  &.failed {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  }
+}
+
+.activity-row-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    color: var(--muted);
+    font-size: 12px;
+  }
+}
+
+.activity-row-error {
+  color: var(--danger);
+}
+
+.activity-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-row-hint {
+  font-size: 12px;
+}
+
+.activity-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  color: var(--muted);
+
+  &.running {
+    color: var(--accent);
+  }
+
+  &.ok {
+    color: var(--success, var(--accent));
+  }
+
+  &.error,
+  &.interrupted {
+    color: var(--danger);
+  }
+
+  // A spinning icon on a row that is only queued would claim progress that is
+  // not happening, which is the misreading this whole view exists to prevent.
+  &.running .icon {
+    animation: spin 1.6s linear infinite;
+  }
+}
+
+.activity-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.activity-idle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  p {
+    margin: 2px 0 0;
+    color: var(--muted);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-state.running .icon {
+    animation: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .activity-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .activity-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}

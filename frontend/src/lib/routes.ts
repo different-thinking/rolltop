@@ -50,6 +50,18 @@ const fixedMailViews = ["inbox", "sent", "drafts"];
  */
 const legacyMailViews = new Map<string, MailView>([["unarchived", "inbox"]]);
 
+/**
+ * defaultMailURL is the list the app opens on. Relevant is what is left once
+ * the machine-generated traffic has been named, which is the mail a reader
+ * arrives wanting to see; All Mail stays one click away in the sidebar.
+ *
+ * It is a category view, so it is spelled as a URL rather than assembled from
+ * mailURL: the router deliberately does not carry its own copy of the category
+ * set, and this is the one name the frontend needs to know before chrome has
+ * loaded.
+ */
+export const defaultMailURL = "/mail/relevant";
+
 /** mailViewCategory reports the category a view names, or "" for the rest. */
 export function mailViewCategory(view: MailView): string {
   return view && !fixedMailViews.includes(view) ? view : "";

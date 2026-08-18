@@ -920,6 +920,24 @@
   }
 }
 
+// Send and archive is the same commitment as Send, so it carries the same
+// weight; the outline keeps Send itself the one filled button in the bar, which
+// is what makes the pair readable as one choice rather than two equal ones.
+.send-archive-button {
+  min-width: 150px;
+  border-radius: 7px;
+  border: 1px solid var(--accent-warm);
+  background: transparent;
+  color: var(--accent-warm-strong);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent-warm) 14%, transparent);
+  }
+}
+
 .save-draft-button {
   min-width: 104px;
   border-radius: 7px;

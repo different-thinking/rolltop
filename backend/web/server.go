@@ -250,6 +250,12 @@ type composeForm struct {
 	SecurityMIME         bool                        `json:"pgp_mime,omitempty"`
 	SecuritySignature    string                      `json:"pgp_signature,omitempty"`
 	AttachPublicKey      bool                        `json:"attach_public_key,omitempty"`
+	// ArchiveAfterSend files the message being replied to once the reply is on
+	// its way. It is what the Send and archive button asks for, and it is a
+	// property of this send rather than a stored preference: the same reader
+	// wants the conversation gone from the list on one reply and kept in front
+	// of them on the next.
+	ArchiveAfterSend bool `json:"archive_after_send,omitempty"`
 }
 
 type composeExistingAttachment struct {
@@ -547,7 +553,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	http.Redirect(w, r, "/mail", http.StatusSeeOther)
+	http.Redirect(w, r, defaultMailPath, http.StatusSeeOther)
 }
 
 func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
@@ -1287,3 +1293,9 @@ func pageFromRequest(r *http.Request) int {
 	}
 	return page
 }
+
+// defaultMailPath is the list a signed-in reader lands on. It matches the
+// frontend's own default so a server redirect and an in-app navigation open the
+// same list; Relevant is the mail left once the machine-generated traffic has
+// been named, and All Mail stays one click away in the sidebar.
+const defaultMailPath = "/mail/relevant"

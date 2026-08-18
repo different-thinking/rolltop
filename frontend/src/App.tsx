@@ -14,7 +14,7 @@ import { RouteView } from "./RouteView";
 import { messageFromError } from "./lib/errors";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
-import { currentLocation, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
+import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
@@ -377,7 +377,7 @@ export default function App() {
       return;
     }
     if (bootstrap.user && (location.path === "/" || location.path === "/login" || location.path === "/setup" || location.path === "/reset-password")) {
-      replaceRoute("/mail");
+      replaceRoute(defaultMailURL);
     }
   }, [bootstrap, location.path, replaceRoute]);
 
@@ -630,7 +630,7 @@ export default function App() {
     if (webPushSupported()) return;
     const messageID = run?.latest_new_message_id || 0;
     const single = count === 1 && messageID > 0;
-    const targetURL = single ? messageURL(messageID, "", [], "/mail") : "/mail";
+    const targetURL = single ? messageURL(messageID, "", [], defaultMailURL) : defaultMailURL;
     const sender = displayNotificationSender(run?.latest_new_from || "");
     const subject = truncateNotificationText(run?.latest_new_subject || "", 110);
     const title = sender ? `rolltop - ${sender}` : "rolltop";

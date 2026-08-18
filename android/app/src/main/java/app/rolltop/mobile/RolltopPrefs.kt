@@ -7,6 +7,14 @@ import java.net.URI
 object RolltopPrefs {
     data class ReadyUpdate(val versionCode: Int, val versionName: String)
 
+    /**
+     * The list the app opens on when it has no remembered location, matching the
+     * server redirect and the web app's own default. Relevant is the mail left
+     * once the machine-generated traffic has been named; All Mail is one tap
+     * away in the sidebar.
+     */
+    const val DEFAULT_PATH = "/mail/relevant"
+
     private const val NAME = "rolltop"
     private const val KEY_SERVER_URL = "server_url"
     private const val KEY_LAST_LOCATION = "last_location"

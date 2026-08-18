@@ -2705,25 +2705,26 @@ function MessageList({
               {conversation.count > 1 ? <span className="thread-count">({conversation.count})</span> : null}
             </span>
             <span className="subject">
-              <strong>
-                <HighlightedText text={msg.subject || "(no subject)"} query={searchQuery} terms={matchTerms} />
-              </strong>
-              {securityIndicators}
-              {annotationNodes}
+              <span className="subject-line">
+                <strong>
+                  <HighlightedText text={msg.subject || "(no subject)"} query={searchQuery} terms={matchTerms} />
+                </strong>
+                {securityIndicators}
+                {annotationNodes}
+                {attachmentNames.length > 0 ? (
+                  <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
+                    <Icon name="attach_file" />
+                    <HighlightedText
+                      text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
+                      query={searchQuery}
+                      terms={matchTerms}
+                    />
+                  </span>
+                ) : conversation.has_attachments ? <Icon name="attach_file" /> : null}
+              </span>
               <span className={`snippet ${securitySnippetClass}`}>
-                {previewText ? <span className="snippet-separator" aria-hidden="true">&mdash;&nbsp;</span> : null}
                 <HighlightedText text={previewText} query={securitySnippetClass ? "" : searchQuery} terms={securitySnippetClass ? [] : matchTerms} />
               </span>
-              {attachmentNames.length > 0 ? (
-                <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
-                  <Icon name="attach_file" />
-                  <HighlightedText
-                    text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
-                    query={searchQuery}
-                    terms={matchTerms}
-                  />
-                </span>
-              ) : conversation.has_attachments ? <Icon name="attach_file" /> : null}
             </span>
       <span className={`date ${snoozedView ? "snoozed-date" : ""}`}>
         {snoozedView ? (

@@ -57,8 +57,30 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id, from_addr, blob_path
-		FROM messages WHERE user_id = ? AND category = '' ORDER BY id LIMIT ?`, userID, limit)
+	// Mail the category lists can show is classified before the rest. The
+	// pending counter beside those lists is scoped the same way, so a plain
+	// oldest-first order lets it sit at a small number for hours while the
+	// worker is busy filing a Trash folder nobody is looking at. The rest is
+	// not skipped, only queued behind: a message moved back out of Trash still
+	// arrives with a category.
+	//
+	// The join is a LEFT one so a row whose mailbox is gone is filed last
+	// rather than never. Such a row still counts as pending in the worker's
+	// eyes, and one of them would otherwise be selected forever.
+	priority, priorityArgs, err := s.inPlayMailScope(ctx, userID, true, "")
+	if err != nil {
+		return nil, err
+	}
+	args := make([]any, 0, len(priorityArgs)+2)
+	args = append(args, priorityArgs...)
+	args = append(args, userID, limit)
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path,
+			CASE WHEN 1 = 1`+priority+` THEN 0 ELSE 1 END AS backlog
+		FROM messages m
+		LEFT JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND m.category = ''
+		ORDER BY backlog, m.id
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +88,8 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 	out := make([]CategoryCandidate, 0, limit)
 	for rows.Next() {
 		var item CategoryCandidate
-		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath); err != nil {
+		var backlog int
+		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath, &backlog); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

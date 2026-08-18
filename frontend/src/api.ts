@@ -4,6 +4,7 @@
 import type {
   Account,
   AccountPurgeEstimate,
+  Activity,
   Bootstrap,
   CalendarEvent,
   CalendarEventInput,
@@ -453,7 +454,7 @@ export const api = {
   send: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
     if (attachments.length === 0) {
-      return postJSON<{ ok: boolean; message_id: number }>("/api/compose", csrf, payload);
+      return postJSON<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, payload);
     }
     const body = new FormData();
     body.append("payload", JSON.stringify({
@@ -468,7 +469,7 @@ export const api = {
       }))
     }));
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
-    return postForm<{ ok: boolean; message_id: number }>("/api/compose", csrf, body);
+    return postForm<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, body);
   },
   saveDraft: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
@@ -656,5 +657,12 @@ export const api = {
   saveRemoteImageBlocklist: (csrf: string, patterns: string[]) =>
     postJSON<{ ok: boolean; patterns: string[] }>("/api/admin/remote-image-blocklist", csrf, { patterns }),
   syncRun: (id: string) => getJSON<{ sync_run: SyncRun; live: SyncRunLiveDetail }>(`/api/sync-runs/${id}`),
-  cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf)
+  cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf),
+  deleteSyncRun: (csrf: string, id: number) => deleteJSON<{ ok: boolean }>(`/api/sync-runs/${id}`, csrf),
+  activity: () => getJSON<Activity>("/api/activity"),
+  // The reservation key embeds a raw IMAP mailbox name, which may contain any
+  // separator a URL scheme could pick, so it travels in the body.
+  cancelWorker: (csrf: string, key: string) =>
+    postJSON<{ ok: boolean }>("/api/activity/workers/cancel", csrf, { key }),
+  clearSyncHistory: (csrf: string) => deleteJSON<{ ok: boolean; removed: number }>("/api/activity/history", csrf)
 };

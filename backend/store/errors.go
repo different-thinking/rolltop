@@ -44,3 +44,18 @@ func WrapNotFound(thing string, err error) error {
 	}
 	return err
 }
+
+// IsUniqueConstraint reports that a write lost a race for a unique key: the row
+// it wanted to insert is already there. Callers that look a row up and then
+// create it when it was missing need this, because nothing stops a second
+// worker from creating the same row between those two statements.
+//
+// The check is on the message rather than on a driver type so it survives the
+// store being opened through a different SQLite driver; every one of them
+// spells this constraint the same way.
+func IsUniqueConstraint(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}

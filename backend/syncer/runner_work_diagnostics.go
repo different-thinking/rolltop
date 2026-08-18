@@ -24,6 +24,36 @@ const (
 	runnerWorkAttachmentIndex          = "attachment_index"
 )
 
+// workerKindLabels names each kind of work in user-facing words. It lives
+// beside the constants so a kind cannot be added or renamed without its label
+// in view; WorkerKindLabel is how the web layer reads it without owning a
+// second copy of these strings.
+var workerKindLabels = map[string]string{
+	runnerWorkAccountSync:              "Account sync",
+	runnerWorkForeground:               "Waiting for a user action",
+	runnerWorkSenderStats:              "Sender statistics",
+	runnerWorkMailboxSync:              "Folder sync",
+	runnerWorkMailboxMaintenance:       "Folder maintenance",
+	runnerWorkMailboxSearchMaintenance: "Search index rebuild",
+	runnerWorkRecoveryReplay:           "Folder recovery",
+	runnerWorkAttachmentIndex:          "Attachment index and categories",
+}
+
+// WorkerKindLabel translates a WorkerActivity kind into display text. An
+// unknown kind answers with itself, so new work shows up under its raw name
+// rather than disappearing.
+func WorkerKindLabel(kind string) string {
+	if label, ok := workerKindLabels[kind]; ok {
+		return label
+	}
+	return kind
+}
+
+// runnerMailboxWorkActivityPrefix separates mailbox-scoped activity keys from
+// user-scoped ones. It is shared by the builder below and the stripper in
+// runner_activity.go, so the two directions cannot drift apart.
+const runnerMailboxWorkActivityPrefix = "mailbox:"
+
 type runnerWorkActivity struct {
 	kind      string
 	phase     string
@@ -38,7 +68,7 @@ func runnerUserWorkActivityKey(kind string, userID int64) string {
 }
 
 func runnerMailboxWorkActivityKey(reservationKey string) string {
-	return "mailbox:" + reservationKey
+	return runnerMailboxWorkActivityPrefix + reservationKey
 }
 
 func (r *Runner) startWorkActivityLocked(key string, activity runnerWorkActivity) {

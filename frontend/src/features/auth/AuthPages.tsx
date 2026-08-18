@@ -6,6 +6,7 @@ import type { FormEvent } from "react";
 import { api } from "../../api";
 import type { AuthProvider, Bootstrap } from "../../types";
 import { messageFromError } from "../../lib/errors";
+import { defaultMailURL } from "../../lib/routes";
 import { LogoMark } from "../../components/Icon";
 
 /** SetupPage creates the first local user and then asks App to refresh bootstrap state. */
@@ -97,7 +98,7 @@ export function LoginPage({
     try {
       await api.login(csrf, { email, password });
       await onReady();
-      navigate("/mail");
+      navigate(defaultMailURL);
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -182,7 +183,7 @@ export function PasswordResetPage({
     try {
       await api.completePasswordReset(csrf, token, password);
       await onReady();
-      navigate("/mail");
+      navigate(defaultMailURL);
     } catch (err) {
       setError(messageFromError(err));
     } finally {
