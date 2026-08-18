@@ -31,7 +31,11 @@ func TestBundledPluginMigrationsRespectDatabaseScope(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(remoteRoot, "manifest.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "build", "-a", "-buildmode=plugin", "-o", filepath.Join(backendDir, "remote_image_blocklist.so"), "./plugins/remote_image_blocklist/backend")
+	// GoBuildFlags carries -race when this test binary is instrumented; without
+	// it plugin.Open rejects the plugin over a mismatched build fingerprint.
+	args := append([]string{"build", "-a"}, plugins.GoBuildFlags()...)
+	args = append(args, "-buildmode=plugin", "-o", filepath.Join(backendDir, "remote_image_blocklist.so"), "./plugins/remote_image_blocklist/backend")
+	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "GOCACHE=/tmp/rolltop-go-build")
 	if out, err := cmd.CombinedOutput(); err != nil {

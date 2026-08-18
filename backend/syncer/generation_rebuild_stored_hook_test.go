@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"rolltop/backend/plugins"
 	"rolltop/backend/syncer"
 )
 
@@ -154,7 +155,11 @@ func (captureStoredHook) ImportStoredMessage(ctx context.Context, host plugins.S
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 	binaryPath := filepath.Join(backendDir, "capture_stored_hook.so")
-	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", binaryPath, sourcePath)
+	// GoBuildFlags carries -race when this test binary is instrumented; without
+	// it plugin.Open rejects the plugin over a mismatched build fingerprint.
+	args := append([]string{"build"}, plugins.GoBuildFlags()...)
+	args = append(args, "-buildmode=plugin", "-o", binaryPath, sourcePath)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build capture stored-message plugin: %v\n%s", err, out)
