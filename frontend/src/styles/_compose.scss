@@ -115,30 +115,52 @@
   background: var(--surface-raised);
   box-shadow: var(--shadow);
 
-  // The thread page scrolls, so the reply grows with what is typed. It used to
-  // be a 178px window around a 224px editor, which meant every reply started
-  // with its own scrollbar and showed a few lines at a time.
+  // The composer takes at most 60% of the window, so the message it answers
+  // stays reachable behind it and Send is never pushed off the bottom. dvh keeps
+  // counting the strip an Android keyboard covers, so the visible height the
+  // composer publishes caps it as well — not at 60% of that strip, which would
+  // leave a sliver exactly while someone is typing, but at all of it: enough to
+  // keep the send bar off the keyboard once the composer is scrolled to.
+  max-height: min(60dvh, var(--compose-visible-height, 100dvh));
+
+  // Everything above the toolbar scrolls when it has to. The writing area below
+  // absorbs the shrinking on its own, so this only takes over once the rows
+  // around it — recipients, a recovery banner, a stack of attachments — no
+  // longer fit either. Without it they would render straight through the send
+  // bar and out of the card.
   > .compose-scroll-region {
-    overflow: visible;
-    flex: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
     gap: 12px;
   }
 
+  // The writing area is the one part that has to look editable, so it carries
+  // the field colour the rest of the app uses for inputs — and, being the part
+  // that scrolls, it draws the frame the text moves inside. It gives way on a
+  // short window rather than pushing the send bar off the card, down to a floor
+  // that still shows a couple of lines.
   .compose-body {
-    flex: none;
-    overflow: visible;
+    flex: 1 1 auto;
+    min-height: 72px;
+    overflow-y: auto;
+    // The popover contains its scrolling because it floats over the page. This
+    // one is part of the page, and a composer covering 60% of it must not be a
+    // dead zone for the wheel: at either end the thread scrolls on.
+    overscroll-behavior: auto;
     padding: 0;
     color: var(--text);
-  }
-
-  // The writing area is the one part that has to look editable, so it carries
-  // the field colour the rest of the app uses for inputs.
-  .compose-editor {
-    min-height: 260px;
-    padding: 12px 14px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--field);
+  }
+
+  // The editor keeps a resting height so an empty reply is comfortable to write
+  // in and the whole frame answers a click. Past that it grows with the text,
+  // and once the card reaches its cap the frame stays put and the text scrolls.
+  .compose-editor {
+    min-height: 140px;
+    padding: 12px 14px;
   }
 
   .compose-format {
