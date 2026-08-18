@@ -2,7 +2,7 @@
 -- (docs/postgres-migration-plan.md).
 --
 -- Verifies, against the actual target database, every capability the plan
--- assumes: server version and encoding, deterministic default collation,
+-- assumes: server version and encoding, byte-exact text equality,
 -- per-column/per-index COLLATE "C" (the hoster cannot provision the database
 -- itself with LC_COLLATE 'C'), the trusted extensions, UTF-8 strictness, and
 -- the SQL features the ported queries rely on (IDENTITY, ON CONFLICT/excluded,
