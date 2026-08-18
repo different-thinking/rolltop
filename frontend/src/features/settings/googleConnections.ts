@@ -15,6 +15,17 @@ export type GoogleContactsSync = {
   ever_synced: boolean;
 };
 
+/** GoogleCalendarSync is the state of one connection's calendar-list sync. It
+ * is absent until the connection has granted access to calendars. */
+export type GoogleCalendarSync = {
+  status: string;
+  status_detail: string;
+  last_sync_at: string;
+  last_success_at: string;
+  calendar_count: number;
+  ever_synced: boolean;
+};
+
 /** GoogleConnection is one Google account this user has authorized. */
 export type GoogleConnection = {
   id: number;
@@ -23,6 +34,8 @@ export type GoogleConnection = {
   needs_reauth: boolean;
   has_contacts_scope: boolean;
   contacts_sync: GoogleContactsSync | null;
+  has_calendar_scope: boolean;
+  calendar_sync: GoogleCalendarSync | null;
 };
 
 export type GoogleConnectionsResponse = {

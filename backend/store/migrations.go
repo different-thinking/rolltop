@@ -58,6 +58,7 @@ const (
 	UserSchemaVersion032   = "user-032"
 	UserSchemaVersion033   = "user-033"
 	UserSchemaVersion034   = "user-034"
+	UserSchemaVersion035   = "user-035"
 )
 
 // MigrationProgress is emitted while Store.OpenServerWithProgress and
@@ -135,6 +136,7 @@ func userMigrationSets() []migrationSet {
 		userIdentityArchiveMailboxMigrationSet(),
 		userGoogleContactMigrationSet(),
 		userDuplicateCopyMigrationSet(),
+		userGoogleCalendarMigrationSet(),
 		userMessageCategoryMigrationSet(),
 	}
 }

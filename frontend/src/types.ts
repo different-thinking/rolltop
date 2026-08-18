@@ -789,6 +789,79 @@ export type ServerLogLine = {
   error: boolean;
 };
 
+/** CalendarSummary is one subscribed Google calendar. */
+export type CalendarSummary = {
+  id: number;
+  /** connection_id and connection_email name the Google account it came from,
+   * which is what tells two identically named calendars apart. */
+  connection_id: number;
+  connection_email: string;
+  name: string;
+  description: string;
+  time_zone: string;
+  /** color is Google's own background colour for the calendar, e.g. "#9fe1e7". */
+  color: string;
+  access_role: string;
+  can_write: boolean;
+  is_primary: boolean;
+  selected: boolean;
+  /** synced_from is the oldest point the mirror covers. An empty week before it
+   * means "not synced", not "nothing scheduled". */
+  synced_from: string;
+  last_sync_at: string;
+  status: string;
+  status_detail: string;
+};
+
+/** CalendarAttendee is one invitee of an event. */
+export type CalendarAttendee = {
+  email: string;
+  name: string;
+  response: string;
+  optional: boolean;
+  organizer: boolean;
+  /** self marks the connected account, whose answer is the only one this app
+   * may change. */
+  self: boolean;
+  resource: boolean;
+};
+
+/** CalendarEvent is one occurrence. Recurring series arrive already expanded,
+ * so there is no recurrence rule to evaluate here. */
+export type CalendarEvent = {
+  id: number;
+  calendar_id: number;
+  summary: string;
+  description: string;
+  location: string;
+  status: string;
+  /** start_at and end_at are RFC 3339. For an all-day event they are the UTC
+   * midnights of Google's plain dates and must be read with the UTC getters. */
+  start_at: string;
+  end_at: string;
+  all_day: boolean;
+  time_zone: string;
+  recurring_event_id: string;
+  organizer_email: string;
+  organizer_name: string;
+  attendees: CalendarAttendee[];
+  my_response: string;
+  html_link: string;
+};
+
+/** CalendarEventInput is what the event dialog submits. */
+export type CalendarEventInput = {
+  calendar_id: number;
+  summary: string;
+  description: string;
+  location: string;
+  start_at: string;
+  end_at: string;
+  all_day: boolean;
+  time_zone: string;
+  attendees: { email: string; name: string; optional: boolean }[];
+};
+
 /** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */
 export type DuplicateAccountSummary = {
   account_id: number;

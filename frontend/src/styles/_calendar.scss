@@ -1,0 +1,513 @@
+@use "mixins/components" as *;
+
+.calendar-shell {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.calendar-sidebar {
+  position: sticky;
+  top: 82px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.calendar-sidebar-group {
+  display: grid;
+  gap: 4px;
+}
+
+.calendar-sidebar-account {
+  @include truncate;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.calendar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+
+  &:hover {
+    background: var(--active);
+  }
+
+  input {
+    flex: none;
+    margin: 0;
+  }
+}
+
+.calendar-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.calendar-toggle-name {
+  @include truncate;
+  flex: 1 1 auto;
+}
+
+.calendar-toggle-tag {
+  flex: none;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.calendar-toggle-problem {
+  flex: none;
+  display: inline-flex;
+  color: var(--danger);
+}
+
+.calendar-main {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.calendar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calendar-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  h1 {
+    @include truncate;
+    margin: 0 0 0 6px;
+    font-size: 17px;
+  }
+}
+
+.calendar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.calendar-empty {
+  margin: 0;
+  padding: 14px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+// The gutter width is shared by the day names, the all-day bar and the hour
+// column, so all three stay in one vertical line.
+$calendar-gutter: 58px;
+
+.calendar-daynames,
+.calendar-allday {
+  display: grid;
+  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border);
+}
+
+.calendar-gutter {
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  border-right: 1px solid var(--border);
+}
+
+.calendar-dayname {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 4px;
+  border-right: 1px solid var(--border);
+
+  &:last-child {
+    border-right: 0;
+  }
+
+  &.today {
+    color: var(--accent);
+    font-weight: 600;
+  }
+}
+
+.calendar-dayname-weekday {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.calendar-dayname-number {
+  font-size: 17px;
+}
+
+.calendar-allday-cell {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+  min-height: 26px;
+  padding: 3px;
+  border-right: 1px solid var(--border);
+
+  &:last-child {
+    border-right: 0;
+  }
+}
+
+.calendar-chip {
+  @include truncate;
+  display: block;
+  width: 100%;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calendar-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  overflow-y: auto;
+  // The grid is the only scrolling region, so the header and the all-day bar
+  // stay put while a day is scrolled.
+  max-height: calc(100vh - 240px);
+}
+
+.calendar-hours {
+  position: relative;
+  padding: 0;
+}
+
+.calendar-hour {
+  position: absolute;
+  right: 6px;
+  // Lifted so the label sits on its gridline rather than below it.
+  transform: translateY(-6px);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calendar-day {
+  position: relative;
+  border-right: 1px solid var(--border);
+
+  &:last-child {
+    border-right: 0;
+  }
+
+  &.today {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  }
+}
+
+.calendar-slot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.calendar-event {
+  position: absolute;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  overflow: hidden;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+
+  &.declined {
+    border-style: dashed;
+    text-decoration: line-through;
+  }
+
+  // An event clipped by midnight loses the rounding on that side, so it reads
+  // as continuing rather than as ending there.
+  &.continues-before {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+
+  &.continues-after {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+}
+
+.calendar-event-time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.calendar-event-title {
+  @include truncate;
+  font-weight: 600;
+}
+
+.calendar-event-location {
+  @include truncate;
+  opacity: 0.85;
+}
+
+.calendar-now {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--danger);
+  pointer-events: none;
+  z-index: 2;
+
+  &::before {
+    content: "";
+    position: absolute;
+    left: -4px;
+    top: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--danger);
+  }
+}
+
+.calendar-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: var(--scrim);
+}
+
+.calendar-dialog {
+  width: min(560px, 100%);
+  max-height: min(820px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.calendar-dialog-header,
+.calendar-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.calendar-dialog-header {
+  border-bottom: 1px solid var(--border);
+
+  h2 {
+    margin: 0;
+    font-size: 17px;
+  }
+}
+
+.calendar-dialog-footer {
+  border-top: 1px solid var(--border);
+}
+
+.calendar-dialog-actions,
+.calendar-dialog-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.calendar-dialog-body {
+  overflow-y: auto;
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.calendar-dialog-times {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.calendar-dialog-when {
+  display: flex;
+  gap: 8px;
+
+  input {
+    min-width: 0;
+  }
+}
+
+.calendar-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.calendar-dialog-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.calendar-dialog-problem {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.calendar-rsvp {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--active);
+}
+
+.calendar-rsvp-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.calendar-rsvp-actions {
+  display: flex;
+  gap: 6px;
+
+  .active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.calendar-attendees {
+  display: grid;
+  gap: 6px;
+}
+
+.calendar-attendee-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.calendar-attendee {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+
+  &.response-declined .calendar-attendee-name {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+
+  &.response-accepted .calendar-attendee-name {
+    color: var(--accent);
+  }
+}
+
+.calendar-attendee-name {
+  @include truncate;
+  flex: 0 1 auto;
+}
+
+.calendar-attendee-email,
+.calendar-attendee-tag {
+  @include truncate;
+  flex: 0 1 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calendar-attendee-suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+
+  button {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--active);
+    }
+
+    small {
+      color: var(--muted);
+    }
+  }
+}

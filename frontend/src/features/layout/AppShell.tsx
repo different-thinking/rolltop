@@ -1141,6 +1141,17 @@ function Sidebar({
             </div>
           );
         })}
+        <div className="side-section">Calendar</div>
+        <a
+          href="/calendar"
+          className={`folder ${currentPath === "/calendar" || currentPath.startsWith("/calendar/") ? "active" : ""}`}
+          onClick={(event) => open(event, "/calendar")}
+        >
+          <span className="folder-name">
+            <Icon name="calendar" weight={currentPath.startsWith("/calendar") ? "bold" : undefined} />
+            Calendar
+          </span>
+        </a>
         <div className="side-section">Address Book</div>
         <a
           href="/contacts"

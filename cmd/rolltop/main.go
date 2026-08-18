@@ -29,6 +29,7 @@ import (
 	"rolltop/backend/buildinfo"
 	"rolltop/backend/config"
 	"rolltop/backend/googleauth"
+	"rolltop/backend/googlecalendar"
 	"rolltop/backend/googlepeople"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
@@ -676,6 +677,10 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	// The People API offers no push, so contacts are polled. It shares the one
 	// manager with mail so a refresh is deduplicated across both.
 	googleContacts := googlepeople.NewSyncer(db, blobStore, googleAuth, googleAuth, googleauth.ScopeContacts)
+	// The Calendar API offers push through watch channels, which need a publicly
+	// reachable HTTPS endpoint. Until that exists calendars are polled the same
+	// way, over the same manager.
+	googleCalendar := googlecalendar.NewSyncer(db, googleAuth, googleAuth, googleauth.ScopeCalendar)
 	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
 	syncSvc := &syncer.Service{
 		Store:         db,
@@ -705,6 +710,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		Google:         cfg.Google,
 		GoogleAuth:     googleAuth,
 		GoogleContacts: googleContacts,
+		GoogleCalendar: googleCalendar,
 		RequestRestart: requestRestart,
 	})
 	if err != nil {
@@ -738,6 +744,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	}
 	if googleAuth.Configured() {
 		go googleContactPoll(ctx, db, googleContacts, googleContactPollInterval)
+		go googleCalendarPoll(ctx, db, googleCalendar, googleCalendarPollInterval)
 	}
 
 	cleanup = false
@@ -1066,6 +1073,61 @@ func syncEveryUsersContacts(ctx context.Context, db *store.Store, contacts *goog
 		// stop the others.
 		if _, err := contacts.SyncUser(ctx, user.ID); err != nil {
 			log.Printf("google contact poll user_id=%d: %v", user.ID, err)
+		}
+	}
+}
+
+// googleCalendarPollInterval is how often Google calendars are re-read. The
+// integration plan settled on five to fifteen minutes; the lower end is chosen
+// because an appointment moved an hour from now is worth noticing sooner than a
+// renamed contact, and a delta call per calendar is cheap.
+const googleCalendarPollInterval = 5 * time.Minute
+
+// googleCalendarPoll syncs every user's Google calendars on a timer.
+//
+// The first pass runs immediately rather than one interval after boot, for the
+// same reason the contact poll does: nothing else notices a change made in
+// Google's own UI, so waiting would leave every week stale after a restart.
+//
+// The parameter is named calendars, not syncer: this file imports a package by
+// that name, and shadowing it here would make a later reference to it fail to
+// compile for a reason that reads like nonsense.
+func googleCalendarPoll(ctx context.Context, db *store.Store, calendars *googlecalendar.Syncer, interval time.Duration) {
+	if db == nil || calendars == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	syncEveryUsersCalendars(ctx, db, calendars)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			syncEveryUsersCalendars(ctx, db, calendars)
+		}
+	}
+}
+
+// syncEveryUsersCalendars runs one pass over every serviceable user. It is
+// sequential for the same reason the contact pass is: a burst of parallel
+// Calendar API calls across all users is the one thing capable of hitting the
+// quota.
+func syncEveryUsersCalendars(ctx context.Context, db *store.Store, calendars *googlecalendar.Syncer) {
+	users, err := db.ServiceableUsers(ctx)
+	if err != nil {
+		log.Printf("google calendar poll list users: %v", err)
+		return
+	}
+	for _, user := range users {
+		if ctx.Err() != nil {
+			return
+		}
+		// SyncUser already skips connections that cannot sync and records each
+		// failure against its own connection, so one broken account does not
+		// stop the others.
+		if _, err := calendars.SyncUser(ctx, user.ID); err != nil {
+			log.Printf("google calendar poll user_id=%d: %v", user.ID, err)
 		}
 	}
 }

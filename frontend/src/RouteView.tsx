@@ -7,6 +7,7 @@ import { MailView, SearchView, SnoozedView } from "./features/mail/MailViews";
 import { ThreadView } from "./features/mail/ThreadView";
 import { ComposePage } from "./features/compose/ComposeViews";
 import { ContactsView } from "./features/contacts/ContactsView";
+import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
 import type { RuntimePlugins } from "./plugins/runtime";
@@ -99,6 +100,9 @@ export function RouteView({
   }
   if (location.path === "/compose") {
     return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
+  }
+  if (location.path === "/calendar" || location.path.startsWith("/calendar/")) {
+    return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
   }
   if (location.path === "/contacts") {
     return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
