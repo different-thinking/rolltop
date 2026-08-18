@@ -18,6 +18,12 @@ var leakCases = []string{
 	"cannot parse `postgres://rolltop:hunter2@db:5432/x`: bad port",
 	"cannot parse `postgresql://rolltop:hunter2@db:5432/x`: bad port",
 	"failed: PGPASSWORD=hunter2",
+	// pgx accepts unknown keywords silently, so a mistyped key still carries a
+	// real secret into anything that echoes the connection string.
+	"TEST_DATABASE_URL must be a URL, got \"host=db pass=hunter2\"",
+	"TEST_DATABASE_URL must be a URL, got \"host=db passwd=hunter2\"",
+	"TEST_DATABASE_URL must be a URL, got \"host=db password-file=hunter2\"",
+	"TEST_DATABASE_URL must be a URL, got \"host=db PASS = 'hunter2'\"",
 	"TEST_DATABASE_URL must be a URL, got \"host=localhost user=rolltop password=hunter2\"",
 	// libpq lets a backslash escape any character in a value, quoted or not, so
 	// the value does not end at the first space or at the first quote.
@@ -87,8 +93,16 @@ func TestRedactStopsAtTheEndOfTheValue(t *testing.T) {
 }
 
 func TestRedactLeavesCleanTextAlone(t *testing.T) {
-	const message = "connect: dial tcp 127.0.0.1:5432: connection refused"
-	if got := Redact(message); got != message {
-		t.Errorf("Redact(%q) = %q", message, got)
+	// The keyword pattern matches a family rather than a list, so it has to
+	// stop at word boundaries: an unrelated key that merely ends in "pass" is
+	// diagnosis, not a secret.
+	for _, message := range []string{
+		"connect: dial tcp 127.0.0.1:5432: connection refused",
+		"failed: bypass=1 compass=north",
+		"failed: sslpassthrough=off",
+	} {
+		if got := Redact(message); got != message {
+			t.Errorf("Redact(%q) = %q", message, got)
+		}
 	}
 }

@@ -11,21 +11,27 @@ package pgdsn
 
 import "regexp"
 
-// Secret spellings that may appear in an error.
+// secretValue matches a conninfo value in any of the three shapes libpq
+// accepts. A backslash escapes any character in all of them, so each branch
+// consumes `\x` as one unit: `password=hun\ ter2` does not end at the space,
+// and `password='hun\' ter2'` does not end at the first quote. Both left the
+// tail of the password in the message before the escape alternatives existed.
+const secretValue = `('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|(?:\\.|[^\s'"])+)`
+
+// secretPattern matches any key whose name begins with "pass", optionally
+// prefixed with "pg".
 //
-// libpq lets a backslash escape any character in a conninfo value, quoted or
-// not, so every branch of the keyword pattern has to consume `\x` as one unit:
-// `password=hun\ ter2` does not end at the space, and `password='hun\' ter2'`
-// does not end at the first quote. Both left the tail of the password in the
-// message before the escape alternatives were added.
+// The family is matched rather than enumerated on purpose. libpq itself uses
+// `password` and `passfile`, the environment adds `PGPASSWORD` and
+// `PGPASSFILE`, and pgx accepts unknown keywords without complaint — so an
+// operator who writes `pass=` or `passwd=` gets a DSN that still carries a
+// secret and still reaches this function through the paths that echo a
+// rejected connection string. Enumerating spellings means the next one leaks.
 //
-// The second pattern covers the environment and file spellings, and matches
-// `passfile` inside `PGPASSFILE` — a leading \b never fires there, because the
-// preceding "PG" is itself a word character.
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)password\s*=\s*('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|(?:\\.|[^\s'"])+)`),
-	regexp.MustCompile(`(?i)(?:pg)?pass(?:word|file)\s*=\s*\S+`),
-}
+// The leading \b sits before the optional "pg", which is what makes
+// `PGPASSFILE` match: anchoring after the prefix cannot work, because "PG" is
+// itself a word character. It also keeps unrelated words like `bypass=` out.
+var secretPattern = regexp.MustCompile(`(?i)\b(?:pg)?pass[\w-]*\s*=\s*` + secretValue)
 
 // urlUserinfo matches the credentials section of a URL-style DSN, keeping the
 // user name so the message still says which role failed.
@@ -42,8 +48,5 @@ var urlUserinfo = regexp.MustCompile("(?i)(postgres(?:ql)?://[^:/@\\s]*):[^\\s`'
 // readable — the role name and the actual diagnostic both survive.
 func Redact(message string) string {
 	message = urlUserinfo.ReplaceAllString(message, "$1:…@")
-	for _, pattern := range secretPatterns {
-		message = pattern.ReplaceAllString(message, "password=…")
-	}
-	return message
+	return secretPattern.ReplaceAllString(message, "password=…")
 }

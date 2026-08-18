@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // TestNewDropsTheDatabaseAfterTheTest is the regression guard for the first
@@ -26,7 +24,7 @@ func TestNewDropsTheDatabaseAfterTheTest(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, os.Getenv(EnvVar))
+	admin, err := connect(ctx, os.Getenv(EnvVar))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +51,7 @@ func TestNewIsolatesDatabases(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, dsn := range []string{first, second} {
-		conn, err := pgx.Connect(ctx, dsn)
+		conn, err := connect(ctx, dsn)
 		if err != nil {
 			t.Fatalf("connect to %s: %v", databaseNameFromDSN(t, dsn), err)
 		}

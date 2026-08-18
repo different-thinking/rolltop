@@ -117,9 +117,11 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
   async function runSchema(action: PostgresSchemaAction) {
     setRunning(action);
     setError("");
+    // Disarmed when the action starts, not when it succeeds. A failed inspect
+    // or create left the drop armed, so the next single click performed it.
+    setDropArmed(false);
     try {
       setState(await api.postgresSchema(csrf, dsn, action));
-      setDropArmed(false);
     } catch (err) {
       // The previous state is kept: a refused action means nothing changed, and
       // blanking the panel would hide what the refusal was about.
@@ -255,6 +257,11 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
                 <small className="database-detail">
                   {state.database} as {state.user} — {state.server_version}
                 </small>
+                {state.blocking?.length ? (
+                  <small className="database-detail">
+                    Remove these by hand to create the schema here: {state.blocking.join(", ")}
+                  </small>
+                ) : null}
                 {state.applied_at > 0 ? (
                   <small className="database-detail">
                     Schema created {displayDateTime(new Date(state.applied_at * 1000).toISOString(), datePrefs)}

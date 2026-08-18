@@ -367,6 +367,73 @@ func TestOpenPostgresWithRoleNamedSchema(t *testing.T) {
 	_ = second.Close()
 }
 
+// TestPostgresConsoleNamesWhatBlocksIt covers the dead end a bare refusal
+// leaves behind. Dropping the schema from a database that also holds an older
+// build's tables — indistinguishable from an operator's own, which is why
+// neither is dropped — leaves objects the console will not create over. Saying
+// only "not ours" gives the operator nothing to act on; the names do.
+func TestPostgresConsoleNamesWhatBlocksIt(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.New(t)
+
+	if _, err := CreatePostgresSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	// A table the current baseline does not declare, which is what an older
+	// build's leftovers look like from here.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE legacy_from_another_build (id int)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE schema_migrations SET checksum = 'from-another-build' WHERE scope = $1`, postgresSchemaScope); err != nil {
+		t.Fatal(err)
+	}
+
+	dropped, err := DropPostgresSchema(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped.Stage != PostgresStageForeign {
+		t.Fatalf("after dropping a mismatched schema with leftovers the stage is %q", dropped.Stage)
+	}
+	if !containsSubstring(dropped.Blocking, "legacy_from_another_build") {
+		t.Errorf("state does not name the leftover object: %v", dropped.Blocking)
+	}
+	if !strings.Contains(dropped.Summary, "legacy_from_another_build") {
+		t.Errorf("summary does not name the leftover object: %s", dropped.Summary)
+	}
+	// And the refusals that follow have to name it too, or the operator is back
+	// to guessing.
+	_, err = CreatePostgresSchema(ctx, dsn)
+	if err == nil {
+		t.Fatal("create over leftovers succeeded")
+	}
+	if !strings.Contains(err.Error(), "legacy_from_another_build") {
+		t.Errorf("create refusal does not name what is in the way: %v", err)
+	}
+	_, err = DropPostgresSchema(ctx, dsn)
+	if err == nil {
+		t.Fatal("drop against leftovers succeeded")
+	}
+	if !strings.Contains(err.Error(), "legacy_from_another_build") {
+		t.Errorf("drop refusal does not name what is in the way: %v", err)
+	}
+}
+
+func containsSubstring(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(value, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestPostgresConsoleNeverEchoesCredentials keeps the console under the same
 // rule as everything else that touches a DSN.
 func TestPostgresConsoleNeverEchoesCredentials(t *testing.T) {

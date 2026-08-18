@@ -67,6 +67,12 @@ type PostgresState struct {
 	// turn into a dropped database.
 	CanCreate bool `json:"can_create"`
 	CanDrop   bool `json:"can_drop"`
+	// Blocking names the objects that stop this database from being created
+	// into, when there are any. A drop that spares an operator's own tables —
+	// or an older build's, which cannot be told apart from them — leaves a
+	// database the console will not create into, and the operator needs to know
+	// which objects are in the way to clear them by hand.
+	Blocking []string `json:"blocking,omitempty"`
 	// Summary is one sentence naming the stage in the operator's terms.
 	Summary string `json:"summary"`
 }
@@ -105,7 +111,8 @@ func CreatePostgresSchema(ctx context.Context, dsn string) (PostgresState, error
 		case PostgresStageMismatch:
 			return PostgresState{}, errors.New("this database carries a Rolltop schema from a different build. Drop it before creating the current one")
 		case PostgresStageForeign:
-			return PostgresState{}, errors.New("this database already holds objects that are not Rolltop's. Point the console at an empty database")
+			return PostgresState{}, blockingObjectsError(ctx, conn,
+				"this database already holds objects that are not Rolltop's, so the schema will not be created on top of them")
 		}
 		if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
 			return PostgresState{}, err
@@ -138,7 +145,8 @@ func DropPostgresSchema(ctx context.Context, dsn string) (PostgresState, error) 
 		case PostgresStageEmpty:
 			return inspectPostgres(ctx, conn)
 		case PostgresStageForeign:
-			return PostgresState{}, errors.New("this database holds objects that are not Rolltop's, so the console will not drop anything here")
+			return PostgresState{}, blockingObjectsError(ctx, conn,
+				"this database holds objects that are not Rolltop's, so the console will not drop anything here")
 		}
 		if err := dropPostgresObjects(ctx, conn); err != nil {
 			return PostgresState{}, err
@@ -193,6 +201,17 @@ func lockPostgresSchema(ctx context.Context, conn *sql.Conn) (func(), error) {
 	}, nil
 }
 
+// blockingObjectsError names what is in the way. A refusal that only says "not
+// ours" leaves the operator with nothing to act on; naming the objects turns it
+// into a list they can clear.
+func blockingObjectsError(ctx context.Context, conn *sql.Conn, reason string) error {
+	blocking, err := postgresBlockingObjects(ctx, conn)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s. In the way: %s", reason, describeBlockingObjects(blocking))
+}
+
 func inspectPostgres(ctx context.Context, conn *sql.Conn) (PostgresState, error) {
 	state := PostgresState{}
 	if err := conn.QueryRowContext(ctx,
@@ -205,12 +224,22 @@ func inspectPostgres(ctx context.Context, conn *sql.Conn) (PostgresState, error)
 	}
 	state.Stage = stage
 	state.AppliedAt = appliedAt
+	// Every count is scoped to the baseline's schema. pg_constraint and
+	// pg_trigger are database-wide catalogs, so without the join an operator's
+	// own foreign keys and triggers in their own schemas were added to the
+	// totals the console reports — and to the numbers the drop summary shows.
 	if err := conn.QueryRowContext(ctx, `
 		SELECT
-			(SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'),
-			(SELECT count(*) FROM pg_indexes WHERE schemaname = 'public'),
-			(SELECT count(*) FROM pg_constraint WHERE contype = 'f'),
-			(SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal)`).
+			(SELECT count(*) FROM information_schema.tables
+			   WHERE table_schema = $1 AND table_type = 'BASE TABLE'),
+			(SELECT count(*) FROM pg_indexes WHERE schemaname = $1),
+			(SELECT count(*) FROM pg_constraint c
+			   JOIN pg_namespace n ON n.oid = c.connamespace
+			   WHERE c.contype = 'f' AND n.nspname = $1),
+			(SELECT count(*) FROM pg_trigger t
+			   JOIN pg_class rel ON rel.oid = t.tgrelid
+			   JOIN pg_namespace n ON n.oid = rel.relnamespace
+			   WHERE NOT t.tgisinternal AND n.nspname = $1)`, pgschema.Schema).
 		Scan(&state.Tables, &state.Indexes, &state.ForeignKeys, &state.Triggers); err != nil {
 		return PostgresState{}, postgresError("count the schema objects", err)
 	}
@@ -233,7 +262,13 @@ func inspectPostgres(ctx context.Context, conn *sql.Conn) (PostgresState, error)
 		state.CanDrop = true
 		state.Summary = "Carries a Rolltop schema from a different build. Drop it and create the current one."
 	default:
-		state.Summary = "Holds objects that are not Rolltop's. The console will not touch this database."
+		blocking, err := postgresBlockingObjects(ctx, conn)
+		if err != nil {
+			return PostgresState{}, err
+		}
+		state.Blocking = blocking
+		state.Summary = "Holds objects that are not Rolltop's, so the console will not touch this database. In the way: " +
+			describeBlockingObjects(blocking) + "."
 	}
 	return state, nil
 }
@@ -251,10 +286,10 @@ func countPostgresRows(ctx context.Context, conn *sql.Conn) (int64, error) {
 		SELECT c.relname
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public' AND c.relkind = 'r'
+		WHERE n.nspname = $1 AND c.relkind = 'r'
 		  AND c.relname <> 'schema_migrations'
 		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
-		ORDER BY c.relname`)
+		ORDER BY c.relname`, pgschema.Schema)
 	if err != nil {
 		return 0, postgresError("list the tables", err)
 	}

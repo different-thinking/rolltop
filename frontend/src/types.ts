@@ -866,6 +866,11 @@ export type PostgresState = {
   triggers: number;
   rows: number;
   applied_at: number;
+  /** blocking names the objects that stop the schema from being created here.
+   * Present only when the stage is "foreign": the console cannot tell an
+   * operator's own tables from an older build's leftovers, so it drops
+   * neither and names what is in the way instead. */
+  blocking?: string[];
   can_create: boolean;
   can_drop: boolean;
   summary: string;

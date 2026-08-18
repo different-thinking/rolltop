@@ -176,12 +176,13 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "already applied", Done: 1, Total: 1})
 		return nil
 	}
-	empty, err := postgresDatabaseIsEmpty(ctx, conn)
+	blocking, err := postgresBlockingObjects(ctx, conn)
 	if err != nil {
 		return err
 	}
-	if !empty {
-		return errors.New("postgres: the target database already contains objects but no recorded Rolltop baseline; point the server at an empty database")
+	if len(blocking) > 0 {
+		return fmt.Errorf("postgres: the target database already contains objects but no recorded Rolltop baseline (%s); point the server at an empty database",
+			describeBlockingObjects(blocking))
 	}
 	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "create schema", Done: 0, Total: 1})
 	if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
@@ -219,8 +220,11 @@ func verifyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string
 // present" is the load-bearing one. Both are "not ours to use"; only the first
 // can be created into.
 func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string, int64, error) {
+	// The qualifier is derived rather than written out, so this classification
+	// and pinPostgresSearchPath can never read and write different namespaces.
 	var table sql.NullString
-	if err := conn.QueryRowContext(ctx, `SELECT to_regclass('public.schema_migrations')::text`).Scan(&table); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1)::text`,
+		pgschema.Schema+".schema_migrations").Scan(&table); err != nil {
 		return "", 0, postgresError("inspect the schema", err)
 	}
 	if table.Valid {
@@ -239,18 +243,23 @@ func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string
 			return "", 0, postgresError("read the schema version", err)
 		}
 	}
-	empty, err := postgresDatabaseIsEmpty(ctx, conn)
+	blocking, err := postgresBlockingObjects(ctx, conn)
 	if err != nil {
 		return "", 0, err
 	}
-	if empty {
+	if len(blocking) == 0 {
 		return PostgresStageEmpty, 0, nil
 	}
 	return PostgresStageForeign, 0, nil
 }
 
-// postgresDatabaseIsEmpty reports whether the database holds no objects of its
-// own.
+// maxListedBlockingObjects bounds how many object names an error or a console
+// summary names. Enough to recognise what is in the way, not so many that the
+// message becomes a schema dump.
+const maxListedBlockingObjects = 10
+
+// postgresBlockingObjects lists the objects that stop this database from being
+// created into, schema-qualified and name-sorted.
 //
 // Counting only base tables in `public` is not enough to refuse a foreign
 // database: an application that keeps its tables in another schema, or a public
@@ -258,10 +267,14 @@ func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string
 // baseline on top. Relations belonging to an extension are excluded, because the
 // preflight installs pg_trgm, citext and unaccent into a database that is
 // otherwise still untouched.
-func postgresDatabaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
-	var objects int
-	if err := conn.QueryRowContext(ctx, `
-		SELECT count(*)
+//
+// The names matter as much as the count. A database that is not empty cannot be
+// created into, and the console cannot decide on the operator's behalf whether
+// what remains is their data or an older build's — so it has to say which
+// objects are in the way instead of only that some are.
+func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -270,10 +283,36 @@ func postgresDatabaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) 
 		  AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e'
-		  )`).Scan(&objects); err != nil {
-		return false, postgresError("count the existing objects", err)
+		  )
+		ORDER BY 1`)
+	if err != nil {
+		return nil, postgresError("list the existing objects", err)
 	}
-	return objects == 0, nil
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, postgresError("list the existing objects", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, postgresError("list the existing objects", err)
+	}
+	return names, nil
+}
+
+// describeBlockingObjects renders a bounded, readable list for a message.
+func describeBlockingObjects(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) <= maxListedBlockingObjects {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more",
+		strings.Join(names[:maxListedBlockingObjects], ", "), len(names)-maxListedBlockingObjects)
 }
 
 // applyPostgresBaseline creates the schema and records its version as one
