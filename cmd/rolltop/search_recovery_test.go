@@ -77,7 +77,7 @@ func TestRecoverMarkedSearchIndexesQuarantinesOnlyTargetAndQueuesEveryVisibleLoc
 	if !slices.Equal(recovered, []int64{owner.ID}) {
 		t.Fatalf("recovered users = %v, want [%d]", recovered, owner.ID)
 	}
-	required, err := searchSvc.SearchIndexRecoveryRequired(owner.ID)
+	required, err := searchRecoveryRequired(searchSvc, owner.ID)
 	if err != nil || required {
 		t.Fatalf("owner recovery marker required=%t err=%v, want false, nil", required, err)
 	}
@@ -175,7 +175,7 @@ func TestRecoverMarkedSearchIndexesKeepsMarkerWhenQuarantineFailsAfterPendingWri
 	if err == nil || !strings.Contains(err.Error(), "quarantine stalled search index") {
 		t.Fatalf("recovery error = %v, want quarantine failure", err)
 	}
-	required, markerErr := searchSvc.SearchIndexRecoveryRequired(user.ID)
+	required, markerErr := searchRecoveryRequired(searchSvc, user.ID)
 	if markerErr != nil || !required {
 		t.Fatalf("recovery marker required=%t err=%v, want true, nil", required, markerErr)
 	}
@@ -311,7 +311,7 @@ func TestRecoverMarkedSearchIndexesRepairsNamedRangeAndKeepsIndex(t *testing.T) 
 	if !slices.Equal(recovered, []int64{owner.ID}) {
 		t.Fatalf("recovered users = %v, want [%d]", recovered, owner.ID)
 	}
-	if required, err := searchSvc.SearchIndexRecoveryRequired(owner.ID); err != nil || required {
+	if required, err := searchRecoveryRequired(searchSvc, owner.ID); err != nil || required {
 		t.Fatalf("recovery marker required=%t err=%v, want false, nil", required, err)
 	}
 	if raw, err := os.ReadFile(filepath.Join(ownerIndex, "index_meta.json")); err != nil || string(raw) != string(published) {
@@ -394,5 +394,120 @@ func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexDoesNotOpen(t *testin
 	}
 	if len(pending) != 2 {
 		t.Fatalf("pending messages = %d, want the full rebuild to queue %d and %d", len(pending), kept.ID, stalled.ID)
+	}
+}
+
+// searchRecoveryRequired keeps the two-value shape these tests were written
+// around; the production accessor returns the whole recovery plan.
+func searchRecoveryRequired(service *search.Service, userID int64) (bool, error) {
+	recovery, err := service.SearchIndexRecoveryPlan(userID)
+	return recovery.Required, err
+}
+
+// The index a targeted marker points at can be gone entirely — an operator
+// deleted it expecting a rebuild, or a restore lost it. Verifying by opening
+// would create an empty one and pass, so recovery must fall back to the rebuild.
+func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexIsMissing(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner, err := db.CreateUser(ctx, "missing-index@example.test", "Missing Index", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobStore := blob.New(dataDir)
+	account := createSearchRecoveryAccount(t, ctx, db, owner)
+	kept := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 1)
+	stalled := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 2)
+
+	searchRoot := filepath.Join(dataDir, "users")
+	searchSvc, err := search.OpenPerUser(searchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+	if err := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(owner.ID, stalled.ID, stalled.ID); err != nil {
+		t.Fatal(err)
+	}
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
+		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.ListMessagesNeedingAttachmentIndex(ctx, owner.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending messages = %d, want the full rebuild to queue %d and %d", len(pending), kept.ID, stalled.ID)
+	}
+}
+
+// A message deleted while the stalled batch held the writer gate never got its
+// Bleve delete. Targeted repair keeps the index, so it has to remove those
+// documents itself or they stay searchable forever.
+func TestRecoverMarkedSearchIndexesDeletesDocumentsWhoseMessagesVanished(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner, err := db.CreateUser(ctx, "ghost-doc@example.test", "Ghost Doc", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobStore := blob.New(dataDir)
+	account := createSearchRecoveryAccount(t, ctx, db, owner)
+	live := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 1)
+
+	searchRoot := filepath.Join(dataDir, "users")
+	searchSvc, err := search.OpenPerUser(searchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+	if err := searchSvc.IndexMessage(ctx, live, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A document whose message row no longer exists: exactly what a delete that
+	// could not reach Bleve leaves behind.
+	ghost := live
+	ghost.ID = live.ID + 1
+	ghost.Subject = "Deleted while the writer was stalled"
+	if err := searchSvc.IndexMessage(ctx, ghost, nil); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := searchSvc.CountUserMessages(ctx, owner.ID); err != nil || count != 2 {
+		t.Fatalf("indexed documents = %d, %v; want 2, nil", count, err)
+	}
+
+	if err := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(owner.ID, live.ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
+		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	count, err := searchSvc.CountUserMessages(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("indexed documents = %d, want the vanished message removed", count)
 	}
 }

@@ -295,3 +295,14 @@ func parseBool(key string, fallback bool) (bool, error) {
 	}
 	return b, nil
 }
+
+// SearchRoot is the directory holding the per-user Bleve indexes, one
+// numbered subdirectory per tenant. It is derived here rather than rebuilt at
+// each call site: a layout that moves must move for the server, the offline
+// maintenance commands, and the startup memory check together, or the ones
+// left behind silently measure and repair an empty directory.
+func (c Config) SearchRoot() string { return SearchRootFor(c.DataDir) }
+
+// SearchRootFor is the same derivation for callers that only have the data
+// directory, such as the offline maintenance commands.
+func SearchRootFor(dataDir string) string { return filepath.Join(dataDir, "users") }

@@ -648,6 +648,15 @@ func (s *Service) writerWaitWarningAfter() time.Duration {
 	return defaultWriterWaitLogAfter
 }
 
+// logf resolves the logger this service reports through: an injected one in
+// tests, the process log otherwise.
+func (s *Service) logf() func(string, ...any) {
+	if s != nil && s.bleveErrorLog != nil {
+		return s.bleveErrorLog
+	}
+	return log.Printf
+}
+
 func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waited, activeFor time.Duration) {
 	logger := log.Printf
 	if s != nil && s.bleveErrorLog != nil {
@@ -771,24 +780,14 @@ func (s *Service) UnfinishedWriterRecoveries() map[int64]SearchIndexRecovery {
 	}
 	s.mu.Unlock()
 	recoveries := make(map[int64]SearchIndexRecovery)
-	for key, writer := range writers {
-		if writer == nil {
-			continue
-		}
+	for _, writer := range writers {
 		active, activeSince := writer.activeSnapshot()
-		if activeSince.IsZero() {
+		if activeSince.IsZero() || active.UserID <= 0 {
 			continue
 		}
-		userID := active.UserID
-		if userID <= 0 {
-			userID = key
-		}
-		if userID <= 0 {
-			continue
-		}
-		recoveries[userID] = recoveries[userID].widen(SearchIndexRecovery{
+		recoveries[active.UserID] = SearchIndexRecovery{
 			Required: true, FirstDocumentID: active.FirstDocumentID, LastDocumentID: active.LastDocumentID,
-		})
+		}
 	}
 	return recoveries
 }
@@ -915,7 +914,7 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	}
 	s.mu.Unlock()
 
-	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), "bleve"))
+	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), liveIndexDirName))
 	if err != nil {
 		s.reportBleveError(bleveErrorContext{Operation: "open-index", UserID: userID}, err)
 		return nil, err

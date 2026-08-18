@@ -158,3 +158,50 @@ func TestUnfinishedWriterRecoveriesNamesOnlyWritersInFlight(t *testing.T) {
 		t.Fatal("a tenant whose writer returned was scheduled for recovery")
 	}
 }
+
+// searchRecoveryRequired keeps the two-value shape these tests were written
+// around. The production accessor returns the whole plan, deliberately: a
+// boolean form alongside it would let a caller drop the document range that
+// decides between an in-place repair and a full rebuild.
+func searchRecoveryRequired(service *Service, userID int64) (bool, error) {
+	recovery, err := service.SearchIndexRecoveryPlan(userID)
+	return recovery.Required, err
+}
+
+// A header this build does not know means a payload written under rules it does
+// not know. Reading the document line anyway would run a repair against bounds
+// that may no longer mean what they say here.
+func TestSearchIndexRecoveryMarkerFromLaterBuildAsksForFullRebuild(t *testing.T) {
+	service, root := openMarkerService(t)
+	userDir := filepath.Join(root, "9")
+	if err := os.MkdirAll(userDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, searchIndexRecoveryMarker),
+		[]byte("rolltop-search-recovery-v3\ndocuments 100 200\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := service.SearchIndexRecoveryPlan(9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovery.Required || recovery.Targeted() {
+		t.Fatalf("recovery = %+v, want an unknown version to degrade to a full rebuild", recovery)
+	}
+}
+
+// An index that is gone must not be "verified" by creating an empty one: the
+// targeted repair would reindex its own range, clear the marker, and leave every
+// other message flagged as indexed but absent.
+func TestVerifyPerUserIndexOpensRejectsAMissingIndex(t *testing.T) {
+	service, root := openMarkerService(t)
+	if err := os.MkdirAll(filepath.Join(root, "13"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.VerifyPerUserIndexOpens(13); err == nil {
+		t.Fatal("verification accepted a tenant with no live index")
+	}
+	if _, err := os.Stat(filepath.Join(root, "13", liveIndexDirName)); !os.IsNotExist(err) {
+		t.Fatalf("verification created an index it was asked to check: %v", err)
+	}
+}

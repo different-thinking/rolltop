@@ -89,12 +89,22 @@ func (r SearchIndexRecovery) marshal() string {
 // parseSearchIndexRecovery reads a marker's payload. Anything it cannot make
 // sense of is a full rebuild: a marker exists, so recovery is required, and
 // without a trustworthy range there is nothing narrower to do.
+//
+// The header decides how the payload is read, and is checked before the payload
+// is looked at. An unrecognized version is a marker some later build wrote under
+// rules this one does not know — reading its document line anyway would run a
+// repair against bounds that may no longer mean what they say here, so it
+// degrades to the rebuild that is correct under every version.
 func parseSearchIndexRecovery(content []byte) SearchIndexRecovery {
-	recovery := SearchIndexRecovery{Required: true}
+	fullRebuild := SearchIndexRecovery{Required: true}
 	if len(content) > maxSearchIndexRecoveryMarkerBytes {
-		return recovery
+		return fullRebuild
 	}
-	for _, line := range strings.Split(string(content), "\n") {
+	lines := strings.Split(string(content), "\n")
+	if strings.TrimSpace(lines[0]) != searchIndexRecoveryHeaderV2 {
+		return fullRebuild
+	}
+	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
 		if len(fields) != 3 || fields[0] != searchIndexRecoveryDocuments {
 			continue
@@ -102,15 +112,15 @@ func parseSearchIndexRecovery(content []byte) SearchIndexRecovery {
 		first, firstErr := strconv.ParseInt(fields[1], 10, 64)
 		last, lastErr := strconv.ParseInt(fields[2], 10, 64)
 		if firstErr != nil || lastErr != nil {
-			return SearchIndexRecovery{Required: true}
+			return fullRebuild
 		}
 		candidate := SearchIndexRecovery{Required: true, FirstDocumentID: first, LastDocumentID: last}
 		if !candidate.Targeted() {
-			return SearchIndexRecovery{Required: true}
+			return fullRebuild
 		}
 		return candidate
 	}
-	return recovery
+	return fullRebuild
 }
 
 // MarkSearchIndexRecoveryRequired durably records that a tenant index must be
@@ -191,13 +201,6 @@ func writeSearchIndexRecoveryMarker(markerPath, userDir string, recovery SearchI
 	return nil
 }
 
-// SearchIndexRecoveryRequired reports whether startup must repair this tenant's
-// index before any Bleve handle is opened.
-func (s *Service) SearchIndexRecoveryRequired(userID int64) (bool, error) {
-	recovery, err := s.SearchIndexRecoveryPlan(userID)
-	return recovery.Required, err
-}
-
 // SearchIndexRecoveryPlan reports what that repair has to do: reindex the
 // message range the marker names, or rebuild the whole index when it names none.
 func (s *Service) SearchIndexRecoveryPlan(userID int64) (SearchIndexRecovery, error) {
@@ -212,10 +215,14 @@ func (s *Service) SearchIndexRecoveryPlan(userID int64) (SearchIndexRecovery, er
 	return recovery, nil
 }
 
-// readSearchIndexRecoveryMarker reads a marker if one is there. A marker whose
-// payload cannot be read is still a marker: the read failure is reported as a
-// full rebuild rather than as an error, because refusing to start would leave
-// the tenant with no search at all and no way out.
+// readSearchIndexRecoveryMarker reads a marker if one is there.
+//
+// A read that fails is an error, never an assumed payload. Treating it as a full
+// rebuild would be wrong in both directions: at startup a transient EIO on the
+// volume would quarantine a healthy multi-gigabyte index, and in the write path
+// it would make an existing marker look like it already asks for everything, so
+// widening it with a newly stalled range would be skipped and those messages
+// would never be reindexed.
 func readSearchIndexRecoveryMarker(markerPath string) (SearchIndexRecovery, bool, error) {
 	info, err := os.Lstat(markerPath)
 	if os.IsNotExist(err) {
@@ -229,7 +236,7 @@ func readSearchIndexRecoveryMarker(markerPath string) (SearchIndexRecovery, bool
 	}
 	content, err := os.ReadFile(markerPath)
 	if err != nil {
-		return SearchIndexRecovery{Required: true}, true, nil
+		return SearchIndexRecovery{}, false, fmt.Errorf("read search recovery marker: %w", err)
 	}
 	return parseSearchIndexRecovery(content), true, nil
 }

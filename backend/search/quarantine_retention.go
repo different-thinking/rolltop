@@ -7,6 +7,7 @@
 package search
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -38,7 +39,6 @@ type quarantineEntry struct {
 	path    string
 	userID  int64
 	created time.Time
-	bytes   int64
 }
 
 // PruneIndexQuarantines removes quarantined indexes that are no longer worth
@@ -46,6 +46,12 @@ type quarantineEntry struct {
 // directory older than maxAge regardless. A directory whose name carries no
 // readable timestamp falls back to its modification time, so a quarantine this
 // build did not write is still bounded rather than kept forever.
+//
+// A tenant that cannot be read is reported and skipped, never fatal to the pass.
+// Housekeeping that stops at the first bad entry would leave every later tenant
+// unpruned on this run and on every run after it, which is how quarantines came
+// to fill a volume in the first place. Errors are joined and returned once the
+// tenants that could be pruned have been.
 func PruneIndexQuarantines(root string, keep int, maxAge time.Duration, now time.Time) ([]PrunedQuarantine, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("per-user index root is required")
@@ -61,6 +67,7 @@ func PruneIndexQuarantines(root string, keep int, maxAge time.Duration, now time
 		return nil, fmt.Errorf("read per-user index root: %w", err)
 	}
 	pruned := make([]PrunedQuarantine, 0)
+	problems := make([]error, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -72,19 +79,25 @@ func PruneIndexQuarantines(root string, keep int, maxAge time.Duration, now time
 		userDir := filepath.Join(root, entry.Name())
 		candidates, err := collectIndexQuarantines(userDir, userID)
 		if err != nil {
-			return pruned, err
+			problems = append(problems, err)
+			continue
 		}
 		for _, candidate := range expiredIndexQuarantines(candidates, keep, maxAge, now) {
+			// Sized here rather than while collecting, so the directories
+			// retention keeps - the multi-gigabyte copies this exists to bound -
+			// are not walked on every pass for a number nothing reads.
+			bytes := directoryBytes(candidate.path)
 			if err := os.RemoveAll(candidate.path); err != nil {
-				return pruned, fmt.Errorf("remove quarantined search index %s: %w", candidate.path, err)
+				problems = append(problems, fmt.Errorf("remove quarantined search index %s: %w", candidate.path, err))
+				continue
 			}
 			pruned = append(pruned, PrunedQuarantine{
 				Path: candidate.path, UserID: candidate.userID,
-				Age: now.Sub(candidate.created), Bytes: candidate.bytes,
+				Age: now.Sub(candidate.created), Bytes: bytes,
 			})
 		}
 	}
-	return pruned, nil
+	return pruned, errors.Join(problems...)
 }
 
 // expiredIndexQuarantines applies both rules to one tenant's directories:
@@ -115,35 +128,42 @@ func collectIndexQuarantines(userDir string, userID int64) ([]quarantineEntry, e
 	if err != nil {
 		return nil, fmt.Errorf("read user %d search directory: %w", userID, err)
 	}
-	prefix := "bleve.quarantine-"
+	prefix := quarantineDirPrefix()
 	collected := make([]quarantineEntry, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
 			continue
 		}
 		path := filepath.Join(userDir, entry.Name())
-		created, err := quarantineCreationTime(path, strings.TrimPrefix(entry.Name(), prefix))
+		created, found, err := quarantineCreationTime(path, strings.TrimPrefix(entry.Name(), prefix))
 		if err != nil {
 			return nil, err
 		}
-		collected = append(collected, quarantineEntry{
-			path: path, userID: userID, created: created, bytes: directoryBytes(path),
-		})
+		if !found {
+			// Removed since the listing above. Nothing left to prune.
+			continue
+		}
+		collected = append(collected, quarantineEntry{path: path, userID: userID, created: created})
 	}
 	return collected, nil
 }
 
 // quarantineCreationTime prefers the stamp quarantine encodes in the directory
-// name, because a copy or a restore rewrites modification times.
-func quarantineCreationTime(path, stamp string) (time.Time, error) {
-	if created, err := time.Parse("20060102T150405.000000000Z", stamp); err == nil {
-		return created.UTC(), nil
+// name, because a copy or a restore rewrites modification times. It reports
+// whether the directory is still there: one removed between the listing and this
+// stat is not an error, it is simply nothing left to prune.
+func quarantineCreationTime(path, stamp string) (time.Time, bool, error) {
+	if created, err := time.Parse(quarantineStampLayout, stamp); err == nil {
+		return created.UTC(), true, nil
 	}
 	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("inspect quarantined search index %s: %w", path, err)
+	if os.IsNotExist(err) {
+		return time.Time{}, false, nil
 	}
-	return info.ModTime().UTC(), nil
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("inspect quarantined search index %s: %w", path, err)
+	}
+	return info.ModTime().UTC(), true, nil
 }
 
 // directoryBytes is best effort: the number only reaches a log line, so an

@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+// The on-disk layout of a per-user index and its quarantines. Quarantine writes
+// these names and retention parses them back, so they are defined once: a prefix
+// or stamp that drifts between the two makes pruning silently stop matching, and
+// quarantines then accumulate unbounded with nothing reporting it.
+const (
+	// liveIndexDirName is the per-user Bleve directory inside a tenant's data
+	// directory.
+	liveIndexDirName = "bleve"
+	// quarantineDirSuffix separates the live index name from its timestamp.
+	quarantineDirSuffix = ".quarantine-"
+	// quarantineStampLayout is the UTC stamp appended to a quarantine.
+	quarantineStampLayout = "20060102T150405.000000000Z"
+)
+
+// quarantineDirPrefix is what a quarantined index directory is named before its
+// timestamp, for callers scanning a tenant directory.
+func quarantineDirPrefix() string { return liveIndexDirName + quarantineDirSuffix }
+
 // IndexQuarantine is the reversible result of moving one tenant's Bleve index
 // out of the live path. An empty QuarantinePath means no index existed.
 type IndexQuarantine struct {
@@ -34,8 +52,8 @@ func quarantinePerUserIndexWithSync(root string, userID int64, now time.Time, sy
 	}
 	indexPath := result.IndexPath
 
-	stamp := now.UTC().Format("20060102T150405.000000000Z")
-	quarantinePath := indexPath + ".quarantine-" + stamp
+	stamp := now.UTC().Format(quarantineStampLayout)
+	quarantinePath := indexPath + quarantineDirSuffix + stamp
 	if _, err := os.Lstat(quarantinePath); err == nil {
 		return IndexQuarantine{}, fmt.Errorf("search index quarantine already exists: %s", quarantinePath)
 	} else if !errorsIsNotExist(err) {
@@ -79,7 +97,7 @@ func inspectPerUserIndex(root string, userID int64) (IndexQuarantine, bool, erro
 		return IndexQuarantine{}, false, fmt.Errorf("resolve per-user index root: %w", err)
 	}
 	userDir := filepath.Join(root, strconv.FormatInt(userID, 10))
-	indexPath := filepath.Join(userDir, "bleve")
+	indexPath := filepath.Join(userDir, liveIndexDirName)
 	result := IndexQuarantine{IndexPath: indexPath}
 	rootInfo, err := os.Lstat(root)
 	if errorsIsNotExist(err) {

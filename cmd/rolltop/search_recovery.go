@@ -71,12 +71,61 @@ func repairMarkedSearchIndexRange(ctx context.Context, db *store.Store, searchSv
 		return 0, fmt.Errorf("mark search rows %d-%d pending for user %d: %w",
 			recovery.FirstDocumentID, recovery.LastDocumentID, userID, err)
 	}
+	removed, err := deleteVanishedDocumentsInRange(ctx, db, searchSvc, userID, recovery)
+	if err != nil {
+		return 0, err
+	}
 	// The marker is cleared only after the pending write is durable, so a crash
 	// in between repeats a repair that is idempotent rather than skipping one.
 	if err := searchSvc.ClearSearchIndexRecoveryRequired(userID); err != nil {
 		return 0, fmt.Errorf("clear search recovery marker for user %d after marking %d rows pending: %w", userID, marked, err)
 	}
-	log.Printf("repaired stalled search index user_id=%d pending_messages=%d first_document_id=%d last_document_id=%d index_retained=true",
-		userID, marked, recovery.FirstDocumentID, recovery.LastDocumentID)
+	log.Printf("repaired stalled search index user_id=%d pending_messages=%d deleted_documents=%d first_document_id=%d last_document_id=%d index_retained=true",
+		userID, marked, removed, recovery.FirstDocumentID, recovery.LastDocumentID)
 	return userID, nil
+}
+
+// maxVanishedDocumentScan bounds the row-ID window swept for deleted messages.
+// A marker's range comes from one batch and is narrow in practice; a pathological
+// one is reported rather than turned into a scan of the whole ID space.
+const maxVanishedDocumentScan = 10000
+
+// deleteVanishedDocumentsInRange removes index documents whose messages no longer
+// exist. Marking rows pending only repairs documents SQLite can still describe;
+// a message deleted while the stalled batch held the writer gate never got its
+// Bleve delete, and the retained index would keep serving it. The full rebuild
+// this replaces discarded such documents by discarding everything.
+func deleteVanishedDocumentsInRange(ctx context.Context, db *store.Store, searchSvc *search.Service, userID int64, recovery search.SearchIndexRecovery) (int, error) {
+	width := recovery.LastDocumentID - recovery.FirstDocumentID + 1
+	if width > maxVanishedDocumentScan {
+		log.Printf("skipped deleted-document sweep user_id=%d first_document_id=%d last_document_id=%d width=%d limit=%d",
+			userID, recovery.FirstDocumentID, recovery.LastDocumentID, width, maxVanishedDocumentScan)
+		return 0, nil
+	}
+	surviving, err := db.MessageIDsInRange(ctx, userID, recovery.FirstDocumentID, recovery.LastDocumentID)
+	if err != nil {
+		return 0, fmt.Errorf("list surviving messages %d-%d for user %d: %w",
+			recovery.FirstDocumentID, recovery.LastDocumentID, userID, err)
+	}
+	present := make(map[int64]struct{}, len(surviving))
+	for _, id := range surviving {
+		present[id] = struct{}{}
+	}
+	vanished := make([]int64, 0)
+	for id := recovery.FirstDocumentID; id <= recovery.LastDocumentID; id++ {
+		if _, ok := present[id]; !ok {
+			vanished = append(vanished, id)
+		}
+	}
+	if len(vanished) == 0 {
+		return 0, nil
+	}
+	// Most of these IDs were never indexed - the range is inclusive and message
+	// IDs within it are sparse. Deleting a document that is not there is a no-op,
+	// which is what makes the sweep safe to run over the whole range.
+	if err := searchSvc.DeleteMessages(ctx, userID, vanished); err != nil {
+		return 0, fmt.Errorf("delete vanished search documents %d-%d for user %d: %w",
+			recovery.FirstDocumentID, recovery.LastDocumentID, userID, err)
+	}
+	return len(vanished), nil
 }

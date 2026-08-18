@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,7 @@ func TestMeasureIndexFootprintCountsLiveIndexesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if footprint.Tenants != 1 || footprint.Bytes != 512 || footprint.LargestBytes != 512 {
+	if footprint.Tenants != 1 || footprint.Bytes != 512 {
 		t.Fatalf("footprint = %+v, want one tenant of 512 bytes", footprint)
 	}
 }
@@ -169,5 +170,75 @@ func TestRecordStallDiagnosticsIsInertWithoutADirectory(t *testing.T) {
 	service, _ := openMarkerService(t)
 	if err := service.recordStallDiagnostics(time.Now(), "summary", "frame"); err != nil {
 		t.Fatalf("unconfigured stall diagnostics returned %v, want nil", err)
+	}
+}
+
+// Housekeeping that stops at the first unreadable tenant leaves every later one
+// unpruned on this run and every run after it, which is how quarantines filled a
+// volume to begin with.
+func TestPruneIndexQuarantinesContinuesPastAnUnreadableTenant(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test makes a tenant unreadable with")
+	}
+	root := filepath.Join(t.TempDir(), "users")
+	blocked := filepath.Join(root, "1")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expired := writeQuarantine(t, root, 2, "20260810T012701.929388599Z", 8)
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	now := time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC)
+	pruned, err := PruneIndexQuarantines(root, DefaultIndexQuarantineKeep, DefaultIndexQuarantineMaxAge, now)
+	if err == nil {
+		t.Fatal("unreadable tenant was not reported")
+	}
+	if len(pruned) != 1 || pruned[0].Path != expired {
+		t.Fatalf("pruned = %+v, want the reachable tenant pruned anyway", pruned)
+	}
+	if _, statErr := os.Stat(expired); !os.IsNotExist(statErr) {
+		t.Fatalf("later tenant was skipped because of an earlier failure: %v", statErr)
+	}
+}
+
+// The volume that refuses the rename is the volume whose incident this report
+// explains, so the report is appended rather than dropped.
+func TestRecordStallDiagnosticsAppendsWhenRotationFails(t *testing.T) {
+	dataDir := t.TempDir()
+	service, _ := openMarkerService(t)
+	service.SetStallDiagnosticsDir(dataDir)
+	logged := make([]string, 0, 2)
+	service.bleveErrorLog = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	path := filepath.Join(dataDir, stallLogName)
+	if err := os.WriteFile(path, make([]byte, stallLogMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the rotation target makes the rename fail without making
+	// the append impossible.
+	if err := os.Mkdir(path+".prev", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path+".prev", "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.recordStallDiagnostics(time.Now(), "summary that must survive", "frame"); err != nil {
+		t.Fatalf("report was dropped when rotation failed: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "summary that must survive") {
+		t.Fatal("stall report was not appended after the failed rotation")
+	}
+	if len(logged) == 0 || !strings.Contains(logged[0], "continuing to append") {
+		t.Fatalf("failed rotation was not reported: %v", logged)
 	}
 }

@@ -496,8 +496,12 @@ what survives is consistent and only the batch in flight is in doubt. Rebuilding
 a multi-gigabyte index for that costs hours of reindexing, and that reindexing is
 itself the load that makes the next commit slow enough to abandon.
 
-Only a stall the marker cannot attribute to a message range falls back to the
-full rebuild: Rolltop then renames `/data/users/<id>/bleve` to a timestamped
+Documents in that range whose messages were deleted while the stalled batch held
+the writer gate are removed from the index during the repair, since their own
+delete never reached Bleve.
+
+A stall the marker cannot attribute to a message range falls back to the full
+rebuild, as does one whose index is missing or no longer opens: Rolltop then renames `/data/users/<id>/bleve` to a timestamped
 quarantine directory, persists that rename before clearing the recovery marker,
 and creates a new derived index. The normal local indexing worker rebuilds it
 from SQLite and retained local `.eml` blobs, including folders configured for

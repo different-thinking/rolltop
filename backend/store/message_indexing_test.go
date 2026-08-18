@@ -58,7 +58,7 @@ func TestMarkSearchVisibleMessagesPendingIndexUsesFullThenRestoresNormal(t *test
 	db.db.SetMaxOpenConns(1)
 
 	events := make([]string, 0, 3)
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
+	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			events = append(events, mode)
 			return setSQLiteSynchronous(ctx, conn, mode)
@@ -78,7 +78,7 @@ func TestMarkSearchVisibleMessagesPendingIndexUsesFullThenRestoresNormal(t *test
 	// The second update targets a row that is already pending. The checkpoint
 	// must still run because SQLite is free to avoid writing an unchanged value.
 	events = events[:0]
-	marked, err = markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
+	marked, err = markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			events = append(events, mode)
 			return setSQLiteSynchronous(ctx, conn, mode)
@@ -117,7 +117,7 @@ func TestDurableSearchPendingWriteDiscardsConnectionWhenNormalRestoreFails(t *te
 	db.db.SetMaxOpenConns(1)
 	restoreErr := errors.New("restore failed")
 
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
+	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			if mode == "NORMAL" {
 				return restoreErr
@@ -304,4 +304,58 @@ func assertResetIndexState(t *testing.T, ctx context.Context, db *Store, userID,
 	if after.Subject != before.Subject || after.BodyText != before.BodyText || after.BlobID != before.BlobID || after.BlobPath != before.BlobPath || after.UID != before.UID {
 		t.Fatalf("message content changed: before=%+v after=%+v", before, after)
 	}
+}
+
+// An invalid range must fail rather than fall back to marking everything: the
+// wide direction silently rewrites every row in the tenant and triggers a full
+// reindex nobody asked for.
+func TestPendingIndexScopeRejectsAnInvalidRangeInsteadOfWidening(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner, err := db.CreateUser(ctx, "invalid-range@example.test", "Invalid Range", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := createIndexedMessageForResetTest(t, ctx, db, owner, "INBOX", true, 1)
+
+	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID,
+		searchPendingScope{firstID: 5, lastID: 3}, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	if err == nil {
+		t.Fatal("an inverted range was accepted")
+	}
+	if marked != 0 {
+		t.Fatalf("marked = %d, want nothing written for an invalid range", marked)
+	}
+	assertResetIndexState(t, ctx, db, owner.ID, message.ID, false, message)
+}
+
+// A targeted repair must reach the rows the indexing worker will pick up, which
+// includes a mailbox whose include_in_search was switched off but which has not
+// been purged from the index yet. Marking zero rows there while clearing the
+// marker would drop that batch silently.
+func TestPendingIndexRangeCoversAnExcludedButUnpurgedMailbox(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner, err := db.CreateUser(ctx, "excluded-range@example.test", "Excluded Range", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	excluded := createIndexedMessageForResetTest(t, ctx, db, owner, "Archive", false, 1)
+
+	marked, err := db.MarkSearchMessagesPendingIndexRange(ctx, owner.ID, excluded.ID, excluded.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked != 1 {
+		t.Fatalf("marked = %d, want the excluded-but-unpurged row queued", marked)
+	}
+	assertResetIndexState(t, ctx, db, owner.ID, excluded.ID, true, excluded)
 }

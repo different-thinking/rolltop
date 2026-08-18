@@ -430,7 +430,11 @@ func run() (runErr error) {
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
 	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
-	reportIndexMemoryHeadroom(appliedMemory, filepath.Join(cfg.DataDir, "users"))
+	// Measuring the index means stat-walking every tenant's segment files, on the
+	// storage whose latency this warning is about. Nothing depends on the result,
+	// so it must not stand between the process and serving traffic - least of all
+	// during the recovery restarts this release exists to make cheap.
+	go reportIndexMemoryHeadroom(appliedMemory, cfg.SearchRoot())
 	// Each database resolves its own mode when it is opened, because the system
 	// database can be configured onto a different filesystem than the tenant
 	// databases. Both are reported here, since the choice changes how SQLite
@@ -666,7 +670,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	}
 
 	startup.update("Search", "opening indexes", 0, 1)
-	searchRoot := filepath.Join(cfg.DataDir, "users")
+	searchRoot := cfg.SearchRoot()
 	searchSvc, err := search.OpenPerUser(searchRoot)
 	if err != nil {
 		return nil, err
@@ -794,7 +798,21 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 			// itself the load that makes the next commit slow enough to abandon.
 			recoveries := searchSvc.UnfinishedWriterRecoveries()
 			if len(recoveries) == 0 {
-				log.Printf("abandoned search index close left no writer in flight; no recovery scheduled")
+				// The close itself was abandoned, not a batch: every writer had
+				// returned and Bleve hung inside Close. Nothing names a range
+				// then, and an index left half-closed still has to be rebuilt or
+				// it fails to open on the next start with no marker to notice.
+				log.Printf("abandoned search index close left no writer in flight; scheduling a full recovery")
+				current, err := db.ListUsers(context.Background())
+				if err != nil {
+					log.Printf("list users for search recovery markers: %v", err)
+					current = users
+				}
+				for _, user := range current {
+					if markErr := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); markErr != nil {
+						log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, markErr)
+					}
+				}
 				return
 			}
 			for userID, recovery := range recoveries {
@@ -1254,6 +1272,13 @@ func reportIndexMemoryHeadroom(applied memlimit.Applied, searchRoot string) {
 		return
 	}
 	if footprint.Tenants == 0 {
+		return
+	}
+	// Below this an index cannot be what is displacing the page cache, and a
+	// warning about a few megabytes on a fresh deployment is noise that teaches
+	// operators to ignore the line that matters later.
+	const meaningfulIndexBytes = 64 << 20
+	if footprint.Bytes < meaningfulIndexBytes {
 		return
 	}
 	headroom := applied.Detected - applied.Bytes

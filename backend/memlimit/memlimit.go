@@ -62,7 +62,8 @@ type Applied struct {
 	Bytes int64
 	// Source names where the value came from.
 	Source string
-	// Detected is the container or machine limit a percentage was applied to.
+	// Detected is the container or machine limit this process may use, whether
+	// or not the ceiling was derived from it as a percentage.
 	Detected int64
 	// Percent is the share taken of Detected, or 0 for an absolute limit.
 	Percent int
@@ -134,15 +135,19 @@ func Apply(request Request) Applied {
 }
 
 func resolve(request Request, gomemlimit string, runtimeLimit, detected int64, detectedSource string) Applied {
+	// Detected is reported for every source, not only for a percentage. It is
+	// what the heap ceiling has to be judged against - how much of the container
+	// is left for the mapped search index - and an operator who set an explicit
+	// ceiling is exactly the one who needs that comparison made.
 	if strings.TrimSpace(gomemlimit) != "" {
 		// The runtime parses and applies GOMEMLIMIT itself, "off" included.
-		return Applied{Bytes: runtimeLimit, Source: SourceEnvGoMem}
+		return Applied{Bytes: runtimeLimit, Source: SourceEnvGoMem, Detected: detected}
 	}
 	if request.Disabled {
-		return Applied{Source: SourceOff}
+		return Applied{Source: SourceOff, Detected: detected}
 	}
 	if request.Bytes > 0 {
-		return Applied{Bytes: request.Bytes, Source: SourceConfig}
+		return Applied{Bytes: request.Bytes, Source: SourceConfig, Detected: detected}
 	}
 	if detected <= 0 {
 		// Nothing to take a share of. Unlimited growth is what happens today,

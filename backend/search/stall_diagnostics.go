@@ -63,7 +63,10 @@ func (s *Service) recordStallDiagnostics(at time.Time, summary, stack string) er
 	stallDiagnosticsMu.Lock()
 	defer stallDiagnosticsMu.Unlock()
 	if err := rotateStallLog(path); err != nil {
-		return err
+		// Keep appending. An oversized log is a far smaller problem than a lost
+		// one, and the volume that refuses this rename is exactly the volume
+		// whose incident this report explains. crash.log makes the same choice.
+		s.logf()("rotate %s: %v; continuing to append to it", path, err)
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

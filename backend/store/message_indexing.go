@@ -27,7 +27,8 @@ func (s *Store) MarkSearchVisibleMessagesPendingIndex(ctx context.Context, userI
 	if err != nil {
 		return 0, err
 	}
-	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, 0, 0, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, searchPendingScope{},
+		setSQLiteSynchronous, fullSQLiteWALCheckpoint)
 }
 
 // MarkSearchMessagesPendingIndexRange is the targeted form: it queues only the
@@ -45,14 +46,55 @@ func (s *Store) MarkSearchMessagesPendingIndexRange(ctx context.Context, userID,
 	if err != nil {
 		return 0, err
 	}
-	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, firstID, lastID, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID,
+		searchPendingScope{firstID: firstID, lastID: lastID}, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+}
+
+// searchPendingScope selects which messages a pending-index write covers. The
+// zero value means every search-visible message, which is the full rebuild; a
+// row-ID range means the messages one abandoned Bleve batch owned.
+//
+// The two are separate cases rather than a sentinel the statement builder
+// re-derives, because getting that derivation wrong in the narrow direction is
+// invisible and in the wide direction rewrites every row in the tenant.
+type searchPendingScope struct {
+	firstID int64
+	lastID  int64
+}
+
+func (s searchPendingScope) ranged() bool { return s.firstID != 0 || s.lastID != 0 }
+
+func (s searchPendingScope) valid() bool {
+	return !s.ranged() || (s.firstID > 0 && s.lastID >= s.firstID)
+}
+
+// filter returns the mailbox restriction and row bound for this scope.
+//
+// A full rebuild covers mailboxes the user has search enabled for. A targeted
+// repair instead matches what the indexing worker will actually pick up, which
+// is every mailbox not yet purged from the index: a batch can stall on rows in a
+// mailbox whose include_in_search was switched off moments earlier, and marking
+// zero rows for it while clearing the marker would drop them silently.
+func (s searchPendingScope) filter(userID int64) (string, []any) {
+	if !s.ranged() {
+		return `AND mailbox_id IN (
+					SELECT id FROM mailboxes WHERE user_id = ? AND include_in_search = 1
+				)`, []any{userID}
+	}
+	return `AND mailbox_id NOT IN (
+					SELECT id FROM mailboxes WHERE user_id = ? AND search_index_purged = 1
+				)
+				AND id BETWEEN ? AND ?`, []any{userID, s.firstID, s.lastID}
 }
 
 // markSearchVisibleMessagesPendingIndexWithSynchronous commits the recovery
 // prerequisite with synchronous=FULL on one dedicated SQLite connection. In
 // WAL mode that commit is durable before the caller fsyncs the Bleve quarantine
 // rename and removes the recovery marker.
-func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, db *sql.DB, userID, firstID, lastID int64, setSynchronous setSQLiteSynchronousFunc, durabilityBarrier sqliteDurabilityBarrierFunc) (marked int64, err error) {
+func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, db *sql.DB, userID int64, scope searchPendingScope, setSynchronous setSQLiteSynchronousFunc, durabilityBarrier sqliteDurabilityBarrierFunc) (marked int64, err error) {
+	if !scope.valid() {
+		return 0, fmt.Errorf("message id range %d-%d is not usable", scope.firstID, scope.lastID)
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reserve durable search recovery connection: %w", err)
@@ -86,19 +128,11 @@ func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, d
 		return 0, fmt.Errorf("begin durable search recovery write: %w", err)
 	}
 	defer tx.Rollback()
-	statement := `UPDATE messages
+	filter, filterArguments := scope.filter(userID)
+	result, err := tx.ExecContext(ctx, `UPDATE messages
 			SET attachment_indexed_at = 0
 			WHERE user_id = ?
-				AND mailbox_id IN (
-					SELECT id FROM mailboxes WHERE user_id = ? AND include_in_search = 1
-				)`
-	arguments := []any{userID, userID}
-	if firstID > 0 && lastID >= firstID {
-		statement += `
-				AND id BETWEEN ? AND ?`
-		arguments = append(arguments, firstID, lastID)
-	}
-	result, err := tx.ExecContext(ctx, statement, arguments...)
+				`+filter, append([]any{userID}, filterArguments...)...)
 	if err != nil {
 		return 0, err
 	}
@@ -438,4 +472,39 @@ func (s *Store) UpdateMessageSecurityState(ctx context.Context, userID, messageI
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages SET is_encrypted = ?, is_signed = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`, boolInt(encrypted), boolInt(signed), nowUnix(), userID, messageID)
 	return err
+}
+
+// MessageIDsInRange returns the message row IDs that still exist in an inclusive
+// range. Targeted search recovery uses it to tell apart the two reasons a marked
+// document can be missing from SQLite: it was never there, or its message was
+// deleted while the stalled batch held the writer gate and the matching Bleve
+// delete could not run. Only the second leaves a document behind in an index
+// that recovery now keeps.
+func (s *Store) MessageIDsInRange(ctx context.Context, userID, firstID, lastID int64) ([]int64, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("user id must be positive")
+	}
+	if firstID <= 0 || lastID < firstID {
+		return nil, fmt.Errorf("message id range %d-%d is not usable", firstID, lastID)
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT id FROM messages WHERE user_id = ? AND id BETWEEN ? AND ? ORDER BY id`,
+		userID, firstID, lastID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
