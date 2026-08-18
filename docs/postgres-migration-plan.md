@@ -245,8 +245,11 @@ New subcommand `rolltop migrate-to-postgres`:
    existing driver.
 2. Requires an **empty** target database; runs the WP2 baseline.
 3. Streams tables in FK order via pgx `CopyFrom` (system tables, then per
-   user). Millions of message/location rows are the sizing case; `COPY` is
-   the difference between minutes and hours.
+   user). Sizing input (2026-08): the deployment holds 200k+ messages and
+   growing — with the 4 KB preview compaction that is roughly 1–2M rows and
+   a low single-digit GB, which `CopyFrom` moves in minutes. The cutover
+   window is therefore dominated by verification, not transfer, and dry
+   runs against a production copy are cheap to repeat.
 4. **Sanitizes text on the way over** — see §8.1, this is the step most
    likely to surface dirty data. Every sanitized value is logged with table,
    rowid, and column.
@@ -367,6 +370,11 @@ A per-user SQLite file made every query ~µs and made N+1 loops invisible.
 Postgres adds a network round trip per statement. The web request paths are
 fine (few queries per request), but syncer inner loops (per-message location
 upserts, fingerprint checks) deserve measurement in the phase-5 dry run.
+Note the shape of the risk with the current 200k+ message corpus:
+incremental sync touches deltas only, so steady-state cost barely changes —
+the paths that walk the whole corpus are the rebuild flows (mailbox
+generation rebuild, index hydration), and those are what the dry run must
+time at full production scale.
 Mitigations if needed: `= ANY($1)` batching (already introduced by WP3),
 multi-row `INSERT ... VALUES (...),(...)`, pgx batch API in hot spots.
 Do not pre-optimize; measure.
