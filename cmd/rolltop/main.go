@@ -143,10 +143,40 @@ func (g *startupGate) setHandler(handler http.Handler) {
 	g.mu.Unlock()
 }
 
+// healthCheckPath is the readiness probe a hosting platform routes traffic on.
+// It stays owned by the gate rather than the application handler, so it answers
+// with the same meaning before and after startup finishes.
+const healthCheckPath = "/api/health"
+
+// serveHealth answers the readiness probe. It is 200 only once the real handler
+// is installed and startup reports itself finished, which is what lets a
+// platform hold the previous instance until this one can actually serve.
+//
+// It deliberately touches nothing else - no database, no search index, no
+// filesystem. This process fails by becoming slow under memory pressure, not by
+// dying, and a probe that waits on storage turns a slow instance into a killed
+// one: that is how a stalled index writer previously cost a tenant its whole
+// search index. Readiness here answers from memory that is already in hand.
+func (g *startupGate) serveHealth(w http.ResponseWriter) {
+	snapshot := g.state.snapshotCopy()
+	g.mu.RLock()
+	serving := g.ready != nil
+	g.mu.RUnlock()
+	status := http.StatusServiceUnavailable
+	if serving && snapshot.Ready {
+		status = http.StatusOK
+	}
+	writeStartupJSON(w, status, snapshot)
+}
+
 // startupGate is the temporary root handler. It serves startup status until
 // startApp has built the real application handler, then delegates all normal
-// traffic while keeping /api/startup available for diagnostics.
+// traffic while keeping /api/startup and the health check available.
 func (g *startupGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == healthCheckPath {
+		g.serveHealth(w)
+		return
+	}
 	if r.URL.Path == "/api/startup" {
 		writeStartupJSON(w, http.StatusOK, g.state.snapshotCopy())
 		return
