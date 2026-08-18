@@ -532,3 +532,52 @@ Hoster answers received 2026-08-18:
 
 Still open:
 5. ~~Timing of phase 0~~ **Done** — shipped on `main` (see §5, phase 0).
+
+## 13. Preflight result against the provisioned database (2026-08-18)
+
+Run from the app container through the admin Database page, so these are the
+real app-to-database numbers. All checks passed in 99 ms.
+
+| Fact | Measured |
+| --- | --- |
+| Server | PostgreSQL 16.6 (Ubuntu, pgdg) |
+| Encoding | UTF8 |
+| Database locale | `LC_COLLATE=en_US.utf-8`, `LC_CTYPE=en_US.utf-8`, provider `libc` |
+| Round-trip latency | median 0.58 ms, fastest 0.55 ms |
+| Sort order under the default collation | `a,ä,B,Z` (byte order is `B,Z,a,ä`) |
+| Connection budget | `max_connections=200`, per-role limit 20, `CREATEDB=false` |
+
+Three of these change how the plan is executed:
+
+**The default collation diverges from byte order, as measured.** `a,ä,B,Z`
+against `B,Z,a,ä` is dictionary order, not byte order — so the per-column
+`COLLATE "C"` decision in §3.4 is load-bearing, not a precaution. Without it
+every text `ORDER BY` would sort differently than SQLite does today, which
+would silently break keyset pagination in the mail list. Equality is
+unaffected (the probe confirmed byte-exact `=`), so the split holds exactly
+as designed: equality needs nothing, ordering needs the column collation.
+
+**Latency sets the batching budget.** 0.58 ms per round trip is good for a
+network hop, and web request paths (a handful of queries each) will not
+notice. The number to watch is the full-corpus walk: with 200k+ messages, a
+per-row loop costs about two minutes of pure round trips. That is the
+concrete threshold for the phase-5 dry run in §8.2 — measure the mailbox
+generation rebuild and index hydration, and batch with `= ANY($1)` or
+multi-row inserts wherever they exceed it.
+
+**`CREATEDB=false` constrains two work packages.** The application role
+cannot create databases, so:
+
+- WP7's migration tool cannot provision its own target. The hoster must
+  create the (empty) destination database before the cutover, and the tool
+  should verify emptiness rather than attempt creation.
+- WP8's test strategy — `CREATE DATABASE ... TEMPLATE rolltop_test_tmpl` per
+  test — cannot run against this instance. That is fine as designed, because
+  tests run against a CI-local Postgres container with full privileges, but
+  the helper must fail with a clear message rather than an opaque
+  permissions error when someone points `TEST_DATABASE_URL` at the hosted
+  database.
+
+The per-role limit of 20 confirms the hoster's figure and leaves the planned
+pool of 10 room for the migration tool, a scheduled `pg_dump`, and a manual
+`psql` session at the same time.
