@@ -258,3 +258,69 @@ func TestPendingCountDescribesOnlyMailTheCategoryListsCanShow(t *testing.T) {
 		t.Fatalf("backfill queue = %d rows, want all three regardless of folder", len(candidates))
 	}
 }
+
+func TestReportedSpamLeavesEveryWholeAccountList(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	junk, err := f.db.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Junk", "junk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A Junk folder that opts into All Mail is the case this guards: the folder
+	// setting must not be able to put reported spam back in front of the user,
+	// because Report spam promises the message is gone from these lists.
+	if err := f.db.UpdateMailboxSettings(ctx, f.user.ID, junk.ID, MailboxSettings{
+		SyncMode: "full", Role: "junk", ShowInSidebar: true, ShowInAllMail: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kept := f.create(t, f.inbox, 1, "ada@example.test", mailparse.CategoryRelevant)
+	spam := f.create(t, junk, 2, "spammer@example.test", mailparse.CategoryNewsletters)
+
+	inbox, err := f.db.ListUnarchivedLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != kept.ID {
+		t.Fatalf("inbox = %v, want only %d (spam %d must stay out)", messageIDsOf(inbox), kept.ID, spam.ID)
+	}
+	all, err := f.db.ListLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != kept.ID {
+		t.Fatalf("all mail = %v, want only %d", messageIDsOf(all), kept.ID)
+	}
+	newsletters, err := f.db.ListCategoryLatestThreadMessagesForUser(ctx, f.user.ID, mailparse.CategoryNewsletters, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newsletters) != 0 {
+		t.Fatalf("newsletters = %v, want nothing: %d is spam now", messageIDsOf(newsletters), spam.ID)
+	}
+	counts, err := f.db.CountMessagesByCategoryForUser(ctx, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[mailparse.CategoryNewsletters].Total != 0 {
+		t.Fatalf("newsletters badge = %+v, want nothing counted", counts[mailparse.CategoryNewsletters])
+	}
+	// A whole-view selection has to cover exactly what the list showed, or
+	// acting on "everything here" would reach the spam the list hid.
+	scope, err := f.db.ListUnarchivedMailScopeMessagesForUser(ctx, f.user.ID, ScopeFilter{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].ID != kept.ID {
+		t.Fatalf("inbox scope = %+v, want only %d", scope, kept.ID)
+	}
+	// The folder itself still lists its own mail: hiding spam from the combined
+	// views is not the same as making it unreachable.
+	folder, err := f.db.ListLatestThreadMessagesForMailbox(ctx, f.user.ID, junk.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder) != 1 || folder[0].ID != spam.ID {
+		t.Fatalf("junk folder = %v, want %d", messageIDsOf(folder), spam.ID)
+	}
+}

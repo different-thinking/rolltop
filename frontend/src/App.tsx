@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { Bootstrap, ChromeEvent, FrontendPluginDefinition, SyncRun, ThemeDefinition } from "./types";
-import type { LocationState, MessageTransferAction, MoveTarget, SecurityUnlockState, Toast, ToastCommitReason, ToastUndo } from "./appTypes";
+import type { LocationState, MailCategoryTarget, MessageTransferAction, MoveTarget, SecurityUnlockState, Toast, ToastCommitReason, ToastUndo } from "./appTypes";
 import { ToastStack } from "./components/common";
 import { LogoMark } from "./components/Icon";
 import { SetupPage, LoginPage, PasswordResetPage } from "./features/auth/AuthPages";
@@ -14,7 +14,7 @@ import { RouteView } from "./RouteView";
 import { messageFromError } from "./lib/errors";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
-import { currentLocation, messageURL } from "./lib/routes";
+import { currentLocation, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
@@ -768,6 +768,36 @@ export default function App() {
     [addToast, bootstrap?.csrf, setMessagesHidden, updateToast]
   );
 
+  // Dropping mail on a category is a correction about its senders, not a move:
+  // the messages stay in their folder, so nothing is hidden on the way out. The
+  // one exception is a category list, which the filed mail does leave — and it
+  // leaves along with every other message from the same senders, so the cached
+  // pages are dropped rather than patched row by row.
+  const fileMessagesInCategory = useCallback(
+    async (messageIDs: number[], category: MailCategoryTarget) => {
+      if (!bootstrap?.csrf) return;
+      const ids = Array.from(new Set(messageIDs.filter((id) => Number.isFinite(id) && id > 0)));
+      if (ids.length === 0) return;
+      const openCategory = mailViewCategory(mailRoute(location.path).view);
+      const leavingOpenList = openCategory !== "" && openCategory !== category.name;
+      if (leavingOpenList) setMessagesHidden(ids, true);
+      const toastID = addToast(`Filing ${messageCountLabel(ids.length)} under ${category.label}...`, "loading");
+      try {
+        const result = await api.setMessageCategory(bootstrap.csrf, ids, category.name);
+        const senderCount = result.senders?.length ?? (result.sender ? 1 : 0);
+        const who = senderCount > 1 ? `${senderCount.toLocaleString()} senders` : (result.sender || "Sender");
+        const moved = result.moved > 0 ? ` ${messageCountLabel(result.moved)} moved.` : "";
+        updateToast(toastID, `${who} now files under ${category.label}.${moved}`, "success");
+        if (bootstrap.user) api.clearMailCache(bootstrap.user.id);
+        await refreshBootstrap();
+      } catch (err) {
+        if (leavingOpenList) setMessagesHidden(ids, false);
+        updateToast(toastID, `Filing under ${category.label} failed: ${messageFromError(err)}`, "error");
+      }
+    },
+    [addToast, bootstrap?.csrf, bootstrap?.user, location.path, refreshBootstrap, setMessagesHidden, updateToast]
+  );
+
   const logout = useCallback(async () => {
     if (!bootstrap?.csrf) return;
     bootstrapGenerationRef.current += 1;
@@ -854,6 +884,7 @@ export default function App() {
         location={location}
         navigate={navigate}
         onMoveMessages={moveMessages}
+        onFileMessagesInCategory={fileMessagesInCategory}
         openCompose={openCompose}
         refreshChrome={refreshBootstrap}
         notificationsEnabled={notificationsEnabled}
