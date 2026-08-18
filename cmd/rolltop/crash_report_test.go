@@ -349,9 +349,39 @@ func TestRunStartMarkerIsRecognized(t *testing.T) {
 		"2026-08-17T11:40:14Z fatal: listen on :8080: bind: address already in use",
 		"panic: runtime error: invalid memory address",
 		"Tree 12 page 13806: btreeInitPage() returns error code 11",
+		// Marker-shaped but not a marker. A line this scan skips is a line it
+		// cannot report, so anything it cannot fully account for has to count.
+		"=== rolltop x started at invalid ===",
+		"=== rolltop latest started at 2026-08-18T18:35:32Z ===",
+		"=== rolltop latest started at 2026-08-18T18:35:32Z pid=one ===",
+		"=== rolltop latest started at yesterday pid=1 ===",
+		"=== rolltop latest finished at 2026-08-18T18:35:32Z pid=1 ===",
+		"=== rolltop latest started at 2026-08-18T18:35:32Z pid=1 === trailing",
 	} {
 		if isRunStartMarker(report) {
 			t.Fatalf("report line read as a start marker: %q", report)
 		}
+	}
+}
+
+// State that will not parse is evidence of a kill, not of a report. Reading the
+// crash log from byte zero because the baseline is unusable finds whatever an
+// earlier run already reported and files it against the run that just died -
+// which both invents a crash and hides the kill.
+func TestUnreadableStateDoesNotReplayAnEarlierReport(t *testing.T) {
+	dataDir := t.TempDir()
+	restart(t, dataDir, errors.New("store failed to open"))
+	restart(t, dataDir, nil)
+	if err := os.WriteFile(filepath.Join(dataDir, crashStateName), []byte(`{"crash_log_by`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := restart(t, dataDir, nil)
+
+	if strings.Contains(logs, "crash or fatal error") {
+		t.Fatalf("an already-reported crash was replayed against a run that left nothing: %q", logs)
+	}
+	if !strings.Contains(logs, "killed externally") {
+		t.Fatalf("a lost state file was not reported as an unclean shutdown: %q", logs)
 	}
 }
