@@ -13,14 +13,17 @@ import "regexp"
 
 // Secret spellings that may appear in an error.
 //
-// The keyword pattern accepts a quoted value, or an unquoted one in which
-// libpq's backslash escaping may hide a space (`password=hun\ ter2`); stopping
-// at that escaped space used to leave the rest of the password in the message.
+// libpq lets a backslash escape any character in a conninfo value, quoted or
+// not, so every branch of the keyword pattern has to consume `\x` as one unit:
+// `password=hun\ ter2` does not end at the space, and `password='hun\' ter2'`
+// does not end at the first quote. Both left the tail of the password in the
+// message before the escape alternatives were added.
+//
 // The second pattern covers the environment and file spellings, and matches
 // `passfile` inside `PGPASSFILE` — a leading \b never fires there, because the
 // preceding "PG" is itself a word character.
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)password\s*=\s*('[^']*'|"[^"]*"|(?:\\.|[^\s'"])+)`),
+	regexp.MustCompile(`(?i)password\s*=\s*('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|(?:\\.|[^\s'"])+)`),
 	regexp.MustCompile(`(?i)(?:pg)?pass(?:word|file)\s*=\s*\S+`),
 }
 

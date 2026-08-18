@@ -19,9 +19,11 @@ var leakCases = []string{
 	"cannot parse `postgresql://rolltop:hunter2@db:5432/x`: bad port",
 	"failed: PGPASSWORD=hunter2",
 	"TEST_DATABASE_URL must be a URL, got \"host=localhost user=rolltop password=hunter2\"",
-	// libpq lets a backslash hide a space in an unquoted value, so the value
-	// does not end where the first space is.
+	// libpq lets a backslash escape any character in a value, quoted or not, so
+	// the value does not end at the first space or at the first quote.
 	"cannot parse `host=db password=hun\\ ter2 sslmode=bogus`: err",
+	`cannot parse ` + "`" + `host=db password='hun\' ter2' sslmode=bogus` + "`" + `: err`,
+	`cannot parse ` + "`" + `host=db password="hun\" ter2" sslmode=bogus` + "`" + `: err`,
 	// An unencoded '@' or '/' in a URL password is itself what makes the DSN
 	// unparseable, which is exactly when pgx quotes the whole thing back.
 	"cannot parse `postgres://rolltop:hun@ter2@db:5432/x`: bad port",
@@ -66,6 +68,21 @@ func TestRedactKeepsDiagnosis(t *testing.T) {
 	got = Redact("cannot parse `postgres://rolltop:hunter2@db/x`: cannot resolve host@example.com")
 	if !strings.Contains(got, "host@example.com") {
 		t.Errorf("Redact ate text after the DSN: %s", got)
+	}
+}
+
+// TestRedactStopsAtTheEndOfTheValue is the counterweight to the escape
+// handling: an escaped backslash ends the value, and the words after it are the
+// message, not more password.
+func TestRedactStopsAtTheEndOfTheValue(t *testing.T) {
+	got := Redact(`cannot parse ` + "`" + `host=db password='hun\\' sslmode=bogus` + "`" + `: invalid sslmode`)
+	if strings.Contains(got, "hun") {
+		t.Errorf("password survived: %s", got)
+	}
+	for _, want := range []string{"sslmode=bogus", "invalid sslmode", "host=db"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("redaction ran past the value and ate %q: %s", want, got)
+		}
 	}
 }
 

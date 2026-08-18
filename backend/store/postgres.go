@@ -26,6 +26,7 @@ import (
 
 	"rolltop/backend/pgdsn"
 	"rolltop/backend/plugins"
+	"rolltop/backend/sqlident"
 	"rolltop/backend/store/pgschema"
 )
 
@@ -140,6 +141,9 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 		return postgresError("acquire a connection", err)
 	}
 	defer func() { _ = conn.Close() }()
+	if err := pinPostgresSearchPath(ctx, conn); err != nil {
+		return err
+	}
 
 	checksum := baselineChecksum()
 	present, err := verifyPostgresBaseline(ctx, conn, checksum)
@@ -322,6 +326,23 @@ func baselineChecksum() string {
 		Version:    postgresSchemaVersion,
 		Statements: []string{pgschema.Baseline},
 	})
+}
+
+// pinPostgresSearchPath makes unqualified names resolve to the schema the
+// baseline is meant to live in.
+//
+// The generated SQL is unqualified, and PostgreSQL's default search path is
+// `"$user", public` — so on a server where a schema named after the connecting
+// role exists, every CREATE TABLE lands there instead. The schema checks look
+// in public by name, so the result is a database that has just been created
+// into and immediately reads back as somebody else's: create refused, drop
+// refused, no way forward. Pinning the path costs one statement per connection
+// and removes the whole class.
+func pinPostgresSearchPath(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `SET search_path TO `+sqlident.Quote(pgschema.Schema)); err != nil {
+		return postgresError("set the search path", err)
+	}
+	return nil
 }
 
 // PostgresError carries a database failure without printing the DSN.

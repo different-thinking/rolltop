@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"rolltop/backend/sqlident"
+	"rolltop/backend/store/pgschema"
 )
 
 // Stages a candidate database can be in.
@@ -170,6 +171,9 @@ func withPostgresConsoleConn(ctx context.Context, dsn string, run func(context.C
 		return PostgresState{}, postgresError("acquire a connection", err)
 	}
 	defer func() { _ = conn.Close() }()
+	if err := pinPostgresSearchPath(ctx, conn); err != nil {
+		return PostgresState{}, err
+	}
 	return run(ctx, conn)
 }
 
@@ -284,86 +288,34 @@ func countPostgresRows(ctx context.Context, conn *sql.Conn) (int64, error) {
 	return total, nil
 }
 
-// dropPostgresObjects removes the schema's own relations and the function its
-// trigger runs, leaving extensions in place.
+// dropPostgresObjects removes exactly the objects the baseline declares.
+//
+// It works from the baseline's own object list rather than from whatever is in
+// the database. Enumerating "every non-extension table" would take an
+// operator's own tables with it: a database can carry the Rolltop schema and
+// something else besides, and the stage check calls that "baseline" because the
+// version row is there and matches. Naming the objects makes the drop's promise
+// — Rolltop's tables and nothing else — one the code actually keeps.
 func dropPostgresObjects(ctx context.Context, conn *sql.Conn) error {
-	relations, err := listPostgresRelations(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if len(relations) > 0 {
+	tables := pgschema.DeclaredNames(pgschema.TableKind)
+	if len(tables) > 0 {
 		// CASCADE takes the indexes, constraints and triggers with the tables,
 		// and one statement avoids having to drop them in dependency order.
-		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+strings.Join(relations, ", ")+" CASCADE"); err != nil {
+		qualified := make([]string, 0, len(tables))
+		for _, table := range tables {
+			qualified = append(qualified, sqlident.Quote(pgschema.Schema)+"."+sqlident.Quote(table))
+		}
+		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+strings.Join(qualified, ", ")+" CASCADE"); err != nil {
 			return postgresError("drop the tables", err)
 		}
 	}
-	functions, err := listPostgresFunctions(ctx, conn)
-	if err != nil {
-		return err
-	}
-	for _, function := range functions {
-		if _, err := conn.ExecContext(ctx, "DROP FUNCTION IF EXISTS "+function+" CASCADE"); err != nil {
+	// Dropping a table takes its triggers but leaves the function each one
+	// runs, and the baseline names the function after the trigger.
+	for _, trigger := range pgschema.DeclaredNames(pgschema.TriggerKind) {
+		name := sqlident.Quote(pgschema.Schema) + "." + sqlident.Quote(trigger)
+		if _, err := conn.ExecContext(ctx, "DROP FUNCTION IF EXISTS "+name+"() CASCADE"); err != nil {
 			return postgresError("drop the trigger functions", err)
 		}
 	}
 	return nil
-}
-
-// listPostgresRelations returns the quoted, schema-qualified tables that are not
-// owned by an extension.
-func listPostgresRelations(ctx context.Context, conn *sql.Conn) ([]string, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND n.nspname NOT LIKE 'pg_toast%'
-		  AND n.nspname NOT LIKE 'pg_temp%'
-		  AND c.relkind = 'r'
-		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')`)
-	if err != nil {
-		return nil, postgresError("list the tables", err)
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, postgresError("list the tables", err)
-		}
-		names = append(names, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, postgresError("list the tables", err)
-	}
-	return names, nil
-}
-
-// listPostgresFunctions returns the quoted signatures of functions that are not
-// owned by an extension. The baseline creates one, for the duplicate-pointer
-// trigger; dropping its table takes the trigger but leaves the function.
-func listPostgresFunctions(ctx context.Context, conn *sql.Conn) ([]string, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')'
-		FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')`)
-	if err != nil {
-		return nil, postgresError("list the functions", err)
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, postgresError("list the functions", err)
-		}
-		names = append(names, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, postgresError("list the functions", err)
-	}
-	return names, nil
 }

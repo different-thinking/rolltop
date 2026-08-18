@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"rolltop/backend/sqlident"
 	"rolltop/backend/store/pgtestdb"
 )
 
@@ -218,6 +219,152 @@ func TestPostgresConsoleLeavesExtensionsAlone(t *testing.T) {
 	if extensions != 3 {
 		t.Errorf("%d of 3 extensions survived the drop", extensions)
 	}
+}
+
+// TestPostgresConsoleDropSparesForeignObjects is the sharper version of the
+// refusal test. A database can carry the Rolltop schema *and* something else —
+// the stage check calls that "baseline", because the version row is there and
+// matches — so the drop has to remove the objects the baseline declares and
+// nothing more. Enumerating every non-extension relation took the operator's
+// own tables, in their own schemas, with it.
+func TestPostgresConsoleDropSparesForeignObjects(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.New(t)
+
+	if _, err := CreatePostgresSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	// A table beside the schema, a table in the operator's own schema, and a
+	// function of their own: all three were destroyed by the previous drop.
+	for _, ddl := range []string{
+		`CREATE TABLE public.operator_notes (id int)`,
+		`INSERT INTO public.operator_notes VALUES (1)`,
+		`CREATE SCHEMA reporting`,
+		`CREATE TABLE reporting.monthly (id int)`,
+		`INSERT INTO reporting.monthly VALUES (1)`,
+		`CREATE FUNCTION public.operator_helper() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$`,
+	} {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+
+	if _, err := DropPostgresSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, query := range []string{
+		`SELECT count(*) FROM public.operator_notes`,
+		`SELECT count(*) FROM reporting.monthly`,
+		`SELECT public.operator_helper()`,
+	} {
+		var value int
+		if err := db.QueryRowContext(ctx, query).Scan(&value); err != nil {
+			t.Errorf("the drop destroyed something it does not own (%s): %v", query, err)
+		}
+	}
+	// And it did do its job: no Rolltop table is left.
+	var rolltopTables int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'schema_migrations'`).Scan(&rolltopTables); err != nil {
+		t.Fatal(err)
+	}
+	if rolltopTables != 0 {
+		t.Error("the drop left the Rolltop schema behind")
+	}
+}
+
+// TestPostgresConsoleWithRoleNamedSchema covers a server shape the generated
+// SQL is blind to. PostgreSQL's default search path is `"$user", public`, so a
+// schema named after the connecting role captures every unqualified CREATE
+// TABLE. The baseline is unqualified, and the checks look in public by name, so
+// without a pinned search path the console creates the schema into the wrong
+// place and then reports the database as somebody else's — refusing both the
+// create and the drop, with no way forward.
+func TestPostgresConsoleWithRoleNamedSchema(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.New(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var role string
+	if err := db.QueryRowContext(ctx, `SELECT current_user`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+sqlident.Quote(role)); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := CreatePostgresSchema(ctx, dsn)
+	if err != nil {
+		t.Fatalf("create with a role-named schema present: %v", err)
+	}
+	if created.Stage != PostgresStageBaseline {
+		t.Fatalf("after create the stage is %q, want %q", created.Stage, PostgresStageBaseline)
+	}
+	// The tables have to be in public, not in the role's schema, or every
+	// later check looks in the wrong place.
+	var elsewhere int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM information_schema.tables WHERE table_schema = $1`, role).Scan(&elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if elsewhere != 0 {
+		t.Errorf("%d tables landed in the role-named schema %q instead of public", elsewhere, role)
+	}
+	if dropped, err := DropPostgresSchema(ctx, dsn); err != nil {
+		t.Fatalf("drop with a role-named schema present: %v", err)
+	} else if dropped.Stage != PostgresStageEmpty {
+		t.Errorf("after drop the stage is %q", dropped.Stage)
+	}
+}
+
+// TestOpenPostgresWithRoleNamedSchema is the same hazard on the startup path,
+// which applies the baseline through its own connection.
+func TestOpenPostgresWithRoleNamedSchema(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.New(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var role string
+	if err := db.QueryRowContext(ctx, `SELECT current_user`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+sqlident.Quote(role)); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("open with a role-named schema present: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var elsewhere int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM information_schema.tables WHERE table_schema = $1`, role).Scan(&elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if elsewhere != 0 {
+		t.Errorf("%d tables landed in the role-named schema %q instead of public", elsewhere, role)
+	}
+	// Reopening must find the schema rather than declare the database foreign.
+	second, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("reopen with a role-named schema present: %v", err)
+	}
+	_ = second.Close()
 }
 
 // TestPostgresConsoleNeverEchoesCredentials keeps the console under the same

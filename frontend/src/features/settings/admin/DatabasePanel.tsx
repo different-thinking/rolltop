@@ -87,6 +87,19 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
   const busy = running !== "";
   const ready = Boolean(dsn.trim());
 
+  // Everything shown describes the database the results came from. Editing the
+  // connection string makes all of it stale at once, and leaving it on screen
+  // is not merely untidy: the drop confirmation names a database and a row
+  // count, so a stale one would describe the old target while the drop ran
+  // against the new one.
+  function changeDsn(next: string) {
+    setDsn(next);
+    setReport(null);
+    setState(null);
+    setError("");
+    setDropArmed(false);
+  }
+
   async function runPreflight() {
     setRunning("preflight");
     setError("");
@@ -135,10 +148,7 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
         <input
           type="password"
           value={dsn}
-          onChange={(event) => {
-            setDsn(event.target.value);
-            setDropArmed(false);
-          }}
+          onChange={(event) => changeDsn(event.target.value)}
           placeholder="postgres://user:password@host:5432/dbname"
           autoComplete="off"
           aria-label="PostgreSQL connection string"
