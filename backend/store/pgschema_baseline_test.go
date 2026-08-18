@@ -85,6 +85,47 @@ func TestBaselineCoversEverySQLiteTable(t *testing.T) {
 	}
 }
 
+// TestEveryPluginWithMigrationsIsInTheCatalog guards the input side of the
+// derivation. TestBaselineCoversEverySQLiteTable proves the baseline contains
+// everything the derivation *ran*; this proves the derivation runs everything
+// there is. A plugin directory carrying migrations but no manifest.json would
+// otherwise be skipped by LoadManifests, and its tables would go missing from
+// the baseline exactly the way the file-backed migrations did.
+func TestEveryPluginWithMigrationsIsInTheCatalog(t *testing.T) {
+	entries, err := os.ReadDir(pluginRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := plugins.LoadManifests(pluginRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := pluginCatalogFromManifests(manifests)
+	known := map[string]bool{}
+	for _, definition := range catalog.definitions {
+		known[definition.ID] = true
+	}
+	checked := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(pluginRoot, entry.Name(), "migrations")); err != nil {
+			// No migrations directory: nothing this plugin can contribute to
+			// the schema. plugins/bundled is such a directory today.
+			continue
+		}
+		checked++
+		if !known[entry.Name()] {
+			t.Errorf("plugin %s has migrations but is not in the catalog, so its tables would be missing from the baseline", entry.Name())
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no plugin migration directories found; this test would prove nothing")
+	}
+	t.Logf("verified %d plugins with migrations are in the catalog", checked)
+}
+
 // TestBaselineIncludesPluginTables pins the coverage gap that the derivation
 // had at first: Open() installs only the statically compiled plugin catalog,
 // so every table from a file-backed plugin migration was missing from the
