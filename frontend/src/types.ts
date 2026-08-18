@@ -844,6 +844,33 @@ export type PostgresPreflightReport = {
   duration_ms: number;
 };
 
+/** PostgresSchemaAction is one step of the migration console. Only "inspect"
+ * is read-only. */
+export type PostgresSchemaAction = "inspect" | "create" | "drop";
+
+/** PostgresState is what a candidate PostgreSQL database currently holds.
+ *
+ * `stage` drives the whole card: "empty" can be created into, "baseline"
+ * carries the schema this build ships, "mismatch" carries one from another
+ * build, and "foreign" holds objects that are not Rolltop's and is never
+ * touched. `can_create` and `can_drop` are decided by the server rather than
+ * derived here, so the buttons cannot disagree with what it will allow. */
+export type PostgresState = {
+  stage: "empty" | "baseline" | "mismatch" | "foreign";
+  server_version: string;
+  database: string;
+  user: string;
+  tables: number;
+  indexes: number;
+  foreign_keys: number;
+  triggers: number;
+  rows: number;
+  applied_at: number;
+  can_create: boolean;
+  can_drop: boolean;
+  summary: string;
+};
+
 /** ServerLogLine is one captured line of the process log tail. */
 export type ServerLogLine = {
   time: string;

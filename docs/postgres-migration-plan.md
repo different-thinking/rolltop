@@ -169,6 +169,26 @@ semicolons — it contains a dollar-quoted function body full of them, and
 PostgreSQL wraps a multi-statement simple query in one implicit transaction, so
 a failure halfway through leaves no partial schema. A test asserts that.
 
+**The migration console** (`/admin/database` → *PostgreSQL migration*) drives
+the staged path against the real target from inside the app container, so the
+network path, the server's locale and the role's privileges are the ones the
+migration will actually meet:
+
+| Step | What it does | Changes the target |
+| --- | --- | --- |
+| Preflight | version, encoding, collation behaviour, extensions, UTF-8 strictness, SQL features, latency | only `CREATE EXTENSION`, which the migration wants anyway |
+| Check database | classifies it: empty / current schema / other build / not ours | no |
+| Create schema | applies the generated baseline to an empty database | yes |
+| Drop schema | removes Rolltop's tables and trigger function, keeps extensions | yes |
+
+The point is rehearsal rather than one attempt: create, look, drop, repeat,
+long before any data moves and long before the server is pointed at it. Two
+safety rules are enforced server-side rather than in the UI, so a mislabelled
+button cannot become a dropped database — a database holding anything that is
+not Rolltop's is refused for both create and drop, and the create step refuses
+anything but an empty database. The drop takes a second, explicit confirmation
+that names the database and its row count.
+
 Still to do, deliberately held until WP3 makes the store serve queries:
 
 - `backend/config/config.go`: replace `ROLLTOP_DB_PATH` with

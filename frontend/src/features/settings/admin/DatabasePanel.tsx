@@ -17,6 +17,8 @@ import type {
   DatabaseStatus,
   PostgresPreflightCheck,
   PostgresPreflightReport,
+  PostgresSchemaAction,
+  PostgresState,
   ServerLogLine
 } from "../../../types";
 
@@ -52,63 +54,112 @@ function preflightState(status: PostgresPreflightCheck["status"]): { label: stri
   return { label: "Info", tone: "warn" };
 }
 
-/**
- * PostgresPreflightCard runs the PostgreSQL migration preflight from inside
- * the app container, which exercises the same network path the migrated
- * store would use. The DSN stays in component state for the one request and
- * is sent nowhere else; the server neither stores nor logs it.
- */
-function PostgresPreflightCard({ csrf }: { csrf: string }) {
-  const [dsn, setDsn] = useState("");
-  const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<PostgresPreflightReport | null>(null);
-  const [error, setError] = useState("");
+// Mirrors databaseState and preflightState so all three keep one convention.
+function stageState(stage: PostgresState["stage"]): { label: string; tone: "ok" | "warn" | "bad" } {
+  if (stage === "empty") return { label: "Empty", tone: "ok" };
+  if (stage === "baseline") return { label: "Schema present", tone: "ok" };
+  if (stage === "mismatch") return { label: "Other build", tone: "warn" };
+  return { label: "Not ours", tone: "bad" };
+}
 
-  async function run() {
-    setRunning(true);
+/**
+ * PostgresMigrationCard is the staged console for the SQLite-to-PostgreSQL
+ * migration. Each step is run and checked on its own against the real target,
+ * so the migration is rehearsed rather than attempted once:
+ *
+ *   1. Preflight — can this database do what the port needs?
+ *   2. Schema — create the generated schema here, look at it, drop it, repeat.
+ *
+ * The connection string is entered once, shared by both steps, held in
+ * component state for the request only, and sent nowhere else; the server
+ * neither stores nor logs it, and redacts it out of driver errors.
+ */
+function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: DatePrefs }) {
+  const [dsn, setDsn] = useState("");
+  const [running, setRunning] = useState<"" | "preflight" | PostgresSchemaAction>("");
+  const [report, setReport] = useState<PostgresPreflightReport | null>(null);
+  const [state, setState] = useState<PostgresState | null>(null);
+  const [error, setError] = useState("");
+  // The drop is the one irreversible step, so it is armed by a first click and
+  // performed by a second. Any other action disarms it.
+  const [dropArmed, setDropArmed] = useState(false);
+
+  const busy = running !== "";
+  const ready = Boolean(dsn.trim());
+
+  async function runPreflight() {
+    setRunning("preflight");
     setError("");
+    setDropArmed(false);
     try {
       setReport(await api.postgresPreflight(csrf, dsn));
     } catch (err) {
       setReport(null);
       setError(messageFromError(err));
     } finally {
-      setRunning(false);
+      setRunning("");
+    }
+  }
+
+  async function runSchema(action: PostgresSchemaAction) {
+    setRunning(action);
+    setError("");
+    try {
+      setState(await api.postgresSchema(csrf, dsn, action));
+      setDropArmed(false);
+    } catch (err) {
+      // The previous state is kept: a refused action means nothing changed, and
+      // blanking the panel would hide what the refusal was about.
+      setError(messageFromError(err));
+    } finally {
+      setRunning("");
     }
   }
 
   return (
     <div className="database-log postgres-preflight">
-      <h2>PostgreSQL preflight</h2>
+      <h2>PostgreSQL migration</h2>
       <p className="settings-hint">
-        Checks a candidate PostgreSQL database for the planned migration: version and encoding, collation
-        behavior, extensions, UTF-8 strictness, and the SQL features the port relies on. It runs from this
-        server, so the measured latency is the path the app would actually use. The connection string is used
-        for this one check and is not stored or logged. One check runs at a time.
+        The staged path to PostgreSQL, run against the real target from inside this server — so the network
+        path, the server&rsquo;s locale, and the role&rsquo;s privileges are the ones the migration will
+        actually meet. The connection string is used for the one request and is not stored or logged. One
+        action runs at a time.
       </p>
       <form
         className="database-log-actions"
         onSubmit={(event) => {
           event.preventDefault();
-          void run();
+          void runPreflight();
         }}
       >
         <input
           type="password"
           value={dsn}
-          onChange={(event) => setDsn(event.target.value)}
+          onChange={(event) => {
+            setDsn(event.target.value);
+            setDropArmed(false);
+          }}
           placeholder="postgres://user:password@host:5432/dbname"
           autoComplete="off"
           aria-label="PostgreSQL connection string"
-          disabled={running}
+          disabled={busy}
           style={{ flex: "1 1 24rem" }}
         />
-        <button type="submit" className="secondary" disabled={running || !dsn.trim()}>
-          <Icon name="search" />
-          {running ? "Running checks…" : "Run preflight"}
-        </button>
       </form>
       {error ? <p className="settings-error">{error}</p> : null}
+
+      <h3>Step 1 — Preflight</h3>
+      <p className="settings-hint">
+        Checks version and encoding, collation behavior, the extensions, UTF-8 strictness, the SQL features the
+        port relies on, and the round-trip latency of this exact path. Changes nothing but the extensions,
+        which the migration wants anyway.
+      </p>
+      <div className="database-log-actions">
+        <button type="button" className="secondary" disabled={busy || !ready} onClick={() => void runPreflight()}>
+          <Icon name="search" />
+          {running === "preflight" ? "Running checks…" : "Run preflight"}
+        </button>
+      </div>
       {report ? (
         <>
           <p className={report.ok ? "settings-hint" : "settings-error"}>
@@ -134,6 +185,75 @@ function PostgresPreflightCard({ csrf }: { csrf: string }) {
             </tbody>
           </table>
         </>
+      ) : null}
+
+      <h3>Step 2 — Schema</h3>
+      <p className="settings-hint">
+        Creates the generated schema — every table, index, foreign key and trigger the port needs — in an empty
+        database, so it is proven against the real server before any data moves. Drop it and create it again as
+        often as you like. A database holding anything that is not Rolltop&rsquo;s is refused outright, and the
+        drop leaves installed extensions in place.
+      </p>
+      <div className="database-log-actions">
+        <button type="button" className="secondary" disabled={busy || !ready} onClick={() => void runSchema("inspect")}>
+          <Icon name="sync" />
+          {running === "inspect" ? "Checking…" : "Check database"}
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          disabled={busy || !ready || !state?.can_create}
+          onClick={() => void runSchema("create")}
+        >
+          <Icon name="add" />
+          {running === "create" ? "Creating schema…" : "Create schema"}
+        </button>
+        <button
+          type="button"
+          className={dropArmed ? "danger" : "secondary"}
+          disabled={busy || !ready || !state?.can_drop}
+          onClick={() => {
+            if (!dropArmed) {
+              setDropArmed(true);
+              return;
+            }
+            void runSchema("drop");
+          }}
+        >
+          <Icon name="trash" />
+          {running === "drop" ? "Dropping schema…" : dropArmed ? "Confirm: drop the schema" : "Drop schema"}
+        </button>
+      </div>
+      {dropArmed && state ? (
+        <p className="settings-error">
+          This drops every Rolltop table in <strong>{state.database}</strong>
+          {state.rows > 0 ? ` along with ${state.rows.toLocaleString()} rows of data` : " (no data rows)"}. It
+          cannot be undone. Click again to confirm.
+        </p>
+      ) : null}
+      {state ? (
+        <table className="database-table">
+          <tbody>
+            <tr>
+              <td>
+                <span className={`database-state is-${stageState(state.stage).tone}`}>
+                  {stageState(state.stage).label}
+                </span>
+              </td>
+              <td>
+                {state.summary}
+                <small className="database-detail">
+                  {state.database} as {state.user} — {state.server_version}
+                </small>
+                {state.applied_at > 0 ? (
+                  <small className="database-detail">
+                    Schema created {displayDateTime(new Date(state.applied_at * 1000).toISOString(), datePrefs)}
+                  </small>
+                ) : null}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       ) : null}
     </div>
   );
@@ -466,7 +586,7 @@ export function AdminDatabaseView({
         </>
       ) : null}
 
-      <PostgresPreflightCard csrf={csrf} />
+      <PostgresMigrationCard csrf={csrf} datePrefs={datePrefs} />
 
       {/* Outside the overview guard on purpose. When the overview itself fails
           — a system database that cannot even list its users — the tail is the

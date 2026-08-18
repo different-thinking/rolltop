@@ -193,27 +193,56 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 // that is the ordinary empty-database case. A row that disagrees is an error:
 // serving a schema this binary was not built for is how data gets lost.
 func verifyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string) (bool, error) {
+	stage, _, err := postgresStage(ctx, conn, checksum)
+	if err != nil {
+		return false, err
+	}
+	switch stage {
+	case PostgresStageBaseline:
+		return true, nil
+	case PostgresStageMismatch:
+		return false, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two yet")
+	default:
+		return false, nil
+	}
+}
+
+// postgresStage classifies a database without judging it, which is what the
+// admin migration console needs: it has to describe a mismatched or foreign
+// database rather than refuse to look at one.
+//
+// The distinction between "no baseline row" and "no baseline row but objects
+// present" is the load-bearing one. Both are "not ours to use"; only the first
+// can be created into.
+func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string, int64, error) {
 	var table sql.NullString
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass('public.schema_migrations')::text`).Scan(&table); err != nil {
-		return false, postgresError("inspect the schema", err)
+		return "", 0, postgresError("inspect the schema", err)
 	}
-	if !table.Valid {
-		return false, nil
+	if table.Valid {
+		var recorded string
+		var appliedAt int64
+		err := conn.QueryRowContext(ctx,
+			`SELECT checksum, applied_at FROM schema_migrations WHERE scope = $1 AND version = $2`,
+			postgresSchemaScope, postgresSchemaVersion).Scan(&recorded, &appliedAt)
+		if err == nil {
+			if recorded == checksum {
+				return PostgresStageBaseline, appliedAt, nil
+			}
+			return PostgresStageMismatch, appliedAt, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", 0, postgresError("read the schema version", err)
+		}
 	}
-	var recorded string
-	err := conn.QueryRowContext(ctx,
-		`SELECT checksum FROM schema_migrations WHERE scope = $1 AND version = $2`,
-		postgresSchemaScope, postgresSchemaVersion).Scan(&recorded)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	empty, err := postgresDatabaseIsEmpty(ctx, conn)
 	if err != nil {
-		return false, postgresError("read the schema version", err)
+		return "", 0, err
 	}
-	if recorded != checksum {
-		return false, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two yet")
+	if empty {
+		return PostgresStageEmpty, 0, nil
 	}
-	return true, nil
+	return PostgresStageForeign, 0, nil
 }
 
 // postgresDatabaseIsEmpty reports whether the database holds no objects of its

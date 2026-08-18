@@ -26,6 +26,8 @@ import type {
   MessageOriginalSource,
   PluginSetting,
   PostgresPreflightReport,
+  PostgresSchemaAction,
+  PostgresState,
   SMTPAccount,
   ScopeMoveResponse,
   SearchExplanation,
@@ -638,6 +640,8 @@ export const api = {
     deleteJSON<{ ok: boolean }>(`/api/admin/users/${id}`, csrf),
   postgresPreflight: (csrf: string, dsn: string) =>
     postJSON<PostgresPreflightReport>("/api/admin/postgres-preflight", csrf, { dsn }),
+  postgresSchema: (csrf: string, dsn: string, action: PostgresSchemaAction) =>
+    postJSON<PostgresState>("/api/admin/postgres-schema", csrf, { dsn, action }),
   database: () => getJSON<DatabaseOverview>("/api/admin/database"),
   databaseJob: () => getJSON<{ job: DatabaseMaintenanceJob | null }>("/api/admin/database/job"),
   checkDatabases: (csrf: string, scope = "", userID = 0) =>
