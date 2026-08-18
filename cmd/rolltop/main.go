@@ -424,11 +424,13 @@ func run() (runErr error) {
 	// account sync is the heaviest thing this process does, and without a limit
 	// the collector lets the heap double past whatever the container allows,
 	// which ends the process mid-write instead of ending an allocation.
-	log.Printf("rolltop %s", memlimit.Apply(cfg.MemoryLimit).Description())
+	appliedMemory := memlimit.Apply(cfg.MemoryLimit)
+	log.Printf("rolltop %s", appliedMemory.Description())
 	// Name the resolved storage paths before anything opens them, so a
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
 	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
+	reportIndexMemoryHeadroom(appliedMemory, filepath.Join(cfg.DataDir, "users"))
 	// Each database resolves its own mode when it is opened, because the system
 	// database can be configured onto a different filesystem than the tenant
 	// databases. Both are reported here, since the choice changes how SQLite
@@ -669,6 +671,10 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	if err != nil {
 		return nil, err
 	}
+	// A writer stall is diagnosed from a stack that the container log keeps only
+	// the first line of. Put it on the volume, beside crash.log, where a shell
+	// in the container can still read it after the restart.
+	searchSvc.SetStallDiagnosticsDir(cfg.DataDir)
 	defer func() {
 		if cleanup {
 			_ = searchSvc.Close()
@@ -768,6 +774,10 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	if cfg.BlobRetention > 0 {
 		go storageRetention(ctx, db, syncSvc, cfg.BlobRetention)
 	}
+	// Deliberately not tied to blob retention: a quarantined index is a full
+	// copy of a tenant's index, and a deployment that turns blob retention off
+	// still must not accumulate one per incident.
+	go indexQuarantineRetention(ctx, searchRoot)
 	if googleAuth.Configured() {
 		go googleContactPoll(ctx, db, googleContacts, googleContactPollInterval)
 		go googleCalendarPoll(ctx, db, googleCalendar, googleCalendarPollInterval)
@@ -778,18 +788,23 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		pluginHost: webServer, db: db, search: searchSvc, handler: webServer.Handler(),
 		restartRequired: restartRequired,
 		markSearchRecovery: func() {
-			// Read the list at call time: a tenant created after startup is not
-			// in the startup snapshot, and its index needs the marker just as
-			// much. This runs before db.Close().
-			current, err := db.ListUsers(context.Background())
-			if err != nil {
-				log.Printf("list users for search recovery markers: %v", err)
-				current = users
+			// Only a tenant whose writer is still inside Bleve has anything in
+			// doubt. Marking every tenant would queue a full reindex for
+			// accounts whose index was published in full, and that reindex is
+			// itself the load that makes the next commit slow enough to abandon.
+			recoveries := searchSvc.UnfinishedWriterRecoveries()
+			if len(recoveries) == 0 {
+				log.Printf("abandoned search index close left no writer in flight; no recovery scheduled")
+				return
 			}
-			for _, user := range current {
-				if markErr := searchSvc.MarkSearchIndexRecoveryRequired(user.ID); markErr != nil {
-					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", user.ID, markErr)
+			for userID, recovery := range recoveries {
+				if markErr := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(
+					userID, recovery.FirstDocumentID, recovery.LastDocumentID); markErr != nil {
+					log.Printf("mark search recovery user_id=%d after abandoned index close: %v", userID, markErr)
+					continue
 				}
+				log.Printf("scheduled search recovery user_id=%d after abandoned index close scope=%s",
+					userID, recovery.Scope())
 			}
 		},
 	}, nil
@@ -1178,4 +1193,77 @@ func scheduledSync(ctx context.Context, db *store.Store, runner *syncer.Runner, 
 			}
 		}
 	}
+}
+
+// indexQuarantineRetention prunes quarantined indexes at start and daily after.
+func indexQuarantineRetention(ctx context.Context, searchRoot string) {
+	pruneIndexQuarantines(searchRoot, time.Now())
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pruneIndexQuarantines(searchRoot, time.Now())
+		}
+	}
+}
+
+// pruneIndexQuarantines reclaims the disk a quarantined index holds. Quarantine
+// renames a whole tenant index aside and nothing else ever removes it, so a
+// deployment that quarantines repeatedly accumulates a full copy per incident.
+// A failure here is logged and not returned: retention is housekeeping, and
+// refusing to serve because a directory would not delete helps nobody.
+func pruneIndexQuarantines(searchRoot string, now time.Time) {
+	if strings.TrimSpace(searchRoot) == "" {
+		return
+	}
+	pruned, err := search.PruneIndexQuarantines(searchRoot,
+		search.DefaultIndexQuarantineKeep, search.DefaultIndexQuarantineMaxAge, now)
+	if err != nil {
+		log.Printf("prune quarantined search indexes: %v", err)
+	}
+	for _, quarantine := range pruned {
+		log.Printf("pruned quarantined search index user_id=%d path=%q age=%s bytes=%d",
+			quarantine.UserID, quarantine.Path, quarantine.Age.Round(time.Minute), quarantine.Bytes)
+	}
+}
+
+// reportIndexMemoryHeadroom warns when the heap ceiling and the search index
+// cannot both fit in the container's memory limit.
+//
+// The heap ceiling is a share of that limit, and the remainder has to cover
+// goroutine stacks, SQLite's own allocations, and the Bleve segments Scorch
+// reads through mmap. Those segments are page cache, so once the index outgrows
+// what is left the kernel evicts the very pages the next commit needs, and every
+// read becomes a major fault. On a FUSE-backed volume that turns a commit of a
+// few kilobytes into one that runs for minutes, which is indistinguishable from
+// a hung writer and is treated as one.
+//
+// This only ever logs. The deployment may be mid-import with an index that is
+// still small, and refusing to start would take away the search it is warning
+// about.
+func reportIndexMemoryHeadroom(applied memlimit.Applied, searchRoot string) {
+	if applied.Detected <= 0 || applied.Bytes <= 0 {
+		return
+	}
+	footprint, err := search.MeasureIndexFootprint(searchRoot)
+	if err != nil {
+		log.Printf("measure search index footprint: %v", err)
+		return
+	}
+	if footprint.Tenants == 0 {
+		return
+	}
+	headroom := applied.Detected - applied.Bytes
+	if headroom > 0 && footprint.Bytes <= headroom {
+		return
+	}
+	log.Printf("rolltop warning: the search index is %s and the heap ceiling is %s of the %s limit, "+
+		"leaving %s for everything the heap does not account for; Bleve reads its segments through mmap, "+
+		"so an index larger than that is paged in and out on every commit. "+
+		"Give the container more memory, or lower ROLLTOP_MEMORY_LIMIT so the index has room to stay resident.",
+		memlimit.FormatBytes(footprint.Bytes), memlimit.FormatBytes(applied.Bytes),
+		memlimit.FormatBytes(applied.Detected), memlimit.FormatBytes(max(headroom, 0)))
 }

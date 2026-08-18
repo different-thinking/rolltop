@@ -77,6 +77,25 @@ different share (`60%`), or `off` to leave the runtime unbounded. An explicit
 rolltop memory limit 1.6GiB (80% of the 2.0GiB cgroup limit)
 ```
 
+That remainder is not optional. Bleve reads its segments through `mmap`, so a
+large search index needs room in the page cache, and the page cache shares the
+container's limit with the heap. Once the index no longer fits in what the heap
+ceiling leaves over, the kernel evicts the pages the next commit needs and every
+read becomes a major fault — on a FUSE-backed volume that turns a commit of a few
+kilobytes into one that runs for minutes, which is indistinguishable from a hung
+writer and is treated as one. Startup measures the index and says so when the
+two cannot both fit:
+
+```text
+rolltop warning: the search index is 3.2GiB and the heap ceiling is 1.6GiB of the 2.0GiB limit, leaving 400MiB for everything the heap does not account for; ...
+```
+
+The remedy is a container with more memory, or a **lower** `ROLLTOP_MEMORY_LIMIT`
+so the index has room to stay resident. A smaller heap ceiling means more
+throughput here, not less. `workingset_refault_file` and `pgmajfault` in
+`/sys/fs/cgroup/memory.stat` count the thrashing directly, and `max` in
+`/sys/fs/cgroup/memory.events` counts how often the limit forced reclaim.
+
 The limit is a ceiling, not a reservation: the process only uses what it needs,
 and going over it makes the collector work harder rather than failing an
 allocation. Give the container at least a gigabyte for a first sync of a large
@@ -462,14 +481,42 @@ tenant recovery marker and starts a controlled shutdown. Cleanup gets a bounded
 Docker restart policy such as `--restart unless-stopped` (or Compose
 `restart: unless-stopped`) is required for hands-off recovery.
 
-On restart, before opening that tenant's index, Rolltop durably marks the user's
-search-visible SQLite rows pending with a full WAL checkpoint, renames only
-`/data/users/<id>/bleve` to a timestamped quarantine directory, persists that
-rename before clearing the recovery marker, and creates a new derived index.
-The normal local indexing worker rebuilds it from SQLite and retained local
-`.eml` blobs, including folders configured for `manual` or `never` sync. Mail
-rows, IMAP state, and blobs are not deleted. If retained raw data has expired,
-existing indexing behavior may retrieve it from IMAP.
+The marker records which messages the abandoned batch owned. On restart, before
+opening that tenant's index, Rolltop durably marks exactly those SQLite rows
+pending with a full WAL checkpoint, clears the marker, and leaves the index in
+place:
+
+```text
+repaired stalled search index user_id=1 pending_messages=6 first_document_id=162614 last_document_id=162620 index_retained=true
+```
+
+A commit that outran the watchdog is a report about how long a write took, not
+about the index it was writing to — Bleve publishes each snapshot atomically, so
+what survives is consistent and only the batch in flight is in doubt. Rebuilding
+a multi-gigabyte index for that costs hours of reindexing, and that reindexing is
+itself the load that makes the next commit slow enough to abandon.
+
+Only a stall the marker cannot attribute to a message range falls back to the
+full rebuild: Rolltop then renames `/data/users/<id>/bleve` to a timestamped
+quarantine directory, persists that rename before clearing the recovery marker,
+and creates a new derived index. The normal local indexing worker rebuilds it
+from SQLite and retained local `.eml` blobs, including folders configured for
+`manual` or `never` sync. Mail rows, IMAP state, and blobs are not deleted. If
+retained raw data has expired, existing indexing behavior may retrieve it from
+IMAP.
+
+Quarantine directories hold a full copy of the index they replaced, so retention
+prunes them alongside blobs: the newest one per tenant is kept for inspection,
+older ones go immediately, and everything older than 48 hours goes regardless.
+Each removal is named in the log.
+
+Stall diagnostics are also appended to `/data/search-stall.log`, which is
+rotated to `.prev` past 1 MiB and never truncated. The stack recorded there
+names the blocked Bleve frame and is what distinguishes a writer waiting on
+storage from one waiting on Bleve itself. It is written to the data volume
+because a container log pipeline keeps only the first line of a multi-line
+entry, and because a shell inside the container cannot read the process log at
+all.
 
 ### Offline Search Index Reset
 

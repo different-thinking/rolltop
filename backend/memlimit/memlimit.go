@@ -21,6 +21,12 @@ import (
 // heap may use when no explicit value is configured. The remainder covers what
 // Go heap accounting does not: goroutine stacks, the SQLite library's own
 // allocations, and the mmapped Bleve segments a search touches.
+//
+// Those segments are page cache and share the container's limit with the heap,
+// so this share only holds while the index fits in what it leaves over. Startup
+// measures the index against that remainder and warns when it does not, because
+// the failure mode is not an allocation error: it is eviction of the pages the
+// next commit needs, and commits that then run long enough to look hung.
 const DefaultPercent = 80
 
 // MinimumBytes is the smallest ceiling worth installing. Below it the collector
