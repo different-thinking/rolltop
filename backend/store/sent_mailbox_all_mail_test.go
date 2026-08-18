@@ -25,6 +25,9 @@ type sentListFixture struct {
 	base    time.Time
 }
 
+// newSentListFixture opens a store whose Sent folder was discovered the way IMAP
+// discovery finds one, so the folder carries the defaults the app ships rather
+// than settings the test wrote itself.
 func newSentListFixture(t *testing.T) sentListFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -42,6 +45,9 @@ func newSentListFixture(t *testing.T) sentListFixture {
 		base: time.Unix(1700000000, 0)}
 }
 
+// create files one message a minute apart from the last, already classified, so
+// a list assertion is about the folder a row sits in and not about how far the
+// category backfill happened to get.
 func (f sentListFixture) create(t *testing.T, mailbox Mailbox, uid uint32, header, from string) MessageRecord {
 	t.Helper()
 	message, err := f.db.CreateMessage(context.Background(), CreateMessage{
