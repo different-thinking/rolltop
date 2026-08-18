@@ -82,6 +82,15 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   `backup-db` deliberately takes no lock because it runs against a serving
   instance. Do not move any open ahead of the lock, and do not make the
   maintenance commands wait.
+- WAL's shared index (`-shm`) and POSIX byte-range locks are unavailable on
+  network and FUSE volumes, where they cause corruption rather than errors. The
+  store detects the filesystem and falls back to `AccessExclusive`: WAL without
+  shared memory, which requires **one connection per database**. Anything that
+  reserves a `*sql.Conn` or a transaction and then queries the same `*sql.DB`
+  deadlocks under that limit, so keep those paths single-connection (see the
+  salvage writer, which deliberately opens its destination shared). Online
+  integrity checks and backups must go through the live handle for the same
+  reason.
 - Keep sync bounded in memory as well as in time. Anything that accumulates
   message content between commits - IMAP fetch batches, the search-index batch -
   must be bounded in **bytes**, not only in message count: mail sizes span four

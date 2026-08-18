@@ -17,6 +17,7 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
 	"rolltop/backend/memlimit"
+	"rolltop/backend/store"
 )
 
 // Config is the validated runtime configuration assembled from environment variables.
@@ -46,6 +47,11 @@ type Config struct {
 	// process to release the data directory before giving up. Rolling
 	// deployments overlap the two containers for exactly that long.
 	StartupLockWait time.Duration
+
+	// SQLiteAccess selects how SQLite coordinates access to its files. The
+	// default reads the filesystem under the data directory, because WAL's
+	// shared-memory index is unusable on a network or FUSE volume.
+	SQLiteAccess store.AccessMode
 
 	// StartupIntegrityCheck selects when SQLite files are verified during
 	// startup: after an unclean shutdown, on every start, or never.
@@ -129,6 +135,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("ROLLTOP_MEMORY_LIMIT: %w", err)
 	}
+	// The store owns what an access mode means, so an unusable value is
+	// rejected here by the same parser the databases are opened with.
+	sqliteAccess, err := store.ParseAccessMode(os.Getenv("ROLLTOP_SQLITE_ACCESS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("ROLLTOP_SQLITE_ACCESS: %w", err)
+	}
 	// quick_check reads every page, so the default only pays that cost when the
 	// previous run did not shut down cleanly and the files may be damaged.
 	integrityCheck := strings.ToLower(env("ROLLTOP_STARTUP_INTEGRITY_CHECK", IntegrityCheckAuto))
@@ -156,6 +168,7 @@ func Load() (Config, error) {
 		Google:            google,
 		MemoryLimit:       memoryLimit,
 		StartupLockWait:   startupLockWait,
+		SQLiteAccess:      sqliteAccess,
 
 		StartupIntegrityCheck: integrityCheck,
 	}, nil

@@ -169,7 +169,7 @@ func TestNoteErrorNamesTenantDatabaseAndLatchesHealth(t *testing.T) {
 func writeSalvageFixture(t *testing.T, path string, messageCount int) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := open(path, "", false, schemaUser, nil, defaultPluginCatalog())
+	db, err := open(path, "", false, schemaUser, nil, defaultPluginCatalog(), AccessShared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestSalvageRefusesAnExistingDestination(t *testing.T) {
 func TestForeignKeyRepairAcceptsADatabaseCleanedByTheLastPass(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := open(path, "", false, schemaUser, nil, defaultPluginCatalog())
+	db, err := open(path, "", false, schemaUser, nil, defaultPluginCatalog(), AccessShared)
 	if err != nil {
 		t.Fatal(err)
 	}
