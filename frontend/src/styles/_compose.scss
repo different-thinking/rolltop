@@ -186,6 +186,13 @@
   gap: 10px;
   min-height: 180px;
   color: var(--text-soft);
+
+  // The way out while the form is still on its way. It sits beside the status
+  // rather than in the composer's usual corner, because there is no composer
+  // header to put it in yet.
+  > button {
+    margin-left: 4px;
+  }
 }
 
 .inline-reply-meta {

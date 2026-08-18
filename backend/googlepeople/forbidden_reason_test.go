@@ -35,3 +35,15 @@ func TestForbiddenSeparatesDisabledAPIFromMissingScope(t *testing.T) {
 		t.Fatalf("unexplained 403 text = %q", got)
 	}
 }
+
+// The reason beside the status belongs to the 403 branch alone. Every other
+// branch classifies on the status itself, and a stale sync token carries a
+// detail of its own: read as the reason, it stops being a precondition failure,
+// so the caller never runs the full sync that gets the connection off a cursor
+// Google has thrown away.
+func TestStaleSyncTokenStaysAPreconditionFailureBesideItsDetail(t *testing.T) {
+	body := []byte(`{"error":{"code":400,"message":"Sync token is expired. Clear local cache and retry call without the sync token.","status":"FAILED_PRECONDITION","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SYNC_TOKEN_EXPIRED","domain":"people.googleapis.com"}]}}`)
+	if err := statusError(http.StatusBadRequest, body); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("expired sync token = %v, want ErrPrecondition", err)
+	}
+}

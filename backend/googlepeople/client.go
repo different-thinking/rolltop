@@ -388,10 +388,15 @@ func statusError(status int, body []byte) error {
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(body, &payload)
+	// The status is what every other branch classifies on, so the detail reason
+	// stays beside it rather than replacing it: FAILED_PRECONDITION arrives with
+	// a detail of its own, and a stale sync token read as a plain upstream
+	// failure would leave the connection on a cursor Google has discarded.
 	reason := strings.TrimSpace(payload.Error.Status)
+	detailReason := ""
 	for _, detail := range payload.Error.Details {
-		if detailReason := strings.TrimSpace(detail.Reason); detailReason != "" {
-			reason = detailReason
+		if trimmed := strings.TrimSpace(detail.Reason); trimmed != "" {
+			detailReason = trimmed
 			break
 		}
 	}
@@ -401,11 +406,14 @@ func statusError(status int, body []byte) error {
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w", ErrUnauthorized)
 	case http.StatusForbidden:
-		switch reason {
+		switch detailReason {
 		case "SERVICE_DISABLED", "accessNotConfigured":
 			return fmt.Errorf("%w", ErrServiceDisabled)
 		case "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions":
 			return fmt.Errorf("%w", ErrScopeInsufficient)
+		}
+		if detailReason != "" {
+			return fmt.Errorf("%w: %s", ErrForbidden, detailReason)
 		}
 		return fmt.Errorf("%w: %s", ErrForbidden, orUnknown(reason))
 	case http.StatusNotFound:

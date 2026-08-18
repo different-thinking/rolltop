@@ -1639,7 +1639,16 @@ export function ThreadView({
   useEffect(() => {
     function handleThreadShortcut(event: globalThis.KeyboardEvent) {
       if (event.shiftKey || event.repeat || shouldIgnoreMailShortcut(event)) return;
-      if (inlineReply || pendingReply || originalSource || messagePluginPanel || pendingUnsubscribe) return;
+      if (pendingReply) {
+        // A reply being prepared holds the thread's keys the way an open
+        // composer does, except that it has no editor to take Escape yet.
+        if (event.key.toLowerCase() === "escape") {
+          event.preventDefault();
+          closeInlineReply();
+        }
+        return;
+      }
+      if (inlineReply || originalSource || messagePluginPanel || pendingUnsubscribe) return;
       const key = event.key.toLowerCase();
       if (key === "u" || key === "escape") {
         event.preventDefault();
@@ -2317,6 +2326,12 @@ export function ThreadView({
                       <div className="inline-reply inline-reply-pending" role="status" aria-live="polite">
                         <span className="spinner" aria-hidden="true" />
                         <span>Preparing your reply</span>
+                        {/* The composer's own discard control is not here yet, and a
+                            request that never lands would otherwise leave no way out
+                            of the reply but reloading the page. */}
+                        <button className="ghost text-link" type="button" onClick={closeInlineReply}>
+                          Cancel
+                        </button>
                       </div>
                     ) : (
                       <ComposeBox
