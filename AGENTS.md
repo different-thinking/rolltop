@@ -26,6 +26,15 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - Gmail's label views (All Mail, Important, Starred) must stay excluded from
   sync by default. The data model stores one folder per message, so mirroring
   them duplicates most of the mailbox.
+- The whole-account lists - All Mail, Inbox, and every category view - read one
+  flag, `mailboxes.show_in_all_mail`, through `Store.inPlayMailScope`. Sent,
+  Drafts, Trash and Junk default it off (`defaultMailboxShowInAllMail`), and that
+  default has exactly one definition: do not restate the role list in SQL. It is
+  a default, not a rule - a reader may switch any of them back on, so a backfill
+  that changes it belongs in a versioned migration's statements and never in a
+  migration's `After` step, which runs again on every startup and would overwrite
+  that choice. Junk is the one folder the lists drop by role regardless, because
+  Report spam promises the message is gone from them.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
