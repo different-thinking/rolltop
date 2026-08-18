@@ -93,7 +93,9 @@ jobs:
             echo "| --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          emit go '\.go$|^go\.mod$|^go\.sum$'
+          # scripts/ carries the SQL twin of backend/pgpreflight, which
+          # TestTwinsAgree reads, so a change there must run the Go suite.
+          emit go '\.go$|^go\.mod$|^go\.sum$|^scripts/'
           emit plugin_backends '^plugins/[^/]+/backend/|^go\.mod$|^go\.sum$'
           emit spam_model '^plugins/experimental_spam_filter/(model|training)/'
           emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^plugins/[^/]+/(frontend|themes)/'

@@ -827,6 +827,23 @@ export type DatabaseOverview = {
   restart_supported: boolean;
 };
 
+/** PostgresPreflightCheck is one verified capability of a candidate
+ * PostgreSQL migration target. Status "info" reports a fact that needs a
+ * human judgement rather than having a hard pass condition. */
+export type PostgresPreflightCheck = {
+  id: string;
+  title: string;
+  status: "pass" | "fail" | "info";
+  detail: string;
+};
+
+/** PostgresPreflightReport is the outcome of one migration preflight run. */
+export type PostgresPreflightReport = {
+  ok: boolean;
+  checks: PostgresPreflightCheck[];
+  duration_ms: number;
+};
+
 /** ServerLogLine is one captured line of the process log tail. */
 export type ServerLogLine = {
   time: string;
