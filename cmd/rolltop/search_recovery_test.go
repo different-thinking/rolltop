@@ -511,3 +511,59 @@ func TestRecoverMarkedSearchIndexesDeletesDocumentsWhoseMessagesVanished(t *test
 		t.Fatalf("indexed documents = %d, want the vanished message removed", count)
 	}
 }
+
+// A range too wide to sweep for deleted messages must not be repaired in place:
+// clearing the marker after a partial repair would leave a message deleted
+// during the stall searchable for good, with nothing left to notice.
+func TestRecoverMarkedSearchIndexesRebuildsWhenTheRangeIsTooWideToSweep(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner, err := db.CreateUser(ctx, "wide-range@example.test", "Wide Range", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobStore := blob.New(dataDir)
+	account := createSearchRecoveryAccount(t, ctx, db, owner)
+	first := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 1)
+	second := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 2)
+
+	searchRoot := filepath.Join(dataDir, "users")
+	ownerIndex := filepath.Join(searchRoot, strconv.FormatInt(owner.ID, 10), "bleve")
+	searchSvc, err := search.OpenPerUser(searchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+	if _, err := searchSvc.CountUserMessages(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	wide := first.ID + maxTargetedRepairWidth
+	if err := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(owner.ID, first.ID, wide); err != nil {
+		t.Fatal(err)
+	}
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
+		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	quarantines, err := filepath.Glob(ownerIndex + ".quarantine-*")
+	if err != nil || len(quarantines) != 1 {
+		t.Fatalf("quarantines = %v, %v; want the too-wide range rebuilt", quarantines, err)
+	}
+	pending, err := db.ListMessagesNeedingAttachmentIndex(ctx, owner.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending messages = %d, want the rebuild to queue %d and %d", len(pending), first.ID, second.ID)
+	}
+}

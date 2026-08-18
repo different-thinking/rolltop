@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -203,5 +204,45 @@ func TestVerifyPerUserIndexOpensRejectsAMissingIndex(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "13", liveIndexDirName)); !os.IsNotExist(err) {
 		t.Fatalf("verification created an index it was asked to check: %v", err)
+	}
+}
+
+// The stall watchdog and the abandoned-close hook can publish a marker for the
+// same tenant at once: the hook fires when Close timed out, which is the same
+// situation that leaves a watchdog running. Without serialization the later
+// rename drops the range the earlier one had just widened the marker with.
+func TestConcurrentMarkerWritesKeepEveryWidenedRange(t *testing.T) {
+	service, _ := openMarkerService(t)
+	if err := service.MarkSearchIndexRecoveryRequiredForDocuments(21, 100, 200); err != nil {
+		t.Fatal(err)
+	}
+
+	ranges := [][2]int64{{300, 400}, {500, 600}, {700, 800}, {900, 1000}}
+	errs := make(chan error, len(ranges))
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for _, span := range ranges {
+		wait.Add(1)
+		go func(first, last int64) {
+			defer wait.Done()
+			<-start
+			errs <- service.MarkSearchIndexRecoveryRequiredForDocuments(21, first, last)
+		}(span[0], span[1])
+	}
+	close(start)
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recovery, err := service.SearchIndexRecoveryPlan(21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.FirstDocumentID != 100 || recovery.LastDocumentID != 1000 {
+		t.Fatalf("recovery = %+v, want every concurrent range merged into 100-1000", recovery)
 	}
 }

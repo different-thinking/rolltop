@@ -498,7 +498,10 @@ itself the load that makes the next commit slow enough to abandon.
 
 Documents in that range whose messages were deleted while the stalled batch held
 the writer gate are removed from the index during the repair, since their own
-delete never reached Bleve.
+delete never reached Bleve. That sweep is what makes the repair complete, so a
+range too wide to sweep is rebuilt instead of repaired: clearing the marker after
+a partial repair would leave such a message searchable with nothing left to
+notice.
 
 A stall the marker cannot attribute to a message range falls back to the full
 rebuild, as does one whose index is missing or no longer opens: Rolltop then renames `/data/users/<id>/bleve` to a timestamped

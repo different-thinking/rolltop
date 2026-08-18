@@ -189,10 +189,7 @@ func (s *Service) reportBleveError(details bleveErrorContext, err error) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errSearchServiceClosing) {
 		return
 	}
-	logger := log.Printf
-	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	logger("bleve error operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v error_type=%T error=%v",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
 		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, err, err)
@@ -658,10 +655,7 @@ func (s *Service) logf() func(string, ...any) {
 }
 
 func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waited, activeFor time.Duration) {
-	logger := log.Printf
-	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	logger("bleve writer wait operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d waited=%s active_operation=%q active_user_id=%d active_account_id=%d active_mailbox_id=%d active_documents=%d active_batch_bytes=%d active_first_document_id=%d active_last_document_id=%d active_document_ids=%v active_for=%s",
 		waiting.Operation, waiting.UserID, waiting.AccountID, waiting.MailboxID, waiting.Documents, waited.Round(time.Second),
 		active.Operation, active.UserID, active.AccountID, active.MailboxID, active.Documents, active.BatchBytes,
@@ -669,10 +663,7 @@ func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waite
 }
 
 func (s *Service) reportBleveCoordinatorWait(diagnostic bleveWriteWaitDiagnostic) {
-	logger := log.Printf
-	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	details := diagnostic.Request.Details
 	logger("bleve coordinator wait operation=%q priority=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d waited=%s queue_depth=%d active_writes=%d active_bytes=%d same_user_active=%t",
 		details.Operation, diagnostic.Request.Priority.String(), details.UserID, details.AccountID, details.MailboxID,
@@ -735,10 +726,7 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 			}
 		})
 	}
-	logger := log.Printf
-	if s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v recovery_scope=%s",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
 		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr,

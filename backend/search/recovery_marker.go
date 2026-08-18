@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -148,7 +149,29 @@ func (s *Service) markSearchIndexRecovery(userID int64, recovery SearchIndexReco
 	return writeSearchIndexRecoveryMarker(markerPath, userDir, recovery, syncDirectory)
 }
 
+// recoveryMarkerMu serializes the read-merge-publish sequence below.
+//
+// Two paths can publish a marker for the same tenant at once: the stall watchdog
+// runs on its own goroutine and is deliberately independent of any context, and
+// the abandoned-close hook fires precisely when Close timed out - which is the
+// same situation that leaves a watchdog running. Without this lock both can read
+// the same marker, merge their own range into it, and rename in turn, so the
+// later write silently drops the range the earlier one had just widened it with.
+//
+// One lock for every tenant is enough: a process writes a handful of these in
+// its lifetime, and never on a path where throughput matters.
+var recoveryMarkerMu sync.Mutex
+
 func writeSearchIndexRecoveryMarker(markerPath, userDir string, recovery SearchIndexRecovery, syncDir func(string) error) error {
+	recoveryMarkerMu.Lock()
+	defer recoveryMarkerMu.Unlock()
+	return writeSearchIndexRecoveryMarkerLocked(markerPath, userDir, recovery, syncDir)
+}
+
+// writeSearchIndexRecoveryMarkerLocked requires recoveryMarkerMu. It exists so
+// the clear path, which already holds the lock, can restore a marker without
+// deadlocking against itself.
+func writeSearchIndexRecoveryMarkerLocked(markerPath, userDir string, recovery SearchIndexRecovery, syncDir func(string) error) error {
 	if !recovery.Required {
 		return fmt.Errorf("refusing to write a search recovery marker for no recovery")
 	}
@@ -254,6 +277,10 @@ func (s *Service) clearSearchIndexRecoveryRequiredWithSync(userID int64, syncDir
 	if err != nil {
 		return err
 	}
+	// Held across the read, the removal and any restore, for the same reason the
+	// write path takes it: a concurrent publish must not land between them.
+	recoveryMarkerMu.Lock()
+	defer recoveryMarkerMu.Unlock()
 	// Read the payload before removing the file: restoring the marker below has
 	// to ask for the same recovery, and a restored full rebuild where the
 	// original named a range would undo the repair this build exists to make.
@@ -273,7 +300,7 @@ func (s *Service) clearSearchIndexRecoveryRequiredWithSync(userID int64, syncDir
 		// attempt whenever possible. The index rename was synced before this
 		// method was called, making either crash outcome safe even if restoration
 		// also fails.
-		if restoreErr := writeSearchIndexRecoveryMarker(markerPath, userDir, recovery, syncDir); restoreErr != nil {
+		if restoreErr := writeSearchIndexRecoveryMarkerLocked(markerPath, userDir, recovery, syncDir); restoreErr != nil {
 			return errors.Join(clearErr, fmt.Errorf("restore search recovery marker after clear failure: %w", restoreErr))
 		}
 		return fmt.Errorf("%w; marker restored for retry", clearErr)

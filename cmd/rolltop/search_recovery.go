@@ -26,10 +26,14 @@ func recoverMarkedSearchIndexes(ctx context.Context, db *store.Store, searchSvc 
 		if !recovery.Required {
 			continue
 		}
-		// Keeping the index is only safe if it still opens. An index that does
-		// not is the one case a range cannot repair, and it falls through to the
-		// rebuild below rather than leaving the tenant without search.
-		if recovery.Targeted() {
+		// Keeping the index is only safe when the repair can be carried out in
+		// full. A range too wide to sweep for deleted messages, and an index that
+		// no longer opens, both fall through to the rebuild below rather than
+		// clearing the marker on a repair that was only partly done.
+		if recovery.Targeted() && !repairableInPlace(recovery) {
+			log.Printf("stalled search index user_id=%d spans %d ids over the %d the in-place repair sweeps, rebuilding instead of repairing %s",
+				user.ID, recoveryWidth(recovery), maxTargetedRepairWidth, recovery.Scope())
+		} else if recovery.Targeted() {
 			if openErr := searchSvc.VerifyPerUserIndexOpens(user.ID); openErr != nil {
 				log.Printf("stalled search index user_id=%d does not open, rebuilding instead of repairing %s: %v",
 					user.ID, recovery.Scope(), openErr)
@@ -85,10 +89,25 @@ func repairMarkedSearchIndexRange(ctx context.Context, db *store.Store, searchSv
 	return userID, nil
 }
 
-// maxVanishedDocumentScan bounds the row-ID window swept for deleted messages.
-// A marker's range comes from one batch and is narrow in practice; a pathological
-// one is reported rather than turned into a scan of the whole ID space.
-const maxVanishedDocumentScan = 10000
+// maxTargetedRepairWidth bounds the row-ID window an in-place repair covers. A
+// marker's range comes from one batch and is narrow in practice; a pathological
+// one is rebuilt rather than turned into a scan of the whole ID space.
+//
+// The bound decides whether the repair happens at all, not how much of it
+// happens. Sweeping only part of a range and then clearing the marker would
+// leave a message that was deleted during the stall searchable for good, with
+// nothing left to notice.
+const maxTargetedRepairWidth = 10000
+
+func recoveryWidth(recovery search.SearchIndexRecovery) int64 {
+	return recovery.LastDocumentID - recovery.FirstDocumentID + 1
+}
+
+// repairableInPlace reports whether this range is narrow enough to repair
+// without discarding the index.
+func repairableInPlace(recovery search.SearchIndexRecovery) bool {
+	return recoveryWidth(recovery) <= maxTargetedRepairWidth
+}
 
 // deleteVanishedDocumentsInRange removes index documents whose messages no longer
 // exist. Marking rows pending only repairs documents SQLite can still describe;
@@ -96,11 +115,12 @@ const maxVanishedDocumentScan = 10000
 // Bleve delete, and the retained index would keep serving it. The full rebuild
 // this replaces discarded such documents by discarding everything.
 func deleteVanishedDocumentsInRange(ctx context.Context, db *store.Store, searchSvc *search.Service, userID int64, recovery search.SearchIndexRecovery) (int, error) {
-	width := recovery.LastDocumentID - recovery.FirstDocumentID + 1
-	if width > maxVanishedDocumentScan {
-		log.Printf("skipped deleted-document sweep user_id=%d first_document_id=%d last_document_id=%d width=%d limit=%d",
-			userID, recovery.FirstDocumentID, recovery.LastDocumentID, width, maxVanishedDocumentScan)
-		return 0, nil
+	if !repairableInPlace(recovery) {
+		// Unreachable: recoverMarkedSearchIndexes rebuilds such a range instead.
+		// Refusing here keeps the guarantee local to the function that has to
+		// hold it, rather than resting on its one caller.
+		return 0, fmt.Errorf("range %d-%d is too wide to sweep for deleted messages",
+			recovery.FirstDocumentID, recovery.LastDocumentID)
 	}
 	surviving, err := db.MessageIDsInRange(ctx, userID, recovery.FirstDocumentID, recovery.LastDocumentID)
 	if err != nil {
