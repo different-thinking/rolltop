@@ -20,7 +20,7 @@ import { mailPageSize } from "../../lib/constants";
 import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
 import type { MailSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
-import { mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
+import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
 import type { RuntimePlugin } from "../../plugins/runtime";
@@ -2424,7 +2424,9 @@ function MessageList({
   }
 
   function replyToConversation(conversation: Conversation) {
-    navigate(`/compose?reply=${conversation.message.id}`);
+    // The list the reply was started from travels with it, so finishing the
+    // reply comes back here rather than to whichever list the app opens on.
+    navigate(composeURL({ replyID: conversation.message.id, backURL: returnURL }));
   }
 
   function moveConversationByRowAction(conversation: Conversation, action: RowMoveAction) {
@@ -2599,7 +2601,9 @@ function MessageList({
       {visible.map((conversation, index) => {
         const msg = conversation.message;
         const matchTerms = conversation.match_terms || [];
-        const href = openAsDraft ? `/compose?draft=${msg.id}` : messageURL(msg.id, searchQuery, matchTerms, returnURL, searchQuery ? msg.id : 0);
+        const href = openAsDraft
+          ? composeURL({ draftID: msg.id, backURL: returnURL })
+          : messageURL(msg.id, searchQuery, matchTerms, returnURL, searchQuery ? msg.id : 0);
         const attachmentNames = conversation.attachment_names || [];
         const attachmentMatches = conversation.attachment_matches || [];
         const previewText = messageSecurityPreviewText(messageSecurityPlugins, conversation.snippet, msg);

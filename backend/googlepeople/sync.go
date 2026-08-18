@@ -412,8 +412,26 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 // appear between the lookup and the insert. Reading it again and overwriting it
 // is the same work the ordinary path would have done, and it keeps one lost race
 // from failing a whole address book instead of one contact.
+//
+// The mirror can also be gone again by the time it is read, because the only
+// unique key a synced person can now collide with is the one over the resource
+// name: a disconnect or a contact deletion running alongside the sync removes
+// the very row the conflict proved was there. Both directions of that race end
+// with this person stored, and neither is reported as a failure -- an apply
+// error withholds the run's cursor, and losing a race twice would cost the
+// account a full re-read of its whole address book on the next poll.
 func (s *Syncer) applyToExistingMirror(ctx context.Context, userID, connectionID int64, incoming store.Contact, person Person) (applyOutcome, error) {
 	existing, err := s.Store.GetContactByGoogleResourceForUser(ctx, userID, connectionID, incoming.ExternalID)
+	if store.IsNotFound(err) {
+		// The row the conflict proved was there has been deleted since. This
+		// person is simply missing again, so they are stored again.
+		created, createErr := s.Store.CreateContact(ctx, userID, incoming)
+		if createErr != nil {
+			return outcomeUnchanged, fmt.Errorf("%s: storing this person again after its mirror was deleted mid-sync: %w", incoming.ExternalID, createErr)
+		}
+		s.importPhoto(ctx, userID, created.ID, person)
+		return outcomeCreated, nil
+	}
 	if err != nil {
 		return outcomeUnchanged, err
 	}
@@ -462,19 +480,52 @@ func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming
 // findLocalMatch looks for an existing contact with one of the incoming
 // addresses. Only local contacts qualify: a contact already owned by another
 // Google account is a separate mirror and must not be stolen from it.
+//
+// Every holder of the address is considered rather than only the first, because
+// an address may be shared: a person Google sent earlier in this very run can
+// already hold it as a mirror, and stopping there would leave a local contact
+// standing beside its own Google copy for good.
+//
+// Among the local holders the reader's own contact goes last, which is the one
+// place that inverts the order the store hands them back in. A household
+// address sits on the Me card and on the card of the person it is shared with,
+// and adopting the Me card would make the reader's own contact the mirror of
+// somebody else -- their outgoing identity would take that person's name. The
+// Me card is still adopted when it is the only local holder, which is how a
+// reader's own Google contact keeps its identity flags.
 func (s *Syncer) findLocalMatch(ctx context.Context, userID int64, incoming store.Contact) (store.Contact, bool, error) {
 	for _, email := range incoming.Emails {
-		candidate, err := s.Store.GetContactByEmailForUser(ctx, userID, email.Email)
-		if store.IsNotFound(err) {
-			continue
-		}
+		holders, err := s.Store.ListContactEmailHoldersForUser(ctx, userID, email.Email)
 		if err != nil {
 			return store.Contact{}, false, err
 		}
-		if candidate.IsGoogleContact() {
+		chosen, ownContact := int64(0), int64(0)
+		for _, holder := range holders {
+			if holder.IsGoogleContact() {
+				continue
+			}
+			if holder.IsMe {
+				if ownContact == 0 {
+					ownContact = holder.ContactID
+				}
+				continue
+			}
+			chosen = holder.ContactID
+			break
+		}
+		if chosen == 0 {
+			chosen = ownContact
+		}
+		if chosen == 0 {
 			continue
 		}
-		return candidate, true, nil
+		// Only the winner is read in full: the merge needs its detail rows, and
+		// the holders it beat were rejected on columns the listing already had.
+		contact, err := s.Store.GetContactForUser(ctx, userID, chosen)
+		if err != nil {
+			return store.Contact{}, false, err
+		}
+		return contact, true, nil
 	}
 	return store.Contact{}, false, nil
 }

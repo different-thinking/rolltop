@@ -117,8 +117,18 @@ export function GoogleAccountsSettings({
   // Keyed per connection and operation: a single shared id would be cleared by
   // whichever request finished first, re-enabling buttons still in flight.
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Every request that acts on one connection, so a control cannot start while
+  // another is still in flight against the same account. Reauthorizing during a
+  // disconnect is the case that matters: consent would return to a connection
+  // the disconnect has already removed.
   const isBusy = (connectionID: number) =>
-    Boolean(busy[`test:${connectionID}`] || busy[`disconnect:${connectionID}`] || busy[`contacts:${connectionID}`]);
+    Boolean(
+      busy[`test:${connectionID}`] ||
+        busy[`disconnect:${connectionID}`] ||
+        busy[`contacts:${connectionID}`] ||
+        busy[`calendar:${connectionID}`] ||
+        busy[`connect:${connectionID}`]
+    );
   const setOperationBusy = (key: string, running: boolean) =>
     setBusy((current) => {
       if (!running) {
@@ -342,20 +352,22 @@ export function GoogleAccountsSettings({
                           {busy[`calendar:${connection.id}`] ? "Syncing..." : "Sync calendars"}
                         </button>
                       ) : null}
-                      {/* A healthy connection missing the contacts scope needs
-                          the same button: consent is the only way to add a
-                          scope, and telling the user to reauthorize without
-                          giving them the control would be a dead end. */}
-                      {connection.needs_reauth || !connection.has_contacts_scope || !connection.has_calendar_scope ? (
-                        <button
-                          className="secondary"
-                          type="button"
-                          disabled={!configured || reconnecting}
-                          onClick={() => void connect(connection.id)}
-                        >
-                          Reauthorize
-                        </button>
-                      ) : null}
+                      {/* Always offered, never conditional. Consent is the only
+                          way to add a scope, to replace a revoked grant, and to
+                          recover a connection Google has quietly stopped
+                          answering for -- and that last state looks, from here,
+                          exactly like a healthy one. Hiding the control until
+                          Rolltop can name the fault left the one account whose
+                          syncs were failing with no way to reconnect it. */}
+                      <button
+                        className="secondary"
+                        type="button"
+                        title={`Send ${connection.email} through Google's consent screen again`}
+                        disabled={!configured || rowBusy}
+                        onClick={() => void connect(connection.id)}
+                      >
+                        {reconnecting ? "Opening Google..." : "Reauthorize"}
+                      </button>
                       {connection.needs_reauth ? null : (
                         <button className="secondary" type="button" disabled={rowBusy} onClick={() => void testConnection(connection)}>
                           {busy[`test:${connection.id}`] ? "Testing..." : "Test connection"}

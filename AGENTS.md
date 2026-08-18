@@ -54,6 +54,23 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   contact whose `source` is `google` must reach Google before the local row
   changes, or the next sync silently undoes it. On an etag conflict, adopt
   Google's version and say so; never force the local one through.
+- An email address identifies at most one contact where something has to resolve
+  it to one -- the Me contact, a reply identity, an import's merge target, the
+  picture beside a sender -- but the address book may hold it more than once.
+  Google lets two people share an address, so a unique index over it made the
+  second of them unstorable and failed the whole sync rather than one row. One
+  contact still carries an address once; saving dedupes by normalized address,
+  because a Me contact holding it twice grows two outgoing identities.
+- Which holder answers for a shared address is decided in exactly one place,
+  `contactEmailOwnerOrder`: the reader's own contact, then whoever carries it as
+  their primary address, then the oldest. Resolve with
+  `GetContactByEmailForUser` or the first holder from
+  `ListContactEmailHoldersForUser`; never with a bare `LIMIT 1`. Anything that
+  has to pick between the holders walks that list, and two of them invert part
+  of the order for stated reasons: a Google-owned row is never adopted as the Me
+  contact or as a local write's target, and the sync ranks the Me card last when
+  choosing which local contact a Google person is, so the reader's own contact
+  cannot become the mirror of somebody they share an address with.
 - Provenance on a contact — `source`, `google_connection_id`, `external_id`,
   `etag` — is written only by the sync and the write-back path.
   `UpdateContact` deliberately leaves those columns alone so an ordinary edit

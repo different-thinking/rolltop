@@ -462,6 +462,192 @@ func TestSyncPromotesAMatchingLocalContactInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
+// Two people at Google may carry the same address -- a couple, a shared office
+// mailbox, a role account kept on two cards -- and both are mirrored. Rolltop
+// used to be unable to store the second one, and because the failure travelled
+// out of the run it also withheld the cursor, so every later sync re-read the
+// whole address book and failed again in the same place.
+func TestSyncMirrorsTwoPeopleWhoShareAnEmailAddress(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People: []Person{
+			personWithEmail("people/c1", "etag-1", "Ada Lovelace", "haushalt@example.test"),
+			personWithEmail("people/c2", "etag-2", "Charles Babbage", "haushalt@example.test"),
+		},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	result, err := syncer.SyncConnection(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatalf("sync = %v, want both people stored", err)
+	}
+	if result.Created != 2 {
+		t.Fatalf("created = %d, want both people mirrored", result.Created)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 2 {
+		t.Fatalf("address book holds %d contacts, want one per Google person", len(contacts))
+	}
+	for _, contact := range contacts {
+		if !contact.IsGoogleContact() {
+			t.Fatalf("contact %q = %+v, want it linked to the connection", contact.DisplayName, contact)
+		}
+	}
+	// The cursor is the proof the run finished: a sync that reported the second
+	// person as a failure would have left it unstored and re-read everything.
+	state, err := db.GetGooglePeopleSync(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SyncToken != "token-1" {
+		t.Fatalf("sync token = %q, want the cursor of a completed run", state.SyncToken)
+	}
+	if state.Status != store.GooglePeopleSyncStatusOK {
+		t.Fatalf("status = %q, want a successful run", state.Status)
+	}
+}
+
+// The address a local contact holds may already belong to a mirror as well.
+// Promotion has to look past that mirror to the local row rather than give up
+// at the first holder of the address, which would leave the local contact
+// standing beside its own Google copy for good.
+func TestSyncPromotesTheLocalHolderOfAnAddressAMirrorAlreadyShares(t *testing.T) {
+	shared := "haushalt@example.test"
+	babbage := personWithEmail("people/c1", "etag-1", "Charles Babbage", shared)
+	fake := &fakePeople{responses: []ConnectionsPage{
+		{People: []Person{babbage}, NextSyncToken: "token-1"},
+		{People: []Person{personWithEmail("people/c2", "etag-2", "Ada Lovelace", shared)}, NextSyncToken: "token-2"},
+	}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	// Entered here after the mirror already held the address, which is what
+	// Rolltop does with every sender the user answers.
+	local, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Ada",
+		Notes:       "Met at the conference",
+		Emails:      []store.ContactEmail{{Label: "Email", Email: shared, IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 2 {
+		t.Fatalf("address book holds %d contacts, want the mirror and the promoted local row", len(contacts))
+	}
+	promoted, err := db.GetContactForUser(ctx, user.ID, local.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.ExternalID != "people/c2" {
+		t.Fatalf("local contact links to %q, want the person that arrived after it", promoted.ExternalID)
+	}
+	if promoted.Notes != "Met at the conference" {
+		t.Fatalf("notes = %q, want the local note preserved by the promotion", promoted.Notes)
+	}
+}
+
+// A household address sits on the reader's own contact and on the card of the
+// person they share it with. Adopting the Me card would make the reader's own
+// contact the mirror of somebody else, and their outgoing identity would take
+// that person's name.
+func TestSyncPromotesTheOtherLocalHolderRatherThanTheReadersOwnContact(t *testing.T) {
+	shared := "haushalt@example.test"
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People:        []Person{personWithEmail("people/c1", "etag-1", "Charles Babbage", shared)},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	me, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "The Reader",
+		IsMe:        true,
+		IsPrimary:   true,
+		Emails:      []store.ContactEmail{{Label: "Home", Email: shared, IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spouse, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Charles",
+		Emails:      []store.ContactEmail{{Label: "Home", Email: shared}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	own, err := db.GetContactForUser(ctx, user.ID, me.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.IsGoogleContact() {
+		t.Fatalf("the reader's own contact became a mirror: %+v", own)
+	}
+	if own.DisplayName != "The Reader" {
+		t.Fatalf("own display name = %q, want the reader's own name kept", own.DisplayName)
+	}
+	promoted, err := db.GetContactForUser(ctx, user.ID, spouse.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.ExternalID != "people/c1" {
+		t.Fatalf("other local holder links to %q, want the Google person", promoted.ExternalID)
+	}
+}
+
+// The Me card is still the right answer when it is the only local holder: that
+// is a reader's own Google contact, and refusing it would build a duplicate and
+// strand the identity flags outgoing mail hangs off.
+func TestSyncStillPromotesTheReadersOwnContactWhenItIsTheOnlyLocalHolder(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People:        []Person{personWithEmail("people/c1", "etag-1", "The Reader", "reader@example.test")},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	me, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Reader",
+		IsMe:        true,
+		IsPrimary:   true,
+		Emails:      []store.ContactEmail{{Label: "Home", Email: "reader@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 {
+		t.Fatalf("address book holds %d contacts, want the single promoted one", len(contacts))
+	}
+	if contacts[0].ID != me.ID || contacts[0].ExternalID != "people/c1" || !contacts[0].IsMe {
+		t.Fatalf("promoted contact = %+v, want the reader's own contact linked and still theirs", contacts[0])
+	}
+}
+
 // A full read re-reports every person. Rewriting all of them each time would
 // churn the database and bump updated_at on contacts nothing changed about.
 func TestSyncSkipsContactsWhoseETagIsUnchanged(t *testing.T) {
@@ -655,5 +841,36 @@ func TestAWaitingSyncReturnsWhenItsContextEnds(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a cancelled caller kept waiting for the running sync to finish")
+	}
+}
+
+// A mirror deleted between the insert that lost to the unique index and the
+// read that follows it is a race, not a conflict, and it ends with the person
+// stored. Reporting it as a failure would withhold the run's cursor, which
+// costs the account a full re-read of its whole address book on the next poll --
+// the very cost this whole change exists to remove.
+//
+// The recovery is exercised directly: producing the collision for real would
+// mean deleting a row between two statements of the sync's own run.
+func TestApplyToExistingMirrorStoresThePersonWhenTheMirrorIsGone(t *testing.T) {
+	person := personWithEmail("people/c1", "etag-1", "Ada Lovelace", "ada@example.test")
+	syncer, db, user := newSyncFixture(t, &fakePeople{})
+	ctx := context.Background()
+
+	incoming := ToContact(person)
+	incoming.GoogleConnectionID = 7
+	outcome, err := syncer.applyToExistingMirror(ctx, user.ID, 7, incoming, person)
+	if err != nil {
+		t.Fatalf("applyToExistingMirror = %v, want the person stored rather than an apply error", err)
+	}
+	if outcome != outcomeCreated {
+		t.Fatalf("outcome = %v, want the person counted as created", outcome)
+	}
+	contact, ok := contactByEmail(t, db, user.ID, "ada@example.test")
+	if !ok {
+		t.Fatal("the person was not stored")
+	}
+	if contact.ExternalID != "people/c1" || !contact.IsGoogleContact() {
+		t.Fatalf("contact = %+v, want it linked to the Google person", contact)
 	}
 }

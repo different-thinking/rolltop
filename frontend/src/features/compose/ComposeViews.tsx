@@ -9,8 +9,9 @@ import type { LocationState, Toast } from "../../appTypes";
 import type { ContactAutocomplete, ComposeAttachmentUpload, ComposeExistingAttachment, ComposeForm, ComposeIdentity } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
+import { isSendChord } from "../../lib/keyboard";
 import { textToHTML } from "../../lib/html";
-import { defaultMailURL } from "../../lib/routes";
+import { defaultMailURL, messageBackURL } from "../../lib/routes";
 import {
   clearComposeRecovery,
   composeContentEqual,
@@ -33,6 +34,14 @@ import type { AndroidContactAccess, NativeContactEmail } from "../../lib/android
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { useComposeSecurity } from "../../plugins/composeSecurity";
 import type { ComposeSecurityUnlockState, OpenComposeSecurityUnlock } from "../../plugins/composeSecurity";
+
+/**
+ * ComposeSendOutcome is what a completed send tells its host. Only the filing
+ * matters so far: a reply that archived the message it answers has taken that
+ * conversation out of the list the reader came from, so the thread behind the
+ * composer is no longer somewhere they can be left standing.
+ */
+export type ComposeSendOutcome = { archived: boolean };
 
 const ATTACHMENT_WARNING_BYTES = 20 * 1024 * 1024;
 const RESIZE_PHOTO_MAX_EDGE = 1920;
@@ -157,6 +166,11 @@ export function ComposePage({
   const [from, setFrom] = useState("");
   const [identities, setIdentities] = useState<ComposeIdentity[]>([]);
   const [error, setError] = useState("");
+  // Where this composer was opened from. Replying from a list is a round trip,
+  // so finishing means going back to that list rather than to whichever one the
+  // app happens to open on -- which is all a composer reached without a list
+  // behind it can do.
+  const backURL = messageBackURL(location, defaultMailURL);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,8 +206,8 @@ export function ComposePage({
           securityUnlock={securityUnlock}
           openSecurityUnlock={openSecurityUnlock}
           addToast={addToast}
-          onSent={() => navigate(defaultMailURL)}
-          onCancel={() => navigate(defaultMailURL)}
+          onSent={() => navigate(backURL)}
+          onCancel={() => navigate(backURL)}
         />
       ) : (
         <div className="panel muted">Loading compose...</div>
@@ -237,7 +251,9 @@ export function ComposeBox({
   securityUnlock: ComposeSecurityUnlockState;
   openSecurityUnlock: OpenComposeSecurityUnlock;
   addToast: (message: string, kind?: Toast["kind"]) => number;
-  onSent: () => void;
+  /** Told what the send did, because filing the answered message away is what
+      makes the view behind this composer stale. */
+  onSent: (outcome: ComposeSendOutcome) => void;
   onCancel?: () => void;
   onMinimize?: () => void;
 }) {
@@ -249,6 +265,10 @@ export function ComposeBox({
   // the submit that the click itself triggers, and a state update would not have
   // landed by then.
   const archiveOnSend = useRef(false);
+  // Whether a send is already on its way. `sending` cannot answer that: it is
+  // state, so it is still false for every submit queued before React re-renders,
+  // and two of those each reach api.send and mail the message twice.
+  const sendInFlight = useRef(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
@@ -288,6 +308,8 @@ export function ComposeBox({
     return uploadBytes + existingBytes + forwardedBytes;
   }, [attachments, includedExistingAttachments, forwardedMessageAttachment]);
   const hasAttachmentWarning = totalAttachmentBytes > ATTACHMENT_WARNING_BYTES;
+  // Only a reply has something to file, so only a reply can send and archive.
+  const canSendAndArchive = initial.in_reply_to_id > 0;
   const canResizePhotos = attachments.some((attachment) => isResizablePhoto(attachment.file));
   const selectedIdentity = identities.find((identity) => identity.id === (form.from_identity_id || primaryIdentity?.id || 0)) || primaryIdentity;
   const hasAttachedItems = attachments.length > 0 || includedExistingAttachments.length > 0 || Boolean(forwardedMessageAttachment);
@@ -672,11 +694,35 @@ export function ComposeBox({
     setTemplates(next);
   }
 
+  /**
+   * Ctrl+Enter (Cmd+Enter on a Mac) sends. On a reply it sends and archives,
+   * which is what the shortcut is for: answering a message is usually the last
+   * thing the reader wants to do with it, and the two-step version of that --
+   * send, go back, archive -- is the thing being replaced.
+   *
+   * It goes through the form's own submit rather than calling submit() so the
+   * keyboard path and the buttons run exactly the same code, including whatever
+   * a security plugin puts in front of a send.
+   */
+  function handleComposeKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
+    if (!isSendChord(event)) return;
+    event.preventDefault();
+    if (event.repeat || sendInFlight.current || sending || savingDraft || resizing) return;
+    archiveOnSend.current = canSendAndArchive;
+    // The recipient fields see this keystroke first and hand over whatever they
+    // were still holding -- a highlighted suggestion, a typed address -- which
+    // reaches this form as a state update. The submit waits one tick for it,
+    // because the send reads that state and not the DOM.
+    window.setTimeout(() => formRef.current?.requestSubmit(), 0);
+  }
+
   // Before sending, replace inline object URLs with cid: URLs and only upload
   // inline files that are still referenced in the edited body.
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (sendInFlight.current) return;
     if (!composeSecurity.beginSubmit(formRef)) return;
+    sendInFlight.current = true;
     const editor = editorRef.current;
     const preparedHTML = prepareComposeHTML(editor?.innerHTML || "", attachments);
     const uploadAttachments = attachments.filter((attachment) => !attachment.inline || preparedHTML.inlineIDs.has(attachment.id));
@@ -686,7 +732,7 @@ export function ComposeBox({
       body: editor?.innerText || "",
       body_html: preparedHTML.html,
       attach_public_key: composeSecurity.attachPublicKey,
-      archive_after_send: archiveOnSend.current && initial.in_reply_to_id > 0
+      archive_after_send: archiveOnSend.current && canSendAndArchive
     };
     let sent = false;
     setSending(true);
@@ -706,10 +752,11 @@ export function ComposeBox({
       // folder chosen, or a conversation already filed in one, sends the reply
       // and leaves the message where it is.
       addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
-      onSent();
+      onSent({ archived: Boolean(result.archived_mailbox) });
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
+      sendInFlight.current = false;
       archiveOnSend.current = false;
       if (!sent) composeSecurity.setTransform({ active: false, phase: "plaintext", ciphertext: "" });
       setSending(false);
@@ -746,7 +793,12 @@ export function ComposeBox({
   }
 
   return (
-    <form ref={formRef} className={`${inline ? "inline-reply" : "compose-window"}${minimized ? " minimized" : ""}`} onSubmit={submit}>
+    <form
+      ref={formRef}
+      className={`${inline ? "inline-reply" : "compose-window"}${minimized ? " minimized" : ""}`}
+      onSubmit={submit}
+      onKeyDown={handleComposeKeyDown}
+    >
       {!inline ? (
         <div className="compose-head">
           <span className="compose-head-title">
@@ -1027,17 +1079,22 @@ export function ComposeBox({
       {composeSecurity.renderSendChoice(formRef)}
       <div className="compose-sendbar">
         <div className="compose-send-actions">
-          <button className="send-button" disabled={sending || savingDraft || resizing} onClick={() => { archiveOnSend.current = false; }}>
+          <button
+            className="send-button"
+            title={canSendAndArchive ? "Send this reply and leave the message it answers where it is" : "Send this message (Ctrl+Enter)"}
+            disabled={sending || savingDraft || resizing}
+            onClick={() => { archiveOnSend.current = false; }}
+          >
             <Icon name="send" />
             {composeSecurity.sendButtonLabel(sending)}
           </button>
           {/* Answering a message is usually the last thing a reader wants to do
               with it, but not always, so the two outcomes are two buttons rather
               than one button and a rule. Only a reply has something to file. */}
-          {initial.in_reply_to_id > 0 ? (
+          {canSendAndArchive ? (
             <button
               className="send-archive-button"
-              title="Send this reply and file the message it answers"
+              title="Send this reply and file the message it answers (Ctrl+Enter)"
               disabled={sending || savingDraft || resizing}
               onClick={() => { archiveOnSend.current = true; }}
             >
@@ -1488,6 +1545,17 @@ function RecipientInput({
   }
 
   function handleRecipientKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    // The send chord belongs to the composer, but this field is holding state
+    // the send is about to read, so it hands that over on the way past rather
+    // than letting the keystroke leave it behind. A highlighted suggestion is
+    // what the user means by that address; the raw text is the fallback. The
+    // event is left to bubble either way, and the form sends a tick later.
+    if (isSendChord(event)) {
+      const highlighted = suggestions[activeSuggestion];
+      if (highlighted) choose(highlighted);
+      else if (inputValue.trim()) commitRecipients(inputValue);
+      return;
+    }
     if (event.key === "ArrowDown" && suggestions.length > 0) {
       event.preventDefault();
       setActiveSuggestion((current) => (current + 1) % suggestions.length);

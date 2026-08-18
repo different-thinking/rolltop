@@ -1215,11 +1215,11 @@ CREATE UNIQUE INDEX idx_calendars_google ON calendars (user_id, google_connectio
 -- index idx_contact_addresses_user_contact
 CREATE INDEX idx_contact_addresses_user_contact ON contact_addresses (user_id, contact_id);
 
+-- index idx_contact_emails_user_address
+CREATE INDEX idx_contact_emails_user_address ON contact_emails (user_id, normalized_email);
+
 -- index idx_contact_emails_user_contact
 CREATE INDEX idx_contact_emails_user_contact ON contact_emails (user_id, contact_id);
-
--- index idx_contact_emails_user_normalized
-CREATE UNIQUE INDEX idx_contact_emails_user_normalized ON contact_emails (user_id, normalized_email) WHERE normalized_email <> '';
 
 -- index idx_contact_icons_user_contact
 CREATE INDEX idx_contact_icons_user_contact ON contact_icons (user_id, contact_id);
