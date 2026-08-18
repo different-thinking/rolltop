@@ -105,6 +105,13 @@ everywhere else. Human-facing sorting that wants locale rules should opt in
 explicitly rather than the reverse. The single `COLLATE NOCASE` site becomes
 `lower(...)` or `citext`.
 
+On the managed offering the database may be provisioned by the hoster, so
+this needs coordination *before* provisioning: either the hoster creates the
+database with `LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`, or our
+database user gets `CREATEDB` and we create it ourselves. Startup verifies
+`pg_database.datcollate = 'C'` and fails fast otherwise, so a wrongly
+provisioned database is caught before the first write.
+
 ## 4. Work packages
 
 ### WP1 — Connection, config, startup
@@ -290,7 +297,7 @@ all call `store.Open(tempfile)`.
 | Phase | Content | Depends on |
 | --- | --- | --- |
 | 0 | Stopgap on current production: `locking_mode=EXCLUSIVE`, `synchronous=FULL`, `MaxOpenConns(1)` (separate small change; removes the `-shm` coherence dependency and the "database is locked" errors while this plan executes) | — |
-| 1 | WP1 + WP2 + WP8 skeleton (app boots against PG, baseline schema, test helper + CI service) | hoster answer: managed PG or RBD |
+| 1 | WP1 + WP2 + WP8 skeleton (app boots against PG, baseline schema, test helper + CI service) | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
 | 2 | WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
 | 3 | WP6 plugins | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
@@ -390,10 +397,16 @@ message-indexing checkpoint dance was the closest and gets deleted).
 
 ### 8.6 Operational surface shift
 
-- Backups: `VACUUM INTO` self-service is gone; the operator story becomes
-  `pg_dump`/provider backups. This is a *feature regression* for
-  self-hosters unless the compose file ships a scheduled `pg_dump` sidecar
-  or the docs cover it well.
+- Backups: `VACUUM INTO` self-service is gone. For this deployment (see
+  §12): the hoster runs continuous WAL archiving plus hourly base backups
+  (7-day retention), but those are disaster-recovery only — not
+  self-service, not browsable, not restorable by us. Our own restore path
+  is therefore scheduled `pg_dump` (via the hoster's SSH bastion or from
+  inside the platform against the same DSN), keeping a copy outside the
+  platform. This replaces the in-app backup button (WP5).
+- For generic self-hosters the compose file should ship a scheduled
+  `pg_dump` sidecar or the docs must cover it well — otherwise this is a
+  feature regression.
 - One more service to run, upgrade (PG major versions), and monitor.
 - Postgres major-version upgrades need `pg_upgrade`/dump-restore — worth a
   README paragraph so it does not surprise anyone in two years.
@@ -451,11 +464,27 @@ complete, since Bleve's mmap'd segments are the remaining risk on `/data`:
 
 ## 12. Open questions
 
-1. Hosting: managed PostgreSQL available? Which version (target ≥ 16)?
-   Extensions `pg_trgm`/`citext` allowed? If no managed offer: RBD volume for
-   a self-run Postgres container?
-2. Connection limits of the offering (pool sizing input).
-3. Is the in-app backup button a must-keep (→ ship `pg_dump` in the image)
-   or acceptable to drop in favor of provider backups?
-4. Timing of phase 0 (the SQLite `locking_mode=EXCLUSIVE` stopgap) relative
+Hoster answers received 2026-08-18:
+
+1. ~~Hosting: managed PostgreSQL available?~~ **Yes — managed Postgres 16.**
+   `pg_trgm`, `citext`, and `unaccent` are trusted extensions and our
+   database user may `CREATE EXTENSION` them directly. Phase 7 (search) is
+   therefore unblocked in principle.
+2. ~~Connection limits?~~ **20 connections per database user.** App pool
+   default `ROLLTOP_DB_MAX_CONNS=10` (WP1) leaves headroom for the
+   migration tool, scheduled `pg_dump`, and manual `psql` without ever
+   tripping the limit.
+3. ~~Backup story?~~ Hoster-side: continuous WAL archiving + hourly base
+   backups, 7-day retention — **disaster recovery only, not self-service.**
+   Our own backups: scheduled `pg_dump` via SSH bastion (or in-platform),
+   stored off-platform. §8.6 updated accordingly; the in-app backup button
+   is dropped (WP5).
+
+Still open:
+
+4. **Collation of the provisioned database** (§3.4): the managed database
+   must be created with `LC_COLLATE 'C'` (template0), or our user needs
+   `CREATEDB`. Coordinate with the hoster before provisioning; startup
+   fail-fast check guards against a mismatch.
+5. Timing of phase 0 (the SQLite `locking_mode=EXCLUSIVE` stopgap) relative
    to this plan — recommended immediately, independent of everything above.
