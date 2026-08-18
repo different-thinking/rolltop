@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -587,6 +588,10 @@ func (w *routineWorker) runOnce(trigger string, failureAttempt int) error {
 			if err != nil {
 				return err
 			}
+			if err := clearDestinationSeenFlag(w.ctx, w.fetcher, destinationAccount, destinationMailbox.Name,
+				message.Flags, appended, writer.UIDValidity()); err != nil {
+				return err
+			}
 			transferred++
 			runStatus.Update(scanned, transferred, skipped, currentUID)
 			unrefreshedCopies = true
@@ -991,4 +996,53 @@ func retryDelay(failures int) time.Duration {
 		return 5 * time.Minute
 	}
 	return delay
+}
+
+// destinationSeenClearer is the narrow flag-write boundary the copy engine needs
+// to undo a read state the destination server invented for itself.
+type destinationSeenClearer interface {
+	SetSeenWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string, uid uint32, seen bool, expectedUIDValidity uint32) (bool, error)
+}
+
+// clearDestinationSeenFlag keeps an unread source message unread on the
+// destination. The copy is appended with the source flags, but a destination
+// server is free to add \Seen on its own, and the next mailbox sync would then
+// mirror that invented flag as a read arrival. The append is confirmed by
+// fetching the copy back, so its real flags are already known here and the
+// mismatch is repaired at once rather than left for the reader.
+func clearDestinationSeenFlag(ctx context.Context, clearer destinationSeenClearer, account store.MailAccount,
+	mailbox string, sourceFlags []string, appended syncer.FetchedMessage, uidValidity uint32,
+) error {
+	if !destinationInventedSeenFlag(sourceFlags, appended.Flags) {
+		return nil
+	}
+	if clearer == nil {
+		return errors.New("remote IMAP sync cannot clear the destination Seen flag without a fetcher")
+	}
+	if appended.UID == 0 || uidValidity == 0 {
+		return errors.New("destination copy is missing the UID or UIDVALIDITY needed to clear its Seen flag")
+	}
+	applied, err := clearer.SetSeenWithUIDValidity(ctx, account, mailbox, appended.UID, false, uidValidity)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return errors.New("destination mailbox generation changed before the copied message Seen flag was cleared")
+	}
+	return nil
+}
+
+// destinationInventedSeenFlag reports whether the destination copy is read while
+// the source message it was copied from is not.
+func destinationInventedSeenFlag(sourceFlags, destinationFlags []string) bool {
+	return !hasSeenFlag(sourceFlags) && hasSeenFlag(destinationFlags)
+}
+
+func hasSeenFlag(flags []string) bool {
+	for _, flag := range flags {
+		if strings.EqualFold(strings.TrimSpace(flag), "\\Seen") {
+			return true
+		}
+	}
+	return false
 }

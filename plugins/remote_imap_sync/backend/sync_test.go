@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"rolltop/backend/store"
+	"rolltop/backend/syncer"
 )
 
 func TestRemoteSyncRunStatusLogsSanitizedLifecycle(t *testing.T) {
@@ -215,5 +218,81 @@ func TestWaitForRemoteSyncChunkHonorsCancellation(t *testing.T) {
 func TestWaitForRemoteSyncChunkCompletesDelay(t *testing.T) {
 	if err := waitForRemoteSyncChunk(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("waitForRemoteSyncChunk() error = %v", err)
+	}
+}
+
+type fakeSeenClearer struct {
+	calls   []fakeSeenClearerCall
+	applied bool
+	err     error
+}
+
+type fakeSeenClearerCall struct {
+	mailbox     string
+	uid         uint32
+	seen        bool
+	uidValidity uint32
+}
+
+func (f *fakeSeenClearer) SetSeenWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string,
+	uid uint32, seen bool, expectedUIDValidity uint32,
+) (bool, error) {
+	f.calls = append(f.calls, fakeSeenClearerCall{mailbox: mailbox, uid: uid, seen: seen, uidValidity: expectedUIDValidity})
+	return f.applied, f.err
+}
+
+func TestClearDestinationSeenFlagKeepsAnUnreadCopyUnread(t *testing.T) {
+	clearer := &fakeSeenClearer{applied: true}
+	appended := syncer.FetchedMessage{UID: 42, Flags: []string{"\\Seen", "\\Recent"}}
+	if err := clearDestinationSeenFlag(context.Background(), clearer, store.MailAccount{}, "INBOX",
+		nil, appended, 9); err != nil {
+		t.Fatal(err)
+	}
+	want := []fakeSeenClearerCall{{mailbox: "INBOX", uid: 42, seen: false, uidValidity: 9}}
+	if len(clearer.calls) != 1 || clearer.calls[0] != want[0] {
+		t.Fatalf("clearer calls = %#v, want %#v", clearer.calls, want)
+	}
+}
+
+func TestClearDestinationSeenFlagLeavesMatchingReadStateAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sourceFlags []string
+		appended    syncer.FetchedMessage
+	}{
+		{name: "read source stays read", sourceFlags: []string{"\\seen"}, appended: syncer.FetchedMessage{UID: 42, Flags: []string{"\\Seen"}}},
+		{name: "unread copy needs no repair", sourceFlags: nil, appended: syncer.FetchedMessage{UID: 42, Flags: []string{"\\Recent"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearer := &fakeSeenClearer{}
+			if err := clearDestinationSeenFlag(context.Background(), clearer, store.MailAccount{}, "INBOX",
+				tc.sourceFlags, tc.appended, 9); err != nil {
+				t.Fatal(err)
+			}
+			if len(clearer.calls) != 0 {
+				t.Fatalf("clearer calls = %#v, want none", clearer.calls)
+			}
+		})
+	}
+}
+
+func TestClearDestinationSeenFlagFailsWithoutADestinationGeneration(t *testing.T) {
+	clearer := &fakeSeenClearer{applied: true}
+	appended := syncer.FetchedMessage{UID: 42, Flags: []string{"\\Seen"}}
+	if err := clearDestinationSeenFlag(context.Background(), clearer, store.MailAccount{}, "INBOX",
+		nil, appended, 0); err == nil {
+		t.Fatal("expected a missing UIDVALIDITY to fail the repair")
+	}
+	if len(clearer.calls) != 0 {
+		t.Fatalf("clearer calls = %#v, want none", clearer.calls)
+	}
+}
+
+func TestClearDestinationSeenFlagReportsAChangedDestinationGeneration(t *testing.T) {
+	clearer := &fakeSeenClearer{applied: false}
+	appended := syncer.FetchedMessage{UID: 42, Flags: []string{"\\Seen"}}
+	if err := clearDestinationSeenFlag(context.Background(), clearer, store.MailAccount{}, "INBOX",
+		nil, appended, 9); err == nil {
+		t.Fatal("expected a refused flag write to fail the repair")
 	}
 }
