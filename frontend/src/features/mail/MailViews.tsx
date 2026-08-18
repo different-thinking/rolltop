@@ -563,6 +563,8 @@ export function MailView({
                 onMessagesMoved={removeMovedConversations}
                 onListChanged={refreshList}
                 listScope={listScope}
+                mailCategories={mailCategories}
+                activeCategory={activeCategory}
                 emptyState={showRecoveryEmptyState && mailbox ? (
                   <MailboxRecoveryEmptyState mailbox={mailbox} activeRun={accountActiveRun} />
                 ) : undefined}
@@ -622,6 +624,7 @@ export function SnoozedView({
   mailboxes,
   swipePreferences,
   archiveMailboxes,
+  mailCategories = [],
   mailGeneration,
   messageSecurityPlugins = [],
   addToast
@@ -634,6 +637,7 @@ export function SnoozedView({
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
   archiveMailboxes: AccountMailboxChoice[];
+  mailCategories?: MailCategorySummary[];
   mailGeneration: number;
   messageSecurityPlugins?: RuntimePlugin[];
   addToast: AddToast;
@@ -726,6 +730,7 @@ export function SnoozedView({
               onReadStatesChange={updateReadStates}
               onMessagesMoved={removeMovedConversations}
               onListChanged={() => setRefreshGeneration((current) => current + 1)}
+              mailCategories={mailCategories}
               snoozedView
             />
       )}
@@ -890,6 +895,7 @@ export function SearchView({
   mailboxes,
   swipePreferences,
   archiveMailboxes,
+  mailCategories = [],
   datePrefs,
   activeSyncRuns,
   mailGeneration,
@@ -906,6 +912,7 @@ export function SearchView({
   mailboxes: Mailbox[];
   swipePreferences: SwipePreferences;
   archiveMailboxes: AccountMailboxChoice[];
+  mailCategories?: MailCategorySummary[];
   datePrefs: DatePrefs;
   activeSyncRuns: SyncRun[];
   mailGeneration: number;
@@ -1055,6 +1062,7 @@ export function SearchView({
               onMessagesMoved={removeMovedConversations}
               onListChanged={() => setRefreshGeneration((current) => current + 1)}
               listScope={{ mailboxID: 0, query, label: query ? `“${query}”` : "All Mail" }}
+              mailCategories={mailCategories}
             />
           )}
         </SlidingMessageListStage>
@@ -1373,6 +1381,8 @@ function MessageList({
   listScope,
   snoozedView = false,
   currentMailboxID = 0,
+  mailCategories = [],
+  activeCategory = "",
   emptyState
 }: {
   csrf: string;
@@ -1400,8 +1410,22 @@ function MessageList({
   snoozedView?: boolean;
   /** The mailbox this list is showing, so Delete can skip rows already in it. */
   currentMailboxID?: number;
+  /** Category names and their labels, for the label a row carries. */
+  mailCategories?: MailCategorySummary[];
+  /** The category this list already is, whose label every row would repeat. */
+  activeCategory?: string;
   emptyState?: ReactNode;
 }) {
+  // A row's label is the category the classifier filed it under. Inside that
+  // category's own list every row would carry the same one, which says nothing,
+  // so the active view's label is left off.
+  const categoryLabels = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const category of mailCategories) {
+      if (category.name && category.name !== activeCategory) out.set(category.name, category.label || category.name);
+    }
+    return out;
+  }, [mailCategories, activeCategory]);
   const [selectedIDs, setSelectedIDs] = useState<Set<number>>(() => new Set());
   const [dismissedIDs, setDismissedIDs] = useState<Set<number>>(() => new Set());
   const [readStateBusy, setReadStateBusy] = useState(false);
@@ -2606,6 +2630,7 @@ function MessageList({
         const securitySnippetClass = messageSecuritySnippetClassName(messageSecurityPlugins, msg);
         const securityIndicators = messageSecurityIndicators(messageSecurityPlugins, { location: "message-list", message: msg, state: msg });
         const annotationNodes = messageAnnotationNodes(messageSecurityPlugins, msg);
+        const categoryLabel = msg.category ? categoryLabels.get(msg.category) || "" : "";
         // Whole-filter mode covers rows this page has not even loaded, so every
         // visible row reads as selected until the mode is left again.
         const selected = scopeSelected || selectedIDs.has(msg.id);
@@ -2705,25 +2730,27 @@ function MessageList({
               {conversation.count > 1 ? <span className="thread-count">({conversation.count})</span> : null}
             </span>
             <span className="subject">
-              <strong>
-                <HighlightedText text={msg.subject || "(no subject)"} query={searchQuery} terms={matchTerms} />
-              </strong>
-              {securityIndicators}
-              {annotationNodes}
+              <span className="subject-line">
+                <strong>
+                  <HighlightedText text={msg.subject || "(no subject)"} query={searchQuery} terms={matchTerms} />
+                </strong>
+                {categoryLabel ? <span className="message-label">{categoryLabel}</span> : null}
+                {securityIndicators}
+                {annotationNodes}
+                {attachmentNames.length > 0 ? (
+                  <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
+                    <Icon name="attach_file" />
+                    <HighlightedText
+                      text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
+                      query={searchQuery}
+                      terms={matchTerms}
+                    />
+                  </span>
+                ) : conversation.has_attachments ? <Icon name="attach_file" /> : null}
+              </span>
               <span className={`snippet ${securitySnippetClass}`}>
-                {previewText ? <span className="snippet-separator" aria-hidden="true">&mdash;&nbsp;</span> : null}
                 <HighlightedText text={previewText} query={securitySnippetClass ? "" : searchQuery} terms={securitySnippetClass ? [] : matchTerms} />
               </span>
-              {attachmentNames.length > 0 ? (
-                <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
-                  <Icon name="attach_file" />
-                  <HighlightedText
-                    text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
-                    query={searchQuery}
-                    terms={matchTerms}
-                  />
-                </span>
-              ) : conversation.has_attachments ? <Icon name="attach_file" /> : null}
             </span>
       <span className={`date ${snoozedView ? "snoozed-date" : ""}`}>
         {snoozedView ? (

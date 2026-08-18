@@ -516,3 +516,50 @@ func TestSyncRefusesAConnectionWithoutTheContactsScope(t *testing.T) {
 		t.Fatalf("called Google %d times without the scope, want none", calls)
 	}
 }
+
+// The poll and the Sync now button reach the same connection, and both start
+// with a lookup that says a person is missing. Run at once they both act on
+// that answer, and the second insert loses to the unique index over the
+// resource name -- which used to fail the whole run and leave the address book
+// as empty as it was before.
+func TestConcurrentSyncsOfOneConnectionDoNotCollide(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People: []Person{
+			personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test"),
+			personWithEmail("people/c2", "etag-2", "Grace", "grace@example.test"),
+			personWithEmail("people/c3", "etag-3", "Alan", "alan@example.test"),
+		},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, errs[index] = syncer.SyncConnection(context.Background(), user.ID, 7)
+		}(i)
+	}
+	wg.Wait()
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent sync %d: %v", index, err)
+		}
+	}
+
+	contacts, err := db.ListContactsForUser(context.Background(), user.ID, store.ContactListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 3 {
+		t.Fatalf("stored %d contacts, want the three Google returned exactly once", len(contacts))
+	}
+	for _, email := range []string{"ada@example.test", "grace@example.test", "alan@example.test"} {
+		contact, ok := contactByEmail(t, db, user.ID, email)
+		if !ok || !contact.IsGoogleContact() {
+			t.Fatalf("%s = %+v, want a Google mirror", email, contact)
+		}
+	}
+}
