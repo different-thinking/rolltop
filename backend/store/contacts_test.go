@@ -189,6 +189,26 @@ func TestContactsMayShareAnEmailAddressInsideOneAddressBook(t *testing.T) {
 	if list, err := db.ListContactEmailHoldersForUser(ctx, user.ID, "nobody@example.test"); err != nil || len(list) != 0 {
 		t.Fatalf("unknown address = %+v, %v, want no holders and no error", list, err)
 	}
+	// An address is shared inside one address book, never across two. The new
+	// reader joins contacts to contact_emails, so it has two places to leak a
+	// tenant from and both are asserted here rather than in the query's shape.
+	other, err := db.CreateUser(ctx, "neighbour@example.test", "Neighbour", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateContact(ctx, other.ID, Contact{
+		DisplayName: "Someone Else",
+		Emails:      []ContactEmail{{Label: "Home", Email: "haushalt@example.test", IsPrimary: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holders, err = db.ListContactEmailHoldersForUser(ctx, user.ID, "haushalt@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holders) != 2 || holders[0].ContactID != second.ID || holders[1].ContactID != first.ID {
+		t.Fatalf("holders = %+v, want only this user's two contacts", holders)
+	}
 }
 
 // The reader's own contact answers for an address it holds. Everything that

@@ -416,14 +416,21 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 // The mirror can also be gone again by the time it is read, because the only
 // unique key a synced person can now collide with is the one over the resource
 // name: a disconnect or a contact deletion running alongside the sync removes
-// the very row the conflict proved was there. That is a lost race rather than a
-// conflict with some other contact, and it says so -- the bare "no rows" this
-// used to return was the least informative sentence the store has, and it was
-// what a whole failing address book reported.
+// the very row the conflict proved was there. Both directions of that race end
+// with this person stored, and neither is reported as a failure -- an apply
+// error withholds the run's cursor, and losing a race twice would cost the
+// account a full re-read of its whole address book on the next poll.
 func (s *Syncer) applyToExistingMirror(ctx context.Context, userID, connectionID int64, incoming store.Contact, person Person) (applyOutcome, error) {
 	existing, err := s.Store.GetContactByGoogleResourceForUser(ctx, userID, connectionID, incoming.ExternalID)
 	if store.IsNotFound(err) {
-		return outcomeUnchanged, fmt.Errorf("%s: mirror was deleted while the sync was storing it; the next run stores this person again", incoming.ExternalID)
+		// The row the conflict proved was there has been deleted since. This
+		// person is simply missing again, so they are stored again.
+		created, createErr := s.Store.CreateContact(ctx, userID, incoming)
+		if createErr != nil {
+			return outcomeUnchanged, fmt.Errorf("%s: storing this person again after its mirror was deleted mid-sync: %w", incoming.ExternalID, createErr)
+		}
+		s.importPhoto(ctx, userID, created.ID, person)
+		return outcomeCreated, nil
 	}
 	if err != nil {
 		return outcomeUnchanged, err

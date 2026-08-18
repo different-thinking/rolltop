@@ -181,13 +181,14 @@ func (s *Store) GetContactForUser(ctx context.Context, userID, id int64) (Contac
 // it, naming somebody else's card -- a shared team mailbox Google also lists,
 // say -- would put their name and picture on the reader's own address.
 //
-// It takes the table aliases because every query applying it joins contacts to
-// contact_emails, and both carry an `id` and a `user_id`. One ordering
-// expression built here rather than one each caller re-spells is what keeps
-// every lookup by address answering with the same contact.
-func contactEmailOwnerOrder(contactAlias, emailAlias string) string {
-	return ` ORDER BY ` + contactAlias + `is_me DESC, ` +
-		emailAlias + `is_primary DESC, ` + emailAlias + `contact_id ASC, ` + emailAlias + `id ASC`
+// It takes qualifier prefixes -- "c." and "e.", trailing dot included -- because
+// every query applying it joins contacts to contact_emails, and both carry an
+// `id` and a `user_id`. One ordering expression built here rather than one each
+// caller re-spells is what keeps every lookup by address answering with the same
+// contact.
+func contactEmailOwnerOrder(contactPrefix, emailPrefix string) string {
+	return ` ORDER BY ` + contactPrefix + `is_me DESC, ` +
+		emailPrefix + `is_primary DESC, ` + emailPrefix + `contact_id ASC, ` + emailPrefix + `id ASC`
 }
 
 // ContactEmailHolder is one contact that carries an address, carrying just
@@ -248,6 +249,26 @@ func (s *Store) ListContactEmailHoldersForUser(ctx context.Context, userID int64
 		holders = append(holders, holder)
 	}
 	return holders, rows.Err()
+}
+
+// FirstLocalHolder returns the holder a local write may target: the first one no
+// Google connection owns, and otherwise the first in owner order. It reports
+// false when nobody holds the address at all.
+//
+// A local write to a Google-owned row never reaches Google, so the next sync
+// reverts it -- which is why naming a sender, or merging an import, looks past a
+// mirror when a local contact carries the same address. The sync's own
+// findLocalMatch deliberately ranks differently and stays separate.
+func FirstLocalHolder(holders []ContactEmailHolder) (ContactEmailHolder, bool) {
+	if len(holders) == 0 {
+		return ContactEmailHolder{}, false
+	}
+	for _, holder := range holders {
+		if !holder.IsGoogleContact() {
+			return holder, true
+		}
+	}
+	return holders[0], true
 }
 
 // GetContactByEmailForUser finds a contact by normalized email inside one user's

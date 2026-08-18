@@ -265,6 +265,10 @@ export function ComposeBox({
   // the submit that the click itself triggers, and a state update would not have
   // landed by then.
   const archiveOnSend = useRef(false);
+  // Whether a send is already on its way. `sending` cannot answer that: it is
+  // state, so it is still false for every submit queued before React re-renders,
+  // and two of those each reach api.send and mail the message twice.
+  const sendInFlight = useRef(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
@@ -703,7 +707,7 @@ export function ComposeBox({
   function handleComposeKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
     if (!isSendChord(event)) return;
     event.preventDefault();
-    if (event.repeat || sending || savingDraft || resizing) return;
+    if (event.repeat || sendInFlight.current || sending || savingDraft || resizing) return;
     archiveOnSend.current = canSendAndArchive;
     // The recipient fields see this keystroke first and hand over whatever they
     // were still holding -- a highlighted suggestion, a typed address -- which
@@ -716,7 +720,9 @@ export function ComposeBox({
   // inline files that are still referenced in the edited body.
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (sendInFlight.current) return;
     if (!composeSecurity.beginSubmit(formRef)) return;
+    sendInFlight.current = true;
     const editor = editorRef.current;
     const preparedHTML = prepareComposeHTML(editor?.innerHTML || "", attachments);
     const uploadAttachments = attachments.filter((attachment) => !attachment.inline || preparedHTML.inlineIDs.has(attachment.id));
@@ -750,6 +756,7 @@ export function ComposeBox({
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
+      sendInFlight.current = false;
       archiveOnSend.current = false;
       if (!sent) composeSecurity.setTransform({ active: false, phase: "plaintext", ciphertext: "" });
       setSending(false);

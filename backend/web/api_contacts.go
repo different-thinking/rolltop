@@ -478,14 +478,7 @@ func (s *Server) addSenderContact(ctx context.Context, userID int64, from string
 	if err != nil {
 		return store.Contact{}, false, err
 	}
-	if len(holders) > 0 {
-		target := holders[0]
-		for _, holder := range holders {
-			if !holder.IsGoogleContact() {
-				target = holder
-				break
-			}
-		}
+	if target, ok := store.FirstLocalHolder(holders); ok {
 		existing, err := s.store.GetContactForUser(ctx, userID, target.ContactID)
 		if err != nil {
 			return store.Contact{}, false, err
@@ -616,15 +609,9 @@ func (s *Server) findImportMergeTarget(ctx context.Context, userID int64, contac
 		if err != nil {
 			return store.Contact{}, false, err
 		}
-		if len(holders) == 0 {
+		target, ok := store.FirstLocalHolder(holders)
+		if !ok {
 			continue
-		}
-		target := holders[0]
-		for _, holder := range holders {
-			if !holder.IsGoogleContact() {
-				target = holder
-				break
-			}
 		}
 		existing, err := s.store.GetContactForUser(ctx, userID, target.ContactID)
 		if err != nil {

@@ -117,8 +117,18 @@ export function GoogleAccountsSettings({
   // Keyed per connection and operation: a single shared id would be cleared by
   // whichever request finished first, re-enabling buttons still in flight.
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Every request that acts on one connection, so a control cannot start while
+  // another is still in flight against the same account. Reauthorizing during a
+  // disconnect is the case that matters: consent would return to a connection
+  // the disconnect has already removed.
   const isBusy = (connectionID: number) =>
-    Boolean(busy[`test:${connectionID}`] || busy[`disconnect:${connectionID}`] || busy[`contacts:${connectionID}`]);
+    Boolean(
+      busy[`test:${connectionID}`] ||
+        busy[`disconnect:${connectionID}`] ||
+        busy[`contacts:${connectionID}`] ||
+        busy[`calendar:${connectionID}`] ||
+        busy[`connect:${connectionID}`]
+    );
   const setOperationBusy = (key: string, running: boolean) =>
     setBusy((current) => {
       if (!running) {
@@ -353,7 +363,7 @@ export function GoogleAccountsSettings({
                         className="secondary"
                         type="button"
                         title={`Send ${connection.email} through Google's consent screen again`}
-                        disabled={!configured || reconnecting}
+                        disabled={!configured || rowBusy}
                         onClick={() => void connect(connection.id)}
                       >
                         {reconnecting ? "Opening Google..." : "Reauthorize"}

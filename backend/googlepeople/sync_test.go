@@ -843,3 +843,34 @@ func TestAWaitingSyncReturnsWhenItsContextEnds(t *testing.T) {
 		t.Fatal("a cancelled caller kept waiting for the running sync to finish")
 	}
 }
+
+// A mirror deleted between the insert that lost to the unique index and the
+// read that follows it is a race, not a conflict, and it ends with the person
+// stored. Reporting it as a failure would withhold the run's cursor, which
+// costs the account a full re-read of its whole address book on the next poll --
+// the very cost this whole change exists to remove.
+//
+// The recovery is exercised directly: producing the collision for real would
+// mean deleting a row between two statements of the sync's own run.
+func TestApplyToExistingMirrorStoresThePersonWhenTheMirrorIsGone(t *testing.T) {
+	person := personWithEmail("people/c1", "etag-1", "Ada Lovelace", "ada@example.test")
+	syncer, db, user := newSyncFixture(t, &fakePeople{})
+	ctx := context.Background()
+
+	incoming := ToContact(person)
+	incoming.GoogleConnectionID = 7
+	outcome, err := syncer.applyToExistingMirror(ctx, user.ID, 7, incoming, person)
+	if err != nil {
+		t.Fatalf("applyToExistingMirror = %v, want the person stored rather than an apply error", err)
+	}
+	if outcome != outcomeCreated {
+		t.Fatalf("outcome = %v, want the person counted as created", outcome)
+	}
+	contact, ok := contactByEmail(t, db, user.ID, "ada@example.test")
+	if !ok {
+		t.Fatal("the person was not stored")
+	}
+	if contact.ExternalID != "people/c1" || !contact.IsGoogleContact() {
+		t.Fatalf("contact = %+v, want it linked to the Google person", contact)
+	}
+}
