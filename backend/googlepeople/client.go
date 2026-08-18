@@ -69,6 +69,14 @@ var (
 	// ErrUpstream marks any other failure of the call itself, as opposed to a
 	// local one.
 	ErrUpstream = errors.New("google people request failed")
+	// ErrServiceDisabled and ErrScopeInsufficient are the two 403s that need
+	// opposite answers, and Google tells them apart only in the machine-readable
+	// reason beside the status. An API switched off for the Cloud project behind
+	// the OAuth client is not something the account holder can grant their way
+	// out of; a missing scope is. Both stay part of ErrForbidden so callers that
+	// only care that Google said no keep working.
+	ErrServiceDisabled   = fmt.Errorf("%w: the People API is not enabled for this Google Cloud project", ErrForbidden)
+	ErrScopeInsufficient = fmt.Errorf("%w: the access token does not carry the contacts scope", ErrForbidden)
 )
 
 // Client performs People API calls. Every method takes the access token to use
@@ -371,16 +379,34 @@ func statusError(status int, body []byte) error {
 		Error struct {
 			Status  string `json:"status"`
 			Message string `json:"message"`
+			// Details carries the reason that separates one PERMISSION_DENIED
+			// from another. The status alone cannot: a disabled API and a
+			// token short of a scope both report PERMISSION_DENIED.
+			Details []struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(body, &payload)
 	reason := strings.TrimSpace(payload.Error.Status)
+	for _, detail := range payload.Error.Details {
+		if detailReason := strings.TrimSpace(detail.Reason); detailReason != "" {
+			reason = detailReason
+			break
+		}
+	}
 	switch status {
 	case http.StatusGone:
 		return fmt.Errorf("%w", ErrSyncTokenExpired)
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w", ErrUnauthorized)
 	case http.StatusForbidden:
+		switch reason {
+		case "SERVICE_DISABLED", "accessNotConfigured":
+			return fmt.Errorf("%w", ErrServiceDisabled)
+		case "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions":
+			return fmt.Errorf("%w", ErrScopeInsufficient)
+		}
 		return fmt.Errorf("%w: %s", ErrForbidden, orUnknown(reason))
 	case http.StatusNotFound:
 		return fmt.Errorf("%w", ErrNotFound)

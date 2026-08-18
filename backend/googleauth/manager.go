@@ -210,7 +210,7 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 	if err != nil {
 		return store.GoogleConnection{}, err
 	}
-	return m.store.UpsertGoogleConnection(ctx, userID, store.GoogleConnectionUpsert{
+	connection, err := m.store.UpsertGoogleConnection(ctx, userID, store.GoogleConnectionUpsert{
 		GoogleEmail:           email,
 		GoogleSubject:         info.Subject,
 		EncryptedRefreshToken: encryptedRefresh,
@@ -218,6 +218,20 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 		AccessTokenExpiresAt:  token.ExpiresAt,
 		GrantedScopes:         token.Scopes,
 	})
+	if err != nil {
+		return store.GoogleConnection{}, err
+	}
+	// A reconnect lands on the row it already had - the subject claim matches -
+	// so this process can be holding a cached access token for it, and that
+	// token was issued under the grant the user has just come back to widen.
+	// Serving it on would refuse every contacts and calendar request for the
+	// rest of its hour with "reconnect the account to grant access", which is
+	// exactly what was just done. The token the new consent produced replaces
+	// it, and the cache is cleared first so nothing survives a token this
+	// exchange did not report an expiry for.
+	m.forgetToken(userID, connection.ID)
+	m.cacheToken(userID, connection.ID, token.AccessToken, token.ExpiresAt)
+	return connection, nil
 }
 
 // AccessToken returns a currently valid access token for a connection,

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -806,5 +807,38 @@ func TestSharedRefreshSurvivesTheClaimantsCancelledContext(t *testing.T) {
 	}
 	if got.token == "" {
 		t.Fatal("waiter received an empty token")
+	}
+}
+
+// A reconnect exists to widen a grant, and the account holder is told to do one
+// when Google refuses a request for want of a scope. Handing the token issued
+// under the old grant to the next request would keep that refusal coming for
+// the rest of the token's hour, with the fix being the thing they just did.
+func TestReconnectReplacesTheCachedAccessToken(t *testing.T) {
+	env := newTestEnv(t)
+	connection := env.connect(t, env.userID)
+
+	first, err := env.manager.AccessToken(context.Background(), env.userID, connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env.google.mu.Lock()
+	env.google.scope = "openid email " + ScopeMail + " " + ScopeContacts + " " + ScopeCalendar
+	env.google.mu.Unlock()
+	reconnected := env.connect(t, env.userID)
+	if reconnected.ID != connection.ID {
+		t.Fatalf("reconnect forked the connection: before=%d after=%d", connection.ID, reconnected.ID)
+	}
+
+	second, err := env.manager.AccessToken(context.Background(), env.userID, connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("reconnect served the access token issued under the previous grant")
+	}
+	if !slices.Contains(reconnected.GrantedScopes, ScopeContacts) {
+		t.Fatalf("reconnect did not record the widened scopes: %q", reconnected.GrantedScopes)
 	}
 }

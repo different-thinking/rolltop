@@ -59,6 +59,14 @@ var (
 	// ErrUpstream marks any other failure of the call itself, as opposed to a
 	// local one.
 	ErrUpstream = errors.New("google calendar request failed")
+	// ErrServiceDisabled and ErrScopeInsufficient are the two 403s that need
+	// opposite answers, and Google tells them apart only in the machine-readable
+	// reason beside the status. An API switched off for the Cloud project behind
+	// the OAuth client is not something the account holder can grant their way
+	// out of; a missing scope is. Both stay part of ErrForbidden so callers that
+	// only care that Google said no keep working.
+	ErrServiceDisabled   = fmt.Errorf("%w: the Google Calendar API is not enabled for this Google Cloud project", ErrForbidden)
+	ErrScopeInsufficient = fmt.Errorf("%w: the access token does not carry the calendar scope", ErrForbidden)
 )
 
 // Client performs Calendar API calls. Every method takes the access token to
@@ -411,6 +419,12 @@ func statusError(status int, reason string) error {
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w", ErrUnauthorized)
 	case http.StatusForbidden:
+		switch reason {
+		case "accessNotConfigured", "SERVICE_DISABLED":
+			return fmt.Errorf("%w", ErrServiceDisabled)
+		case "insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT":
+			return fmt.Errorf("%w", ErrScopeInsufficient)
+		}
 		return fmt.Errorf("%w: %s", ErrForbidden, orUnknown(reason))
 	case http.StatusNotFound:
 		return fmt.Errorf("%w", ErrNotFound)
@@ -434,11 +448,22 @@ func errorReason(body []byte) string {
 			Errors []struct {
 				Reason string `json:"reason"`
 			} `json:"errors"`
+			// Details is the newer shape of the same field. Calendar answers in
+			// the legacy one, but a disabled API is reported by the API gateway
+			// ahead of Calendar, which does not.
+			Details []struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(body, &payload)
 	if len(payload.Error.Errors) > 0 {
 		if reason := strings.TrimSpace(payload.Error.Errors[0].Reason); reason != "" {
+			return reason
+		}
+	}
+	for _, detail := range payload.Error.Details {
+		if reason := strings.TrimSpace(detail.Reason); reason != "" {
 			return reason
 		}
 	}

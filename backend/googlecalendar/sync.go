@@ -586,7 +586,9 @@ func (s *Syncer) recordConnectionOutcome(ctx context.Context, userID, connection
 // the UI.
 func SummarizeError(err error) string {
 	switch {
-	case errors.Is(err, ErrScopeMissing):
+	case errors.Is(err, ErrServiceDisabled):
+		return "The Google Calendar API is switched off for the Google Cloud project this connection's OAuth client belongs to. Enable it there; reconnecting the account does not help."
+	case errors.Is(err, ErrScopeMissing), errors.Is(err, ErrScopeInsufficient):
 		return "This Google account has not granted access to calendars. Reconnect it to allow calendar sync."
 	case errors.Is(err, ErrForbidden):
 		return "Google refused the request. Reconnect the account to grant access to calendars."
