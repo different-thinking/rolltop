@@ -272,7 +272,10 @@ const maxListedBlockingObjects = 10
 //     foreign function is both a sign the database is somebody else's and a
 //     potential name collision during the apply.
 //   - Domains, enums, and standalone composite types. Row types of tables are
-//     excluded, since the table already accounts for them.
+//     excluded, since the table already accounts for them. Undefined types are
+//     included whatever their kind: `CREATE TYPE name;` declares a shell, which
+//     the catalog records as a pseudo-type with typisdefined false, so matching
+//     on kind alone let a database holding one read as empty.
 //
 // Objects belonging to an extension are excluded throughout, because the
 // preflight installs pg_trgm, citext and unaccent into a database that is
@@ -320,10 +323,15 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
 		  AND n.nspname NOT LIKE 'pg_toast%'
 		  AND n.nspname NOT LIKE 'pg_temp%'
-		  AND t.typtype IN ('d', 'e', 'c')
 		  AND (
-		      t.typrelid = 0
-		      OR EXISTS (SELECT 1 FROM pg_class c2 WHERE c2.oid = t.typrelid AND c2.relkind = 'c')
+		      NOT t.typisdefined
+		      OR (
+		          t.typtype IN ('d', 'e', 'c')
+		          AND (
+		              t.typrelid = 0
+		              OR EXISTS (SELECT 1 FROM pg_class c2 WHERE c2.oid = t.typrelid AND c2.relkind = 'c')
+		          )
+		      )
 		  )
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_depend d

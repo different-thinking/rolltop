@@ -377,6 +377,9 @@ func TestPostgresConsoleRejectsNonRelationObjects(t *testing.T) {
 		"enum":           `CREATE TYPE mood AS ENUM ('good', 'bad')`,
 		"domain":         `CREATE DOMAIN postcode AS text`,
 		"composite type": `CREATE TYPE address AS (street text, city text)`,
+		// A shell type: the catalog records it as a pseudo-type with
+		// typisdefined false, so a predicate matching on kind alone misses it.
+		"shell type": `CREATE TYPE someones_shell`,
 	}
 	for name, ddl := range occupants {
 		t.Run(name, func(t *testing.T) {
