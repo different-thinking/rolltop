@@ -524,12 +524,6 @@
     align-self: center;
   }
 
-  .message-row > .star-action {
-    grid-column: 4;
-    grid-row: 2;
-    justify-self: end;
-  }
-
   .sender {
     grid-column: 3 / 4;
   }
@@ -555,6 +549,12 @@
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 1;
+  }
+
+  // The preview sits on its own line here, so the dash has nothing left to
+  // separate and would just open every second line with a stray "— ".
+  .snippet-separator {
+    display: none;
   }
 
   .thread-summary {

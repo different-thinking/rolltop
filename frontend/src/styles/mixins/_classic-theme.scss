@@ -40,6 +40,9 @@
   // so the split is visible before any text is read.
   --row-read: #f2f6fc;
   --row-unread: #fff;
+  // The tint a row carries while it lands, kept apart from the two resting
+  // grounds so the arrival reads as an event in every theme.
+  --row-arriving: #e8f0fe;
 
   // Translucent so it can wash over read and unread grounds alike.
   --hover: rgba(32, 33, 36, .08);
@@ -51,6 +54,10 @@
   --accent: #0b57d0;
   --accent-strong: #0842a0;
   --accent-soft: #d3e3fd;
+  // Gmail carries one accent, so the warm pair matches the plain one here. The
+  // tokens stay because plugin palettes do split them (matrix runs a green
+  // accent against a cyan warm accent); treat them as one colour in this theme
+  // and change both together.
   --accent-warm: #0b57d0;
   --accent-warm-strong: #0842a0;
   --accent-sun: #aeb3b9;
@@ -59,19 +66,23 @@
   --focus: #0b57d0;
   --button-hover-border: rgba(11, 87, 208, .40);
 
-  // The starred state keeps Gmail's yellow instead of the accent, so a star
-  // reads as a star and not as another link.
-  --star: #f4b400;
+  // The starred state stays amber rather than taking the accent, so a star
+  // reads as a star and not as another link. Deeper than Gmail's #f4b400,
+  // which sits at 1.9:1 on a white row — below the 3:1 this project holds
+  // every painted UI part to.
+  --star: #c47b00;
 
-  // Sender-initial avatars: fixed identity hues, stable per correspondent.
-  --avatar-0: #ab47bc;
-  --avatar-1: #5c6bc0;
-  --avatar-2: #1e88e5;
-  --avatar-3: #00897b;
-  --avatar-4: #43a047;
-  --avatar-5: #f4511e;
-  --avatar-6: #e53935;
-  --avatar-7: #8d6e63;
+  // Sender-initial avatars: one hue per correspondent, deep enough to carry
+  // white initials. The dark palette answers with light chips and dark ink
+  // instead, the way its own surfaces run.
+  --avatar-0: #8e24aa;
+  --avatar-1: #3949ab;
+  --avatar-2: #1565c0;
+  --avatar-3: #00796b;
+  --avatar-4: #2e7d32;
+  --avatar-5: #bf360c;
+  --avatar-6: #c2185b;
+  --avatar-7: #6d4c41;
   --on-avatar: #fff;
 
   // Status. Each pair is "colour" plus "text that sits on top of it".

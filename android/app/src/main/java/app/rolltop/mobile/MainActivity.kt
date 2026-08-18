@@ -595,6 +595,9 @@ class MainActivity : ComponentActivity() {
         private const val STATE_PROMPTED_UPDATE_CODE = "rolltop.prompted_update_code"
         private const val STATE_LOADING_ANIMATION_ELAPSED_MS = "rolltop.loading_animation_elapsed_ms"
         private const val LOADING_CROSSFADE_MS = 160L
-        private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
+        // Mirrors R.color.shell_background and theme.LightChrome / the --chrome
+        // token in frontend/src/styles/mixins/_classic-theme.scss. A stale value
+        // here shows as a coloured seam around the web content on startup.
+        private val SHELL_BACKGROUND = Color.rgb(246, 248, 252)
     }
 }

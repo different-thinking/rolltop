@@ -24,6 +24,11 @@ const (
 	// WCAG 2.1 AA: body text needs 4.5:1, large text and UI parts need 3:1.
 	textContrast = 4.5
 	uiContrast   = 3.0
+
+	// Sender-initial avatar hues, mirrored by senderAvatarHueCount in
+	// frontend/src/features/mail/MailViews.tsx and the .avatar-hue-N rules in
+	// frontend/src/styles/_message-list.scss.
+	avatarHueCount = 8
 )
 
 var (
@@ -233,6 +238,23 @@ func TestPaletteContrastMeetsWCAG(t *testing.T) {
 		{"label on a danger fill", "--on-danger", "--danger", textContrast},
 		{"search highlight text", "--on-highlight", "--surface", textContrast},
 		{"the focus ring against a panel", "--focus", "--surface", uiContrast},
+		// The star is a UI graphic rather than text, so it answers to the 3:1
+		// threshold — on both row grounds, because a list paints it on each.
+		// Gmail's own yellow sits at 1.9:1 on a white row, which is why this
+		// pair is worth holding.
+		{"a starred message on an unread row", "--star", "--row-unread", uiContrast},
+		{"a starred message on a read row", "--star", "--row-read", uiContrast},
+	}
+	// Avatar initials are small text on a coloured chip, so every hue carries
+	// the text threshold. Generating the pairs is what catches a ninth hue
+	// added to one theme and forgotten in another.
+	for hue := 0; hue < avatarHueCount; hue++ {
+		pairs = append(pairs, pair{
+			what:      fmt.Sprintf("an avatar initial on hue %d", hue),
+			ink:       "--on-avatar",
+			ground:    fmt.Sprintf("--avatar-%d", hue),
+			threshold: textContrast,
+		})
 	}
 
 	for _, p := range []palette{light, dark} {

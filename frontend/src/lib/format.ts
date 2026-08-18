@@ -17,25 +17,41 @@ export function formatBytes(value: unknown): string {
   return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
 }
 
+// Validating a locale tag means constructing an Intl formatter and throwing it
+// away, which is the most expensive thing in this file. The answer only depends
+// on the tag, so it is remembered: list rendering calls this once per row.
+const validatedLocales = new Map<string, string | undefined>();
+
 function dateLocale(prefs?: DatePrefs): string | undefined {
   const locale = prefs?.date_locale?.trim();
   if (!locale) return undefined;
+  const cached = validatedLocales.get(locale);
+  if (cached !== undefined || validatedLocales.has(locale)) return cached;
+  let resolved: string | undefined;
   try {
     Intl.DateTimeFormat(locale);
-    return locale;
+    resolved = locale;
   } catch {
-    return undefined;
+    resolved = undefined;
   }
+  validatedLocales.set(locale, resolved);
+  return resolved;
 }
 
 function isSameLocalDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
+/** startOfLocalDay truncates to midnight in the reader's own zone. */
+function startOfLocalDay(value: Date): Date {
+  const day = new Date(value);
+  day.setHours(0, 0, 0, 0);
+  return day;
+}
+
 function isOlderThanLastYear(date: Date, now = new Date()): boolean {
-  const cutoff = new Date(now);
+  const cutoff = startOfLocalDay(now);
   cutoff.setFullYear(cutoff.getFullYear() - 1);
-  cutoff.setHours(0, 0, 0, 0);
   return date < cutoff;
 }
 
@@ -122,27 +138,33 @@ export function displaySnoozeUntil(value: string | Date, prefs?: DatePrefs, now 
 
 /**
  * dateGroupLabel names the date section a list row belongs to, the way Gmail
- * heads its list with "Today", "Yesterday" and "This month". Rows outside the
- * current month fall back to their month, with the year added once the month
- * alone would be ambiguous. Snoozed lists pass future dates, so "Tomorrow"
- * exists as well. An unparseable date returns "" and joins the previous group
- * rather than opening a heading it cannot name.
+ * heads its list with "Today" and "Yesterday".
+ *
+ * The labels are deliberately in English rather than the reader's date locale:
+ * they are interface chrome, like "All Mail" and "Snoozed" beside them, and a
+ * heading column reading "Today, Yesterday, Oktober" mixes two languages in one
+ * list. The row's own timestamp beside it stays fully localized.
+ *
+ * Every label covers one unbroken run of dates, which is what lets the caller
+ * open a section wherever the label changes. That is why the current month is
+ * split in two: days after tomorrow carry the month name while days before
+ * yesterday read "Earlier this month", so a future-dated message — a skewed
+ * Date header, or a reminder set for later this month — cannot make one heading
+ * appear twice with Today wedged between the halves. An unparseable date
+ * returns "" so the row joins the section above it instead of opening one that
+ * cannot be named.
  */
-export function dateGroupLabel(value: string, prefs?: DatePrefs, now = new Date()): string {
+export function dateGroupLabel(value: string, now = new Date()): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  const startOfDay = (input: Date) => {
-    const day = new Date(input);
-    day.setHours(0, 0, 0, 0);
-    return day;
-  };
-  const dayDiff = Math.round((startOfDay(date).getTime() - startOfDay(now).getTime()) / 86400000);
+  const dayDiff = Math.round((startOfLocalDay(date).getTime() - startOfLocalDay(now).getTime()) / 86_400_000);
   if (dayDiff === 0) return "Today";
-  if (dayDiff === -1) return "Yesterday";
   if (dayDiff === 1) return "Tomorrow";
-  if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()) return "This month";
-  const month = date.toLocaleDateString(dateLocale(prefs), { month: "long" });
+  if (dayDiff === -1) return "Yesterday";
+  const sameMonth = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+  if (sameMonth && dayDiff < -1) return "Earlier this month";
+  const month = date.toLocaleDateString("en", { month: "long" });
   return date.getFullYear() === now.getFullYear() ? month : `${month} ${date.getFullYear()}`;
 }
 

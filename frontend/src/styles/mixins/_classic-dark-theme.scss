@@ -43,6 +43,9 @@
   // through bold, brighter text rather than a tinted surface.
   --row-read: var(--surface);
   --row-unread: var(--surface);
+  // Both resting grounds are the same here, so the arrival tint has to be its
+  // own colour or a landing row would flash the colour it already is.
+  --row-arriving: #2f3a4a;
 
   --hover: rgba(227, 227, 227, .08);
   --active: rgba(168, 199, 250, .28);
@@ -52,6 +55,8 @@
   --accent: #a8c7fa;
   --accent-strong: #d3e3fd;
   --accent-soft: rgba(168, 199, 250, .20);
+  // One accent, like the light palette: the warm pair is kept only because
+  // plugin palettes split it, so change both together here.
   --accent-warm: #a8c7fa;
   --accent-warm-strong: #d3e3fd;
   --accent-sun: #9aa0a6;
@@ -64,17 +69,19 @@
   // as in the light palette.
   --star: #fdd663;
 
-  // Sender-initial avatars: the same identity hues as the light palette, so a
-  // correspondent keeps their colour when the theme flips.
-  --avatar-0: #ab47bc;
-  --avatar-1: #5c6bc0;
-  --avatar-2: #1e88e5;
-  --avatar-3: #00897b;
-  --avatar-4: #43a047;
-  --avatar-5: #f4511e;
-  --avatar-6: #e53935;
-  --avatar-7: #8d6e63;
-  --on-avatar: #fff;
+  // Sender-initial avatars in the same hue order as the light palette, so a
+  // correspondent keeps their identity across a theme switch even though the
+  // chip inverts: light chips carrying dark initials, the way a dark ground
+  // wants them.
+  --avatar-0: #ce93d8;
+  --avatar-1: #9fa8da;
+  --avatar-2: #90caf9;
+  --avatar-3: #80cbc4;
+  --avatar-4: #a5d6a7;
+  --avatar-5: #ffab91;
+  --avatar-6: #f48fb1;
+  --avatar-7: #bcaaa4;
+  --on-avatar: #131314;
 
   --ok: #5ec7a7;
   --on-ok: #131314;
