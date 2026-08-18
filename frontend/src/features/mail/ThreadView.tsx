@@ -923,6 +923,7 @@ export function ThreadView({
   const [brandIcons, setBrandIcons] = useState<Record<string, string>>({});
   const inlineReplyRowRef = useRef<HTMLDivElement | null>(null);
   const replyRequestRef = useRef(0);
+  const loadRequestRef = useRef(0);
   const autoPGPVerificationRef = useRef<Set<string>>(new Set());
   const pgpWasUnlockedRef = useRef(false);
   const pgpBodiesRef = useRef<Record<number, PGPBodyState>>({});
@@ -952,6 +953,11 @@ export function ThreadView({
   // user opened, including the local ones that had nothing to report.
   const load = useCallback(
     async (images: boolean) => {
+      // Opening a second message while the first is still loading leaves that
+      // first load running against the view the second one now owns, so every
+      // answer it produces - the thread, the status, the end of the loading
+      // state - is checked against the load the view is actually waiting for.
+      const loadRequest = ++loadRequestRef.current;
       setLoading(true);
       setError("");
       setLoadStatus(null);
@@ -970,27 +976,32 @@ export function ThreadView({
           .messageLoadStatus(id)
           .catch(() => null)
           .then((status) => {
-            if (settled || !shouldShowLoadStatus(status)) return;
+            if (settled || loadRequest !== loadRequestRef.current) return;
+            if (!shouldShowLoadStatus(status)) return;
             setLoadStatus(status);
           });
       }, 250);
       try {
         const data = await api.message(id, images, highlightQuery);
+        if (loadRequest !== loadRequestRef.current) return;
         setThread(data.thread);
         setSubject(data.message.subject || "(no subject)");
         setMailboxID(data.mailbox_id);
-    setSnoozedUntil(data.snoozed_until || "");
+        setSnoozedUntil(data.snoozed_until || "");
         setComposeFrom(data.compose_from);
         setFromIdentities(data.from_identities || []);
         setExpanded(new Set(data.thread.filter((item) => item.expanded).map((item) => item.message.id)));
         void refreshChrome();
       } catch (err) {
+        if (loadRequest !== loadRequestRef.current) return;
         setError(messageFromError(err));
       } finally {
         settled = true;
         window.clearTimeout(statusTimer);
-        setLoadStatus(null);
-        setLoading(false);
+        if (loadRequest === loadRequestRef.current) {
+          setLoadStatus(null);
+          setLoading(false);
+        }
       }
     },
     [highlightQuery, id, refreshChrome]

@@ -72,13 +72,26 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 // It is removed anyway, because a blocked one is not silent - the browser logs
 // "Blocked script execution in 'about:srcdoc'" for every message the reader
 // opens, which buries the console errors that do mean something.
-var scriptElementRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>|<script\b[^>]*>|</script\s*>`)
+var (
+	scriptBlockRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
+	scriptOpenRE  = regexp.MustCompile(`(?is)<script\b[^>]*>`)
+	scriptCloseRE = regexp.MustCompile(`(?is)</script\s*>`)
+)
 
 func removeScriptElements(bodyHTML string) string {
 	if !strings.Contains(strings.ToLower(bodyHTML), "<script") {
 		return bodyHTML
 	}
-	return scriptElementRE.ReplaceAllString(bodyHTML, "")
+	bodyHTML = scriptBlockRE.ReplaceAllString(bodyHTML, "")
+	// An opening tag with no closing tag left after that swallows the rest of
+	// the document in a browser too - everything behind it is script text until
+	// the end of the file - so dropping the tag alone would not match what the
+	// reader would have seen: it would spill the script's source into the body
+	// as visible text, and reparse whatever markup follows as document HTML.
+	if opening := scriptOpenRE.FindStringIndex(bodyHTML); opening != nil {
+		return bodyHTML[:opening[0]]
+	}
+	return scriptCloseRE.ReplaceAllString(bodyHTML, "")
 }
 
 var cidURLRE = regexp.MustCompile(`(?i)cid:([^\s"'<>\)]+)`)

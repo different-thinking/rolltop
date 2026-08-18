@@ -333,9 +333,22 @@ func (s *Store) GetSessionUser(ctx context.Context, tokenHash string) (Session, 
 	u.UpdatedAt = unixTime(userUpdated)
 	u.BackupEmail = cleanEmail(u.BackupEmail)
 	normalizeUserPreferences(&u)
-	if now := nowUnix(); now-lastSeen >= int64(sessionLastSeenInterval/time.Second) {
-		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, now, sess.ID)
-		sess.LastSeenAt = unixTime(now)
+	// The value just read decides whether the statement is worth issuing at all,
+	// and the statement decides whether it writes: concurrent requests all see
+	// the same stale timestamp, so without the predicate they would each write
+	// one after another. The row is user-owned, so the write names its owner
+	// like every other one, and last_seen_at only moves for the request whose
+	// update actually landed.
+	now := nowUnix()
+	if now-lastSeen < int64(sessionLastSeenInterval/time.Second) {
+		return sess, u, nil
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ?
+		WHERE id = ? AND user_id = ? AND last_seen_at <= ?`, now, sess.ID, sess.UserID, lastSeen)
+	if err == nil {
+		if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows == 1 {
+			sess.LastSeenAt = unixTime(now)
+		}
 	}
 	return sess, u, nil
 }

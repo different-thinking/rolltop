@@ -226,11 +226,15 @@ func (m *Manager) CompleteConnect(ctx context.Context, userID int64, state, code
 	// token was issued under the grant the user has just come back to widen.
 	// Serving it on would refuse every contacts and calendar request for the
 	// rest of its hour with "reconnect the account to grant access", which is
-	// exactly what was just done. The token the new consent produced replaces
-	// it, and the cache is cleared first so nothing survives a token this
-	// exchange did not report an expiry for.
+	// exactly what was just done.
+	//
+	// The cache is dropped rather than filled with the token this exchange
+	// produced. Two consents for one account can be in flight at once, and
+	// seeding the cache here would let the slower one install its older token
+	// over the row the faster one already wrote - the same stale-grant failure,
+	// reached by a narrower path. An empty entry cannot be stale: the next
+	// caller reads the row, which is the copy the last writer won.
 	m.forgetToken(userID, connection.ID)
-	m.cacheToken(userID, connection.ID, token.AccessToken, token.ExpiresAt)
 	return connection, nil
 }
 

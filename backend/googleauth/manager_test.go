@@ -831,6 +831,13 @@ func TestReconnectReplacesTheCachedAccessToken(t *testing.T) {
 		t.Fatalf("reconnect forked the connection: before=%d after=%d", connection.ID, reconnected.ID)
 	}
 
+	// Nothing may be left in the cache for the connection: an entry seeded here
+	// could only be stale, because a second consent finishing later would
+	// install its older token over it.
+	if cached, ok := env.manager.cachedToken(env.userID, connection.ID); ok {
+		t.Fatalf("reconnect left a cached token in place: %q", cached)
+	}
+
 	second, err := env.manager.AccessToken(context.Background(), env.userID, connection.ID)
 	if err != nil {
 		t.Fatal(err)
