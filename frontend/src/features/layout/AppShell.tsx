@@ -854,7 +854,7 @@ function Sidebar({
   ].filter(Boolean).join(" · ");
   const listRoute = mailRoute(currentPath);
   const activeMailbox = listRoute.mailboxID;
-  const unarchivedActive = listRoute.view === "unarchived";
+  const inboxActive = listRoute.view === "inbox";
   const sentActive = listRoute.view === "sent";
   const draftsActive = listRoute.view === "drafts";
   const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
@@ -1060,19 +1060,19 @@ function Sidebar({
       </a>
       <div className="sidebar-scroll">
         <a
+          href="/mail/inbox"
+          className={`folder ${inboxActive ? "active" : ""}`}
+          title="Everything that is not archived yet, across every account"
+          onClick={(event) => open(event, "/mail/inbox")}
+        >
+          <span className="folder-name"><Icon name="inbox" weight={inboxActive ? "bold" : undefined} />Inbox</span>
+        </a>
+        <a
           href="/mail"
           className={`folder ${allMailActive ? "active" : ""}`}
           onClick={(event) => open(event, "/mail")}
         >
           <span className="folder-name"><Icon name="mail" weight={allMailActive ? "bold" : undefined} />All Mail</span>
-        </a>
-        <a
-          href="/mail/unarchived"
-          className={`folder ${unarchivedActive ? "active" : ""}`}
-          title="All Mail without each account's Archive folder"
-          onClick={(event) => open(event, "/mail/unarchived")}
-        >
-          <span className="folder-name"><Icon name="inbox" weight={unarchivedActive ? "bold" : undefined} />Unarchived</span>
         </a>
         <a
           href="/mail/sent"

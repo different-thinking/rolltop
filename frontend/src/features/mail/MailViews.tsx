@@ -26,6 +26,7 @@ import { messageSecurityIndicators, messageSecurityPreviewText, messageSecurityS
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { SnoozeControl } from "./SnoozeControl";
+import { ArchiveBeforeControl, EmptyTrashControl } from "./MailListActions";
 
 type SearchActionPlugin = RuntimePlugin & {
   renderSearchActions?: (context: {
@@ -134,7 +135,7 @@ export function MailView({
   const mailbox = mailboxes.find((item) => String(item.id) === mailboxID);
   // Each named view counts the folders it actually reads, mirroring how the
   // server builds it: Sent and Drafts are the folders carrying that role, and
-  // Unarchived is All Mail minus every account's chosen Archive folder.
+  // Inbox is All Mail minus every account's chosen Archive folder.
   const archiveMailboxIDs = new Set(archiveMailboxes.map((item) => item.mailbox_id));
   const viewRole = view === "sent" ? "sent" : view === "drafts" ? "drafts" : "";
   const roleMailboxIDSet = useMemo(
@@ -144,22 +145,30 @@ export function MailView({
   const viewMailboxes = mailboxes.filter((item) => {
     if (viewRole) return roleMailboxIDSet.has(item.id);
     if (item.show_in_all_mail === false) return false;
-    return view !== "unarchived" || !archiveMailboxIDs.has(item.id);
+    return view !== "inbox" || !archiveMailboxIDs.has(item.id);
   });
   const totalCount = mailbox
     ? mailbox.message_count
     : viewMailboxes.reduce((sum, item) => sum + item.message_count, 0);
-  const viewLabel = view === "unarchived" ? "Unarchived" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
+  const viewLabel = view === "inbox" ? "Inbox" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the
   // route names a folder this view cannot see, no whole-folder scope is offered.
   const scopeMailboxID = Number.parseInt(mailboxID || "0", 10) || 0;
-  const listScope = scopeMailboxID === 0
+  const listScope: MessageListScope | undefined = scopeMailboxID === 0
     ? { mailboxID: 0, query: "", view, label: viewLabel, total: totalCount }
     : mailbox
       ? { mailboxID: scopeMailboxID, query: "", label: mailbox.name, total: mailbox.message_count }
       : undefined;
+  // Archiving by date is offered wherever archiving a single message would make
+  // sense. Sent, Drafts, Trash, and Junk are left out: filing a received backlog
+  // is no reason to empty the user's own sent mail, and moving the others into
+  // Archive would pull mail back out of the folder it was deliberately put in.
+  // The server enforces the same rule on the folders inside a whole-account
+  // list, which this button cannot narrow.
+  const archiveOlderAvailable = view !== "drafts" && view !== "sent"
+    && !["sent", "drafts", "trash", "junk"].includes(mailbox?.role || "");
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
   const listScopeKey = `${userID}:${mailboxID || view || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
@@ -397,7 +406,42 @@ export function MailView({
       <ListHeader
         title={mailbox?.name || viewLabel}
         titleClassName="mailbox-title"
-        actions={<MailSortToggle order={sortOrder} onChange={changeSortOrder} />}
+        actions={(
+          <>
+            <MailSortToggle order={sortOrder} onChange={changeSortOrder} />
+            {mailbox?.role === "trash" ? (
+              <EmptyTrashControl
+                // The list header survives a route change, so an open
+                // confirmation would otherwise retarget itself at whichever
+                // Trash folder the reader navigated to next.
+                key={mailbox.id}
+                csrf={csrf}
+                mailboxID={mailbox.id}
+                mailboxName={mailbox.name}
+                messageCount={mailbox.message_count}
+                disabled={listPending}
+                addToast={addToast}
+                onEmptied={() => {
+                  refreshList();
+                  void refreshChrome();
+                }}
+              />
+            ) : null}
+            {listScope && archiveOlderAvailable ? (
+              <ArchiveBeforeControl
+                csrf={csrf}
+                scope={{ mailboxID: listScope.mailboxID, query: listScope.query, view: listScope.view, label: listScope.label }}
+                archiveConfigured={archiveMailboxes.length > 0}
+                disabled={listPending}
+                addToast={addToast}
+                onArchived={() => {
+                  refreshList();
+                  void refreshChrome();
+                }}
+              />
+            ) : null}
+          </>
+        )}
         pager={{
           page,
           pageSize: mailPageSize,

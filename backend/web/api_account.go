@@ -995,7 +995,7 @@ func (s *Server) apiMailIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearComposeIdentityCache(cu.User.ID)
 	// An identity carries this account's Archive folder, which is what the
-	// Unarchived list hides, so its cached pages have to be rebuilt.
+	// Inbox list hides, so its cached pages have to be rebuilt.
 	s.noteMailListChanged(cu.User.ID)
 	if s.events != nil {
 		s.events.Notify(cu.User.ID)

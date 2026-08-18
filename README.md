@@ -501,6 +501,27 @@ All Mail and every folder list can be sorted by date in either direction from th
 
 Settings shows the hidden copies per account under `Incoming mail`, with `Scan for duplicates` to re-run detection over mail that was mirrored before detection existed, and `Move copies to Trash` to move every hidden copy into the Trash folder of the account holding it. The cleanup never deletes remotely and never touches the addressed account's mail: the copies land in the aggregating account's own Trash, so anything moved by mistake can be moved back. Stopping the copies at the source is still worth doing - a Gmail filter that skips the inbox puts the fetched mail in a label folder instead, and a folder set to `never` is not mirrored at all.
 
+The sidebar leads with `Inbox`: All Mail minus each account's chosen Archive
+folder, so it is everything that has not been filed away yet, across every
+account. All Mail sits below it and still shows the lot. Both are whole-account
+lists rather than the `INBOX` folder of one account, which keeps its own entry
+under Folders. The older `/mail/unarchived` address still resolves to `Inbox`.
+
+Two list-header actions work on a whole list rather than on selected rows.
+`Archive older` moves everything the current list holds that is dated before a
+chosen day into each account's Archive folder. The day itself is kept, and it is
+the reader's own calendar day: the browser sends the instant that day begins at
+in its timezone. Sent, Drafts, Trash, and Junk are never swept up, even though a
+whole-account list shows them, so filing a received backlog leaves the user's
+own mail alone. The cutoff and that exclusion are applied in SQL rather than
+after the fact, and a very large backlog is archived in repeated passes that say
+how much they covered. `Empty Trash`
+appears only on a folder carrying the Trash role and is the one place rolltop
+deletes mail on the server instead of moving it: the folder is listed live,
+flagged `\Deleted`, and expunged under a proven `UIDVALIDITY`, so mail the
+mirror never downloaded goes too, and local rows, blobs, and search documents
+are removed only for the UIDs the server confirms are gone.
+
 rolltop uses IMAP `IDLE` for INBOX wakeups when the server supports it and keeps the scheduled INBOX poll as a fallback. Remote deletes and moves are reconciled after folder syncs by comparing local UIDs with the server's current UID set.
 
 ## License And Contributions

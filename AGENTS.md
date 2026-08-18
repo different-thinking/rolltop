@@ -7,7 +7,12 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 ## Rules For Future Agents
 
 - SMTP sending and message moves exist and are supported; extend them rather than
-  reintroducing the old prohibition. Remote delete is still deliberately absent.
+  reintroducing the old prohibition.
+- Remote delete exists in exactly one place: emptying a folder that carries the
+  Trash role (`syncer.ExpungeFetcher`, `Service.StartEmptyTrash`). Nothing else
+  may flag `\Deleted` or expunge. It lists the folder live rather than trusting
+  the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
+  the UIDs the server reports gone afterwards. Keep all four properties.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.

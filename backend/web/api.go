@@ -124,6 +124,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiBulkReadMessages(w, r)
 	case path == "messages/scope-trash":
 		s.apiScopeTrashMessages(w, r)
+	case path == "messages/scope-archive":
+		s.apiScopeArchiveMessages(w, r)
+	case path == "messages/empty-trash":
+		s.apiEmptyTrash(w, r)
 	case strings.HasPrefix(path, "messages/"):
 		s.apiMessagePath(w, r, strings.TrimPrefix(path, "messages/"))
 	case strings.HasPrefix(path, "sync-runs/"):
