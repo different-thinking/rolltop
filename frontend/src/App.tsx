@@ -791,8 +791,16 @@ export default function App() {
         if (bootstrap.user) api.clearMailCache(bootstrap.user.id);
         await refreshBootstrap();
       } catch (err) {
-        if (leavingOpenList) setMessagesHidden(ids, false);
         updateToast(toastID, `Filing under ${category.label} failed: ${messageFromError(err)}`, "error");
+      } finally {
+        // The hide covers the round trip only. Filing a category leaves the
+        // message where it is and keeps its ID, so a row left hidden would stay
+        // hidden in every other list too - the hidden set is app-wide and
+        // nothing else clears it. Releasing it here hands the decision back to
+        // the reloaded list, which the bumped mail generation has already asked
+        // for: the filed rows are gone from the category they left, and present
+        // everywhere they still belong.
+        if (leavingOpenList) setMessagesHidden(ids, false);
       }
     },
     [addToast, bootstrap?.csrf, bootstrap?.user, location.path, refreshBootstrap, setMessagesHidden, updateToast]

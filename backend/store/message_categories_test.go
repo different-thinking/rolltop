@@ -324,3 +324,55 @@ func TestReportedSpamLeavesEveryWholeAccountList(t *testing.T) {
 		t.Fatalf("junk folder = %v, want %d", messageIDsOf(folder), spam.ID)
 	}
 }
+
+func TestFilingSeveralSendersLandsWholeOrNotAtAll(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	f.create(t, f.inbox, 1, `"Shop" <offers@example.test>`, mailparse.CategoryNewsletters)
+	f.create(t, f.inbox, 2, "offers@example.test", mailparse.CategoryNewsletters)
+	f.create(t, f.inbox, 3, "list@example.test", mailparse.CategoryNewsletters)
+
+	// A sender with no address to key on, or a category that does not exist,
+	// fails the call before anything is written. Filing the senders that did
+	// parse would leave the user with a correction that covered part of what
+	// they dropped and no way to tell which part.
+	for _, broken := range []struct {
+		senders  []string
+		category string
+	}{
+		{senders: []string{"offers@example.test", "   "}, category: mailparse.CategoryForums},
+		{senders: []string{"offers@example.test", "list@example.test"}, category: "everything"},
+	} {
+		if _, err := f.db.SetSenderCategoryOverrides(ctx, f.user.ID, broken.senders, broken.category); err == nil {
+			t.Fatalf("SetSenderCategoryOverrides(%v, %q) succeeded, want a rejection", broken.senders, broken.category)
+		}
+		for _, sender := range []string{"offers@example.test", "list@example.test"} {
+			if pinned, err := f.db.SenderCategoryOverride(ctx, f.user.ID, sender); err != nil || pinned != "" {
+				t.Fatalf("override for %q after a rejected call = %q err=%v, want none", sender, pinned, err)
+			}
+		}
+	}
+
+	// The same address named twice is one sender, and the count reports the
+	// messages that actually changed category rather than the rows examined.
+	moved, err := f.db.SetSenderCategoryOverrides(ctx, f.user.ID,
+		[]string{"Shop <offers@example.test>", "offers@example.test", "list@example.test"}, mailparse.CategoryForums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 3 {
+		t.Fatalf("moved = %d, want all 3 messages", moved)
+	}
+	for _, sender := range []string{"offers@example.test", "list@example.test"} {
+		if pinned, err := f.db.SenderCategoryOverride(ctx, f.user.ID, sender); err != nil || pinned != mailparse.CategoryForums {
+			t.Fatalf("override for %q = %q err=%v", sender, pinned, err)
+		}
+	}
+	forums, err := f.db.ListCategoryLatestThreadMessagesForUser(ctx, f.user.ID, mailparse.CategoryForums, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forums) != 3 {
+		t.Fatalf("forums = %v, want all three messages", messageIDsOf(forums))
+	}
+}

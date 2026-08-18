@@ -43,12 +43,18 @@ func duplicateHideableRole(role string) bool {
 
 // duplicateOriginalEligible reports whether a row can be the copy everything
 // else hides behind. Being hideable is not enough: the row also has to sit in a
-// folder the reader actually reads. Junk, Drafts, and Trash are forced out of
-// All Mail, and a user can take any other folder out of it too, so a Spam-filed
-// row standing in as the original would leave the message reachable only from
+// folder the reader actually reads, or the message would be reachable only from
 // that account's Spam list - which is exactly the "hid the only copy" failure
 // this rule exists to prevent.
+//
+// Junk is named rather than left to show_in_all_mail because that flag is the
+// user's to set: the whole-account lists drop Junk whatever it says, so a Junk
+// row switched back into All Mail would pass this check and still be invisible
+// everywhere it was meant to stand in.
 func duplicateOriginalEligible(item DuplicateCopy) bool {
+	if normalizeMailboxRole(item.MailboxRole) == "junk" {
+		return false
+	}
 	return item.ShowInAllMail && duplicateHideableRole(item.MailboxRole)
 }
 

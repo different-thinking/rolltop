@@ -188,14 +188,13 @@ func (s *Server) apiMessageCategory(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "no sender address to file under")
 		return
 	}
-	var moved int64
-	for _, sender := range senders {
-		count, err := s.store.SetSenderCategoryOverride(r.Context(), cu.User.ID, sender, category)
-		if err != nil {
-			s.serverError(w, r, err)
-			return
-		}
-		moved += count
+	// One call rather than one per sender: the store commits the whole set in a
+	// single transaction, so a failure leaves nothing corrected and the error
+	// below is the truth about every sender the drop named.
+	moved, err := s.store.SetSenderCategoryOverrides(r.Context(), cu.User.ID, senders, category)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
 	}
 	s.noteMailListChanged(cu.User.ID)
 	if s.events != nil {

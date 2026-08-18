@@ -506,3 +506,44 @@ func TestPointerWriteRefusesAnOriginalThatVanishedMidScan(t *testing.T) {
 		t.Fatalf("copy points at deleted message %d, which nothing would ever clear", pointer)
 	}
 }
+
+// A Junk folder can be switched back into All Mail by hand, but the whole-account
+// lists drop it either way. A copy hidden behind such a row would sit behind a
+// row those lists never show, so the message would be in no list at all.
+func TestDuplicateScanNeverHidesBehindJunkThatOptedIntoAllMail(t *testing.T) {
+	f := newDuplicateFixture(t)
+	junk, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Spam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, junk.ID, MailboxSettings{
+		SyncMode: "auto", Role: "junk", ShowInSidebar: true, ShowInAllMail: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.storeMessage(t, f.original, junk.ID, 11, "<optin@partner.test>", "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 11, "<optin@partner.test>", "info@firma.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
+		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
+	}
+	// The whole-account list is where the failure would show: the junk row is
+	// excluded by role, so hiding this row too would leave nothing.
+	all, err := f.db.ListLatestThreadMessagesForUser(f.ctx, f.userID, 50, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range all {
+		if message.ID == fetched.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("all mail = %v, want the visible copy %d: hiding it leaves the message only in Spam",
+			messageIDsOf(all), fetched.ID)
+	}
+}
