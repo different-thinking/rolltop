@@ -47,6 +47,9 @@ type Service struct {
 	activeStallHandler func(int64)
 	activeStallOnce    sync.Once
 	bleveErrorLog      func(string, ...any)
+	// stallDiagnosticsDir is the data directory a writer stall reports into, so
+	// its stack outlives the process log. Empty leaves reports in the log only.
+	stallDiagnosticsDir string
 }
 
 // writerLock is a context-friendly FIFO gate. Unlike polling sync.Mutex.TryLock,
@@ -708,7 +711,11 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 		}
 	}
 
-	markerErr := s.MarkSearchIndexRecoveryRequired(details.UserID)
+	// The stalled batch owns a known message range, so recovery only has to
+	// reindex that range. A range this operation does not carry marshals as a
+	// full rebuild, which is what an operation nothing can attribute needs.
+	markerErr := s.MarkSearchIndexRecoveryRequiredForDocuments(
+		details.UserID, details.FirstDocumentID, details.LastDocumentID)
 	if markerErr == nil {
 		s.activeStallOnce.Do(func() {
 			s.mu.Lock()
@@ -723,12 +730,67 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 	if s.bleveErrorLog != nil {
 		logger = s.bleveErrorLog
 	}
-	logger("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v",
+	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v recovery_scope=%s",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
-		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr)
-	if stack := filteredBleveBatchStack(); stack != "" {
-		logger("bleve active writer stack user_id=%d operation=%q\n%s", details.UserID, details.Operation, stack)
+		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr,
+		SearchIndexRecovery{Required: true, FirstDocumentID: details.FirstDocumentID, LastDocumentID: details.LastDocumentID}.Scope())
+	logger("%s", summary)
+	stack := filteredBleveBatchStack()
+	if stack != "" {
+		// One log line per frame. A single Printf with embedded newlines gives
+		// only its first line a timestamp prefix, and line-based log shipping
+		// drops or reorders the rest — losing exactly the frames that say
+		// whether the writer was blocked on storage or on Bleve itself.
+		frames := strings.Split(stack, "\n")
+		logger("bleve active writer stack user_id=%d operation=%q frames=%d",
+			details.UserID, details.Operation, len(frames))
+		for index, frame := range frames {
+			logger("bleve active writer frame user_id=%d %d/%d %s", details.UserID, index+1, len(frames), frame)
+		}
 	}
+	// The report also goes onto the data volume, because the process log is not
+	// readable from a shell inside the container and does not survive the
+	// restart this stall is about to cause.
+	if err := s.recordStallDiagnostics(time.Now(), summary, stack); err != nil {
+		logger("record search writer stall diagnostics: %v", err)
+	}
+}
+
+// UnfinishedWriterRecoveries reports the recovery each tenant needs when a
+// writer is still inside Bleve. Tenants whose writers all returned are absent
+// on purpose: their index was published in full, and rebuilding it would cost
+// hours of reindexing to repair nothing.
+func (s *Service) UnfinishedWriterRecoveries() map[int64]SearchIndexRecovery {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	writers := make(map[int64]*writerLock, len(s.writers))
+	for key, writer := range s.writers {
+		writers[key] = writer
+	}
+	s.mu.Unlock()
+	recoveries := make(map[int64]SearchIndexRecovery)
+	for key, writer := range writers {
+		if writer == nil {
+			continue
+		}
+		active, activeSince := writer.activeSnapshot()
+		if activeSince.IsZero() {
+			continue
+		}
+		userID := active.UserID
+		if userID <= 0 {
+			userID = key
+		}
+		if userID <= 0 {
+			continue
+		}
+		recoveries[userID] = recoveries[userID].widen(SearchIndexRecovery{
+			Required: true, FirstDocumentID: active.FirstDocumentID, LastDocumentID: active.LastDocumentID,
+		})
+	}
+	return recoveries
 }
 
 func filteredBleveBatchStack() string {

@@ -58,7 +58,7 @@ func TestMarkSearchVisibleMessagesPendingIndexUsesFullThenRestoresNormal(t *test
 	db.db.SetMaxOpenConns(1)
 
 	events := make([]string, 0, 3)
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID,
+	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			events = append(events, mode)
 			return setSQLiteSynchronous(ctx, conn, mode)
@@ -78,7 +78,7 @@ func TestMarkSearchVisibleMessagesPendingIndexUsesFullThenRestoresNormal(t *test
 	// The second update targets a row that is already pending. The checkpoint
 	// must still run because SQLite is free to avoid writing an unchanged value.
 	events = events[:0]
-	marked, err = markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID,
+	marked, err = markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			events = append(events, mode)
 			return setSQLiteSynchronous(ctx, conn, mode)
@@ -117,7 +117,7 @@ func TestDurableSearchPendingWriteDiscardsConnectionWhenNormalRestoreFails(t *te
 	db.db.SetMaxOpenConns(1)
 	restoreErr := errors.New("restore failed")
 
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID,
+	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, 0, 0,
 		func(ctx context.Context, conn *sql.Conn, mode string) error {
 			if mode == "NORMAL" {
 				return restoreErr

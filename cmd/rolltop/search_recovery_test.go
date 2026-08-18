@@ -257,3 +257,142 @@ func assertSearchRecoveryMessagePreserved(t *testing.T, ctx context.Context, db 
 		t.Fatalf("message %d blob metadata changed: %v", before.ID, err)
 	}
 }
+
+// A marker that names the messages an abandoned batch owned must repair exactly
+// those and leave the index in place. Discarding a 3 GB index because one commit
+// ran long is what turned a slow write into a twelve-hour rebuild cycle.
+func TestRecoverMarkedSearchIndexesRepairsNamedRangeAndKeepsIndex(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner, err := db.CreateUser(ctx, "ranged-search@example.test", "Ranged Search", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobStore := blob.New(dataDir)
+	account := createSearchRecoveryAccount(t, ctx, db, owner)
+	before := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 1)
+	stalled := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 2)
+	after := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 3)
+
+	searchRoot := filepath.Join(dataDir, "users")
+	ownerIndex := filepath.Join(searchRoot, strconv.FormatInt(owner.ID, 10), "bleve")
+
+	searchSvc, err := search.OpenPerUser(searchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+	// A real index, because targeted repair only keeps one that still opens.
+	if _, err := searchSvc.CountUserMessages(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	published, err := os.ReadFile(filepath.Join(ownerIndex, "index_meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(owner.ID, stalled.ID, stalled.ID); err != nil {
+		t.Fatal(err)
+	}
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
+		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(recovered, []int64{owner.ID}) {
+		t.Fatalf("recovered users = %v, want [%d]", recovered, owner.ID)
+	}
+	if required, err := searchSvc.SearchIndexRecoveryRequired(owner.ID); err != nil || required {
+		t.Fatalf("recovery marker required=%t err=%v, want false, nil", required, err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(ownerIndex, "index_meta.json")); err != nil || string(raw) != string(published) {
+		t.Fatalf("live index changed: %q, %v", raw, err)
+	}
+	quarantines, err := filepath.Glob(ownerIndex + ".quarantine-*")
+	if err != nil || len(quarantines) != 0 {
+		t.Fatalf("targeted repair quarantined the index: %v, %v", quarantines, err)
+	}
+
+	pending, err := db.ListMessagesNeedingAttachmentIndex(ctx, owner.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingIDs := make([]int64, 0, len(pending))
+	for _, message := range pending {
+		pendingIDs = append(pendingIDs, message.ID)
+	}
+	if !slices.Equal(pendingIDs, []int64{stalled.ID}) {
+		t.Fatalf("pending messages = %v, want only the stalled batch %d", pendingIDs, stalled.ID)
+	}
+	assertSearchRecoveryMessagePreserved(t, ctx, db, owner.ID, before, false)
+	assertSearchRecoveryMessagePreserved(t, ctx, db, owner.ID, after, false)
+}
+
+// Keeping the index is only safe while it opens. One that does not is the case a
+// range cannot repair, and it has to fall back to the rebuild rather than leave
+// the tenant with an index nothing can read.
+func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexDoesNotOpen(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner, err := db.CreateUser(ctx, "unopenable-search@example.test", "Unopenable Search", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobStore := blob.New(dataDir)
+	account := createSearchRecoveryAccount(t, ctx, db, owner)
+	kept := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 1)
+	stalled := createSearchRecoveryMessage(t, ctx, db, blobStore, owner, account, "INBOX", "manual", true, 2)
+
+	searchRoot := filepath.Join(dataDir, "users")
+	ownerIndex := filepath.Join(searchRoot, strconv.FormatInt(owner.ID, 10), "bleve")
+	if err := os.MkdirAll(ownerIndex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory with no index metadata: present, but not an index Bleve opens.
+	if err := os.WriteFile(filepath.Join(ownerIndex, "segment.zap"), []byte("damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	searchSvc, err := search.OpenPerUser(searchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+	if err := searchSvc.MarkSearchIndexRecoveryRequiredForDocuments(owner.ID, stalled.ID, stalled.ID); err != nil {
+		t.Fatal(err)
+	}
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
+		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	quarantines, err := filepath.Glob(ownerIndex + ".quarantine-*")
+	if err != nil || len(quarantines) != 1 {
+		t.Fatalf("quarantines = %v, %v; want the unopenable index moved aside", quarantines, err)
+	}
+	pending, err := db.ListMessagesNeedingAttachmentIndex(ctx, owner.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending messages = %d, want the full rebuild to queue %d and %d", len(pending), kept.ID, stalled.ID)
+	}
+}

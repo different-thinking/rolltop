@@ -27,14 +27,32 @@ func (s *Store) MarkSearchVisibleMessagesPendingIndex(ctx context.Context, userI
 	if err != nil {
 		return 0, err
 	}
-	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, 0, 0, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+}
+
+// MarkSearchMessagesPendingIndexRange is the targeted form: it queues only the
+// messages an abandoned Bleve batch owned, identified by the inclusive row-ID
+// range the recovery marker recorded. Everything else in the index is already
+// published and is deliberately left alone.
+func (s *Store) MarkSearchMessagesPendingIndexRange(ctx context.Context, userID, firstID, lastID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	if firstID <= 0 || lastID < firstID {
+		return 0, fmt.Errorf("message id range %d-%d is not usable", firstID, lastID)
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, firstID, lastID, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
 }
 
 // markSearchVisibleMessagesPendingIndexWithSynchronous commits the recovery
 // prerequisite with synchronous=FULL on one dedicated SQLite connection. In
 // WAL mode that commit is durable before the caller fsyncs the Bleve quarantine
 // rename and removes the recovery marker.
-func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, db *sql.DB, userID int64, setSynchronous setSQLiteSynchronousFunc, durabilityBarrier sqliteDurabilityBarrierFunc) (marked int64, err error) {
+func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, db *sql.DB, userID, firstID, lastID int64, setSynchronous setSQLiteSynchronousFunc, durabilityBarrier sqliteDurabilityBarrierFunc) (marked int64, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reserve durable search recovery connection: %w", err)
@@ -68,12 +86,19 @@ func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, d
 		return 0, fmt.Errorf("begin durable search recovery write: %w", err)
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE messages
+	statement := `UPDATE messages
 			SET attachment_indexed_at = 0
 			WHERE user_id = ?
 				AND mailbox_id IN (
 					SELECT id FROM mailboxes WHERE user_id = ? AND include_in_search = 1
-				)`, userID, userID)
+				)`
+	arguments := []any{userID, userID}
+	if firstID > 0 && lastID >= firstID {
+		statement += `
+				AND id BETWEEN ? AND ?`
+		arguments = append(arguments, firstID, lastID)
+	}
+	result, err := tx.ExecContext(ctx, statement, arguments...)
 	if err != nil {
 		return 0, err
 	}
