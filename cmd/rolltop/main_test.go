@@ -179,3 +179,75 @@ func TestInboxAutoTargetsIncludesEveryAccountInbox(t *testing.T) {
 		t.Fatalf("targets = %+v, want both account inboxes", targets)
 	}
 }
+
+// A platform routes traffic on this path and takes the previous instance down
+// once it answers 200. Answering before the process can serve is what turns a
+// redeploy into downtime, so 200 has to mean ready and nothing less.
+func TestHealthCheckIsUnavailableUntilServing(t *testing.T) {
+	state := newStartupState()
+	gate := &startupGate{state: state}
+
+	probe := func() int {
+		res := httptest.NewRecorder()
+		gate.ServeHTTP(res, httptest.NewRequest(http.MethodGet, healthCheckPath, nil))
+		return res.Code
+	}
+
+	if code := probe(); code != http.StatusServiceUnavailable {
+		t.Fatalf("status while starting = %d, want %d", code, http.StatusServiceUnavailable)
+	}
+	// Migrations reporting progress are still not readiness.
+	state.update("Database", "running migrations", 3, 9)
+	if code := probe(); code != http.StatusServiceUnavailable {
+		t.Fatalf("status mid-startup = %d, want %d", code, http.StatusServiceUnavailable)
+	}
+	// Nor is a handler that exists before startup declared itself finished.
+	gate.setHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	if code := probe(); code != http.StatusServiceUnavailable {
+		t.Fatalf("status with a handler but no readiness = %d, want %d", code, http.StatusServiceUnavailable)
+	}
+
+	state.ready()
+	if code := probe(); code != http.StatusOK {
+		t.Fatalf("status once ready = %d, want %d", code, http.StatusOK)
+	}
+}
+
+// The gate keeps the path after startup: delegating it would hand the probe to
+// the application router, which knows nothing about it and would answer 404.
+func TestHealthCheckIsNotDelegatedToTheApplication(t *testing.T) {
+	state := newStartupState()
+	state.ready()
+	delegated := false
+	gate := &startupGate{state: state}
+	gate.setHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		delegated = true
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	res := httptest.NewRecorder()
+	gate.ServeHTTP(res, httptest.NewRequest(http.MethodGet, healthCheckPath, nil))
+
+	if delegated {
+		t.Fatal("health check reached the application handler")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+// A startup that failed must never read as ready.
+func TestHealthCheckStaysUnavailableAfterAFailedStartup(t *testing.T) {
+	state := newStartupState()
+	state.fail(errors.New("ROLLTOP_MASTER_KEY is required"))
+	gate := &startupGate{state: state}
+
+	res := httptest.NewRecorder()
+	gate.ServeHTTP(res, httptest.NewRequest(http.MethodGet, healthCheckPath, nil))
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
