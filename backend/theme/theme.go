@@ -20,8 +20,8 @@ const (
 // frontend/src/styles/mixins/. Browsers tint their own surrounding UI with
 // them, so a mismatch shows up as a seam above the page.
 const (
-	LightChrome = "#f2f0eb"
-	DarkChrome  = "#10161f"
+	LightChrome = "#f6f8fc"
+	DarkChrome  = "#131314"
 )
 
 // Normalize maps a stored or submitted theme identifier onto a known one.

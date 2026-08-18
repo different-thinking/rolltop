@@ -24,6 +24,11 @@ const (
 	// WCAG 2.1 AA: body text needs 4.5:1, large text and UI parts need 3:1.
 	textContrast = 4.5
 	uiContrast   = 3.0
+
+	// Sender-initial avatar hues, mirrored by senderAvatarHueCount in
+	// frontend/src/features/mail/MailViews.tsx and the .avatar-hue-N rules in
+	// frontend/src/styles/_message-list.scss.
+	avatarHueCount = 8
 )
 
 var (
@@ -233,6 +238,38 @@ func TestPaletteContrastMeetsWCAG(t *testing.T) {
 		{"label on a danger fill", "--on-danger", "--danger", textContrast},
 		{"search highlight text", "--on-highlight", "--surface", textContrast},
 		{"the focus ring against a panel", "--focus", "--surface", uiContrast},
+		// The star is a UI graphic rather than text, so it answers to the 3:1
+		// threshold — on both row grounds, because a list paints it on each.
+		// Gmail's own yellow sits at 1.9:1 on a white row, which is why this
+		// pair is worth holding.
+		{"a starred message on an unread row", "--star", "--row-unread", uiContrast},
+		{"a starred message on a read row", "--star", "--row-read", uiContrast},
+	}
+	// Avatar initials are small text on a coloured chip, so every hue carries
+	// the text threshold. Generating the pairs is what catches a ninth hue
+	// added to one theme and forgotten in another.
+	var avatarPairs []pair
+	for hue := 0; hue < avatarHueCount; hue++ {
+		avatarPairs = append(avatarPairs, pair{
+			what:      fmt.Sprintf("an avatar initial on hue %d", hue),
+			ink:       "--on-avatar",
+			ground:    fmt.Sprintf("--avatar-%d", hue),
+			threshold: textContrast,
+		})
+	}
+	// The avatar chips are opaque in every theme, unlike the translucent
+	// surfaces that keep the matrix palette out of the table above, so its hues
+	// can be held to the same threshold as the built-in ones.
+	matrix := loadPalette(t, matrixThemePath, "matrix")
+	for _, p := range []palette{light, dark, matrix} {
+		for _, pr := range avatarPairs {
+			ink := p.mustResolve(t, pr.ink)
+			ground := p.mustResolve(t, pr.ground)
+			if ratio := contrast(ink, ground); ratio < pr.threshold {
+				t.Errorf("%s: %s (%s on %s) is %.2f:1, want at least %.1f:1",
+					p.name, pr.what, pr.ink, pr.ground, ratio, pr.threshold)
+			}
+		}
 	}
 
 	for _, p := range []palette{light, dark} {

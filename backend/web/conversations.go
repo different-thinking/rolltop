@@ -80,6 +80,7 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		fields       []string
 		queryTerms   []string
 		snoozedUntil time.Time
+		snoozeReturn time.Time
 	}
 	threadKeys := make([]string, 0, len(seeds))
 	snoozeKeys := make([]string, 0, len(seeds))
@@ -94,6 +95,12 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		return nil, err
 	}
 	activeSnoozes, err := s.store.ActiveMessageSnoozesForThreads(ctx, userID, snoozeKeys, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	// A snooze that has come due keeps deciding where its message sorts, so the
+	// due ones are read as well: they are what ListDate is built from.
+	dueSnoozes, err := s.store.DueMessageSnoozesForThreads(ctx, userID, snoozeKeys, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +125,12 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		if snooze, ok := activeSnoozes[store.SnoozeThreadKey(seed.Message)]; ok {
 			g.snoozedUntil = snooze.SnoozedUntil
 		}
+		// Seeds sharing a conversation can carry different reminders, and the
+		// row sorts by the latest of them. Taking the last one iterated would
+		// let an earlier seed's later return time decide nothing.
+		if snooze, ok := dueSnoozes[store.SnoozeThreadKey(seed.Message)]; ok && snooze.SnoozedUntil.After(g.snoozeReturn) {
+			g.snoozeReturn = snooze.SnoozedUntil
+		}
 		g.terms = mergeTerms(g.terms, seed.MatchTerms)
 		g.fields = mergeFields(g.fields, seed.MatchFields)
 		g.queryTerms = mergeFields(g.queryTerms, seed.MatchQueryTerms)
@@ -134,6 +147,10 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		group := groups[key]
 		view := summarizeConversation(group.messages, own)
 		view.SnoozedUntil = group.snoozedUntil
+		view.ListDate = view.Message.Date
+		if group.snoozeReturn.After(view.ListDate) {
+			view.ListDate = group.snoozeReturn
+		}
 		if view.HasAttachments {
 			view.AttachmentNames = s.conversationAttachmentNames(ctx, userID, group.messages, 3)
 			if len(view.AttachmentNames) == 0 {

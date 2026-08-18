@@ -23,7 +23,7 @@ export const plainTextDocumentClass = "plaintext-doc";
 const darkGrounds: Record<"classic_dark" | "matrix", { bg: string; text: string; link: string; linkBorder: string }> = {
   // The same surface the .email-frame sits on, so message and frame belong to
   // one colour family.
-  classic_dark: { bg: "#1a2230", text: "#e2dfd9", link: "#9cc9ea", linkBorder: "rgba(156,201,234,.5)" },
+  classic_dark: { bg: "#1e1f20", text: "#e3e3e3", link: "#a8c7fa", linkBorder: "rgba(168,199,250,.5)" },
   matrix: { bg: "#06130d", text: "#dcffe9", link: "#7dffbf", linkBorder: "rgba(125,255,191,.5)" }
 };
 

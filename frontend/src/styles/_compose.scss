@@ -175,6 +175,26 @@
   }
 }
 
+// The card the composer will occupy, drawn while /api/compose is still on its
+// way. It carries the composer's own frame at roughly the composer's resting
+// height, so the answer fills a shape that is already there instead of pushing
+// the thread around a second time.
+.inline-reply-pending {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 180px;
+  color: var(--text-soft);
+
+  // The way out while the form is still on its way. It sits beside the status
+  // rather than in the composer's usual corner, because there is no composer
+  // header to put it in yet.
+  > button {
+    margin-left: 4px;
+  }
+}
+
 .inline-reply-meta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

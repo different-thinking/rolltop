@@ -1,58 +1,89 @@
 // Classic: the light palette. Every colour the app paints comes from this list,
 // so a theme is a token swap and never a per-component patch list.
+// The palette follows Gmail's light look: a cool grey page, white list cards,
+// blue as the single accent, and shaded read rows against white unread ones.
 @mixin theme {
   color-scheme: light;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
-  --font-brand: var(--font-display);
+  --font-display: "Google Sans", "Product Sans", "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-brand: "Fraunces", "Georgia", "Times New Roman", serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
   // Surfaces, lowest to highest. --chrome is the flat colour a browser tints
   // its own UI with; it is read back at runtime for the theme-color meta.
-  --chrome: #f2f0eb;
-  --bg: #f2f0eb;
-  --surface-sunken: #f4f1ec;
+  --chrome: #f6f8fc;
+  --bg: #f6f8fc;
+  --surface-sunken: #eef3fa;
   --surface: #fff;
-  --surface-subtle: #f8f6f2;
+  --surface-subtle: #f2f6fc;
   --surface-raised: #fff;
-  --field: #fff;
+  --field: #eef1f6;
 
   // High-contrast block used for avatars and other inked chips.
-  --surface-ink: #151f2e;
+  --surface-ink: #3c4043;
   --on-ink: #fff;
 
   // Primary action (the compose button).
-  --action: #151f2e;
-  --action-hover: #2b3448;
+  --action: #0b57d0;
+  --action-hover: #0842a0;
   --on-action: #fff;
 
-  --text: #202426;
-  --muted: #636e6a;
-  --text-soft: #37413e;
+  --text: #1f1f1f;
+  --muted: #5f6368;
+  --text-soft: #444746;
 
-  --border: #ded8d1;
-  --border-strong: #b7b3aa;
-  --separator: #e6ece8;
+  --border: #dadce0;
+  --border-strong: #aeb3b9;
+  --separator: #e8eaed;
 
-  --row-read: var(--surface);
-  --row-unread: var(--surface);
+  // Gmail marks read rows with a shaded ground and leaves unread ones white,
+  // so the split is visible before any text is read.
+  --row-read: #f2f6fc;
+  --row-unread: #fff;
+  // The tint a row carries while it lands, kept apart from the two resting
+  // grounds so the arrival reads as an event in every theme.
+  --row-arriving: #e8f0fe;
 
-  --hover: #efe7e0;
-  --active: #e7d8ce;
-  --active-strong: #c46b44;
-  --selected: #f2faf7;
+  // Translucent so it can wash over read and unread grounds alike.
+  --hover: rgba(32, 33, 36, .08);
+  --active: #c2dbff;
+  --active-strong: #0b57d0;
+  --selected: #d3e3fd;
 
-  // #b45c35 keeps the terracotta character while carrying white text at 4.6:1.
-  --accent: #b45c35;
-  --accent-strong: #151f2e;
-  --accent-soft: #f6e3da;
-  --accent-warm: #c46b44;
-  --accent-warm-strong: #93482c;
-  --accent-sun: #b7b3aa;
+  // #0b57d0 is Gmail's blue and carries white text at 6.4:1.
+  --accent: #0b57d0;
+  --accent-strong: #0842a0;
+  --accent-soft: #d3e3fd;
+  // Gmail carries one accent, so the warm pair matches the plain one here. The
+  // tokens stay because plugin palettes do split them (matrix runs a green
+  // accent against a cyan warm accent); treat them as one colour in this theme
+  // and change both together.
+  --accent-warm: #0b57d0;
+  --accent-warm-strong: #0842a0;
+  --accent-sun: #aeb3b9;
   --on-accent: #fff;
   --button-text: var(--on-accent);
-  --focus: #b45c35;
-  --button-hover-border: rgba(180, 92, 53, .40);
+  --focus: #0b57d0;
+  --button-hover-border: rgba(11, 87, 208, .40);
+
+  // The starred state stays amber rather than taking the accent, so a star
+  // reads as a star and not as another link. Deeper than Gmail's #f4b400,
+  // which sits at 1.9:1 on a white row — below the 3:1 this project holds
+  // every painted UI part to.
+  --star: #c47b00;
+
+  // Sender-initial avatars: one hue per correspondent, deep enough to carry
+  // white initials. The dark palette answers with light chips and dark ink
+  // instead, the way its own surfaces run.
+  --avatar-0: #8e24aa;
+  --avatar-1: #3949ab;
+  --avatar-2: #1565c0;
+  --avatar-3: #00796b;
+  --avatar-4: #2e7d32;
+  --avatar-5: #bf360c;
+  --avatar-6: #c2185b;
+  --avatar-7: #6d4c41;
+  --on-avatar: #fff;
 
   // Status. Each pair is "colour" plus "text that sits on top of it".
   --ok: #17795f;
@@ -74,10 +105,10 @@
   --swipe-trash: #93382a;
   --on-swipe: #fff;
 
-  --scrim: rgba(21, 31, 46, .28);
-  --scrim-strong: rgba(21, 31, 46, .42);
+  --scrim: rgba(32, 33, 36, .32);
+  --scrim-strong: rgba(32, 33, 36, .48);
   --highlight: rgba(229, 169, 40, .26);
-  --on-highlight: #202426;
-  --shadow: 0 1px 2px rgba(21, 31, 46, 0.13), 0 8px 20px rgba(21, 31, 46, 0.07);
-  --shadow-raised: 0 14px 34px rgba(38, 35, 31, .22);
+  --on-highlight: #1f1f1f;
+  --shadow: 0 1px 2px rgba(60, 64, 67, .14), 0 8px 20px rgba(60, 64, 67, .08);
+  --shadow-raised: 0 14px 34px rgba(60, 64, 67, .26);
 }

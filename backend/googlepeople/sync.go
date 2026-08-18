@@ -542,7 +542,9 @@ func (s *Syncer) recordOutcome(ctx context.Context, userID, connectionID int64, 
 // data, so only the classification travels into storage and the UI.
 func summarizeSyncError(err error) string {
 	switch {
-	case errors.Is(err, ErrScopeMissing):
+	case errors.Is(err, ErrServiceDisabled):
+		return "The People API is switched off for the Google Cloud project this connection's OAuth client belongs to. Enable it there; reconnecting the account does not help."
+	case errors.Is(err, ErrScopeMissing), errors.Is(err, ErrScopeInsufficient):
 		return "This Google account has not granted access to contacts. Reconnect it to allow contact sync."
 	case errors.Is(err, ErrForbidden):
 		return "Google refused the request. Reconnect the account to grant access to contacts."
