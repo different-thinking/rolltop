@@ -123,7 +123,7 @@ function highlightImageAltMatches(doc: Document, pattern: RegExp) {
 // Search highlighting inside the message iframe follows the same three states as
 // the body theme itself: an explicit dark marker, an explicit matrix marker, and
 // no marker at all, which means the reader follows the operating system.
-const lightHighlight = "mark.rolltop-search-hit{background:rgba(229,169,40,.26);color:#202426;border-radius:3px;padding:0 1px;box-shadow:none}"
+const lightHighlight = "mark.rolltop-search-hit{background:rgba(229,169,40,.26);color:#1f1f1f;border-radius:3px;padding:0 1px;box-shadow:none}"
   + "img.rolltop-search-image-hit{outline:2px solid rgba(229,169,40,.92)!important;outline-offset:2px!important;box-shadow:0 0 0 4px rgba(229,169,40,.20)!important;border-radius:4px}";
 
 const darkHighlight = (scope: string) => `${scope} mark.rolltop-search-hit{background:rgba(224,182,77,.28);color:#f5f2ec}`

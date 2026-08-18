@@ -238,7 +238,10 @@ class MainActivity : ComponentActivity() {
             )
         }
         fun removeLoadingOverlay() {
-            (view.parent as? View)?.setBackgroundColor(Color.WHITE)
+            // The root keeps painting the system-bar inset areas after the
+            // overlay goes, so it stays on the shell colour; white would leave
+            // a bright band around a page whose own ground is the shell colour.
+            (view.parent as? View)?.setBackgroundColor(SHELL_BACKGROUND)
             (loadingOverlay.parent as? ViewGroup)?.removeView(loadingOverlay)
             if (this.loadingOverlay === loadingOverlay) this.loadingOverlay = null
             if (loadingAnimationView === loadingAnimation) loadingAnimationView = null
@@ -595,6 +598,9 @@ class MainActivity : ComponentActivity() {
         private const val STATE_PROMPTED_UPDATE_CODE = "rolltop.prompted_update_code"
         private const val STATE_LOADING_ANIMATION_ELAPSED_MS = "rolltop.loading_animation_elapsed_ms"
         private const val LOADING_CROSSFADE_MS = 160L
-        private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
+        // Mirrors R.color.shell_background and theme.LightChrome / the --chrome
+        // token in frontend/src/styles/mixins/_classic-theme.scss. A stale value
+        // here shows as a coloured seam around the web content on startup.
+        private val SHELL_BACKGROUND = Color.rgb(246, 248, 252)
     }
 }

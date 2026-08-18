@@ -1,6 +1,8 @@
 // Bounded, user-scoped compose persistence. localStorage is origin-scoped by
 // the browser; user IDs prevent drafts and templates crossing local accounts.
 
+import { stableHash } from "./senderIdentity";
+
 const recoveryVersion = 1;
 const maxRecipientLength = 16_000;
 const maxSubjectLength = 2_000;
@@ -193,12 +195,7 @@ function removeLocalStorageItem(key: string) {
 }
 
 function stableContextHash(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
+  return stableHash(value).toString(36);
 }
 
 function safeString(value: unknown): string {

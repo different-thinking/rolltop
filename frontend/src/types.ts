@@ -121,6 +121,10 @@ export type Conversation = {
   match_terms?: string[];
   match_query_terms?: string[];
   snoozed_until?: string;
+  /** The instant the server sorted this row by: max(snooze return, message
+   * date). Date sections group by it so a message returning from a snooze
+   * heads the section its position in the list actually belongs to. */
+  list_date?: string;
 };
 
 /** MailListResponse is one paged conversation list returned by /api/mail. */

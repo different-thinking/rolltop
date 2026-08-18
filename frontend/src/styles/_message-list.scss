@@ -249,22 +249,39 @@
 }
 
 .message-table {
-  --new-mail-row-height: 45px;
+  // The height one arriving row adds: .message-row's min-height plus its
+  // bottom border. The arrival animation lifts the rows below by exactly this,
+  // so it has to follow the row box.
+  --new-mail-row-height: 49px;
+
   background: transparent;
 
-  &.mail-arrival-shift .message-row:not(.new-delivery) {
+  // Headings ride the arrival shift with the rows they head. Left out, a
+  // section title stays put while its own rows slide away underneath it.
+  &.mail-arrival-shift .message-row:not(.new-delivery),
+  &.mail-arrival-shift .message-date-heading {
     animation: mail-surface-drop .96s cubic-bezier(.16, 1, .3, 1) both;
     will-change: transform;
   }
 }
 
+// The date sections Gmail heads its list with: Today, Yesterday, This month.
+.message-date-heading {
+  padding: 14px 16px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
 .message-row {
   position: relative;
   display: grid;
-  grid-template-columns: 22px 24px minmax(140px, 240px) minmax(0, 1fr) 88px;
+  grid-template-columns: 22px 40px minmax(140px, 220px) minmax(0, 1fr) max-content;
   column-gap: 8px;
   row-gap: 0;
-  min-height: 44px;
+  min-height: 48px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--separator);
   color: var(--text);
@@ -274,6 +291,8 @@
   transition: transform .18s cubic-bezier(.2, .8, .2, 1);
   z-index: 1;
 
+  // Read and unread part ways the same way Gmail's rows do: a shaded ground
+  // and regular weight against a plain ground and bold ink. No accent bar.
   &.read {
     background: var(--row-read);
     color: var(--muted);
@@ -294,17 +313,6 @@
     background: var(--row-unread);
     color: var(--text);
 
-    &::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      top: 9px;
-      bottom: 9px;
-      width: 3px;
-      border-radius: 0 2px 2px 0;
-      background: var(--accent-warm);
-    }
-
     .sender,
     .subject strong,
     .date {
@@ -312,13 +320,19 @@
     }
   }
 
+  // Gmail's hover keeps the row's own ground and washes over it. The wash is a
+  // background layer rather than an inset shadow so it survives alongside the
+  // selected row's accent bar: both states paint at once, and a selected row
+  // under the pointer still answers.
   &:hover {
-    background: color-mix(in srgb, var(--hover) 55%, var(--row-read));
-    box-shadow: inset 3px 0 0 var(--accent-warm), 0 1px 0 var(--separator);
+    background-image: linear-gradient(var(--hover), var(--hover));
   }
 
+  // background-color, not the background shorthand: the shorthand would reset
+  // the hover wash's background-image and leave selected rows unresponsive to
+  // the pointer.
   &.selected {
-    background: var(--selected);
+    background-color: var(--selected);
     box-shadow: inset 3px 0 0 var(--accent);
   }
 
@@ -680,13 +694,17 @@
   animation: message-list-track-right var(--message-list-slide-duration) cubic-bezier(.16, 1, .3, 1) both;
 }
 
+// A flat rounded card on the page ground, the way Gmail's list sits on its
+// cool grey chrome. The hairline stays: the classic themes separate --surface
+// from --bg well enough to draw the card on their own, but a theme whose page
+// ground is a gradient or close to its surface — the matrix plugin is both —
+// has nothing else to end the list against.
 .message-list-pane {
   flex: 0 0 calc((100% - var(--message-list-slide-gap)) / 2);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 16px;
   overflow: hidden;
-  box-shadow: var(--shadow);
 }
 
 .message-list-pane.outgoing {
@@ -776,7 +794,33 @@
     margin: 0;
     accent-color: var(--accent);
     cursor: pointer;
-    transform: translateY(4px);
+  }
+}
+
+// Gmail-style initial avatar. Each theme owns the hue values as --avatar-0..7,
+// like every other colour; the classic pair deliberately carries identical
+// values so a correspondent keeps their colour when the theme flips, while a
+// plugin theme is free to answer with its own. No fallback ground is set: a
+// theme that forgets a hue should show an unpainted chip rather than borrow the
+// ink chip's colour and look deliberate. The count is mirrored by
+// senderAvatarHueCount in features/mail/MailViews.tsx.
+.sender-avatar {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  border-radius: 50%;
+  color: var(--on-avatar);
+  font-size: 14px;
+  font-weight: 600;
+  user-select: none;
+
+  @for $hue from 0 through 7 {
+    &.avatar-hue-#{$hue} {
+      background: var(--avatar-#{$hue});
+    }
   }
 }
 
@@ -793,25 +837,14 @@
 
   &:hover {
     background: color-mix(in srgb, var(--border-strong) 22%, transparent);
-    color: var(--accent-warm-strong);
+    color: var(--star);
   }
 
   &.starred {
-    color: var(--accent-warm-strong);
+    color: var(--star);
   }
 }
 
-
-.message-row > .star-action {
-  @include icon-button(24px);
-  justify-self: center;
-  align-self: center;
-
-  .icon {
-    width: 17px;
-    height: 17px;
-  }
-}
 
 .sender,
 .subject {
@@ -853,6 +886,7 @@
   margin-left: 6px;
   font-weight: 400;
 }
+
 
 
 

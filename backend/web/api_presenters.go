@@ -317,6 +317,7 @@ func apiConversations(conversations []conversationView) []apiConversation {
 			MatchTerms:               conv.MatchTerms,
 			MatchQueryTerms:          conv.MatchQueryTerms,
 			SnoozedUntil:             timeString(conv.SnoozedUntil),
+			ListDate:                 timeString(conv.ListDate),
 		})
 	}
 	return out

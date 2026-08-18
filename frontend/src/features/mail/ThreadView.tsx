@@ -24,6 +24,7 @@ import { OneClickUnsubscribeInlineAction, OneClickUnsubscribeMenuAction } from "
 import { RemoteImageNotice } from "../../plugins/remoteImageBlocklist/RemoteImageNotice";
 import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
+import { displayInitial } from "../../lib/senderIdentity";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
 import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
@@ -916,7 +917,7 @@ export function ThreadView({
   const mailbox = mailboxID ? mailboxes.find((item) => item.id === mailboxID) : null;
   const trashByAccount = useMemo(() => trashMailboxesByAccount(mailboxes), [mailboxes]);
   const backURL = messageBackURL(location);
-  const composeInitial = (composeFrom.match(/[A-Za-z0-9]/)?.[0] || "M").toUpperCase();
+  const composeInitial = displayInitial(composeFrom);
   const canExplainSearch = highlightQuery.trim() !== "";
   const brandDomainKey = useMemo(() => brandDomainKeyForThread(thread, pluginSet), [thread, pluginSet]);
   const [brandIcons, setBrandIcons] = useState<Record<string, string>>({});

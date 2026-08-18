@@ -1,9 +1,8 @@
 // File overview: Mailbox and search result lists. These components fetch paged conversations,
 // surface sync clues, keep selection state stable, and link rows back to their source page.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
-import { Star } from "@phosphor-icons/react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
 import type { AccountMailboxChoice, Bootstrap, Conversation, MailCategorySummary, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
@@ -11,7 +10,8 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
-import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
+import { dateGroupLabel, displaySnoozeUntil, displayTime, localDayKey, messageCountLabel } from "../../lib/format";
+import { displayInitial, stableHash } from "../../lib/senderIdentity";
 import { archiveMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
@@ -48,6 +48,57 @@ function searchActionNodes(plugins: RuntimePlugin[], query: string, navigate: (u
   return (plugins as SearchActionPlugin[])
     .map((plugin) => plugin.renderSearchActions?.({ query, navigate }))
     .filter(Boolean);
+}
+
+// Gmail-style initial avatars: one of eight fixed hues, picked from the sender
+// text so the same correspondent keeps the same colour between renders. The
+// count is mirrored by the .avatar-hue-N classes in styles/_message-list.scss;
+// raising it here without raising it there leaves the new hue unpainted.
+const senderAvatarHueCount = 8;
+
+function senderAvatarHue(seed: string): number {
+  return stableHash(seed) % senderAvatarHueCount;
+}
+
+/**
+ * rowDate is the instant a list row is placed by: the reminder in the Snoozed
+ * view, and otherwise the key the server sorted the page with, which is the
+ * message date except for mail returning from a snooze — that sorts by the
+ * moment it came back. The row's timestamp and its date section both read it,
+ * so a row can never sit under a heading its own time contradicts.
+ */
+function rowDate(conversation: Conversation, snoozedView: boolean): string {
+  if (snoozedView) return conversation.snoozed_until || conversation.message.date;
+  return conversation.list_date || conversation.message.date;
+}
+
+/**
+ * participantSource is the address line a row names: the recipients in Sent and
+ * Drafts, the senders everywhere else. The label beside the avatar and the
+ * avatar's own letter and colour are all derived from this one value.
+ */
+function participantSource(conversation: Conversation, showRecipients: boolean): string {
+  const message = conversation.message;
+  if (showRecipients) return conversation.recipient_participants || message.to_addr || conversation.participants || "";
+  return conversation.participants || message.from_addr || "";
+}
+
+/**
+ * dateSectionHeadings returns the heading each row opens, or "" for a row that
+ * continues the section above it. It is one pass over the page against a single
+ * clock: labels derived per row from their own `new Date()` could disagree
+ * across midnight, and a row whose date cannot be named must not make the next
+ * row re-open a heading that is already on screen.
+ */
+function dateSectionHeadings(conversations: Conversation[], snoozedView: boolean): string[] {
+  const now = new Date();
+  let openSection = "";
+  return conversations.map((conversation) => {
+    const label = dateGroupLabel(rowDate(conversation, snoozedView), now);
+    if (!label || label === openSection) return "";
+    openSection = label;
+    return label;
+  });
 }
 
 function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation["message"]) {
@@ -373,17 +424,6 @@ export function MailView({
     if (page !== 1) navigate(mailURL(mailboxID, 1, view));
   }
 
-  function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
-    setConversations((current) => current.map((conversation) => {
-      if (conversation.message.id !== messageID && conversation.starred_message_id !== starredMessageID) return conversation;
-      return {
-        ...conversation,
-        starred_message_id: starred ? starredMessageID : conversation.message.id,
-        message: { ...conversation.message, is_starred: starred }
-      };
-    }));
-  }
-
   function updateReadStates(states: ConversationReadState[]) {
     const readByID = new Map(states.map((state) => [state.id, state.read]));
     setConversations((current) => current.map((conversation) => {
@@ -517,7 +557,6 @@ export function MailView({
                 navigate={navigate}
                 messageSecurityPlugins={messageSecurityPlugins}
                 addToast={addToast}
-                onStarredChange={updateStarred}
                 onReadStatesChange={updateReadStates}
                 onMessagesMoved={removeMovedConversations}
                 onListChanged={refreshList}
@@ -636,13 +675,6 @@ export function SnoozedView({
     return () => { cancelled = true; };
   }, [page, mailGeneration, refreshGeneration]);
 
-  function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
-    setConversations((current) => current.map((conversation) => {
-      if (conversation.message.id !== messageID && conversation.starred_message_id !== starredMessageID) return conversation;
-      return { ...conversation, starred_message_id: starred ? starredMessageID : conversation.message.id, message: { ...conversation.message, is_starred: starred } };
-    }));
-  }
-
   function updateReadStates(states: ConversationReadState[]) {
     const readByID = new Map(states.map((state) => [state.id, state.read]));
     setConversations((current) => current.map((conversation) => {
@@ -689,7 +721,6 @@ export function SnoozedView({
               navigate={navigate}
               messageSecurityPlugins={messageSecurityPlugins}
               addToast={addToast}
-              onStarredChange={updateStarred}
               onReadStatesChange={updateReadStates}
               onMessagesMoved={removeMovedConversations}
               onListChanged={() => setRefreshGeneration((current) => current + 1)}
@@ -951,17 +982,6 @@ export function SearchView({
   const maintenanceRun = activeSearchMaintenanceRun(activeSyncRuns);
   const pluginSearchActions = searchActionNodes(searchActionPlugins, query, navigate);
 
-  function updateStarred(messageID: number, starredMessageID: number, starred: boolean) {
-    setConversations((current) => current.map((conversation) => {
-      if (conversation.message.id !== messageID && conversation.starred_message_id !== starredMessageID) return conversation;
-      return {
-        ...conversation,
-        starred_message_id: starred ? starredMessageID : conversation.message.id,
-        message: { ...conversation.message, is_starred: starred }
-      };
-    }));
-  }
-
   function updateReadStates(states: ConversationReadState[]) {
     const readByID = new Map(states.map((state) => [state.id, state.read]));
     setConversations((current) => current.map((conversation) => {
@@ -1029,7 +1049,6 @@ export function SearchView({
               returnURL={returnURL}
               addToast={addToast}
               messageSecurityPlugins={messageSecurityPlugins}
-              onStarredChange={updateStarred}
               onReadStatesChange={updateReadStates}
               onMessagesMoved={removeMovedConversations}
               onListChanged={() => setRefreshGeneration((current) => current + 1)}
@@ -1309,7 +1328,6 @@ function MessageList({
   navigate,
   messageSecurityPlugins = [],
   addToast,
-  onStarredChange,
   onReadStatesChange,
   onMessagesMoved,
   onListChanged,
@@ -1334,7 +1352,6 @@ function MessageList({
   navigate: (url: string) => void;
   messageSecurityPlugins?: RuntimePlugin[];
   addToast: AddToast;
-  onStarredChange: (messageID: number, starredMessageID: number, starred: boolean) => void;
   onReadStatesChange: (states: ConversationReadState[]) => void;
   onMessagesMoved: (messageIDs: number[]) => void;
   /** Reload the current page: rows removed here are replaced by the next ones. */
@@ -1392,6 +1409,24 @@ function MessageList({
     });
   const visibleKey = visible.map((conversation) => conversation.message.id).join(",");
   const sourceKey = conversations.map((conversation) => conversation.message.id).join(",");
+  // Search results are ranked by match rather than by date, so they carry no
+  // date sections — the same rule Gmail follows. Derived here rather than asked
+  // of every caller, so a new list cannot be wired up without its headings.
+  const groupByDate = !searchQuery;
+  // Headings depend only on the rows' dates and on which day it is. Selection,
+  // swipes and drags re-render this list without moving a row, and a swipe
+  // re-renders it per touch event, so they are computed once per page rather
+  // than per render. The key carries the dates themselves, not just the row
+  // ids: a refresh can hand back the same messages with a reminder that has
+  // since come due. It carries the day too, so a list left open past midnight
+  // stops calling yesterday's mail "Today".
+  const sectionKey = groupByDate
+    ? `${localDayKey()}|${visible.map((conversation) => `${conversation.message.id}:${rowDate(conversation, snoozedView)}`).join(",")}`
+    : "";
+  const sectionHeadings = useMemo(
+    () => groupByDate ? dateSectionHeadings(visible, snoozedView) : [],
+    [sectionKey, groupByDate, snoozedView]
+  );
   const hiddenKey = Array.from(hiddenMessageIDs).sort((a, b) => a - b).join(",");
   const pendingSwipeMoveKey = Array.from(pendingSwipeMoveIDs).sort((a, b) => a - b).join(",");
   const pendingSwipeSnoozeKey = Array.from(pendingSwipeSnoozeIDs).sort((a, b) => a - b).join(",");
@@ -2338,21 +2373,6 @@ function MessageList({
     }, messageSwipeCommitHoldMS);
   }
 
-  async function toggleStar(event: MouseEvent<HTMLButtonElement>, conversation: Conversation) {
-    event.preventDefault();
-    event.stopPropagation();
-    const msg = conversation.message;
-    const targetID = conversation.starred_message_id || msg.id;
-    const next = !msg.is_starred;
-    onStarredChange(msg.id, targetID, next);
-    try {
-      await api.setStarred(csrf, targetID, next);
-    } catch (err) {
-      onStarredChange(msg.id, targetID, msg.is_starred);
-      addToast(`Star update failed: ${messageFromError(err)}`, "error");
-    }
-  }
-
   // Pointer row actions reuse the swipe and selection mutation paths, so undo
   // toasts, optimistic dismissal, and busy gating behave identically. A row that
   // is already committing another action ignores them until it settles.
@@ -2559,13 +2579,18 @@ function MessageList({
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));
         const swipeStyle = activeSwipe ? messageSwipeAffordanceStyle(activeSwipe) : undefined;
+        const participants = participantSource(conversation, showRecipients);
         const participantText = showRecipients
-          ? `To: ${conversation.recipient_participants || msg.to_addr || conversation.participants || "undisclosed recipients"}`
-          : (conversation.participants || msg.from_addr || "Unknown sender");
+          ? `To: ${participants || "undisclosed recipients"}`
+          : (participants || "Unknown sender");
+        const sectionHeading = sectionHeadings[index] || "";
         return (
+      <Fragment key={msg.id}>
+      {sectionHeading ? (
+        <div className="message-date-heading" role="heading" aria-level={2}>{sectionHeading}</div>
+      ) : null}
       <div
         className={`message-swipe-shell ${activeSwipe ? `revealing-${activeSwipe.direction} swipe-phase-${activeSwipe.phase}` : ""} ${swipeReady ? "swipe-action-ready" : ""}`}
-        key={msg.id}
         style={swipeStyle}
       >
       <div className="message-swipe-actions" aria-hidden="true">
@@ -2624,15 +2649,9 @@ function MessageList({
                 onChange={() => undefined}
               />
             </label>
-            <button
-              className={`star-action ${msg.is_starred ? "starred" : ""}`}
-              type="button"
-              aria-pressed={msg.is_starred}
-              title={msg.is_starred ? "Unstar" : "Star"}
-              onClick={(event) => void toggleStar(event, conversation)}
-            >
-              <Star className="icon" weight={msg.is_starred ? "fill" : "regular"} />
-            </button>
+            <span className={`sender-avatar avatar-hue-${senderAvatarHue(participants)}`} aria-hidden="true">
+              {displayInitial(participants)}
+            </span>
             <span className="sender">
               <span className="sender-name">
                 <HighlightedText text={participantText} query={searchQuery} terms={matchTerms} />
@@ -2646,6 +2665,7 @@ function MessageList({
               {securityIndicators}
               {annotationNodes}
               <span className={`snippet ${securitySnippetClass}`}>
+                {previewText ? <span className="snippet-separator" aria-hidden="true">&mdash;&nbsp;</span> : null}
                 <HighlightedText text={previewText} query={securitySnippetClass ? "" : searchQuery} terms={securitySnippetClass ? [] : matchTerms} />
               </span>
               {attachmentNames.length > 0 ? (
@@ -2665,7 +2685,7 @@ function MessageList({
             <Icon name="clock" />
           </button>
         ) : null}
-        <span>{displayTime(snoozedView && conversation.snoozed_until ? conversation.snoozed_until : msg.date, datePrefs)}</span>
+        <span>{displayTime(rowDate(conversation, snoozedView), datePrefs)}</span>
       </span>
       <div className="message-row-actions" role="group" aria-label={`Actions for ${msg.subject || "message"}`}>
         {openAsDraft ? null : (
@@ -2711,6 +2731,7 @@ function MessageList({
       </div>
       </div>
           </div>
+      </Fragment>
         );
       })}
     </div>
