@@ -777,6 +777,7 @@ export function SettingsView({
   const [duplicateError, setDuplicateError] = useState("");
   const [folderRunRefreshAccounts, setFolderRunRefreshAccounts] = useState<Set<number>>(() => new Set());
   const [savingIdentity, setSavingIdentity] = useState(false);
+  const [deletingIdentityID, setDeletingIdentityID] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -1328,6 +1329,34 @@ export function SettingsView({
       addToast(messageFromError(err), "error");
     } finally {
       setSavingIdentity(false);
+    }
+  }
+
+  // Removing an identity is how a user drops a From address they never chose --
+  // older versions grew one per address on their own contact card. The Me
+  // contact behind it stays, so mail to that address is still recognised.
+  async function deleteSelectedIdentity() {
+    if (typeof selectedIdentityID !== "number" || deletingIdentityID) return;
+    const identity = identities.find((item) => item.id === selectedIdentityID);
+    if (!identity) return;
+    if (!window.confirm([
+      `Remove the identity "${identity.email}" from rolltop?`,
+      "",
+      "It disappears from the From menu. Messages, folders, and the contact behind it are kept."
+    ].join("\n"))) return;
+    setDeletingIdentityID(identity.id);
+    try {
+      const data = await api.deleteMailIdentity(csrf, identity.id);
+      setIdentities(data.identities);
+      const next = data.identities[0] || null;
+      setSelectedIdentityID(next ? next.id : "new");
+      setIdentityDraft(next ? cloneMailIdentity(next) : blankMailIdentity(user, data.identities));
+      addToast(`${identity.email} identity removed.`);
+      await refreshChrome();
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setDeletingIdentityID(null);
     }
   }
 
@@ -1974,6 +2003,11 @@ export function SettingsView({
           </div>
           <div className="contact-savebar">
             <button disabled={savingIdentity}>{savingIdentity ? "Saving..." : "Save identity"}</button>
+            {typeof selectedIdentityID === "number" ? (
+              <button className="danger secondary" type="button" disabled={deletingIdentityID === selectedIdentityID} onClick={() => void deleteSelectedIdentity()}>
+                <Icon name="delete" />{deletingIdentityID === selectedIdentityID ? "Removing..." : "Remove identity"}
+              </button>
+            ) : null}
           </div>
         </form>
       </section>

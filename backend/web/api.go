@@ -92,6 +92,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiSMTPAccountPath(w, r, strings.TrimPrefix(path, "account/smtp/"))
 	case path == "account/identities":
 		s.apiMailIdentity(w, r)
+	case strings.HasPrefix(path, "account/identities/"):
+		s.apiMailIdentityPath(w, r, strings.TrimPrefix(path, "account/identities/"))
 	case path == "account/sync":
 		s.apiAccountSync(w, r)
 	case path == "account/duplicates":

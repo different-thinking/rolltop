@@ -1901,7 +1901,13 @@ func TestUpdateMailboxSettingsRejectsDuplicateSpecialRole(t *testing.T) {
 	}
 }
 
-func TestEnsureMeContactForEmailSeedsIdentityAndDefaultSMTP(t *testing.T) {
+// TestOnboardingIdentityTakesTheDefaultSMTPAccount walks the sign-up path: the
+// Me contact is created for the address, the identity is asked for explicitly,
+// and the SMTP server configured afterwards is adopted as its default. Ensuring
+// the contact must not produce the identity on its own -- that derivation is
+// what grew a From address for every address the address book ever put on the
+// reader's own card.
+func TestOnboardingIdentityTakesTheDefaultSMTPAccount(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
 	if err != nil {
@@ -1921,6 +1927,16 @@ func TestEnsureMeContactForEmailSeedsIdentityAndDefaultSMTP(t *testing.T) {
 	}
 	if len(contact.Emails) != 1 || !contact.Emails[0].IsPrimary {
 		t.Fatalf("onboarding contact emails = %+v, want one primary email", contact.Emails)
+	}
+	derived, err := db.ListMailIdentitiesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(derived) != 0 {
+		t.Fatalf("identities from the Me contact alone = %+v, want none", derived)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
+		t.Fatal(err)
 	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
@@ -1961,25 +1977,40 @@ func TestCachedMailIdentitiesDoNotSyncMeContacts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := db.ListMeContactsForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 {
+		t.Fatalf("me contacts = %+v, want one", contacts)
+	}
+	renamed := contacts[0]
+	renamed.DisplayName = "Renamed Ident"
+	if _, err := db.UpdateContact(ctx, user.ID, renamed.ID, renamed); err != nil {
+		t.Fatal(err)
+	}
 	cached, err := db.ListCachedMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cached) != 0 {
-		t.Fatalf("cached identities before sync = %+v, want none", cached)
+	if len(cached) != 1 || cached[0].DisplayName != "Cached Ident" {
+		t.Fatalf("cached identities before sync = %+v, want the stored display name", cached)
 	}
 	synced, err := db.ListMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(synced) != 1 || synced[0].Email != user.Email {
-		t.Fatalf("synced identities = %+v", synced)
+	if len(synced) != 1 || synced[0].DisplayName != "Renamed Ident" {
+		t.Fatalf("synced identities = %+v, want the contact's new display name", synced)
 	}
 	cached, err = db.ListCachedMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cached) != 1 || cached[0].Email != user.Email {
+	if len(cached) != 1 || cached[0].DisplayName != "Renamed Ident" {
 		t.Fatalf("cached identities after sync = %+v", cached)
 	}
 }
@@ -2033,6 +2064,12 @@ func TestMailAccountsAndIdentitiesStayScopedByUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.CreateContact(ctx, other.ID, Contact{DisplayName: "Other User", IsMe: true, IsPrimary: true, Emails: []ContactEmail{{Email: "other-multi@example.test", IsPrimary: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "multi@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, other.ID, "other-multi@example.test"); err != nil {
 		t.Fatal(err)
 	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
@@ -2089,6 +2126,9 @@ func TestMailIdentityDefaultsChooseMatchingIMAPAndFolders(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.CreateContact(ctx, user.ID, Contact{DisplayName: "Identity Default", IsMe: true, IsPrimary: true, Emails: []ContactEmail{{Email: user.Email, IsPrimary: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
 		t.Fatal(err)
 	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
@@ -2189,6 +2229,9 @@ func TestUpdateMailIdentityValidatesIMAPAndMailboxScope(t *testing.T) {
 	if _, err := db.CreateContact(ctx, user.ID, Contact{DisplayName: "Identity Scope", IsMe: true, IsPrimary: true, Emails: []ContactEmail{{Email: user.Email, IsPrimary: true}}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -2233,6 +2276,9 @@ func TestDeleteSMTPAccountForUserUnlinksIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.CreateContact(ctx, user.ID, Contact{DisplayName: "SMTP Remove", IsMe: true, IsPrimary: true, Emails: []ContactEmail{{Email: user.Email, IsPrimary: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
 		t.Fatal(err)
 	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)

@@ -60,7 +60,21 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   Google lets two people share an address, so a unique index over it made the
   second of them unstorable and failed the whole sync rather than one row. One
   contact still carries an address once; saving dedupes by normalized address,
-  because a Me contact holding it twice grows two outgoing identities.
+  because two rows for one address are two answers to a question that has one.
+- An outgoing identity is created by hand and never derived. The user asks for
+  one in the identity editor, or gets one for a mailbox they just configured
+  (`Store.EnsureMailIdentityForEmail` is the only other caller); nothing else
+  may add one. Deriving them from the Me contact's addresses -- which is what
+  `SyncMailIdentitiesForMeContacts` used to do -- let the address book decide
+  what the From menu offered, so every address a Google sync or a vCard import
+  put on the reader's own card became a sending identity they never chose. The
+  sync now only re-binds, renames and drops the rows that exist.
+- An identity points at a `contact_emails` row and cascades on its deletion, so
+  saving a contact must not give its addresses new ids. `replaceContactEmails`
+  matches them by normalized address and updates in place for exactly that
+  reason; the other detail lists have no dependents and are still rewritten
+  wholesale. `SyncMailIdentitiesForMeContacts` re-binds an identity to the
+  current row by the address it stores as a second line of defence.
 - Which holder answers for a shared address is decided in exactly one place,
   `contactEmailOwnerOrder`: the reader's own contact, then whoever carries it as
   their primary address, then the oldest. Resolve with

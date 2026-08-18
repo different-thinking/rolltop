@@ -25,6 +25,9 @@ func TestMailIdentityAutocryptDefaultsAndUpdates(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "me@example.test"); err != nil {
+		t.Fatal(err)
+	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
