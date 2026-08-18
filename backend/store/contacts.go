@@ -166,7 +166,20 @@ func (s *Store) GetContactForUser(ctx context.Context, userID, id int64) (Contac
 	return c, nil
 }
 
-// GetContactByEmailForUser finds a contact by normalized email inside one user's address book.
+// contactEmailOwnerOrder ranks the contacts that share one address. An address
+// book may hold several since user-036 -- Google lets two people carry the same
+// one -- so every lookup by address has to name which of them it means, or the
+// answer changes with SQLite's row order and a Me contact, a merge target or a
+// reply identity silently moves to a different person.
+//
+// The contact whose primary address this is comes first, then the oldest row:
+// the address book's own idea of whose address it is, and failing that the
+// contact that has been answering to it the longest.
+const contactEmailOwnerOrder = ` ORDER BY is_primary DESC, contact_id ASC, id ASC`
+
+// GetContactByEmailForUser finds a contact by normalized email inside one user's
+// address book. Where several contacts share the address it returns the one
+// contactEmailOwnerOrder names first.
 func (s *Store) GetContactByEmailForUser(ctx context.Context, userID int64, email string) (Contact, error) {
 	normalized := NormalizeContactEmail(email)
 	if normalized == "" {
@@ -174,7 +187,8 @@ func (s *Store) GetContactByEmailForUser(ctx context.Context, userID int64, emai
 	}
 	row := s.mustDataDB(ctx, userID).QueryRowContext(ctx, contactSelectSQL()+`
 		WHERE user_id = ? AND id = (
-			SELECT contact_id FROM contact_emails WHERE user_id = ? AND normalized_email = ? LIMIT 1
+			SELECT contact_id FROM contact_emails WHERE user_id = ? AND normalized_email = ?`+
+		contactEmailOwnerOrder+` LIMIT 1
 		)`, userID, userID, normalized)
 	c, err := scanContact(row)
 	if err != nil {
@@ -184,6 +198,39 @@ func (s *Store) GetContactByEmailForUser(ctx context.Context, userID int64, emai
 		return Contact{}, err
 	}
 	return c, nil
+}
+
+// ListContactsByEmailForUser returns every contact that carries one address, in
+// the order GetContactByEmailForUser would have picked from. Callers that have
+// to choose between the holders rather than accept the first one need the whole
+// set: the contact sync, for one, may only adopt a local contact, and taking
+// the first row and finding it owned by Google would make it create a duplicate
+// instead of looking one row further.
+func (s *Store) ListContactsByEmailForUser(ctx context.Context, userID int64, email string) ([]Contact, error) {
+	normalized := NormalizeContactEmail(email)
+	if normalized == "" {
+		return nil, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, contactSelectSQL()+`
+		WHERE user_id = ? AND id IN (
+			SELECT contact_id FROM contact_emails WHERE user_id = ? AND normalized_email = ?
+		)
+		ORDER BY (
+			SELECT min(CASE WHEN e.is_primary = 1 THEN 0 ELSE 1 END) FROM contact_emails e
+			WHERE e.user_id = contacts.user_id AND e.contact_id = contacts.id AND e.normalized_email = ?
+		), id`, userID, userID, normalized, normalized)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	contacts, err := scanContacts(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.loadContactDetailsForAll(ctx, userID, contacts); err != nil {
+		return nil, err
+	}
+	return contacts, nil
 }
 
 // EnsureMeContactForEmail creates or updates the Me contact used for compose identities and reply targeting.

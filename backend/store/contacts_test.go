@@ -136,3 +136,57 @@ func TestContactIconsAreScopedByUser(t *testing.T) {
 		t.Fatalf("other user batch icons = %+v", otherIcons)
 	}
 }
+
+// Two people in one address book may share an address. Google allows it, and a
+// unique index over the normalized address used to make the second of them
+// impossible to store, which failed the whole contact sync rather than one row.
+func TestContactsMayShareAnEmailAddressInsideOneAddressBook(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "household@example.test", "Household", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.CreateContact(ctx, user.ID, Contact{
+		DisplayName: "Ada Lovelace",
+		Emails: []ContactEmail{
+			{Label: "Work", Email: "ada@example.test", IsPrimary: true},
+			{Label: "Home", Email: "haushalt@example.test"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.CreateContact(ctx, user.ID, Contact{
+		DisplayName: "Charles Babbage",
+		Emails:      []ContactEmail{{Label: "Home", Email: "haushalt@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatalf("second holder of a shared address: %v", err)
+	}
+
+	// The single-answer lookup still has to name one of them, and it names the
+	// contact whose primary address this is. Anything else would let a Me
+	// contact, a merge target or a reply identity move with SQLite's row order.
+	found, err := db.GetContactByEmailForUser(ctx, user.ID, "haushalt@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != second.ID {
+		t.Fatalf("lookup returned contact %d, want %d, whose primary address it is", found.ID, second.ID)
+	}
+	holders, err := db.ListContactsByEmailForUser(ctx, user.ID, "haushalt@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holders) != 2 || holders[0].ID != second.ID || holders[1].ID != first.ID {
+		t.Fatalf("holders = %+v, want both contacts with the primary holder first", holders)
+	}
+	if list, err := db.ListContactsByEmailForUser(ctx, user.ID, "nobody@example.test"); err != nil || len(list) != 0 {
+		t.Fatalf("unknown address = %+v, %v, want no holders and no error", list, err)
+	}
+}

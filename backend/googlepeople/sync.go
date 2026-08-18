@@ -412,8 +412,16 @@ func (s *Syncer) applyPerson(ctx context.Context, userID, connectionID int64, pe
 // appear between the lookup and the insert. Reading it again and overwriting it
 // is the same work the ordinary path would have done, and it keeps one lost race
 // from failing a whole address book instead of one contact.
+//
+// A conflict over anything else is not that race, and the lookup then finds
+// nothing. Saying so is the whole point of the branch: the bare "no rows" a
+// missing mirror produces is the least informative sentence the store can
+// return, and it was what a whole failing address book used to report.
 func (s *Syncer) applyToExistingMirror(ctx context.Context, userID, connectionID int64, incoming store.Contact, person Person) (applyOutcome, error) {
 	existing, err := s.Store.GetContactByGoogleResourceForUser(ctx, userID, connectionID, incoming.ExternalID)
+	if store.IsNotFound(err) {
+		return outcomeUnchanged, fmt.Errorf("%s: an existing contact conflicts with this person and is not their mirror", incoming.ExternalID)
+	}
 	if err != nil {
 		return outcomeUnchanged, err
 	}
@@ -462,19 +470,23 @@ func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming
 // findLocalMatch looks for an existing contact with one of the incoming
 // addresses. Only local contacts qualify: a contact already owned by another
 // Google account is a separate mirror and must not be stolen from it.
+//
+// Every holder of the address is considered rather than only the first, because
+// an address may be shared: a person Google sent earlier in this very run can
+// already hold it as a mirror, and stopping there would leave a local contact
+// standing beside its own Google copy for good.
 func (s *Syncer) findLocalMatch(ctx context.Context, userID int64, incoming store.Contact) (store.Contact, bool, error) {
 	for _, email := range incoming.Emails {
-		candidate, err := s.Store.GetContactByEmailForUser(ctx, userID, email.Email)
-		if store.IsNotFound(err) {
-			continue
-		}
+		candidates, err := s.Store.ListContactsByEmailForUser(ctx, userID, email.Email)
 		if err != nil {
 			return store.Contact{}, false, err
 		}
-		if candidate.IsGoogleContact() {
-			continue
+		for _, candidate := range candidates {
+			if candidate.IsGoogleContact() {
+				continue
+			}
+			return candidate, true, nil
 		}
-		return candidate, true, nil
 	}
 	return store.Contact{}, false, nil
 }

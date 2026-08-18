@@ -362,7 +362,7 @@
     color: currentColor;
   }
 
-  > span:not(.notification-toggle-track) {
+  > span:not(.notification-toggle-track):not(.account-menu-count) {
     min-width: 0;
     display: grid;
     gap: 2px;
@@ -388,6 +388,19 @@
   &.danger {
     color: var(--danger);
   }
+}
+
+// The running-sync count on the Syncs & tasks row. It sits in the row's third
+// column, which the two-line label grid also uses, so it opts out of that
+// grid rather than inheriting a layout meant for a stacked title and subtitle.
+.account-menu-count {
+  display: inline-block;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 18px;
+  text-align: right;
 }
 
 .account-menu-notifications.active .notification-toggle-track {

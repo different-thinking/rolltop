@@ -407,6 +407,7 @@ export function AppShell({
         mailboxes={mailboxes}
         enabledPlugins={enabledPlugins}
         location={location}
+        activeSyncRuns={activeSyncRuns}
         navigate={navigate}
         notificationsEnabled={notificationsEnabled}
         toggleNotifications={toggleNotifications}
@@ -680,6 +681,7 @@ function Topbar({
   mailboxes,
   enabledPlugins,
   location,
+  activeSyncRuns,
   navigate,
   notificationsEnabled,
   toggleNotifications,
@@ -694,6 +696,8 @@ function Topbar({
   mailboxes: Mailbox[];
   enabledPlugins: string[];
   location: LocationState;
+  /** Only for the count on the Syncs & tasks row; the page itself fetches its own state. */
+  activeSyncRuns: SyncRun[];
   navigate: (url: string) => void;
   notificationsEnabled: boolean;
   toggleNotifications: () => Promise<void>;
@@ -831,6 +835,17 @@ function Topbar({
                 <span className="notification-toggle-track"><span /></span>
               </button>
             ) : null}
+            {/* Background work is a question about the whole installation, not
+                about the folder it happens to be touching, so it is asked from
+                here rather than from a row between the mailboxes. */}
+            <button className="account-menu-row" type="button" role="menuitem" onClick={() => menuNavigate("/activity")}>
+              <Icon name="sync" />
+              <span>
+                <strong>Syncs &amp; tasks</strong>
+                <small>{activeSyncRuns.length > 0 ? `${activeSyncRuns.length.toLocaleString()} running now` : "Every sync and background task"}</small>
+              </span>
+              {activeSyncRuns.length > 0 ? <span className="account-menu-count">{activeSyncRuns.length.toLocaleString()}</span> : null}
+            </button>
             <button className="account-menu-row" type="button" role="menuitem" onClick={() => menuNavigate("/settings/account")}>
               <Icon name="settings" />
               <span><strong>Settings</strong><small>Profile, servers, folders, and identities</small></span>
@@ -1243,22 +1258,6 @@ function Sidebar({
           onClick={(event) => open(event, "/contacts")}
         >
           <span className="folder-name"><Icon name="group" weight={currentPath === "/contacts" ? "bold" : undefined} />Contacts</span>
-        </a>
-        {/* Background work has its own entry rather than a badge on the folder
-            it happens to be touching: what is running is a question about the
-            whole installation, and it is asked when something looks stuck. */}
-        <div className="side-section">Activity</div>
-        <a
-          href="/activity"
-          className={`folder ${currentPath === "/activity" ? "active" : ""}`}
-          title="Every sync and background task running right now"
-          onClick={(event) => open(event, "/activity")}
-        >
-          <span className="folder-name">
-            <Icon name="sync" weight={currentPath === "/activity" ? "bold" : undefined} />
-            Syncs &amp; tasks
-          </span>
-          {activeSyncRuns.length > 0 ? <span className="folder-count">{activeSyncRuns.length.toLocaleString()}</span> : null}
         </a>
         {advertiseAndroidApp ? (
           <>

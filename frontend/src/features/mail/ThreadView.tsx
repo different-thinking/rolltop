@@ -2359,8 +2359,19 @@ export function ThreadView({
                         securityUnlock={securityUnlock}
                         openSecurityUnlock={openSecurityUnlock}
                         addToast={addToast}
-                        onSent={() => {
+                        onSent={(outcome) => {
                           closeInlineReply();
+                          // A reply that filed the conversation away has taken
+                          // it out of the list the reader came from, and left
+                          // them looking at the one thing they just said they
+                          // were done with. Send alone keeps them here: the
+                          // conversation is still in that list, and the answer
+                          // they just wrote is worth seeing land.
+                          if (outcome.archived) {
+                            navigate(backURL);
+                            void refreshChrome().catch(() => undefined);
+                            return;
+                          }
                           void load(showImages);
                         }}
                         onCancel={closeInlineReply}

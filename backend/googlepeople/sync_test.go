@@ -462,6 +462,105 @@ func TestSyncPromotesAMatchingLocalContactInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
+// Two people at Google may carry the same address -- a couple, a shared office
+// mailbox, a role account kept on two cards -- and both are mirrored. Rolltop
+// used to be unable to store the second one, and because the failure travelled
+// out of the run it also withheld the cursor, so every later sync re-read the
+// whole address book and failed again in the same place.
+func TestSyncMirrorsTwoPeopleWhoShareAnEmailAddress(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People: []Person{
+			personWithEmail("people/c1", "etag-1", "Ada Lovelace", "haushalt@example.test"),
+			personWithEmail("people/c2", "etag-2", "Charles Babbage", "haushalt@example.test"),
+		},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	result, err := syncer.SyncConnection(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatalf("sync = %v, want both people stored", err)
+	}
+	if result.Created != 2 {
+		t.Fatalf("created = %d, want both people mirrored", result.Created)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 2 {
+		t.Fatalf("address book holds %d contacts, want one per Google person", len(contacts))
+	}
+	for _, contact := range contacts {
+		if !contact.IsGoogleContact() {
+			t.Fatalf("contact %q = %+v, want it linked to the connection", contact.DisplayName, contact)
+		}
+	}
+	// The cursor is the proof the run finished: a sync that reported the second
+	// person as a failure would have left it unstored and re-read everything.
+	state, err := db.GetGooglePeopleSync(ctx, user.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SyncToken != "token-1" {
+		t.Fatalf("sync token = %q, want the cursor of a completed run", state.SyncToken)
+	}
+	if state.Status != store.GooglePeopleSyncStatusOK {
+		t.Fatalf("status = %q, want a successful run", state.Status)
+	}
+}
+
+// The address a local contact holds may already belong to a mirror as well.
+// Promotion has to look past that mirror to the local row rather than give up
+// at the first holder of the address, which would leave the local contact
+// standing beside its own Google copy for good.
+func TestSyncPromotesTheLocalHolderOfAnAddressAMirrorAlreadyShares(t *testing.T) {
+	shared := "haushalt@example.test"
+	babbage := personWithEmail("people/c1", "etag-1", "Charles Babbage", shared)
+	fake := &fakePeople{responses: []ConnectionsPage{
+		{People: []Person{babbage}, NextSyncToken: "token-1"},
+		{People: []Person{personWithEmail("people/c2", "etag-2", "Ada Lovelace", shared)}, NextSyncToken: "token-2"},
+	}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	// Entered here after the mirror already held the address, which is what
+	// Rolltop does with every sender the user answers.
+	local, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Ada",
+		Notes:       "Met at the conference",
+		Emails:      []store.ContactEmail{{Label: "Email", Email: shared, IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 2 {
+		t.Fatalf("address book holds %d contacts, want the mirror and the promoted local row", len(contacts))
+	}
+	promoted, err := db.GetContactForUser(ctx, user.ID, local.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.ExternalID != "people/c2" {
+		t.Fatalf("local contact links to %q, want the person that arrived after it", promoted.ExternalID)
+	}
+	if promoted.Notes != "Met at the conference" {
+		t.Fatalf("notes = %q, want the local note preserved by the promotion", promoted.Notes)
+	}
+}
+
 // A full read re-reports every person. Rewriting all of them each time would
 // churn the database and bump updated_at on contacts nothing changed about.
 func TestSyncSkipsContactsWhoseETagIsUnchanged(t *testing.T) {
