@@ -36,6 +36,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    services:
+      # The PostgreSQL migration baseline is verified by applying it to a real
+      # server (backend/store/pgschema); the apply test fails rather than
+      # skips when this DSN is set, so a baseline that no longer applies
+      # cannot reach main.
+      #
+      # This block is duplicated in pr.yml on purpose: GitHub Actions has no
+      # YAML anchors, and the two workflows must gate against the same server
+      # version and credentials. Change both together.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rolltop
+          POSTGRES_PASSWORD: rolltop
+          POSTGRES_DB: rolltop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rolltop"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Check Out
         uses: actions/checkout@v5
@@ -78,6 +101,8 @@ jobs:
       # A merge gate that cannot run the suite is worth less than a coverage
       # number nothing read.
       - name: Run Go Tests
+        env:
+          TEST_DATABASE_URL: postgres://rolltop:rolltop@localhost:5432/rolltop_test?sslmode=disable
         run: |
           mkdir -p test-results
           set +e
