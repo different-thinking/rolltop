@@ -280,16 +280,20 @@ func (s *Store) GetOrCreateMailboxFromDiscovery(ctx context.Context, userID, acc
 	}
 	if role != "" {
 		roleIcon := defaultMailboxIcon(name, role)
+		// The All Mail default is resolved in Go rather than repeated as a role
+		// list in SQL: a second list here would decide the same question for
+		// folders that gain their role after discovery, and drift from the first.
+		roleShowInAllMail := boolInt(defaultMailboxShowInAllMail(role))
 		_, err = tx.ExecContext(ctx, `UPDATE mailboxes
 			SET role = ?,
 				icon = CASE WHEN icon = 'folder' THEN ? ELSE icon END,
-				show_in_all_mail = CASE WHEN ? IN ('drafts', 'trash', 'junk') THEN 0 ELSE show_in_all_mail END,
+				show_in_all_mail = CASE WHEN ? = 0 THEN 0 ELSE show_in_all_mail END,
 				updated_at = ?
 			WHERE user_id = ? AND account_id = ? AND name = ? AND role = ''
 			AND NOT EXISTS (
 				SELECT 1 FROM mailboxes assigned
 				WHERE assigned.user_id = ? AND assigned.account_id = ? AND assigned.role = ? AND assigned.name <> ?
-			)`, role, roleIcon, role, ts, userID, accountID, name, userID, accountID, role, name)
+			)`, role, roleIcon, roleShowInAllMail, ts, userID, accountID, name, userID, accountID, role, name)
 		if err != nil {
 			_ = tx.Rollback()
 			return Mailbox{}, err
@@ -751,9 +755,14 @@ func defaultMailboxIcon(name string, role string) string {
 	}
 }
 
+// defaultMailboxShowInAllMail decides whether a folder joins the whole-account
+// lists. Those lists answer "what is on my plate": Drafts, Trash and Junk are
+// not, and neither is Sent, which is the user's own writing coming back at them
+// in All Mail, Inbox and every category view at once. Each is only a default -
+// folder settings can put any of them back.
 func defaultMailboxShowInAllMail(role string) bool {
 	switch normalizeMailboxRole(role) {
-	case "drafts", "trash", "junk":
+	case "sent", "drafts", "trash", "junk":
 		return false
 	default:
 		return true

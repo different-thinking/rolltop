@@ -609,17 +609,33 @@ Settings shows the hidden copies per account under `Incoming mail`, with `Scan f
 
 The sidebar leads with `Inbox`: All Mail minus each account's chosen Archive
 folder, so it is everything that has not been filed away yet, across every
-account. All Mail sits below it and still shows the lot. Both are whole-account
+account. All Mail sits below it and shows the rest. Both are whole-account
 lists rather than the `INBOX` folder of one account, which keeps its own entry
 under Folders. The older `/mail/unarchived` address still resolves to `Inbox`.
+
+Sent, Drafts, Trash and Junk are out of those lists by default, because they
+answer "what is on my plate" and the user's own writing is not on it - a Sent
+folder inside them puts every reply back in front of its author in All Mail, in
+Inbox, and in the category its headers earned it, all at once. Each folder's
+`All Mail` switch under folder settings decides this, so any of them can be put
+back; only Junk is dropped by role whatever the switch says, because Report spam
+promises the message is gone from these lists. Existing accounts are migrated
+once, and a Sent folder switched back on stays on. The `Sent` and `Drafts` views
+are built from the folder role instead and are unaffected, as is each folder's
+own entry under Folders, so nothing becomes unreachable. A conversation row
+stands for the newest message the list it sits in holds, not for the newest
+message the thread holds anywhere, so a thread you answered keeps the date and
+preview of the message you were answering and stays where that date puts it; the
+reply is still in the thread when the conversation is opened, and still counts
+towards the row's message count and its batch actions.
 
 Two list-header actions work on a whole list rather than on selected rows.
 `Archive older` moves everything the current list holds that is dated before a
 chosen day into each account's Archive folder. The day itself is kept, and it is
 the reader's own calendar day: the browser sends the instant that day begins at
-in its timezone. Sent, Drafts, Trash, and Junk are never swept up, even though a
-whole-account list shows them, so filing a received backlog leaves the user's
-own mail alone. The cutoff and that exclusion are applied in SQL rather than
+in its timezone. Sent, Drafts, Trash, and Junk are never swept up, whether or not
+a whole-account list is set to show them, so filing a received backlog leaves the
+user's own mail alone. The cutoff and that exclusion are applied in SQL rather than
 after the fact, and a very large backlog is archived in repeated passes that say
 how much they covered. `Empty Trash`
 appears only on a folder carrying the Trash role and is the one place rolltop

@@ -5,16 +5,16 @@ import "testing"
 // The newest migration owns the whole-list invariants: it is the one that would
 // break them, and asserting them from every migration's test would mean fixing
 // the same thing in a dozen places the next time one is added.
-func TestUser035IsLatestRegisteredUserMigration(t *testing.T) {
+func TestUser036IsLatestRegisteredUserMigration(t *testing.T) {
 	sets := currentUserMigrationSetsForUpgradeTest()
 	if len(sets) < 2 {
 		t.Fatalf("registered user migrations=%d, want at least 2", len(sets))
 	}
-	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion035 {
-		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion035)
+	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion036 {
+		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion036)
 	}
-	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion034 {
-		t.Fatalf("user-035 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion034)
+	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion035 {
+		t.Fatalf("user-036 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion035)
 	}
 	// Application order is not numeric — user-011 has always run before
 	// user-004 — so only duplicates are worth asserting here. A version applied
