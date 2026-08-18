@@ -568,10 +568,12 @@ back; only Junk is dropped by role whatever the switch says, because Report spam
 promises the message is gone from these lists. Existing accounts are migrated
 once, and a Sent folder switched back on stays on. The `Sent` and `Drafts` views
 are built from the folder role instead and are unaffected, as is each folder's
-own entry under Folders, so nothing becomes unreachable. A conversation is still
-represented by its newest message, so a thread you answered shows your reply as
-its latest line - the row is the received conversation, not a second entry for
-what you sent.
+own entry under Folders, so nothing becomes unreachable. A conversation row
+stands for the newest message the list it sits in holds, not for the newest
+message the thread holds anywhere, so a thread you answered keeps the date and
+preview of the message you were answering and stays where that date puts it; the
+reply is still in the thread when the conversation is opened, and still counts
+towards the row's message count and its batch actions.
 
 Two list-header actions work on a whole list rather than on selected rows.
 `Archive older` moves everything the current list holds that is dated before a

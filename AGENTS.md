@@ -35,6 +35,13 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   migration's `After` step, which runs again on every startup and would overwrite
   that choice. Junk is the one folder the lists drop by role regardless, because
   Report spam promises the message is gone from them.
+- A conversation row is the message its list selected - the seed the list query
+  returned - and `conversationView.ListDate` is that message's date. Threads are
+  hydrated in full, so a row's thread carries messages the list excludes; taking
+  one of those as the row prints a date the row is not sorted by, and the date
+  section headings group on exactly that date. Thread-wide answers (message
+  count, participants, read state, starred, attachments) still come from the
+  whole thread.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
