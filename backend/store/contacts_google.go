@@ -91,12 +91,20 @@ func (s *Store) SetContactGoogleLink(ctx context.Context, userID, contactID int6
 	if userID <= 0 || contactID <= 0 || link.ConnectionID <= 0 || strings.TrimSpace(link.ExternalID) == "" {
 		return ErrNotFound
 	}
+	return setContactGoogleLinkTx(ctx, s.mustDataDB(ctx, userID), userID, contactID, link, nowUnix())
+}
+
+// setContactGoogleLinkTx is the link write itself, shared between the
+// standalone call above and the transactional mirror update: the sync writes a
+// contact's data and its provenance atomically, and two hand-kept copies of
+// this statement would let those columns drift.
+func setContactGoogleLinkTx(ctx context.Context, db execer, userID, contactID int64, link ContactGoogleLink, ts int64) error {
 	source, connectionID, externalID, etag := normalizeContactProvenance(
 		ContactSourceGoogle, link.ConnectionID, link.ExternalID, link.ETag)
-	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+	res, err := db.ExecContext(ctx,
 		`UPDATE contacts SET source = ?, google_connection_id = ?, external_id = ?, etag = ?, remote_updated_at = ?, updated_at = ?
 			WHERE user_id = ? AND id = ?`,
-		source, connectionID, externalID, etag, timeUnix(link.RemoteUpdatedAt), nowUnix(), userID, contactID)
+		source, connectionID, externalID, etag, timeUnix(link.RemoteUpdatedAt), ts, userID, contactID)
 	if err != nil {
 		return err
 	}

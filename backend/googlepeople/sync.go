@@ -57,7 +57,7 @@ type Syncer struct {
 	// OAuth configuration.
 	ScopeGranted func(store.GoogleConnection) bool
 
-	// running holds one mutex per connection, keyed by user and connection id.
+	// running holds one gate per connection, keyed by user and connection id.
 	// Two syncs of the same address book each look a person up and then create
 	// the missing row, so running them at once makes both miss and both insert.
 	// The poll and the button in settings are exactly that pair, and the loser
@@ -65,11 +65,14 @@ type Syncer struct {
 	running sync.Map
 }
 
-// connectionRunLock returns the mutex that serializes one connection's syncs.
-func (s *Syncer) connectionRunLock(userID, connectionID int64) *sync.Mutex {
+// connectionRunGate returns the one-slot channel that serializes a connection's
+// syncs. A channel rather than a mutex so a waiter can also watch its context:
+// a caller whose deadline expires while another sync holds the gate should walk
+// away, not stand in line for a turn it can no longer use.
+func (s *Syncer) connectionRunGate(userID, connectionID int64) chan struct{} {
 	key := [2]int64{userID, connectionID}
-	existing, _ := s.running.LoadOrStore(key, &sync.Mutex{})
-	return existing.(*sync.Mutex)
+	existing, _ := s.running.LoadOrStore(key, make(chan struct{}, 1))
+	return existing.(chan struct{})
 }
 
 // ConnectionLister is the slice of the Google auth manager the sync needs.
@@ -172,12 +175,14 @@ func (s *Syncer) SyncConnection(ctx context.Context, userID, connectionID int64)
 	// One sync per connection at a time. Waiting is right here rather than
 	// returning early: the caller is either the poll, which has nothing else to
 	// do with this connection, or a user who pressed Sync now and is owed a
-	// current answer, and the timeout above still bounds the wait.
-	lock := s.connectionRunLock(userID, connectionID)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
-		return Result{}, err
+	// current answer. The select keeps the wait honest -- a context that
+	// expires in line returns now instead of after the running sync finishes.
+	gate := s.connectionRunGate(userID, connectionID)
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
 	}
 
 	result, err := s.run(ctx, userID, connectionID)
@@ -438,10 +443,11 @@ func (s *Syncer) overwrite(ctx context.Context, userID int64, existing, incoming
 	}
 	merged.IsMe = existing.IsMe
 	merged.IsPrimary = existing.IsPrimary
-	if _, err := s.Store.UpdateContact(ctx, userID, existing.ID, merged); err != nil {
-		return err
-	}
-	if err := s.Store.SetContactGoogleLink(ctx, userID, existing.ID, store.ContactGoogleLink{
+	// Data and provenance travel in one transaction. Written separately, a
+	// link that lost to the unique index over the resource name would leave a
+	// contact already rewritten with Google's fields but still local -- and a
+	// promotion that fails must leave the local contact exactly as it was.
+	if _, err := s.Store.UpdateContactAsGoogleMirror(ctx, userID, existing.ID, merged, store.ContactGoogleLink{
 		ConnectionID:    incoming.GoogleConnectionID,
 		ExternalID:      incoming.ExternalID,
 		ETag:            incoming.ETag,

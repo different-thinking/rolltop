@@ -504,6 +504,13 @@
     padding-left: 12px;
   }
 
+  // Narrow rows stack the sender line above the subject block, so one row is
+  // taller than the wide layout's. The arrival animation shifts following rows
+  // by this height, and the wide value would leave a visible jump.
+  .message-table {
+    --new-mail-row-height: 77px;
+  }
+
   .message-select {
     grid-column: 1;
     grid-row: 1;
@@ -563,9 +570,17 @@
   .date {
     grid-column: 4 / 5;
     grid-row: 1;
+
     // Narrow rows put the date right beside the text with no toolbar between
     // them, so it needs the gap even more than a wide one does.
     margin-left: 12px;
+  }
+
+  // The snoozed date carries a button beside the time and already fills its
+  // 64px column; the gap that helps a plain date would push these controls
+  // into the subject.
+  .snoozed-date {
+    margin-left: 0;
   }
 
   .message-details {

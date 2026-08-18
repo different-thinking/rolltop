@@ -73,6 +73,22 @@ func (s *Store) CreateContact(ctx context.Context, userID int64, c Contact) (Con
 
 // UpdateContact replaces a user-owned contact and synchronizes child detail rows.
 func (s *Store) UpdateContact(ctx context.Context, userID, id int64, c Contact) (Contact, error) {
+	return s.updateContact(ctx, userID, id, c, nil)
+}
+
+// UpdateContactAsGoogleMirror replaces a contact's data and records the Google
+// person it mirrors in one transaction. The sync needs the pair to be atomic:
+// data written first and a link that then loses to the unique index over the
+// resource name would leave a contact rewritten with Google's fields but still
+// local, which the next delta would never revisit.
+func (s *Store) UpdateContactAsGoogleMirror(ctx context.Context, userID, id int64, c Contact, link ContactGoogleLink) (Contact, error) {
+	if link.ConnectionID <= 0 || strings.TrimSpace(link.ExternalID) == "" {
+		return Contact{}, ErrNotFound
+	}
+	return s.updateContact(ctx, userID, id, c, &link)
+}
+
+func (s *Store) updateContact(ctx context.Context, userID, id int64, c Contact, link *ContactGoogleLink) (Contact, error) {
 	c = normalizeContactForSave(userID, c)
 	ts := nowUnix()
 	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
@@ -99,6 +115,12 @@ func (s *Store) UpdateContact(ctx context.Context, userID, id int64, c Contact) 
 	if err := replaceContactChildren(ctx, tx, userID, id, c, ts); err != nil {
 		_ = tx.Rollback()
 		return Contact{}, err
+	}
+	if link != nil {
+		if err := setContactGoogleLinkTx(ctx, tx, userID, id, *link, ts); err != nil {
+			_ = tx.Rollback()
+			return Contact{}, err
+		}
 	}
 	if c.IsMe && c.IsPrimary {
 		if _, err := tx.ExecContext(ctx, `UPDATE contacts SET is_primary = 0, updated_at = ? WHERE user_id = ? AND id <> ? AND is_me = 1`, ts, userID, id); err != nil {

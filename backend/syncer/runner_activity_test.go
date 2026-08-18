@@ -112,3 +112,35 @@ func TestWorkerActivitiesShowParkedFolderSyncs(t *testing.T) {
 		t.Fatalf("parked folders = %v, want the tenant's inbox and archive only", mailboxes)
 	}
 }
+
+// The attachment worker keeps its cancel in its own map rather than under a
+// mailbox reservation. The view must still offer Stop for it, and the button
+// must actually reach the work.
+func TestAttachmentIndexWorkIsCancellable(t *testing.T) {
+	runner := NewRunner(nil)
+	userID := int64(7)
+	key := mailboxKey(userID, "__attachments__")
+	cancelled := false
+
+	runner.mu.Lock()
+	runner.mailboxRunning[key] = true
+	runner.startWorkActivityLocked(runnerMailboxWorkActivityKey(key), runnerWorkActivity{
+		kind: runnerWorkAttachmentIndex, userID: userID, startedAt: time.Unix(100, 0),
+	})
+	runner.attachmentCancels[userID] = func() { cancelled = true }
+	runner.mu.Unlock()
+
+	activities := runner.WorkerActivities(userID)
+	if len(activities) != 1 || !activities[0].Cancellable {
+		t.Fatalf("activities = %+v, want one cancellable attachment-index row", activities)
+	}
+	if !runner.CancelWorkerActivity(userID, activities[0].Key) {
+		t.Fatal("cancelling the attachment index was refused")
+	}
+	if !cancelled {
+		t.Fatal("the attachment worker's cancel func was not called")
+	}
+	if runner.CancelWorkerActivity(9, activities[0].Key) {
+		t.Fatal("another tenant cancelled the attachment index")
+	}
+}

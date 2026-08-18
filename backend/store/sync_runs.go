@@ -375,31 +375,38 @@ func (s *Store) DeleteSyncRunForUser(ctx context.Context, userID, id int64) erro
 	if userID <= 0 || id <= 0 {
 		return ErrNotFound
 	}
-	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
-		`DELETE FROM sync_runs WHERE user_id = ? AND id = ? AND status <> 'running'`, userID, id)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected > 0 {
-		return nil
-	}
-	// Nothing deleted: either the row is gone or it is still running. The two
-	// deserve different answers, so look once more.
-	var status string
-	err = s.mustDataDB(ctx, userID).QueryRowContext(ctx,
-		`SELECT status FROM sync_runs WHERE user_id = ? AND id = ?`, userID, id).Scan(&status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if status == "running" {
-		return ErrSyncRunRunning
+	// Two attempts, not one: the first delete can lose to a run that finishes
+	// between it and the status lookup, and answering "still running" for a
+	// row that is finished by the time we say so would strand it in history
+	// behind a response that claimed success.
+	for attempt := 0; attempt < 2; attempt++ {
+		res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+			`DELETE FROM sync_runs WHERE user_id = ? AND id = ? AND status <> 'running'`, userID, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			return nil
+		}
+		// Nothing deleted: either the row is gone or it is still running. The
+		// two deserve different answers, so look once more.
+		var status string
+		err = s.mustDataDB(ctx, userID).QueryRowContext(ctx,
+			`SELECT status FROM sync_runs WHERE user_id = ? AND id = ?`, userID, id).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status == "running" {
+			return ErrSyncRunRunning
+		}
+		// The run finished after the delete ran. Loop and delete it for real.
 	}
 	return ErrNotFound
 }

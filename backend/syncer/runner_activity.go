@@ -7,6 +7,7 @@
 package syncer
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -49,7 +50,7 @@ func (r *Runner) WorkerActivities(userID int64) []WorkerActivity {
 		if activity.userID != userID {
 			continue
 		}
-		_, cancellable := r.mailboxCancels[mailboxReservationKeyFromActivityKey(key)]
+		cancellable := r.activityCancelLocked(userID, key, activity.kind) != nil
 		out = append(out, WorkerActivity{
 			Key:         key,
 			Kind:        activity.kind,
@@ -134,16 +135,30 @@ func (r *Runner) CancelWorkerActivity(userID int64, key string) bool {
 		r.mu.Unlock()
 		return false
 	}
-	reservation := mailboxReservationKeyFromActivityKey(key)
-	work, ok := r.mailboxCancels[reservation]
-	if !ok || work.userID != userID || work.cancel == nil {
-		r.mu.Unlock()
+	cancel := r.activityCancelLocked(userID, key, activity.kind)
+	r.mu.Unlock()
+	if cancel == nil {
 		return false
 	}
-	cancel := work.cancel
-	r.mu.Unlock()
 	cancel()
 	return true
+}
+
+// activityCancelLocked finds the cancel func behind one activity, or nil when
+// there is nothing to stop. It is the one lookup both Cancellable and the
+// cancel itself use, so the flag the view shows and the action the button takes
+// can never disagree. The attachment worker keeps its cancel in its own map
+// rather than under a mailbox reservation, which is why the kind decides where
+// to look.
+func (r *Runner) activityCancelLocked(userID int64, key, kind string) context.CancelFunc {
+	if kind == runnerWorkAttachmentIndex {
+		return r.attachmentCancels[userID]
+	}
+	work, ok := r.mailboxCancels[mailboxReservationKeyFromActivityKey(key)]
+	if !ok || work.userID != userID {
+		return nil
+	}
+	return work.cancel
 }
 
 // mailboxReservationKeyFromActivityKey undoes the prefix the activity key

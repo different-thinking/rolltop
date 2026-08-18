@@ -1500,7 +1500,14 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 				r.scheduleNextAttachmentIndexRetry(userID)
 			}
 			if stranded && r.context().Err() == nil {
-				r.scheduleAttachmentIndexRetry(userID, time.Now().Add(attachmentIndexStrandedRetryDelay))
+				// The stranded fallback is a ceiling, not a replacement: a
+				// per-message cooldown or continuation wake that is already
+				// due sooner keeps its earlier slot.
+				retryAt := time.Now().Add(attachmentIndexStrandedRetryDelay)
+				if wake, ok := r.Service.nextAttachmentIndexWake(userID); ok && wake.Before(retryAt) {
+					retryAt = wake
+				}
+				r.scheduleAttachmentIndexRetry(userID, retryAt)
 			}
 			if categorizedAny && !drainMore && r.context().Err() == nil {
 				r.Service.notify(userID)

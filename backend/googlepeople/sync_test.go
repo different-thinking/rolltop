@@ -8,6 +8,7 @@ package googlepeople
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -41,11 +42,35 @@ type fakePeople struct {
 	// updateConflict makes the next update fail with a stale-etag precondition.
 	updateConflict bool
 	deleted        []string
+	// holdFirstList, when set, blocks the first list call until the channel is
+	// closed. It is what lets a test hold one sync mid-flight and observe what
+	// a second one does in the meantime.
+	holdFirstList chan struct{}
+	// listStarted counts list requests as they arrive, before any hold. The
+	// calls counter only moves once a request completes, so a held request
+	// would otherwise be invisible to the test that is holding it.
+	listStarted int
+}
+
+func (f *fakePeople) startedListCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listStarted
 }
 
 func (f *fakePeople) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/people/me/connections", func(w http.ResponseWriter, r *http.Request) {
+		// The barrier waits outside the lock so a held first call cannot
+		// deadlock the very second call the test wants to observe.
+		f.mu.Lock()
+		hold := f.holdFirstList
+		first := f.listStarted == 0
+		f.listStarted++
+		f.mu.Unlock()
+		if first && hold != nil {
+			<-hold
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.syncTokens = append(f.syncTokens, r.URL.Query().Get("syncToken"))
@@ -522,16 +547,33 @@ func TestSyncRefusesAConnectionWithoutTheContactsScope(t *testing.T) {
 // that answer, and the second insert loses to the unique index over the
 // resource name -- which used to fail the whole run and leave the address book
 // as empty as it was before.
+//
+// The overlap is forced, not hoped for: the first sync is held mid-list while
+// the second starts, so the test fails if serialization is ever removed rather
+// than passing whenever the first sync happens to finish early.
 func TestConcurrentSyncsOfOneConnectionDoNotCollide(t *testing.T) {
-	fake := &fakePeople{responses: []ConnectionsPage{{
-		People: []Person{
-			personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test"),
-			personWithEmail("people/c2", "etag-2", "Grace", "grace@example.test"),
-			personWithEmail("people/c3", "etag-3", "Alan", "alan@example.test"),
-		},
-		NextSyncToken: "token-1",
-	}}}
+	hold := make(chan struct{})
+	fake := &fakePeople{
+		holdFirstList: hold,
+		responses: []ConnectionsPage{{
+			People: []Person{
+				personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test"),
+				personWithEmail("people/c2", "etag-2", "Grace", "grace@example.test"),
+				personWithEmail("people/c3", "etag-3", "Alan", "alan@example.test"),
+			},
+			NextSyncToken: "token-1",
+		}},
+	}
 	syncer, db, user := newSyncFixture(t, fake)
+	// The fixture's cleanup closes the test server, which waits for the held
+	// request; release the barrier first even when an assertion fails.
+	t.Cleanup(func() {
+		select {
+		case <-hold:
+		default:
+			close(hold)
+		}
+	})
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -542,6 +584,18 @@ func TestConcurrentSyncsOfOneConnectionDoNotCollide(t *testing.T) {
 			_, errs[index] = syncer.SyncConnection(context.Background(), user.ID, 7)
 		}(i)
 	}
+	// One sync is held inside Google's list call; the other must be waiting at
+	// the gate rather than listing too. Poll briefly: the goroutines need a
+	// moment to start at all.
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.startedListCalls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if started := fake.startedListCalls(); started != 1 {
+		t.Fatalf("list calls while one sync is held = %d, want 1: the second sync must wait at the gate", started)
+	}
+	close(hold)
 	wg.Wait()
 	for index, err := range errs {
 		if err != nil {
@@ -561,5 +615,45 @@ func TestConcurrentSyncsOfOneConnectionDoNotCollide(t *testing.T) {
 		if !ok || !contact.IsGoogleContact() {
 			t.Fatalf("%s = %+v, want a Google mirror", email, contact)
 		}
+	}
+}
+
+// A caller whose context ends while another sync holds the gate walks away with
+// that context's error. Standing in line would make a Sync now press wait out
+// the whole background sync only to fail afterwards anyway.
+func TestAWaitingSyncReturnsWhenItsContextEnds(t *testing.T) {
+	hold := make(chan struct{})
+	defer close(hold)
+	fake := &fakePeople{
+		holdFirstList: hold,
+		responses: []ConnectionsPage{{
+			People:        []Person{personWithEmail("people/c1", "etag-1", "Ada", "ada@example.test")},
+			NextSyncToken: "token-1",
+		}},
+	}
+	syncer, _, user := newSyncFixture(t, fake)
+
+	go func() {
+		_, _ = syncer.SyncConnection(context.Background(), user.ID, 7)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.startedListCalls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := syncer.SyncConnection(ctx, user.ID, 7)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiting sync returned %v, want the caller's cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled caller kept waiting for the running sync to finish")
 	}
 }

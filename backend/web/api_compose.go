@@ -23,6 +23,13 @@ const (
 	composeMaxUploadBytes            int64 = 80 << 20
 	composeMaxRequestBytes           int64 = 96 << 20
 	composeForegroundReservationWait       = 30 * time.Second
+	// The archive that follows a Send and archive runs on its own clock. The
+	// send has already succeeded, so this move may neither inherit the
+	// request's cancellation -- a proxy timing out must not kill the move
+	// mid-flight -- nor hold the response long enough to look like a failed
+	// send that the user would then retry into a duplicate.
+	archiveAfterSendTimeout         = 10 * time.Second
+	archiveAfterSendReservationWait = 2 * time.Second
 )
 
 func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
@@ -512,6 +519,12 @@ func (s *Server) archiveRepliedMessage(ctx context.Context, userID int64, form c
 	if !form.ArchiveAfterSend || form.InReplyToID <= 0 || s.syncer == nil {
 		return ""
 	}
+	// Detach from the request's lifetime, then bound the work independently.
+	// The message is already sent: a client that disconnects must not abort
+	// the move halfway, and a move that cannot finish promptly is given up on
+	// rather than delaying the answer to a send that succeeded.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), archiveAfterSendTimeout)
+	defer cancel()
 	message, err := s.store.GetMessageForUser(ctx, userID, form.InReplyToID)
 	if err != nil {
 		if !store.IsNotFound(err) {
@@ -546,7 +559,7 @@ func (s *Server) archiveRepliedMessage(ctx context.Context, userID int64, form c
 		log.Printf("archive after send user_id=%d message_id=%d: %v", userID, message.ID, err)
 		return ""
 	}
-	finishForeground, err := s.beginComposeForegroundOperation(ctx, userID)
+	finishForeground, err := s.beginComposeForegroundOperationWithin(ctx, userID, archiveAfterSendReservationWait)
 	if err != nil {
 		log.Printf("archive after send user_id=%d message_id=%d: %v", userID, message.ID, err)
 		return ""
