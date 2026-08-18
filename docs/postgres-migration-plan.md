@@ -125,8 +125,11 @@ locale, not configurable per database. That is acceptable, for two reasons:
 `scripts/pg-preflight.sql` verifies all of this against the actual target
 database (version/encoding gate, deterministic default, column- and
 index-level `COLLATE "C"` byte ordering, extensions, UTF-8 strictness, and
-the SQL features WP3 relies on). Run it via the SSH bastion before phase 1;
-it was validated against a stock Postgres 16 with a non-C cluster default.
+the SQL features WP3 relies on). The same checks also run from the admin
+Database page ("PostgreSQL preflight", `backend/pgpreflight`), which
+exercises the real app-to-database network path and reports its round-trip
+latency — prefer that over the bastion route. Run either before phase 1;
+both were validated against a stock Postgres 16.
 The startup fail-fast check becomes: default collation is deterministic and
 the baseline's own `COLLATE "C"` columns are present.
 
@@ -511,8 +514,9 @@ Hoster answers received 2026-08-18:
    `COLLATE "C"` in the baseline DDL. Equality stays byte-exact under any
    deterministic default collation, so this narrows the concern to
    ordering, which the column collation pins. Verified end-to-end by
-   `scripts/pg-preflight.sql`; run it against the provisioned database
-   before phase 1 starts.
+   `scripts/pg-preflight.sql` and by the in-app admin preflight
+   (`backend/pgpreflight`, admin Database page); run one of them against
+   the provisioned database before phase 1 starts.
 
 Still open:
 5. ~~Timing of phase 0~~ **Done** — shipped on `main` (see §5, phase 0).

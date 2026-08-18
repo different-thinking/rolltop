@@ -12,7 +12,7 @@ import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
 import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
 import type { DatePrefs, Toast } from "../../../appTypes";
-import type { DatabaseOverview, DatabaseStatus, ServerLogLine } from "../../../types";
+import type { DatabaseOverview, DatabaseStatus, PostgresPreflightReport, ServerLogLine } from "../../../types";
 
 const JOB_POLL_MS = 1500;
 const IDLE_POLL_MS = 15000;
@@ -35,6 +35,99 @@ function databaseState(database: DatabaseStatus): { label: string; tone: "ok" | 
   if (database.corrupt) return { label: "Damaged", tone: "bad" };
   if (database.repair_scheduled) return { label: "Repair scheduled", tone: "warn" };
   return { label: "No problems reported", tone: "ok" };
+}
+
+function preflightTone(status: string): string {
+  if (status === "pass") return "database-state is-ok";
+  if (status === "fail") return "database-state is-bad";
+  return "database-state";
+}
+
+/**
+ * PostgresPreflightCard runs the PostgreSQL migration preflight from inside
+ * the app container, which exercises the same network path the migrated
+ * store would use. The DSN stays in component state for the one request and
+ * is sent nowhere else; the server neither stores nor logs it.
+ */
+function PostgresPreflightCard({ csrf }: { csrf: string }) {
+  const [dsn, setDsn] = useState("");
+  const [running, setRunning] = useState(false);
+  const [report, setReport] = useState<PostgresPreflightReport | null>(null);
+  const [error, setError] = useState("");
+
+  async function run() {
+    setRunning(true);
+    setError("");
+    try {
+      setReport(await api.postgresPreflight(csrf, dsn));
+    } catch (err) {
+      setReport(null);
+      setError(messageFromError(err));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="database-log postgres-preflight">
+      <h2>PostgreSQL preflight</h2>
+      <p className="settings-hint">
+        Checks a candidate PostgreSQL database for the planned migration: version and encoding, collation
+        behavior, extensions, UTF-8 strictness, and the SQL features the port relies on. It runs from this
+        server, so the measured latency is the path the app would actually use. The connection string is used
+        for this one check and is not stored or logged.
+      </p>
+      <form
+        className="database-log-actions"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void run();
+        }}
+      >
+        <input
+          type="password"
+          value={dsn}
+          onChange={(event) => setDsn(event.target.value)}
+          placeholder="postgres://user:password@host:5432/dbname"
+          autoComplete="off"
+          aria-label="PostgreSQL connection string"
+          disabled={running}
+          style={{ flex: "1 1 24rem" }}
+        />
+        <button type="submit" className="secondary" disabled={running || !dsn.trim()}>
+          <Icon name="search" />
+          {running ? "Running checks…" : "Run preflight"}
+        </button>
+      </form>
+      {error ? <p className="settings-error">{error}</p> : null}
+      {report ? (
+        <>
+          <p className={report.ok ? "settings-hint" : "settings-error"}>
+            {report.ok
+              ? `All checks passed in ${report.duration_ms} ms. This database is ready for the migration.`
+              : "At least one check failed. This database is not ready for the migration."}
+          </p>
+          <table className="database-table">
+            <tbody>
+              {report.checks.map((check) => (
+                <tr key={check.id}>
+                  <td>
+                    <span className={preflightTone(check.status)}>
+                      {check.status === "pass" ? "Pass" : check.status === "fail" ? "Fail" : "Info"}
+                    </span>
+                  </td>
+                  <td>
+                    {check.title}
+                    {check.detail ? <small className="database-detail">{check.detail}</small> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 /**
@@ -363,6 +456,8 @@ export function AdminDatabaseView({
           </div>
         </>
       ) : null}
+
+      <PostgresPreflightCard csrf={csrf} />
 
       {/* Outside the overview guard on purpose. When the overview itself fails
           — a system database that cannot even list its users — the tail is the

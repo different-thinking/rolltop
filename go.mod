@@ -6,6 +6,7 @@ require (
 	github.com/blevesearch/bleve/v2 v2.6.0
 	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/pemistahl/lingua-go v1.4.0
 	golang.org/x/crypto v0.52.0
@@ -34,6 +35,8 @@ require (
 	github.com/blevesearch/zapx/v16 v16.3.4 // indirect
 	github.com/blevesearch/zapx/v17 v17.1.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect

@@ -24,6 +24,7 @@ import type {
   MessageSnooze,
   MessageOriginalSource,
   PluginSetting,
+  PostgresPreflightReport,
   SMTPAccount,
   ScopeMoveResponse,
   SearchExplanation,
@@ -632,6 +633,8 @@ export const api = {
     postJSON<{ ok: boolean }>(`/api/admin/users/${id}/password`, csrf, { password }),
   deleteUser: (csrf: string, id: number) =>
     deleteJSON<{ ok: boolean }>(`/api/admin/users/${id}`, csrf),
+  postgresPreflight: (csrf: string, dsn: string) =>
+    postJSON<PostgresPreflightReport>("/api/admin/postgres-preflight", csrf, { dsn }),
   database: () => getJSON<DatabaseOverview>("/api/admin/database"),
   databaseJob: () => getJSON<{ job: DatabaseMaintenanceJob | null }>("/api/admin/database/job"),
   checkDatabases: (csrf: string, scope = "", userID = 0) =>
