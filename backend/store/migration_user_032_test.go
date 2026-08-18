@@ -97,3 +97,20 @@ func TestGoogleContactMigrationIndexOnlyConstrainsLinkedContacts(t *testing.T) {
 		t.Fatalf("same resource name for another user: %v", err)
 	}
 }
+
+// The contact columns have to be in place before the calendar migration runs,
+// because both extend the same per-user schema and only their order decides
+// which checksum an installed database recorded.
+func TestUser032RunsAfterUser031(t *testing.T) {
+	sets := currentUserMigrationSetsForUpgradeTest()
+	for i, set := range sets {
+		if set.Version != UserSchemaVersion032 {
+			continue
+		}
+		if i == 0 || sets[i-1].Version != UserSchemaVersion031 {
+			t.Fatalf("user-032 runs at index %d, want it directly after %q", i, UserSchemaVersion031)
+		}
+		return
+	}
+	t.Fatalf("user-032 is not registered")
+}

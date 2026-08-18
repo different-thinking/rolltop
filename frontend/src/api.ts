@@ -5,6 +5,9 @@ import type {
   Account,
   AccountPurgeEstimate,
   Bootstrap,
+  CalendarEvent,
+  CalendarEventInput,
+  CalendarSummary,
   Contact,
   ContactAutocomplete,
   DatabaseMaintenanceJob,
@@ -497,6 +500,31 @@ export const api = {
     form.append("file", file);
     return postForm<{ ok: boolean; imported: number; updated: number; failed: number }>("/api/contacts/import", csrf, form);
   },
+  calendars: () => getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars"),
+  setCalendarSelected: (csrf: string, id: number, selected: boolean) =>
+    putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { selected }),
+  // The range is sent as absolute instants; which calendars are drawn is stored
+  // server-side, so the client never has to keep a second copy of that choice.
+  calendarEvents: (from: Date, to: Date) =>
+    getJSON<{ events: CalendarEvent[] }>(
+      `/api/calendar/events?${new URLSearchParams({ from: from.toISOString(), to: to.toISOString() })}`
+    ),
+  createCalendarEvent: (csrf: string, input: CalendarEventInput) =>
+    postJSON<{ event: CalendarEvent }>("/api/calendar/events", csrf, input),
+  updateCalendarEvent: (csrf: string, id: number, input: CalendarEventInput) =>
+    putJSON<{ event: CalendarEvent }>(`/api/calendar/events/${id}`, csrf, input),
+  deleteCalendarEvent: (csrf: string, id: number) =>
+    deleteJSON<{ ok: boolean }>(`/api/calendar/events/${id}`, csrf),
+  // Sync-now for one connected account. The calendar view offers it because a
+  // week that looks empty is the moment a user wants to force a refresh, and
+  // the settings page is two navigations away.
+  syncGoogleCalendar: (csrf: string, connectionID: number) =>
+    postJSON<{ calendars: number; created: number; updated: number; deleted: number }>(
+      `/api/google/connections/${connectionID}/calendar/sync`,
+      csrf
+    ),
+  respondToCalendarEvent: (csrf: string, id: number, response: string) =>
+    postJSON<{ event: CalendarEvent }>(`/api/calendar/events/${id}/respond`, csrf, { response }),
   addSenderContact: (csrf: string, id: number) =>
     postJSON<{ contact: Contact; created: boolean }>(`/api/messages/${id}/contacts/add-sender`, csrf),
   syncStatus: () => getJSON<{ running: boolean; latest: SyncRun | null }>("/api/sync/status"),

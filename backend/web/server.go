@@ -26,6 +26,7 @@ import (
 	"rolltop/backend/config"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/googleauth"
+	"rolltop/backend/googlecalendar"
 	"rolltop/backend/googlepeople"
 	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
@@ -70,6 +71,8 @@ type Options struct {
 	// GoogleContacts syncs Google contacts. It is built here when the manager
 	// is available so a server assembled by a test gets the same wiring main does.
 	GoogleContacts *googlepeople.Syncer
+	// GoogleCalendar syncs Google calendars, wired the same way.
+	GoogleCalendar *googlecalendar.Syncer
 	// RequestRestart asks the process supervisor for a controlled restart. The
 	// admin database repair needs one, because a tenant database can only be
 	// replaced while nothing holds a handle on it. Nil disables the action.
@@ -105,6 +108,7 @@ type Server struct {
 	webhookToken              string
 	googleAuth                *googleauth.Manager
 	googleContacts            *googlepeople.Syncer
+	googleCalendar            *googlecalendar.Syncer
 	requestRestart            func(userID int64, reason string)
 	maintenance               maintenanceState
 	backupSizeMu              sync.Mutex
@@ -300,6 +304,10 @@ func New(opts Options) (*Server, error) {
 		opts.GoogleContacts = googlepeople.NewSyncer(
 			opts.Store, opts.Blobs, opts.GoogleAuth, opts.GoogleAuth, googleauth.ScopeContacts)
 	}
+	if opts.GoogleCalendar == nil && opts.GoogleAuth != nil && opts.Store != nil {
+		opts.GoogleCalendar = googlecalendar.NewSyncer(
+			opts.Store, opts.GoogleAuth, opts.GoogleAuth, googleauth.ScopeCalendar)
+	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
 		return nil, err
@@ -342,6 +350,7 @@ func New(opts Options) (*Server, error) {
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
 		googleAuth:            opts.GoogleAuth,
 		googleContacts:        opts.GoogleContacts,
+		googleCalendar:        opts.GoogleCalendar,
 		requestRestart:        opts.RequestRestart,
 		events:                events,
 

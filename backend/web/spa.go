@@ -332,6 +332,9 @@ var spaRoutes = []spaRoute{
 	// /contacts/{id} doubles as a vCard download, so its subtree has its own
 	// handler that chooses between the file and the app shell.
 	{path: "/contacts", exact: true, prefix: true, ownPrefixHandler: true},
+	// /calendar/2026-08-17 selects the week a date falls in, so the subtree
+	// serves the app shell like the mailbox one does.
+	{path: "/calendar", exact: true, prefix: true},
 	{path: "/messages", prefix: true},
 	{path: "/sync-runs", prefix: true},
 	{path: "/settings/account", exact: true, prefix: true},

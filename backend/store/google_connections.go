@@ -232,6 +232,12 @@ func (s *Store) DeleteGoogleConnection(ctx context.Context, userID, connectionID
 	// Contacts keep their data and become local; the sync cursor is meaningless
 	// without the grant it was issued under and would otherwise be picked up by
 	// a later reconnect that reuses the id.
+	//
+	// Calendars go the other way and are removed outright. A contact can be
+	// typed in here and often exists nowhere else, so demoting it preserves the
+	// user's own data; a calendar is a pure mirror with no local editor behind
+	// it, and keeping one would leave a row in the sidebar that can never sync,
+	// never be edited, and never be switched off again.
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return err
@@ -254,6 +260,13 @@ func (s *Store) DeleteGoogleConnection(ctx context.Context, userID, connectionID
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM google_people_sync WHERE user_id = ? AND connection_id = ?`, userID, connectionID); err != nil {
+		return err
+	}
+	if err := deleteCalendarsForConnection(ctx, tx, userID, connectionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM google_calendar_sync WHERE user_id = ? AND connection_id = ?`, userID, connectionID); err != nil {
 		return err
 	}
 	return tx.Commit()

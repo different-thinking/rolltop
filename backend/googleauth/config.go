@@ -37,11 +37,17 @@ const ScopeMail = "https://mail.google.com/"
 // variant would only work for half the feature.
 const ScopeContacts = "https://www.googleapis.com/auth/contacts"
 
-// DefaultScopes covers identifying the account, IMAP/SMTP access and contacts.
+// ScopeCalendar is the read/write Calendar API scope. Rolltop creates, edits,
+// deletes events and answers invitations, so the read-only variant would leave
+// every write in the calendar UI failing at Google.
+const ScopeCalendar = "https://www.googleapis.com/auth/calendar"
+
+// DefaultScopes covers identifying the account, IMAP/SMTP access, contacts and
+// calendars.
 // Accounts connected before a scope was added keep the grant they consented to;
 // GoogleConnection.HasScope is what decides whether a feature may run, so the
 // settings page can offer re-authorization instead of failing at the API.
-var DefaultScopes = []string{"openid", "email", ScopeMail, ScopeContacts}
+var DefaultScopes = []string{"openid", "email", ScopeMail, ScopeContacts, ScopeCalendar}
 
 // Config describes the single OAuth client shared by all Rolltop users. Each
 // user still authorizes their own Google accounts against it.

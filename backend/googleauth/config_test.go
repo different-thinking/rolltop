@@ -24,8 +24,10 @@ func TestNewFillsDefaultScopesAndEndpoints(t *testing.T) {
 		t.Fatalf("config = %+v, want trimmed and configured", cfg)
 	}
 	scopes := cfg.ScopeString()
-	if !strings.Contains(scopes, ScopeMail) || !strings.Contains(scopes, ScopeContacts) {
-		t.Fatalf("default scopes = %v, want the mail and contacts scopes included", cfg.Scopes)
+	for _, want := range []string{ScopeMail, ScopeContacts, ScopeCalendar} {
+		if !strings.Contains(scopes, want) {
+			t.Fatalf("default scopes = %v, want %q included", cfg.Scopes, want)
+		}
 	}
 	if cfg.TokenEndpoint != DefaultTokenEndpoint || cfg.UserinfoEndpoint != DefaultUserinfoEndpoint {
 		t.Fatalf("endpoints not defaulted: %+v", cfg)

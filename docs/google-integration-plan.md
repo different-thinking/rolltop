@@ -192,6 +192,22 @@ Berührt: `backend/store/contacts.go` (924 Zeilen, gut wiederverwendbar),
 Komplett neues Feature — es existiert null Kalender-Code (kein ICS-Parsing, keine
 Ansicht, kein Datenmodell). Der größte Einzelposten ist die Frontend-Kalenderansicht.
 
+> **Stand:** Der MVP-Schnitt ist umgesetzt — Datenmodell (`user-033`),
+> `backend/googlecalendar` (REST-Client, Sync, Rückschreiben), `/api/calendar`,
+> die Wochenansicht mit Mehrkalender-Overlay unter `/calendar` und der
+> Termin-Dialog inkl. Einladungsantwort. Polling alle 5 Minuten. Offen bleiben
+> die als „zweiter Schritt" markierten Monats- und Agenda-Ansicht, Drag&Drop und
+> die Ausbaustufe „Einladungen aus E-Mails".
+>
+> Zwei Festlegungen, die im Plan noch offen waren:
+> - **Ganztägige Termine** werden auf Mitternacht **UTC** verankert. Ein
+>   Datum ohne Zeitpunkt an die Zone des Betrachters zu binden verschiebt einen
+>   Feiertag für alle westlich davon auf den Vortag.
+> - **Beim Trennen eines Google-Kontos werden Kalender gelöscht**, anders als
+>   Kontakte. Ein Kalender ist ein reiner Spiegel ohne lokalen Editor; ein
+>   zurückgelassener könnte nie wieder synchronisieren, nie bearbeitet und nie
+>   wieder ausgeblendet werden.
+
 ### Datenmodell
 
 ```
@@ -272,7 +288,9 @@ Berührt: neu `backend/googlecalendar/`, `backend/store/migration_user_03x.go`,
 |---|---|---|
 | Verifizierung | Testmodus / Produktion unverifiziert / Voll-Verifizierung | **Entschieden:** Produktion unverifiziert (Privatbetrieb) |
 | Kontakte löschen | bidirektional / nur lokal | **Entschieden:** bidirektional mit Bestätigung |
-| Kalender-MVP | Wochenansicht zuerst / Monat+Agenda zuerst | **Entschieden:** Wochenansicht + Mehrkalender-Overlay zuerst, Monat/Agenda danach |
+| Kalender-MVP | Wochenansicht zuerst / Monat+Agenda zuerst | **Entschieden:** Wochenansicht + Mehrkalender-Overlay zuerst, Monat/Agenda danach — Wochenansicht ausgeliefert |
+| Ganztägige Termine | Zone des Betrachters / UTC-Anker | **Entschieden:** UTC-Mitternacht, überall in UTC formatiert |
+| Kalender beim Trennen | behalten wie Kontakte / löschen | **Entschieden:** löschen (reiner Spiegel ohne lokalen Editor) |
 | Dependencies | `x/oauth2` + eigene REST-Clients / `google.golang.org/api` | Empfehlung: `x/oauth2` + eigene schlanke Clients |
 | Kalender-Push | Polling / `events.watch`-Webhooks | Empfehlung: Polling zuerst, Webhooks später |
 | Einbau-Ort | Core / Plugin-System | Empfehlung: Core (Auth & Mail zwingend; Kontakte/Kalender der Konsistenz wegen ebenfalls) |

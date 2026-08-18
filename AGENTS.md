@@ -40,6 +40,23 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
 - Disconnecting a Google account demotes its contacts to local ones. Do not
   make it delete them: the user asked to stop syncing, and Rolltop's copy is
   often the only one they can still reach.
+- Google is the leading system for calendars as well, and by the same rule: a
+  create, edit, deletion or invitation answer reaches Google before the local
+  row changes, and an etag conflict is resolved by adopting Google's version.
+  Disconnecting an account does delete its calendars, unlike its contacts — a
+  calendar is a pure mirror with no local editor behind it, and one left behind
+  could never sync, never be edited and never be switched off again.
+- An all-day event has no instant. Its bounds are stored as midnight **UTC** of
+  the plain dates Google named, and everything that formats or compares one has
+  to read it in UTC. Anchoring it to the viewer's zone moves a public holiday
+  onto the wrong day for anyone west of that zone.
+- The Calendar sync window lives inside Google's sync token. A request carrying
+  a `syncToken` must not also carry `timeMin`; keep every other parameter
+  (`singleEvents`, `showDeleted`) identical between the initial read and its
+  deltas, or the deltas are undefined.
+- A calendar the user has switched off is not synced. Switching one on triggers
+  its own first sync, because an unsynced week renders as an empty one and reads
+  as "nothing scheduled".
 - A cross-account duplicate copy is hidden behind a pointer to the row that stays
   visible, and that pointer is only safe while it resolves. Deletes clear it in a
   SQLite trigger rather than in Go, because reconciliation, folder purges, account
