@@ -13,7 +13,30 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/mattn/go-sqlite3"
 )
+
+// exclusiveDriverName is a second registration of the same SQLite driver whose
+// connect hook turns WAL on after the connection is built.
+//
+// The order is the whole point. SQLite only leaves the shared index out of a WAL
+// database when EXCLUSIVE locking is set before the first WAL access, and the
+// driver applies its DSN pragmas in its own fixed order - journal_mode first,
+// locking_mode after it. Asking for both in the DSN therefore still creates a
+// `-shm` file for a database that is already in WAL mode, which is every
+// database that has ever run. Leaving journal_mode out of the DSN and setting it
+// from the hook, which runs last, puts the locking mode first.
+const exclusiveDriverName = "sqlite3-rolltop-exclusive"
+
+func init() {
+	sql.Register(exclusiveDriverName, &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			_, err := conn.Exec("PRAGMA journal_mode = WAL;", nil)
+			return err
+		},
+	})
+}
 
 // AccessMode selects how SQLite coordinates access to a database file.
 type AccessMode int
@@ -55,19 +78,28 @@ func ParseAccessMode(raw string) (AccessMode, error) {
 	}
 }
 
+// driverName selects the driver registration that carries the WAL pragma for
+// this mode.
+func (m AccessMode) driverName() string {
+	if m == AccessExclusive {
+		return exclusiveDriverName
+	}
+	return "sqlite3"
+}
+
 // dataSourceName builds the DSN for one database file.
 //
 // BEGIN IMMEDIATE queues transactions for SQLite's single writer at the start,
 // instead of allowing concurrent readers to deadlock while both try to upgrade a
 // stale WAL snapshot to a writer.
 func (m AccessMode) dataSourceName(path string) string {
-	dsn := path + "?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate"
+	dsn := path + "?_foreign_keys=on&_busy_timeout=5000&_synchronous=NORMAL&_txlock=immediate"
 	if m == AccessExclusive {
-		// Set before the first access, because SQLite can only leave shared
-		// memory out of a WAL database it has not opened normally yet.
-		dsn += "&_locking_mode=exclusive"
+		// journal_mode is deliberately absent here and set by the connect hook
+		// instead, so that this lands before the first WAL access.
+		return dsn + "&_locking_mode=exclusive"
 	}
-	return dsn
+	return dsn + "&_journal_mode=WAL"
 }
 
 // applyConnectionLimits sizes the pool for the mode.

@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,16 +36,24 @@ func TestParseAccessMode(t *testing.T) {
 func TestExclusiveAccessAsksForLockingModeAndOneConnection(t *testing.T) {
 	shared := AccessShared.dataSourceName("/data/rolltop.db")
 	exclusive := AccessExclusive.dataSourceName("/data/rolltop.db")
-	for _, required := range []string{"_journal_mode=WAL", "_busy_timeout=5000", "_txlock=immediate", "_foreign_keys=on"} {
+	for _, required := range []string{"_busy_timeout=5000", "_txlock=immediate", "_foreign_keys=on"} {
 		if !strings.Contains(shared, required) || !strings.Contains(exclusive, required) {
 			t.Fatalf("%q missing from one of the DSNs", required)
 		}
 	}
-	if strings.Contains(shared, "_locking_mode") {
-		t.Fatalf("shared DSN sets a locking mode: %s", shared)
+	if strings.Contains(shared, "_locking_mode") || !strings.Contains(shared, "_journal_mode=WAL") {
+		t.Fatalf("shared DSN = %s", shared)
 	}
-	if !strings.Contains(exclusive, "_locking_mode=exclusive") {
+	if AccessShared.driverName() != "sqlite3" {
+		t.Fatalf("shared driver = %s", AccessShared.driverName())
+	}
+	// The driver applies journal_mode before locking_mode whatever the DSN
+	// says, so exclusive mode asks for WAL from the connect hook instead.
+	if !strings.Contains(exclusive, "_locking_mode=exclusive") || strings.Contains(exclusive, "_journal_mode") {
 		t.Fatalf("exclusive DSN = %s", exclusive)
+	}
+	if AccessExclusive.driverName() != exclusiveDriverName {
+		t.Fatalf("exclusive driver = %s", AccessExclusive.driverName())
 	}
 
 	db := &sql.DB{}
@@ -142,5 +151,146 @@ func TestCheckDatabaseFallsBackToTheFileWithoutALiveHandle(t *testing.T) {
 	problems, err := db.CheckDatabase(ctx, user.ID+1, path)
 	if err != nil || len(problems) != 0 {
 		t.Fatalf("CheckDatabase without a live handle = %v, %v", problems, err)
+	}
+}
+
+// The whole point of exclusive mode is that SQLite never creates the shared
+// index, and the case that matters is a database that is already in WAL - which
+// is every database that has ever run. SQLite only leaves the index out when
+// EXCLUSIVE locking is set before the first WAL access, and the driver applies
+// DSN pragmas in its own order, so this asserts the outcome rather than the
+// spelling.
+func TestExclusiveAccessNeverCreatesTheSharedIndex(t *testing.T) {
+	ctx := context.Background()
+	for _, existing := range []bool{false, true} {
+		name := "fresh database"
+		if existing {
+			name = "database already in WAL"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "rolltop.db")
+			if existing {
+				seeded, err := open(path, "", false, schemaCombined, nil, defaultPluginCatalog(), AccessShared)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := seeded.CreateUser(ctx, "seed@example.test", "Seed", "hash", false); err != nil {
+					t.Fatal(err)
+				}
+				if err := seeded.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(path + "-shm"); err == nil {
+					t.Fatal("the seeded database left a shared index behind, so this proves nothing")
+				}
+			}
+
+			db, err := open(path, "", false, schemaCombined, nil, defaultPluginCatalog(), AccessExclusive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.CreateUser(ctx, "exclusive@example.test", "Exclusive", "hash", false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path + "-shm"); !os.IsNotExist(err) {
+				t.Fatalf("exclusive mode created %s-shm: %v", path, err)
+			}
+			// It still has to be a WAL database: the mode is about the index,
+			// not about giving up the write-ahead log.
+			var journal string
+			if err := db.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journal); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.EqualFold(journal, "wal") {
+				t.Fatalf("journal mode = %q, want wal", journal)
+			}
+			var locking string
+			if err := db.db.QueryRowContext(ctx, `PRAGMA locking_mode`).Scan(&locking); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.EqualFold(locking, "exclusive") {
+				t.Fatalf("locking mode = %q, want exclusive", locking)
+			}
+		})
+	}
+}
+
+// Shared mode keeps the index it depends on.
+func TestSharedAccessKeepsTheSharedIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rolltop.db")
+	db, err := open(path, "", false, schemaCombined, nil, defaultPluginCatalog(), AccessShared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.CreateUser(context.Background(), "shared@example.test", "Shared", "hash", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + "-shm"); err != nil {
+		t.Fatalf("shared mode did not create the WAL index: %v", err)
+	}
+}
+
+// ROLLTOP_DB_PATH can put the system database on a different filesystem than the
+// tenant databases, so an automatic mode has to be answered per file rather than
+// once for the installation.
+func TestAutomaticAccessIsResolvedForEachDatabaseFile(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	systemPath := filepath.Join(t.TempDir(), "elsewhere", "rolltop.db")
+	db, err := OpenServerWithOptions(systemPath, ServerOptions{DataDir: dataDir, Access: AccessAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if db.accessConfigured != AccessAuto {
+		t.Fatalf("configured access = %v, want it retained for later files", db.accessConfigured)
+	}
+	wantSystem, _ := ResolveAccessMode(AccessAuto, filepath.Dir(systemPath))
+	if db.AccessMode() != wantSystem {
+		t.Fatalf("system access = %v, want %v from its own directory", db.AccessMode(), wantSystem)
+	}
+
+	user, err := db.CreateUser(ctx, "resolved@example.test", "Resolved", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := db.UserStore(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTenant, _ := ResolveAccessMode(AccessAuto, filepath.Dir(UserDatabaseFilePath(dataDir, user.ID)))
+	if tenant.AccessMode() != wantTenant {
+		t.Fatalf("tenant access = %v, want %v from the data directory", tenant.AccessMode(), wantTenant)
+	}
+}
+
+// An explicit mode still reaches every database, including tenants opened later.
+func TestExplicitAccessReachesTenantDatabases(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	db, err := OpenServerWithOptions(filepath.Join(dataDir, "rolltop.db"), ServerOptions{
+		DataDir: dataDir, Access: AccessExclusive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "explicit@example.test", "Explicit", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := db.UserStore(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.AccessMode() != AccessExclusive || tenant.AccessMode() != AccessExclusive {
+		t.Fatalf("access modes = system %v, tenant %v, want exclusive for both", db.AccessMode(), tenant.AccessMode())
+	}
+	if _, err := os.Stat(UserDatabaseFilePath(dataDir, user.ID) + "-shm"); !os.IsNotExist(err) {
+		t.Fatalf("tenant database created a shared index: %v", err)
 	}
 }

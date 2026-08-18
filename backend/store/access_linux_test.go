@@ -5,6 +5,7 @@
 package store
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,8 +44,24 @@ func TestDetectFilesystemNamesWhatItFound(t *testing.T) {
 	if strings.HasPrefix(report.Name, "unknown (") && !report.SharedMemorySafe {
 		t.Fatalf("unknown filesystem %q was treated as unsafe", report.Name)
 	}
-	missing := DetectFilesystem("/proc/rolltop-does-not-exist")
-	if missing.Name != "unknown" || !missing.SharedMemorySafe {
-		t.Fatalf("unstattable path = %+v", missing)
+	// A path with no inspectable ancestor at all is the only case left that
+	// cannot be classified.
+	if unstattable := DetectFilesystem(""); unstattable.Name != "unknown" || !unstattable.SharedMemorySafe {
+		t.Fatalf("unstattable path = %+v", unstattable)
+	}
+}
+
+// A first start creates the data directory, so detection has to describe the
+// mount it will be created in rather than giving up on the missing path. Getting
+// this wrong picks shared mode on exactly the volumes that cannot host it.
+func TestDetectFilesystemWalksUpToAnExistingAncestor(t *testing.T) {
+	existing := t.TempDir()
+	want := DetectFilesystem(existing)
+	missing := filepath.Join(existing, "users", "1", "not-created-yet")
+	if got := DetectFilesystem(missing); got != want {
+		t.Fatalf("DetectFilesystem(%q) = %+v, want the ancestor's %+v", missing, got, want)
+	}
+	if magic, ok := filesystemMagic(missing); !ok || magic == 0 {
+		t.Fatalf("filesystemMagic(%q) = 0x%x, %t", missing, magic, ok)
 	}
 }

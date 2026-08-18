@@ -429,16 +429,13 @@ func run() (runErr error) {
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
 	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
-	// Decided before anything opens a database, and named here because it
-	// changes how SQLite behaves for the whole run.
-	sqliteAccess, filesystem := store.ResolveAccessMode(cfg.SQLiteAccess, cfg.DataDir)
-	log.Printf("rolltop sqlite access=%s filesystem=%s", sqliteAccess, filesystem.Name)
-	if !filesystem.SharedMemorySafe {
-		// The one failure this cannot be diagnosed from afterwards: a WAL index
-		// on such a volume corrupts databases hours later, with nothing in the
-		// log tying the damage to the storage.
-		log.Printf("rolltop warning: %s cannot be trusted with SQLite's shared WAL index; "+
-			"databases are opened one connection at a time without it", filesystem.Name)
+	// Each database resolves its own mode when it is opened, because the system
+	// database can be configured onto a different filesystem than the tenant
+	// databases. Both are reported here, since the choice changes how SQLite
+	// behaves for the whole run.
+	reportSQLiteAccess(cfg.SQLiteAccess, "data directory", cfg.DataDir)
+	if systemDir := filepath.Dir(cfg.DatabasePath); systemDir != filepath.Clean(cfg.DataDir) {
+		reportSQLiteAccess(cfg.SQLiteAccess, "system database", systemDir)
 	}
 	// A deployment that starts the replacement before stopping the process it
 	// replaces makes both want this directory for a few seconds. Waiting is what
@@ -488,7 +485,7 @@ func run() (runErr error) {
 
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
-	app, err := startApp(appCtx, cfg, sqliteAccess, startup, uncleanShutdown)
+	app, err := startApp(appCtx, cfg, startup, uncleanShutdown)
 	if err != nil {
 		startup.fail(err)
 		log.Printf("rolltop startup failed: %v", err)
@@ -564,7 +561,20 @@ func run() (runErr error) {
 
 // startApp performs the blocking startup work in dependency order: schema,
 // user stores, interrupted sync cleanup, search indexes, then web/sync services.
-func startApp(ctx context.Context, cfg config.Config, access store.AccessMode, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
+// reportSQLiteAccess names the mode one location resolves to. The failure it
+// guards against cannot be diagnosed afterwards: a WAL index on a volume that
+// cannot host it corrupts databases hours later, with nothing in the log tying
+// the damage to the storage.
+func reportSQLiteAccess(configured store.AccessMode, label, path string) {
+	access, filesystem := store.ResolveAccessMode(configured, path)
+	log.Printf("rolltop sqlite access=%s %s filesystem=%s", access, label, filesystem.Name)
+	if !filesystem.SharedMemorySafe {
+		log.Printf("rolltop warning: the %s is on %s, which cannot be trusted with SQLite's shared WAL index; "+
+			"databases there are opened one connection at a time without it", label, filesystem.Name)
+	}
+}
+
+func startApp(ctx context.Context, cfg config.Config, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
 	startup.update("System database", "opening", 0, 1)
 	pluginManifests, err := plugins.LoadManifests(cfg.PluginDir)
 	if err != nil {
@@ -591,7 +601,7 @@ func startApp(ctx context.Context, cfg config.Config, access store.AccessMode, s
 		DataDir:   cfg.DataDir,
 		Manifests: pluginManifests,
 		Progress:  reporter,
-		Access:    access,
+		Access:    cfg.SQLiteAccess,
 	})
 	if err != nil {
 		return nil, err

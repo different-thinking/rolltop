@@ -6,7 +6,9 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"syscall"
 )
 
@@ -51,15 +53,15 @@ var sharedMemoryUnsafeFilesystems = map[int64]string{
 // DetectFilesystem identifies the storage under a path. An unrecognized
 // filesystem is reported by its superblock number and treated as safe, so a
 // local filesystem this list has not heard of keeps the behavior it had.
+//
+// A data directory that does not exist yet is the normal case on a first start,
+// and the mount it will be created in is what matters, so the walk continues up
+// to the nearest existing ancestor rather than giving up on the first ENOENT.
 func DetectFilesystem(path string) FilesystemReport {
-	if path == "" {
+	magic, ok := filesystemMagic(path)
+	if !ok {
 		return FilesystemReport{Name: "unknown", SharedMemorySafe: true}
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return FilesystemReport{Name: "unknown", SharedMemorySafe: true}
-	}
-	magic := int64(stat.Type)
 	if name, ok := sharedMemoryUnsafeFilesystems[magic]; ok {
 		return FilesystemReport{Name: name, SharedMemorySafe: false}
 	}
@@ -67,4 +69,21 @@ func DetectFilesystem(path string) FilesystemReport {
 		return FilesystemReport{Name: name, SharedMemorySafe: true}
 	}
 	return FilesystemReport{Name: fmt.Sprintf("unknown (0x%x)", magic), SharedMemorySafe: true}
+}
+
+func filesystemMagic(path string) (int64, bool) {
+	for path != "" {
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(path, &stat); err == nil {
+			return int64(stat.Type), true
+		} else if !errors.Is(err, syscall.ENOENT) {
+			return 0, false
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return 0, false
+		}
+		path = parent
+	}
+	return 0, false
 }

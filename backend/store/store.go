@@ -40,6 +40,7 @@ type Store struct {
 	pluginDefinitions []plugins.Definition
 	pluginMigrations  []plugins.Migration
 	access            AccessMode
+	accessConfigured  AccessMode
 	mu                sync.Mutex
 	userStores        map[int64]*Store
 	healthMu          sync.Mutex
@@ -62,8 +63,7 @@ func OpenServer(path string, dataDir string) (*Store, error) {
 // databases are opened lazily through UserStore so tenant-owned data remains in
 // data/users/<id>/rolltop.db.
 func OpenServerWithProgress(path string, dataDir string, progress MigrationReporter) (*Store, error) {
-	access, _ := ResolveAccessMode(AccessAuto, dataDir)
-	return open(path, dataDir, true, schemaSystem, progress, defaultPluginCatalog(), access)
+	return open(path, dataDir, true, schemaSystem, progress, defaultPluginCatalog(), AccessAuto)
 }
 
 // OpenServerWithPluginManifests opens the production system store with a plugin
@@ -84,13 +84,12 @@ type ServerOptions struct {
 	Access AccessMode
 }
 
-// OpenServerWithOptions is the production entrypoint.
+// OpenServerWithOptions is the production entrypoint. An automatic access mode
+// is resolved per database file rather than once for the installation, because
+// ROLLTOP_DB_PATH can put the system database on a different filesystem than the
+// tenant databases under the data directory.
 func OpenServerWithOptions(path string, opts ServerOptions) (*Store, error) {
-	access := opts.Access
-	if access == AccessAuto {
-		access, _ = ResolveAccessMode(access, opts.DataDir)
-	}
-	return open(path, opts.DataDir, true, schemaSystem, opts.Progress, pluginCatalogFromManifests(opts.Manifests), access)
+	return open(path, opts.DataDir, true, schemaSystem, opts.Progress, pluginCatalogFromManifests(opts.Manifests), opts.Access)
 }
 
 // open is the shared constructor behind all Store entrypoints. It creates the
@@ -101,10 +100,11 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	if access == AccessAuto {
-		access = AccessShared
-	}
-	db, err := sql.Open("sqlite3", access.dataSourceName(path))
+	// Resolved here, once the directory exists, so the answer describes the
+	// filesystem this database actually lands on.
+	configured := access
+	access, _ = ResolveAccessMode(access, filepath.Dir(path))
+	db, err := sql.Open(access.driverName(), access.dataSourceName(path))
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +116,7 @@ func open(path string, dataDir string, split bool, schema schemaKind, progress M
 		schema:            schema,
 		split:             split,
 		access:            access,
+		accessConfigured:  configured,
 		pluginDefinitions: append([]plugins.Definition(nil), catalog.definitions...),
 		pluginMigrations:  append([]plugins.Migration(nil), catalog.migrations...),
 	}
@@ -239,7 +240,7 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 	us, err := open(userDBPath, "", false, schemaUser, progress, pluginCatalog{
 		definitions: s.pluginDefinitions,
 		migrations:  s.pluginMigrations,
-	}, s.access)
+	}, s.accessConfigured)
 	if err != nil {
 		return nil, s.NoteError(userID, err)
 	}
