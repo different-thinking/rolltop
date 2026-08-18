@@ -177,7 +177,9 @@ func TestTranslateKeepsLiteralsIntact(t *testing.T) {
 	objects, err := Translate([]SQLiteObject{{Kind: TableKind, Name: "t", SQL: `CREATE TABLE t (
 		note TEXT NOT NULL DEFAULT 'REFERENCES u(id)',
 		spaced TEXT NOT NULL DEFAULT 'a  b',
-		quoted TEXT NOT NULL DEFAULT 'it''s here'
+		quoted TEXT NOT NULL DEFAULT 'it''s here',
+		binary_note TEXT NOT NULL DEFAULT 'literal COLLATE BINARY value',
+		nocase_note TEXT NOT NULL DEFAULT 'literal COLLATE NOCASE value'
 	)`}})
 	if err != nil {
 		t.Fatal(err)
@@ -190,10 +192,31 @@ func TestTranslateKeepsLiteralsIntact(t *testing.T) {
 		`note text COLLATE "C" NOT NULL DEFAULT 'REFERENCES u(id)'`,
 		`spaced text COLLATE "C" NOT NULL DEFAULT 'a  b'`,
 		`quoted text COLLATE "C" NOT NULL DEFAULT 'it''s here'`,
+		`binary_note text COLLATE "C" NOT NULL DEFAULT 'literal COLLATE BINARY value'`,
+		`nocase_note text COLLATE "C" NOT NULL DEFAULT 'literal COLLATE NOCASE value'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("literal was rewritten; missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+// TestTranslateStripsRealCollateOutsideLiterals is the other half of the
+// literal test: an actual column collation still has to be removed, and an
+// actual NOCASE index column still has to become lower().
+func TestTranslateStripsRealCollateOutsideLiterals(t *testing.T) {
+	objects := translateOne(t, TableKind, "t",
+		`CREATE TABLE t (sha TEXT NOT NULL DEFAULT '' COLLATE BINARY)`)
+	if strings.Contains(objects[0].SQL, "COLLATE BINARY") {
+		t.Errorf("a real COLLATE BINARY was not removed:\n%s", objects[0].SQL)
+	}
+	if !strings.Contains(objects[0].SQL, `sha text COLLATE "C" NOT NULL DEFAULT ''`) {
+		t.Errorf("column lost its shape:\n%s", objects[0].SQL)
+	}
+	index := translateOne(t, IndexKind, "i",
+		`CREATE INDEX i ON t(name COLLATE NOCASE) WHERE note <> 'COLLATE NOCASE'`)
+	if index[0].SQL != `CREATE INDEX i ON t (lower(name)) WHERE note <> 'COLLATE NOCASE';` {
+		t.Errorf("index collation handling changed a literal or missed a real one:\n%s", index[0].SQL)
 	}
 }
 

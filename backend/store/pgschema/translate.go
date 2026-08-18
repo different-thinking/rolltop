@@ -205,7 +205,7 @@ func translateTable(ddl string) (string, []string, error) {
 			continue
 		}
 		if tableConstraintRE.MatchString(part) {
-			rendered = append(rendered, "  "+collateBinary.ReplaceAllString(part, ""))
+			rendered = append(rendered, "  "+replaceOutsideStrings(part, collateBinary, ""))
 			continue
 		}
 		column, reference, err := translateColumn(part)
@@ -235,7 +235,7 @@ func translateTable(ddl string) (string, []string, error) {
 // indexes exist. The remainder (NOT NULL, DEFAULT, CHECK) is valid PostgreSQL
 // as written and passes through untouched.
 func translateColumn(definition string) (string, string, error) {
-	definition = collateBinary.ReplaceAllString(definition, "")
+	definition = replaceOutsideStrings(definition, collateBinary, "")
 	reference := ""
 	// Located with a string-literal-aware search: a plain regex also matches
 	// REFERENCES inside a quoted DEFAULT, which would corrupt the default and
@@ -313,8 +313,8 @@ func translateIndex(ddl string) (string, error) {
 	// case-insensitive intent becomes an expression index on lower(). Queries
 	// must be written as lower(col) to use it — recorded as a WP3 obligation
 	// in the migration plan.
-	columns = collateNoCase.ReplaceAllString(columns, "lower($1)")
-	columns = collateBinary.ReplaceAllString(columns, "")
+	columns = replaceOutsideStrings(columns, collateNoCase, "lower($1)")
+	columns = replaceOutsideStrings(columns, collateBinary, "")
 	if columns, err = translatePortableExpression(columns); err != nil {
 		return "", err
 	}
@@ -547,9 +547,34 @@ func collapse(value string) string {
 	return strings.TrimSpace(out.String())
 }
 
-// findOutsideStrings locates the first match of pattern that begins outside a
-// string literal, and returns its byte range.
-func findOutsideStrings(value string, pattern *regexp.Regexp) (int, int, bool) {
+// replaceOutsideStrings applies pattern only to the parts of value that are
+// not inside a string literal.
+//
+// Every rewrite this translator performs has to go through here. A plain
+// ReplaceAllString also edits quoted DEFAULT values: SQLite
+// DEFAULT 'literal COLLATE BINARY value' would silently become
+// DEFAULT 'literal value', changing what every new row stores. The same class
+// of bug hit the foreign-key extraction first; this is its collation twin.
+func replaceOutsideStrings(value string, pattern *regexp.Regexp, replacement string) string {
+	literal := literalPositions(value)
+	var out strings.Builder
+	out.Grow(len(value))
+	last := 0
+	for _, match := range pattern.FindAllStringIndex(value, -1) {
+		if literal[match[0]] {
+			continue
+		}
+		out.WriteString(value[last:match[0]])
+		out.WriteString(pattern.ReplaceAllString(value[match[0]:match[1]], replacement))
+		last = match[1]
+	}
+	out.WriteString(value[last:])
+	return out.String()
+}
+
+// literalPositions marks the byte offsets that sit inside a string literal or
+// a comment.
+func literalPositions(value string) map[int]bool {
 	literal := make(map[int]bool)
 	_ = scanSQL(value, func(t token) bool {
 		if t.inString || t.inCommen {
@@ -557,6 +582,13 @@ func findOutsideStrings(value string, pattern *regexp.Regexp) (int, int, bool) {
 		}
 		return true
 	})
+	return literal
+}
+
+// findOutsideStrings locates the first match of pattern that begins outside a
+// string literal, and returns its byte range.
+func findOutsideStrings(value string, pattern *regexp.Regexp) (int, int, bool) {
+	literal := literalPositions(value)
 	for _, match := range pattern.FindAllStringIndex(value, -1) {
 		if !literal[match[0]] {
 			return match[0], match[1], true
