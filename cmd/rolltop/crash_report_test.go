@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -286,4 +287,71 @@ func truncateForMessage(contents []byte) string {
 		return string(contents[:120]) + "..."
 	}
 	return string(contents)
+}
+
+// The production symptom this replaces a size comparison for: a baseline that
+// sits one start marker behind the log made every restart announce a crash and
+// point at a report that was not there.
+func TestStaleBaselineDoesNotInventACrashReport(t *testing.T) {
+	dataDir := t.TempDir()
+	restart(t, dataDir, nil)
+	restart(t, dataDir, nil)
+
+	// Rewind the recorded baseline by one marker, which is what a stat answered
+	// from cache leaves behind.
+	statePath := filepath.Join(dataDir, crashStateName)
+	state, ok := readRunState(statePath)
+	if !ok {
+		t.Fatal("no run state to rewind")
+	}
+	markers, err := os.ReadFile(filepath.Join(dataDir, crashLogName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastMarker := strings.LastIndex(strings.TrimRight(string(markers), "\n"), "\n") + 1
+	state.CrashLogBytes = int64(lastMarker)
+	rewritten, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, append(rewritten, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := restart(t, dataDir, nil)
+
+	if strings.Contains(logs, "crash or fatal error") {
+		t.Fatalf("a log that only grew by start markers was read as a crash: %q", logs)
+	}
+	if strings.Contains(logs, "without a clean shutdown") {
+		t.Fatalf("a clean shutdown was reported as unclean: %q", logs)
+	}
+}
+
+// The other direction: a real report among the markers must still be found.
+func TestReportAmongStartMarkersIsStillReported(t *testing.T) {
+	dataDir := t.TempDir()
+	restart(t, dataDir, errors.New("store failed to open"))
+
+	logs := restart(t, dataDir, nil)
+
+	if !strings.Contains(logs, "crash or fatal error") {
+		t.Fatalf("a persisted fatal was not reported: %q", logs)
+	}
+}
+
+func TestRunStartMarkerIsRecognized(t *testing.T) {
+	marker := fmt.Sprintf(runStartMarkerFormat, "latest", "2026-08-18T18:35:32Z", 1)
+	if !isRunStartMarker(marker) {
+		t.Fatalf("the marker this build writes is not recognized: %q", marker)
+	}
+	for _, report := range []string{
+		"2026-08-17T11:40:14Z fatal: listen on :8080: bind: address already in use",
+		"panic: runtime error: invalid memory address",
+		"Tree 12 page 13806: btreeInitPage() returns error code 11",
+	} {
+		if isRunStartMarker(report) {
+			t.Fatalf("report line read as a start marker: %q", report)
+		}
+	}
 }

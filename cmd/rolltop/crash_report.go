@@ -16,13 +16,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -107,11 +110,16 @@ func (c *crashReporter) open() {
 func (c *crashReporter) beginRun(version string) {
 	previous, hadPreviousRun := readRunState(c.statePath())
 	size := c.crashLogSize()
+	reported, grown := false, int64(0)
+	if hadPreviousRun {
+		reported, grown = c.crashReportSince(previous.CrashLogBytes)
+	}
 	switch {
-	case hadPreviousRun && size > previous.CrashLogBytes:
+	case hadPreviousRun && reported:
 		// Checked before CleanShutdown: a panic dump lands after the process
 		// has already recorded how it thought it was ending.
-		log.Printf("previous run ended with a crash or fatal error; the report is in %s", c.crashLogPath())
+		log.Printf("previous run ended with a crash or fatal error; the report is in %s, among the %d bytes appended since the previous start",
+			c.crashLogPath(), grown)
 	case hadPreviousRun && !previous.CleanShutdown:
 		log.Printf("previous run was terminated without a clean shutdown and left no crash report; "+
 			"it was likely killed externally (kernel OOM kill or SIGKILL) or could not write %s - "+
@@ -120,7 +128,7 @@ func (c *crashReporter) beginRun(version string) {
 	if size > crashLogMaxBytes {
 		c.rotate()
 	}
-	c.appendf("=== rolltop %s started at %s pid=%d ===", version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
+	c.appendf(runStartMarkerFormat, version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
 	c.owned = true
 	c.writeState(false)
 }
@@ -164,6 +172,73 @@ func (c *crashReporter) rotate() {
 	c.open()
 }
 
+// runStartMarkerFormat is the line every run appends to announce itself.
+// isRunStartMarker below has to recognize exactly this shape, so the writer and
+// the reader are defined together: a marker the reader stops matching would be
+// read as a crash report, and every start would announce a failure that never
+// happened.
+const runStartMarkerFormat = "=== rolltop %s started at %s pid=%d ==="
+
+// isRunStartMarker reports whether a crash log line is a run announcement
+// rather than part of a report.
+func isRunStartMarker(line string) bool {
+	return strings.HasPrefix(line, "=== rolltop ") &&
+		strings.Contains(line, " started at ") &&
+		strings.HasSuffix(line, " ===")
+}
+
+// crashReportSince reports whether a crash report was appended past offset, and
+// how far the log grew.
+//
+// Growth on its own does not mean a crash. Every start appends its own marker,
+// so comparing sizes announces a failure whenever the recorded baseline drifts
+// by as little as one line - and a baseline can drift, because it comes from a
+// stat that a FUSE-backed volume may answer from cache. Reading what was
+// actually appended costs one pass over a file bounded at 1 MiB and cannot
+// produce that false alarm.
+func (c *crashReporter) crashReportSince(offset int64) (bool, int64) {
+	file, err := os.Open(c.crashLogPath())
+	if err != nil {
+		return false, 0
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, 0
+	}
+	if !info.Mode().IsRegular() {
+		// Not a log at all - a directory in its place, say. There is nothing to
+		// have been reported, and claiming otherwise would hide the unclean
+		// shutdown that a log this broken could not record.
+		return false, 0
+	}
+	if offset < 0 || offset > info.Size() {
+		// A rotated or replaced log shares no bytes with the baseline, so an
+		// offset into it means nothing. Read what is there instead.
+		offset = 0
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return false, 0
+	}
+	grown := info.Size() - offset
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), crashLogMaxBytes)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || isRunStartMarker(line) {
+			continue
+		}
+		return true, grown
+	}
+	if scanner.Err() != nil {
+		// A readable log whose contents will not parse still has something in
+		// it. Reporting that keeps a real crash visible, where the alternative
+		// hides one behind a read error.
+		return true, grown
+	}
+	return false, grown
+}
+
 // appendf writes one line to the crash log and reports whether it landed.
 func (c *crashReporter) appendf(format string, args ...any) bool {
 	if c.file == nil {
@@ -176,12 +251,25 @@ func (c *crashReporter) appendf(format string, args ...any) bool {
 	return c.file.Sync() == nil
 }
 
+// crashLogSize reports how large the crash log is.
+//
+// The append handle's own offset is preferred whenever it is ahead of the stat.
+// A stat taken right after a write can still report a cached size on a
+// FUSE-backed volume, and a baseline recorded from that stat sits one line
+// behind the file for the rest of its life. The offset is zero until this
+// process writes, so the stat still answers the call made before a run appends
+// its marker.
 func (c *crashReporter) crashLogSize() int64 {
-	info, err := os.Stat(c.crashLogPath())
-	if err != nil {
-		return 0
+	size := int64(0)
+	if info, err := os.Stat(c.crashLogPath()); err == nil {
+		size = info.Size()
 	}
-	return info.Size()
+	if c.file != nil {
+		if offset, err := c.file.Seek(0, io.SeekCurrent); err == nil && offset > size {
+			size = offset
+		}
+	}
+	return size
 }
 
 // writeState records this run. The size baseline is captured on the first write
