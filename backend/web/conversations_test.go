@@ -145,19 +145,19 @@ func TestSearchResultSnippetUsesMatchingBodyContext(t *testing.T) {
 	}
 }
 
-func TestSearchResultDisplayMessageUsesMatchedSeed(t *testing.T) {
+func TestConversationRowMessageUsesTheListsOwnSeed(t *testing.T) {
 	now := time.Now()
 	summary := conversationView{
 		Message: store.MessageRecord{ID: 2, Subject: "Latest reply", FromAddr: "Me <me@example.test>", Date: now.Add(time.Minute), IsStarred: true},
 	}
 	seed := store.MessageRecord{ID: 1, Subject: "Checking In", FromAddr: "\"Nick Koncilja\" <nick@riverrise.com>", Date: now}
 
-	display := searchResultDisplayMessage(summary, seed)
+	display := conversationRowMessage(summary, seed)
 	if display.ID != seed.ID {
-		t.Fatalf("display id = %d, want matched seed %d", display.ID, seed.ID)
+		t.Fatalf("display id = %d, want the seed %d", display.ID, seed.ID)
 	}
 	if !display.IsStarred {
-		t.Fatal("expected thread-level starred state to remain visible on search result row")
+		t.Fatal("expected thread-level starred state to remain visible on the row")
 	}
 }
 

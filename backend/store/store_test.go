@@ -2378,12 +2378,15 @@ func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 		})
 	}
 
+	// Four of the six messages, because Sent is out of the whole-account lists by
+	// default and a selection made from one of those lists covers exactly what it
+	// shows.
 	unfiltered, err := db.ListAllMailScopeMessagesForUser(ctx, user.ID, ScopeFilter{}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(unfiltered) != 6 {
-		t.Fatalf("unfiltered scope = %d rows, want every message", len(unfiltered))
+	if len(unfiltered) != 4 {
+		t.Fatalf("unfiltered scope = %d rows, want every message All Mail shows", len(unfiltered))
 	}
 
 	// An excluded folder drops out of the same selection, which is how an archive

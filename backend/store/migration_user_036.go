@@ -1,25 +1,25 @@
-// File overview: Contact email addresses stop being unique inside one address
-// book. Google lets two people share an address -- a couple, a shared office
-// mailbox, a role account someone kept on two cards -- and Rolltop mirrors what
-// Google has. A unique index over the normalized address made the second of
-// those people impossible to store, which failed the contact sync for the whole
-// account rather than for the one row.
+// File overview: Take Sent out of the whole-account lists. A folder's All Mail
+// flag decides whether All Mail, Inbox and every category view draw from it, and
+// Sent shipped with it on, so the user's own writing came back at them in all
+// three at once.
 
 package store
 
-func userSharedContactEmailMigrationSet() migrationSet {
+func userSentMailboxAllMailMigrationSet() migrationSet {
 	return migrationSet{
 		Scope:   "user",
 		Version: UserSchemaVersion036,
-		Label:   "user schema 036 shared contact emails",
+		Label:   "user schema 036 sent folder out of all mail",
 		Statements: []string{
-			// The lookup this index served is still needed; only its
-			// uniqueness is dropped. A new name rather than the old one so a
-			// database carrying the unique index cannot keep it by accident:
-			// CREATE INDEX IF NOT EXISTS would have found the old name taken
-			// and left the constraint in place.
-			`DROP INDEX IF EXISTS idx_contact_emails_user_normalized`,
-			`CREATE INDEX IF NOT EXISTS idx_contact_emails_user_address ON contact_emails(user_id, normalized_email)`,
+			// A one-time backfill rather than a startup seed step: those run on
+			// every boot, and re-forcing the flag there would mean a reader who
+			// deliberately switches Sent back into All Mail loses that choice at
+			// the next restart. The migration's own applied-version record is
+			// what keeps this to a single pass.
+			`UPDATE mailboxes
+				SET show_in_all_mail = 0,
+					updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+				WHERE role = 'sent' AND show_in_all_mail = 1`,
 		},
 	}
 }

@@ -11,16 +11,16 @@ import (
 // The newest migration owns the whole-list invariants: it is the one that would
 // break them, and asserting them from every migration's test would mean fixing
 // the same thing in a dozen places the next time one is added.
-func TestUser036IsLatestRegisteredUserMigration(t *testing.T) {
+func TestUser037IsLatestRegisteredUserMigration(t *testing.T) {
 	sets := currentUserMigrationSetsForUpgradeTest()
 	if len(sets) < 2 {
 		t.Fatalf("registered user migrations=%d, want at least 2", len(sets))
 	}
-	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion036 {
-		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion036)
+	if latest := sets[len(sets)-1]; latest.Version != UserSchemaVersion037 {
+		t.Fatalf("latest user migration=%q, want %q", latest.Version, UserSchemaVersion037)
 	}
-	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion035 {
-		t.Fatalf("user-036 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion035)
+	if predecessor := sets[len(sets)-2]; predecessor.Version != UserSchemaVersion036 {
+		t.Fatalf("user-037 predecessor=%q, want %q", predecessor.Version, UserSchemaVersion036)
 	}
 	// Application order is not numeric — user-011 has always run before
 	// user-004 — so only duplicates are worth asserting here. A version applied
@@ -46,11 +46,11 @@ func TestUser036IsLatestRegisteredUserMigration(t *testing.T) {
 	}
 }
 
-// The point of user-036: an address book may hold the same address twice. The
+// The point of user-037: an address book may hold the same address twice. The
 // index has to stay, because every lookup by address uses it, and it has to
 // stop being unique, because the second holder is a person Google owns and
 // Rolltop has to mirror.
-func TestUser036LeavesTheContactAddressLookupWithoutAUniqueConstraint(t *testing.T) {
+func TestUser037LeavesTheContactAddressLookupWithoutAUniqueConstraint(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {

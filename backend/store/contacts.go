@@ -167,7 +167,7 @@ func (s *Store) GetContactForUser(ctx context.Context, userID, id int64) (Contac
 }
 
 // contactEmailOwnerOrder ranks the contact_emails rows that carry one address.
-// An address book may hold several since user-036 -- Google lets two people
+// An address book may hold several since user-037 -- Google lets two people
 // carry the same one -- so every lookup by address has to name which of them it
 // means, or the answer changes with SQLite's row order and a Me contact, a
 // merge target or a reply identity silently moves to a different person.
@@ -287,7 +287,7 @@ func (s *Store) EnsureMeContactForEmail(ctx context.Context, userID int64, email
 	// Holders arrive with any existing Me contact first, so this takes the
 	// reader's own card when they have one and otherwise the first local holder.
 	// When only mirrors hold the address none is adopted; the reader gets a card
-	// of their own beside them, which is only storable because user-036 lets two
+	// of their own beside them, which is only storable because user-037 lets two
 	// contacts carry one address.
 	holders, err := s.ListContactEmailHoldersForUser(ctx, userID, email)
 	if err != nil {
@@ -1122,7 +1122,7 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 	// a vCard import, a Google sync -- appends entries that were each primary
 	// on their own side, and replaceContactChildren stores every one of them as
 	// primary. Two primaries is a state nothing downstream is prepared for.
-	// The unique index user-036 dropped was also the only thing stopping one
+	// The unique index user-037 dropped was also the only thing stopping one
 	// contact from carrying an address twice -- two labels, two spellings of the
 	// same address. A Me contact that does grows one outgoing identity per row,
 	// so the same address appears twice in the From menu, each half with its own

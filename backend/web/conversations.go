@@ -146,6 +146,19 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 	for _, key := range order {
 		group := groups[key]
 		view := summarizeConversation(group.messages, own)
+		// The row stands for the message this list selected, not for the newest
+		// message the thread holds anywhere. A thread is hydrated in full, so it
+		// carries rows the list itself excludes - a Sent reply, an archived or
+		// trashed copy, a draft - and letting one of those supply the row would
+		// print a date the row is not sorted by. ListDate is what the date
+		// section headings group on, so the two have to be the same message.
+		if group.hasSeed {
+			view.Message = conversationRowMessage(view, group.seed)
+			view.Snippet = messageSnippet(group.seed.BodyText, group.seed.BodyHTML)
+			if !view.Message.IsStarred {
+				view.StarredMessageID = group.seed.ID
+			}
+		}
 		view.SnoozedUntil = group.snoozedUntil
 		view.ListDate = view.Message.Date
 		if group.snoozeReturn.After(view.ListDate) {
@@ -158,7 +171,8 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 			}
 		}
 		if strings.TrimSpace(query) != "" && group.hasSeed {
-			view.Message = searchResultDisplayMessage(view, group.seed)
+			// The row already carries the seed, which for a search is the message
+			// that matched; only the snippet has to be rebuilt around the terms.
 			view.Snippet = searchResultSnippet(query, group.terms, group.seed, view.Snippet)
 			view.MatchTerms = group.terms
 			view.MatchFields = group.fields
@@ -315,7 +329,11 @@ func (s *Server) dueSearchConversationSeeds(ctx context.Context, userID int64, q
 	return out, nil
 }
 
-func searchResultDisplayMessage(summary conversationView, seed store.MessageRecord) store.MessageRecord {
+// conversationRowMessage puts the list's own selection in front of a row.
+// Thread-wide state that the row renders stays as summarizeConversation read it
+// from the whole thread: a star anywhere in a conversation stars its row, and
+// the seed carries only its own flag.
+func conversationRowMessage(summary conversationView, seed store.MessageRecord) store.MessageRecord {
 	display := seed
 	display.IsStarred = summary.Message.IsStarred
 	return display

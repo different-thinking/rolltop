@@ -305,7 +305,7 @@ func TestEnsureMeContactNeverAdoptsAGoogleMirror(t *testing.T) {
 	}
 }
 
-// One contact carries an address once. The unique index user-036 dropped was
+// One contact carries an address once. The unique index user-037 dropped was
 // also what enforced that, and a Me contact holding the address twice grows two
 // identical From identities.
 func TestContactStoresOneRowPerAddressEvenWhenGivenSeveral(t *testing.T) {

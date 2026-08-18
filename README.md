@@ -77,6 +77,25 @@ different share (`60%`), or `off` to leave the runtime unbounded. An explicit
 rolltop memory limit 1.6GiB (80% of the 2.0GiB cgroup limit)
 ```
 
+That remainder is not optional. Bleve reads its segments through `mmap`, so a
+large search index needs room in the page cache, and the page cache shares the
+container's limit with the heap. Once the index no longer fits in what the heap
+ceiling leaves over, the kernel evicts the pages the next commit needs and every
+read becomes a major fault — on a FUSE-backed volume that turns a commit of a few
+kilobytes into one that runs for minutes, which is indistinguishable from a hung
+writer and is treated as one. Startup measures the index and says so when the
+two cannot both fit:
+
+```text
+rolltop warning: the search index is 3.2GiB and the heap ceiling is 1.6GiB of the 2.0GiB limit, leaving 400MiB for everything the heap does not account for; ...
+```
+
+The remedy is a container with more memory, or a **lower** `ROLLTOP_MEMORY_LIMIT`
+so the index has room to stay resident. A smaller heap ceiling means more
+throughput here, not less. `workingset_refault_file` and `pgmajfault` in
+`/sys/fs/cgroup/memory.stat` count the thrashing directly, and `max` in
+`/sys/fs/cgroup/memory.events` counts how often the limit forced reclaim.
+
 The limit is a ceiling, not a reservation: the process only uses what it needs,
 and going over it makes the collector work harder rather than failing an
 allocation. Give the container at least a gigabyte for a first sync of a large
@@ -473,14 +492,49 @@ tenant recovery marker and starts a controlled shutdown. Cleanup gets a bounded
 Docker restart policy such as `--restart unless-stopped` (or Compose
 `restart: unless-stopped`) is required for hands-off recovery.
 
-On restart, before opening that tenant's index, Rolltop durably marks the user's
-search-visible SQLite rows pending with a full WAL checkpoint, renames only
-`/data/users/<id>/bleve` to a timestamped quarantine directory, persists that
-rename before clearing the recovery marker, and creates a new derived index.
-The normal local indexing worker rebuilds it from SQLite and retained local
-`.eml` blobs, including folders configured for `manual` or `never` sync. Mail
-rows, IMAP state, and blobs are not deleted. If retained raw data has expired,
-existing indexing behavior may retrieve it from IMAP.
+The marker records which messages the abandoned batch owned. On restart, before
+opening that tenant's index, Rolltop durably marks exactly those SQLite rows
+pending with a full WAL checkpoint, clears the marker, and leaves the index in
+place:
+
+```text
+repaired stalled search index user_id=1 pending_messages=6 first_document_id=162614 last_document_id=162620 index_retained=true
+```
+
+A commit that outran the watchdog is a report about how long a write took, not
+about the index it was writing to — Bleve publishes each snapshot atomically, so
+what survives is consistent and only the batch in flight is in doubt. Rebuilding
+a multi-gigabyte index for that costs hours of reindexing, and that reindexing is
+itself the load that makes the next commit slow enough to abandon.
+
+Documents in that range whose messages were deleted while the stalled batch held
+the writer gate are removed from the index during the repair, since their own
+delete never reached Bleve. That sweep is what makes the repair complete, so a
+range too wide to sweep is rebuilt instead of repaired: clearing the marker after
+a partial repair would leave such a message searchable with nothing left to
+notice.
+
+A stall the marker cannot attribute to a message range falls back to the full
+rebuild, as does one whose index is missing or no longer opens: Rolltop then renames `/data/users/<id>/bleve` to a timestamped
+quarantine directory, persists that rename before clearing the recovery marker,
+and creates a new derived index. The normal local indexing worker rebuilds it
+from SQLite and retained local `.eml` blobs, including folders configured for
+`manual` or `never` sync. Mail rows, IMAP state, and blobs are not deleted. If
+retained raw data has expired, existing indexing behavior may retrieve it from
+IMAP.
+
+Quarantine directories hold a full copy of the index they replaced, so retention
+prunes them alongside blobs: the newest one per tenant is kept for inspection,
+older ones go immediately, and everything older than 48 hours goes regardless.
+Each removal is named in the log.
+
+Stall diagnostics are also appended to `/data/search-stall.log`, which is
+rotated to `.prev` past 1 MiB and never truncated. The stack recorded there
+names the blocked Bleve frame and is what distinguishes a writer waiting on
+storage from one waiting on Bleve itself. It is written to the data volume
+because a container log pipeline keeps only the first line of a multi-line
+entry, and because a shell inside the container cannot read the process log at
+all.
 
 ### Offline Search Index Reset
 
@@ -574,17 +628,33 @@ mailboxes.
 
 The sidebar leads with `Inbox`: All Mail minus each account's chosen Archive
 folder, so it is everything that has not been filed away yet, across every
-account. All Mail sits below it and still shows the lot. Both are whole-account
+account. All Mail sits below it and shows the rest. Both are whole-account
 lists rather than the `INBOX` folder of one account, which keeps its own entry
 under Folders. The older `/mail/unarchived` address still resolves to `Inbox`.
+
+Sent, Drafts, Trash and Junk are out of those lists by default, because they
+answer "what is on my plate" and the user's own writing is not on it - a Sent
+folder inside them puts every reply back in front of its author in All Mail, in
+Inbox, and in the category its headers earned it, all at once. Each folder's
+`All Mail` switch under folder settings decides this, so any of them can be put
+back; only Junk is dropped by role whatever the switch says, because Report spam
+promises the message is gone from these lists. Existing accounts are migrated
+once, and a Sent folder switched back on stays on. The `Sent` and `Drafts` views
+are built from the folder role instead and are unaffected, as is each folder's
+own entry under Folders, so nothing becomes unreachable. A conversation row
+stands for the newest message the list it sits in holds, not for the newest
+message the thread holds anywhere, so a thread you answered keeps the date and
+preview of the message you were answering and stays where that date puts it; the
+reply is still in the thread when the conversation is opened, and still counts
+towards the row's message count and its batch actions.
 
 Two list-header actions work on a whole list rather than on selected rows.
 `Archive older` moves everything the current list holds that is dated before a
 chosen day into each account's Archive folder. The day itself is kept, and it is
 the reader's own calendar day: the browser sends the instant that day begins at
-in its timezone. Sent, Drafts, Trash, and Junk are never swept up, even though a
-whole-account list shows them, so filing a received backlog leaves the user's
-own mail alone. The cutoff and that exclusion are applied in SQL rather than
+in its timezone. Sent, Drafts, Trash, and Junk are never swept up, whether or not
+a whole-account list is set to show them, so filing a received backlog leaves the
+user's own mail alone. The cutoff and that exclusion are applied in SQL rather than
 after the fact, and a very large backlog is archived in repeated passes that say
 how much they covered. `Empty Trash`
 appears only on a folder carrying the Trash role and is the one place rolltop

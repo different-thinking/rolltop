@@ -93,9 +93,13 @@ jobs:
             echo "| --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # scripts/ carries the SQL twin of backend/pgpreflight, which
-          # TestTwinsAgree reads, so a change there must run the Go suite.
-          emit go '\.go$|^go\.mod$|^go\.sum$|^scripts/'
+          # Non-.go paths the Go tests read, and which therefore must run
+          # them: scripts/ carries the SQL twin of backend/pgpreflight that
+          # TestTwinsAgree compares against; backend/store/pgschema/ holds the
+          # generated PostgreSQL baseline whose only guards are Go tests; and
+          # plugins/*/migrations/ feeds the schema that baseline is derived
+          # from.
+          emit go '\.go$|^go\.mod$|^go\.sum$|^scripts/|^backend/store/pgschema/|^plugins/[^/]+/migrations/'
           emit plugin_backends '^plugins/[^/]+/backend/|^go\.mod$|^go\.sum$'
           emit spam_model '^plugins/experimental_spam_filter/(model|training)/'
           emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^plugins/[^/]+/(frontend|themes)/'
@@ -112,6 +116,30 @@ jobs:
       needs.changes.outputs.spam_model == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      # The PostgreSQL migration baseline is verified by applying it to a real
+      # server (backend/store/pgschema); the apply test fails rather than
+      # skips when this DSN is set, so a baseline that no longer applies
+      # cannot reach main.
+      #
+      # The job also runs for plugin-backend and spam-model changes, which
+      # skip the Go test step and so never use this container. Keeping one
+      # service on the job is the cost of GitHub Actions having no per-step
+      # services; it is a few seconds of image pull on those runs.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rolltop
+          POSTGRES_PASSWORD: rolltop
+          POSTGRES_DB: rolltop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rolltop"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Check Out
         uses: actions/checkout@v5
@@ -166,6 +194,8 @@ jobs:
 
       - name: Run Go Tests
         if: needs.changes.outputs.go == 'true'
+        env:
+          TEST_DATABASE_URL: postgres://rolltop:rolltop@localhost:5432/rolltop_test?sslmode=disable
         run: |
           mkdir -p test-results
           set +e

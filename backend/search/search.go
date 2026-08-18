@@ -47,6 +47,9 @@ type Service struct {
 	activeStallHandler func(int64)
 	activeStallOnce    sync.Once
 	bleveErrorLog      func(string, ...any)
+	// stallDiagnosticsDir is the data directory a writer stall reports into, so
+	// its stack outlives the process log. Empty leaves reports in the log only.
+	stallDiagnosticsDir string
 }
 
 // writerLock is a context-friendly FIFO gate. Unlike polling sync.Mutex.TryLock,
@@ -186,10 +189,7 @@ func (s *Service) reportBleveError(details bleveErrorContext, err error) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errSearchServiceClosing) {
 		return
 	}
-	logger := log.Printf
-	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	logger("bleve error operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v error_type=%T error=%v",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
 		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, err, err)
@@ -645,11 +645,17 @@ func (s *Service) writerWaitWarningAfter() time.Duration {
 	return defaultWriterWaitLogAfter
 }
 
-func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waited, activeFor time.Duration) {
-	logger := log.Printf
+// logf resolves the logger this service reports through: an injected one in
+// tests, the process log otherwise.
+func (s *Service) logf() func(string, ...any) {
 	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
+		return s.bleveErrorLog
 	}
+	return log.Printf
+}
+
+func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waited, activeFor time.Duration) {
+	logger := s.logf()
 	logger("bleve writer wait operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d waited=%s active_operation=%q active_user_id=%d active_account_id=%d active_mailbox_id=%d active_documents=%d active_batch_bytes=%d active_first_document_id=%d active_last_document_id=%d active_document_ids=%v active_for=%s",
 		waiting.Operation, waiting.UserID, waiting.AccountID, waiting.MailboxID, waiting.Documents, waited.Round(time.Second),
 		active.Operation, active.UserID, active.AccountID, active.MailboxID, active.Documents, active.BatchBytes,
@@ -657,10 +663,7 @@ func (s *Service) reportBleveWriterWait(waiting, active bleveErrorContext, waite
 }
 
 func (s *Service) reportBleveCoordinatorWait(diagnostic bleveWriteWaitDiagnostic) {
-	logger := log.Printf
-	if s != nil && s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
+	logger := s.logf()
 	details := diagnostic.Request.Details
 	logger("bleve coordinator wait operation=%q priority=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d waited=%s queue_depth=%d active_writes=%d active_bytes=%d same_user_active=%t",
 		details.Operation, diagnostic.Request.Priority.String(), details.UserID, details.AccountID, details.MailboxID,
@@ -708,7 +711,11 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 		}
 	}
 
-	markerErr := s.MarkSearchIndexRecoveryRequired(details.UserID)
+	// The stalled batch owns a known message range, so recovery only has to
+	// reindex that range. A range this operation does not carry marshals as a
+	// full rebuild, which is what an operation nothing can attribute needs.
+	markerErr := s.MarkSearchIndexRecoveryRequiredForDocuments(
+		details.UserID, details.FirstDocumentID, details.LastDocumentID)
 	if markerErr == nil {
 		s.activeStallOnce.Do(func() {
 			s.mu.Lock()
@@ -719,16 +726,58 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 			}
 		})
 	}
-	logger := log.Printf
-	if s.bleveErrorLog != nil {
-		logger = s.bleveErrorLog
-	}
-	logger("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v",
+	logger := s.logf()
+	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v recovery_scope=%s",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
-		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr)
-	if stack := filteredBleveBatchStack(); stack != "" {
-		logger("bleve active writer stack user_id=%d operation=%q\n%s", details.UserID, details.Operation, stack)
+		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr,
+		SearchIndexRecovery{Required: true, FirstDocumentID: details.FirstDocumentID, LastDocumentID: details.LastDocumentID}.Scope())
+	logger("%s", summary)
+	stack := filteredBleveBatchStack()
+	if stack != "" {
+		// One log line per frame. A single Printf with embedded newlines gives
+		// only its first line a timestamp prefix, and line-based log shipping
+		// drops or reorders the rest — losing exactly the frames that say
+		// whether the writer was blocked on storage or on Bleve itself.
+		frames := strings.Split(stack, "\n")
+		logger("bleve active writer stack user_id=%d operation=%q frames=%d",
+			details.UserID, details.Operation, len(frames))
+		for index, frame := range frames {
+			logger("bleve active writer frame user_id=%d %d/%d %s", details.UserID, index+1, len(frames), frame)
+		}
 	}
+	// The report also goes onto the data volume, because the process log is not
+	// readable from a shell inside the container and does not survive the
+	// restart this stall is about to cause.
+	if err := s.recordStallDiagnostics(time.Now(), summary, stack); err != nil {
+		logger("record search writer stall diagnostics: %v", err)
+	}
+}
+
+// UnfinishedWriterRecoveries reports the recovery each tenant needs when a
+// writer is still inside Bleve. Tenants whose writers all returned are absent
+// on purpose: their index was published in full, and rebuilding it would cost
+// hours of reindexing to repair nothing.
+func (s *Service) UnfinishedWriterRecoveries() map[int64]SearchIndexRecovery {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	writers := make(map[int64]*writerLock, len(s.writers))
+	for key, writer := range s.writers {
+		writers[key] = writer
+	}
+	s.mu.Unlock()
+	recoveries := make(map[int64]SearchIndexRecovery)
+	for _, writer := range writers {
+		active, activeSince := writer.activeSnapshot()
+		if activeSince.IsZero() || active.UserID <= 0 {
+			continue
+		}
+		recoveries[active.UserID] = SearchIndexRecovery{
+			Required: true, FirstDocumentID: active.FirstDocumentID, LastDocumentID: active.LastDocumentID,
+		}
+	}
+	return recoveries
 }
 
 func filteredBleveBatchStack() string {
@@ -853,7 +902,7 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	}
 	s.mu.Unlock()
 
-	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), "bleve"))
+	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), liveIndexDirName))
 	if err != nil {
 		s.reportBleveError(bleveErrorContext{Operation: "open-index", UserID: userID}, err)
 		return nil, err

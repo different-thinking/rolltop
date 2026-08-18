@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"time"
 
+	"rolltop/backend/config"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
 )
@@ -159,7 +160,7 @@ func runScheduledDatabaseRepairs(ctx context.Context, dataDir string, manifests 
 // than from the installation database, so a repair can be scheduled for a
 // tenant whose own database no longer opens.
 func scheduledRepairUserIDs(dataDir string) ([]int64, error) {
-	entries, err := os.ReadDir(filepath.Join(dataDir, "users"))
+	entries, err := os.ReadDir(config.SearchRootFor(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

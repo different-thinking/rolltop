@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,7 +94,7 @@ func runResetSearch(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 		return fmt.Errorf("load local user %d: %w", *userID, err)
 	}
-	indexRoot := filepath.Join(cfg.DataDir, "users")
+	indexRoot := cfg.SearchRoot()
 	if err := search.ValidatePerUserIndexPath(indexRoot, *userID); err != nil {
 		return fmt.Errorf("validate local user %d data path: %w", *userID, err)
 	}
