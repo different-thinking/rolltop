@@ -112,6 +112,24 @@ jobs:
       needs.changes.outputs.spam_model == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      # The PostgreSQL migration baseline is verified by applying it to a real
+      # server (backend/store/pgschema). Without this the apply test skips
+      # itself, and a baseline that no longer applies would reach main.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rolltop
+          POSTGRES_PASSWORD: rolltop
+          POSTGRES_DB: rolltop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rolltop"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Check Out
         uses: actions/checkout@v5
@@ -166,6 +184,8 @@ jobs:
 
       - name: Run Go Tests
         if: needs.changes.outputs.go == 'true'
+        env:
+          TEST_DATABASE_URL: postgres://rolltop:rolltop@localhost:5432/rolltop_test?sslmode=disable
         run: |
           mkdir -p test-results
           set +e

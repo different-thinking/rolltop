@@ -36,7 +36,7 @@ Verified against the tree as of this writing:
 | `backend/store` | 86 non-test files, ~18.8k LOC (+ ~12.6k test LOC) |
 | Query call sites (`ExecContext`/`QueryContext`/`QueryRowContext`) | 663 non-test, ~1,000 incl. tests |
 | Schema migrations | system 001–004, user 001–035, plus named side migrations and plugin migrations |
-| `CREATE TABLE` statements | 87 |
+| `CREATE TABLE` statements / resulting tables | 87 statements across the migrations, 55 tables in the final schema |
 | Production triggers | 1 (`messages_clear_duplicate_pointer`, `migration_user_033.go`) |
 | `AUTOINCREMENT` | 54 (all in migration DDL) |
 | `INSERT OR IGNORE` | 13 |
@@ -163,12 +163,34 @@ baseline's own `COLLATE "C"` columns are present.
 - Wait-for-database loop at startup (Postgres may come up after the app
   container; today's code never needed this).
 
-### WP2 — Schema baseline (squash)
+### WP2 — Schema baseline (squash) — **done**
 
 Do **not** port 40+ incremental migrations. Freeze the current combined
 schema (what `Open()` produces after all system, user, side, and plugin
 migrations) and write it as one Postgres baseline, keeping the existing
 `schema_migrations` checksum runner (it is dialect-portable).
+
+Shipped as `backend/store/pgschema`. The baseline is **derived, not written**:
+`TestBaselineMatchesSQLiteSchema` opens a fully migrated combined SQLite
+store, translates its `sqlite_master` contents, and fails when the committed
+`baseline.sql` differs — so a SQLite migration landing during the transition
+cannot silently leave the two schemas apart (`-update` regenerates).
+`TestBaselineAppliesToPostgres` then applies it to a real server and asserts
+the properties the migration depends on: every text column C-collated, the
+foreign keys present, identity sequences accepting `setval`, and the
+translated trigger behaving like the SQLite original.
+
+Two things the derivation surfaced that hand-writing would likely have
+missed:
+
+- PostgreSQL requires a referenced column list to be backed by a unique
+  constraint or index, and this schema has composite keys —
+  `mailboxes(user_id, account_id, id)` — whose uniqueness comes from a
+  `CREATE UNIQUE INDEX`. Inline foreign keys are therefore rejected. The
+  baseline emits four phases: tables, indexes, foreign keys, triggers.
+- The final schema has 55 tables, not the 87 the inventory above counts;
+  that number counts `CREATE TABLE` statements across migrations, several of
+  which recreate the same table.
 
 Translation rules for the baseline:
 
@@ -333,7 +355,7 @@ all call `store.Open(tempfile)`.
 | Phase | Content | Depends on |
 | --- | --- | --- |
 | 0 | **Done** (shipped on `main`, `f9f686d` + `0552945`): WAL without the shared `-shm` index via `locking_mode=exclusive` and one connection per database, auto-detected from the filesystem superblock (`backend/store/access.go`) with a `ROLLTOP_SQLITE_ACCESS` override; live maintenance rerouted through the owning handle. Deviation from this plan's sketch: `synchronous` stays `NORMAL`, so durability of the most recent commits still depends on checkpoint-time fsync — acceptable residual risk for the interim, since the corruption vector (shm coherence) is gone. | — |
-| 1 | WP1 + WP2 + WP8 skeleton (app boots against PG, baseline schema, test helper + CI service) | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
+| 1 | WP2 baseline + CI Postgres service (**done**). WP1's config and pool moved to phase 2: without the store conversion they would be unused code | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
 | 2 | WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
 | 3 | WP6 plugins | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
