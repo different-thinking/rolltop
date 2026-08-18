@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 )
 
 // ListMessagesForUser returns recent messages across visible mailboxes for one user.
@@ -234,6 +236,47 @@ type ScopeMessage struct {
 // smaller limit and report to the user when a pass was cut short.
 const maxScopeMessages = 50000
 
+// ScopeFilter narrows a whole-view selection past the list it mirrors. The zero
+// value selects everything that list shows.
+type ScopeFilter struct {
+	// Before keeps only mail dated before this instant, which is what an
+	// "archive everything older than" action selects.
+	Before time.Time
+	// ExcludeMailboxIDs drops mail living in these folders. An archive pass uses
+	// it to leave Sent, Drafts, Trash, and Junk alone: those lists appear inside
+	// All Mail, but filing a received backlog is not a reason to empty them.
+	ExcludeMailboxIDs []int64
+}
+
+// sql renders the filter as a WHERE fragment plus its arguments, in the order
+// the fragment names them. Both parts belong in the query rather than in a pass
+// over the resolved rows: a selection is capped, and lists are ordered newest
+// first, so filtering afterwards would spend the whole cap on mail the caller
+// did not ask for and never reach the old messages it did.
+func (f ScopeFilter) sql() (string, []any) {
+	fragment := ""
+	args := make([]any, 0, len(f.ExcludeMailboxIDs)+1)
+	if !f.Before.IsZero() {
+		fragment += " AND m.date_unix < ?"
+		args = append(args, f.Before.UTC().Unix())
+	}
+	if len(f.ExcludeMailboxIDs) > 0 {
+		placeholders, idArgs := int64ListPlaceholders(f.ExcludeMailboxIDs)
+		fragment += " AND m.mailbox_id NOT IN (" + placeholders + ")"
+		args = append(args, idArgs...)
+	}
+	return fragment, args
+}
+
+// Matches reports whether one message record satisfies the filter. Scopes that
+// are resolved through the search index rather than SQL apply it this way.
+func (f ScopeFilter) Matches(msg MessageRecord) bool {
+	if !f.Before.IsZero() && !msg.Date.Before(f.Before) {
+		return false
+	}
+	return !slices.Contains(f.ExcludeMailboxIDs, msg.MailboxID)
+}
+
 func scopeMessageLimit(limit int) int {
 	if limit <= 0 || limit > maxScopeMessages {
 		return maxScopeMessages
@@ -243,8 +286,8 @@ func scopeMessageLimit(limit int) int {
 
 // archivedMailboxExclusion renders the SQL that keeps each account's effective
 // Archive folder out of a list, along with its arguments. Requesting the
-// exclusion when nothing is configured yields an empty fragment, so Unarchived
-// simply equals All Mail until an Archive folder exists.
+// exclusion when nothing is configured yields an empty fragment, so the Inbox
+// list simply equals All Mail until an Archive folder exists.
 func (s *Store) archivedMailboxExclusion(ctx context.Context, userID int64, exclude bool) (string, []any, error) {
 	if !exclude {
 		return "", nil, nil
@@ -284,18 +327,18 @@ func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchiv
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
 // covers: every unsnoozed message in a folder All Mail shows. Rows the list
 // hides (Trash, Junk, Drafts, snoozed threads) stay out of the selection.
-func (s *Store) ListAllMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
-	return s.listAllMailScopeMessagesForUser(ctx, userID, limit, false)
+func (s *Store) ListAllMailScopeMessagesForUser(ctx context.Context, userID int64, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
+	return s.listAllMailScopeMessagesForUser(ctx, userID, filter, limit, false)
 }
 
-// ListUnarchivedMailScopeMessagesForUser lists what an Unarchived selection
-// covers: the All Mail scope minus each account's Archive folder, so a
-// whole-view delete from the Unarchived list never reaches archived mail.
-func (s *Store) ListUnarchivedMailScopeMessagesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
-	return s.listAllMailScopeMessagesForUser(ctx, userID, limit, true)
+// ListUnarchivedMailScopeMessagesForUser lists what an Inbox selection covers:
+// the All Mail scope minus each account's Archive folder, so a whole-view
+// delete from the Inbox list never reaches archived mail.
+func (s *Store) ListUnarchivedMailScopeMessagesForUser(ctx context.Context, userID int64, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
+	return s.listAllMailScopeMessagesForUser(ctx, userID, filter, limit, true)
 }
 
-func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int64, limit int, excludeArchived bool) ([]ScopeMessage, error) {
+func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int64, filter ScopeFilter, limit int, excludeArchived bool) ([]ScopeMessage, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -304,14 +347,16 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, 0, len(predicateArgs)+3)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(predicateArgs)+len(filterArgs)+3)
 	args = append(args, userID)
 	args = append(args, predicateArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m`+allMailSource+`
 		`+snoozeJoin+`
-		WHERE m.user_id = ?`+predicate+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ?`+predicate+filterSQL+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
 	if err != nil {
@@ -324,19 +369,24 @@ func (s *Store) listAllMailScopeMessagesForUser(ctx context.Context, userID int6
 // ListMailboxScopeMessagesForUser lists the messages a single-folder selection
 // covers. Unlike All Mail this includes folders hidden from All Mail, because
 // the user is looking at that folder's own list.
-func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mailboxID int64, limit int) ([]ScopeMessage, error) {
+func (s *Store) ListMailboxScopeMessagesForUser(ctx context.Context, userID, mailboxID int64, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(filterArgs)+4)
+	args = append(args, userID, mailboxID)
+	args = append(args, filterArgs...)
+	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id = ? AND m.duplicate_of_message_id = 0
+		WHERE m.user_id = ? AND m.mailbox_id = ?`+filterSQL+` AND m.duplicate_of_message_id = 0
 			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
-		LIMIT ?`, userID, mailboxID, nowUnix(), scopeMessageLimit(limit))
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +426,7 @@ func (s *Store) RoleMailboxIDsForUser(ctx context.Context, userID int64, role st
 
 // ListRoleMailScopeMessagesForUser lists what a whole-view selection over a
 // role covers, so a delete from a role view reaches exactly the rows it shows.
-func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int64, role string, limit int) ([]ScopeMessage, error) {
+func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int64, role string, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
 	mailboxIDs, err := s.RoleMailboxIDsForUser(ctx, userID, role)
 	if err != nil || len(mailboxIDs) == 0 {
 		return nil, err
@@ -386,15 +436,17 @@ func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int
 		return nil, err
 	}
 	placeholders, idArgs := int64ListPlaceholders(mailboxIDs)
-	args := make([]any, 0, len(idArgs)+3)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(idArgs)+len(filterArgs)+3)
 	args = append(args, userID)
 	args = append(args, idArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m
 		LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`) AND m.duplicate_of_message_id = 0
+		WHERE m.user_id = ? AND m.mailbox_id IN (`+placeholders+`)`+filterSQL+` AND m.duplicate_of_message_id = 0
 			AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
@@ -456,7 +508,7 @@ func (s *Store) ListLatestThreadMessagesForUser(ctx context.Context, userID int6
 	return s.listLatestThreadMessagesForUser(ctx, userID, limit, offset, order, false)
 }
 
-// ListUnarchivedLatestThreadMessagesForUser renders the Unarchived list: All
+// ListUnarchivedLatestThreadMessagesForUser renders the Inbox list: All
 // Mail minus the messages sitting in each account's chosen Archive folder. A
 // thread whose newest message is archived still appears through its newest
 // unarchived message, matching how single-folder lists represent threads.
@@ -599,7 +651,7 @@ func (s *Store) ListCategoryLatestThreadMessagesForUser(ctx context.Context, use
 // ListCategoryMailScopeMessagesForUser lists what a whole-view selection over a
 // category covers, so acting on everything a category shows reaches exactly the
 // rows it shows and no archived mail behind them.
-func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID int64, category string, limit int) ([]ScopeMessage, error) {
+func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID int64, category string, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
 	normalized, err := validCategoryOrError(category)
 	if err != nil {
 		return nil, err
@@ -612,14 +664,16 @@ func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, 0, len(predicateArgs)+3)
+	filterSQL, filterArgs := filter.sql()
+	args := make([]any, 0, len(predicateArgs)+len(filterArgs)+3)
 	args = append(args, userID)
 	args = append(args, predicateArgs...)
+	args = append(args, filterArgs...)
 	args = append(args, nowUnix(), scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
 		FROM messages m`+allMailSource+`
 		`+snoozeJoin+`
-		WHERE m.user_id = ?`+predicate+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
+		WHERE m.user_id = ?`+predicate+filterSQL+` AND (sn.id IS NULL OR sn.snoozed_until <= ?)
 		ORDER BY m.date_unix DESC, m.id DESC
 		LIMIT ?`, args...)
 	if err != nil {

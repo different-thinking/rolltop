@@ -39,12 +39,24 @@ function decodePathSegment(value = ""): string {
 export type MailView = string;
 
 /** The views this frontend constructs on its own, rather than reading from chrome. */
-const fixedMailViews = ["unarchived", "sent", "drafts"];
+const fixedMailViews = ["inbox", "sent", "drafts"];
+
+/**
+ * legacyMailViews keeps older URLs working. The Inbox list shipped as
+ * /mail/unarchived, so bookmarks, the installed app's cached shell, and open
+ * tabs still name it that way. A Map rather than an object literal: a path
+ * segment like `constructor` would otherwise resolve against Object.prototype
+ * and travel on as the view name.
+ */
+const legacyMailViews = new Map<string, MailView>([["unarchived", "inbox"]]);
 
 /** mailViewCategory reports the category a view names, or "" for the rest. */
 export function mailViewCategory(view: MailView): string {
   return view && !fixedMailViews.includes(view) ? view : "";
 }
+
+/** pageSegment matches the /pN marker, which is the one thing in the view slot that is not a view. */
+const pageSegment = /^p\d+$/;
 
 /** Parse /mail, /mail/pN, /mail/<view>(/pN), /mailbox/:id, and /mailbox/:id/pN into list state. */
 export function mailRoute(path: string): { mailboxID: string | null; page: number; view: MailView } {
@@ -54,10 +66,12 @@ export function mailRoute(path: string): { mailboxID: string | null; page: numbe
     return { mailboxID: id > 0 ? String(id) : null, page: positiveInt(parts[2], 1), view: "" };
   }
   if (parts[0] !== "mail") return { mailboxID: null, page: 1, view: "" };
-  // Anything in the view slot that is not a page marker is a view name. The
-  // server decides whether it names a list, which is what keeps this router
-  // from needing its own copy of the category set.
-  const named = parts[1] && !parts[1].startsWith("p") ? parts[1] : "";
+  // Anything in the view slot that is not a page marker is a view name, mapped
+  // through the legacy names first. The server decides whether the name is a
+  // list it renders, which is what keeps this router from needing its own copy
+  // of the category set.
+  const segment = parts[1] && !pageSegment.test(parts[1]) ? parts[1] : "";
+  const named = segment ? legacyMailViews.get(segment) || segment : "";
   if (named) return { mailboxID: null, page: positiveInt(parts[2], 1), view: named };
   return { mailboxID: null, page: positiveInt(parts[1], 1), view: "" };
 }

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"rolltop/backend/mailparse"
 	"rolltop/backend/store"
@@ -19,11 +20,11 @@ func createCategoryTestMessage(t *testing.T, ctx context.Context, db *store.Stor
 	mailbox store.Mailbox, uid uint32, from, category string,
 ) store.MessageRecord {
 	t.Helper()
-	return createScopeTestMessageFrom(t, ctx, db, tenant, mailbox, uid, "", from, category)
+	return createScopeTestMessageFrom(t, ctx, db, tenant, mailbox, uid, "", from, category, time.Now().UTC())
 }
 
 func TestMailViewNamesResolveOnlyToListsThisServerRenders(t *testing.T) {
-	known := []string{"", "unarchived", "sent", "drafts", "relevant", "newsletters", "forums", "notifications"}
+	known := []string{"", "inbox", "sent", "drafts", "relevant", "newsletters", "forums", "notifications"}
 	for _, name := range known {
 		view, ok := parseMailView(name)
 		if !ok || string(view) != name {
@@ -39,6 +40,11 @@ func TestMailViewNamesResolveOnlyToListsThisServerRenders(t *testing.T) {
 	// what lets a URL carry it without the handler doing its own normalizing.
 	if view, ok := parseMailView(" Newsletters "); !ok || view != "newsletters" {
 		t.Fatalf("parseMailView(\" Newsletters \") = %q ok=%t", view, ok)
+	}
+	// A retired name still resolves, to the view that replaced it: bookmarks and
+	// cached app shells keep asking for the Inbox list as "unarchived".
+	if view, ok := parseMailView("unarchived"); !ok || view != mailViewInbox {
+		t.Fatalf("parseMailView(\"unarchived\") = %q ok=%t, want the Inbox view", view, ok)
 	}
 }
 

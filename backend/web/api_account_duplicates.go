@@ -7,11 +7,8 @@
 package web
 
 import (
-	"errors"
 	"net/http"
 	"sort"
-
-	"rolltop/backend/store"
 )
 
 // duplicateAccountSummary reports one account's share of the hidden copies.
@@ -117,26 +114,14 @@ func (s *Server) apiAccountDuplicatesTrash(w http.ResponseWriter, r *http.Reques
 	}
 	plan, err := s.trashPlanForMessages(r.Context(), cu.User, messages)
 	if err != nil {
-		var missingTrash missingTrashMailboxError
-		switch {
-		case errors.As(err, &missingTrash):
-			writeAPIError(w, http.StatusBadRequest, missingTrash.Error())
-		case store.IsNotFound(err):
-			http.NotFound(w, r)
-		default:
-			s.serverError(w, r, err)
-		}
+		s.writeScopePlanError(w, r, err)
 		return
 	}
 	plan.Truncated = truncated
-	if len(plan.Groups) == 0 {
-		writeJSON(w, map[string]any{
-			"ok": true, "queued": false, "matched": plan.Matched, "skipped": plan.Skipped,
-			"truncated": plan.Truncated, "runs": []any{},
-		})
+	if s.writeEmptyScopePlan(w, plan) {
 		return
 	}
-	s.respondTrashPlan(w, r, cu.User.ID, plan, "cleanup")
+	s.respondMovePlan(w, r, cu.User.ID, plan, "cleanup")
 }
 
 // duplicateAccountSummaries joins the per-account counts with the account names

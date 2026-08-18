@@ -25,7 +25,7 @@ import type {
   MessageOriginalSource,
   PluginSetting,
   SMTPAccount,
-  ScopeTrashResponse,
+  ScopeMoveResponse,
   SearchExplanation,
   ServerLogLine,
   StorageStats,
@@ -405,10 +405,26 @@ export const api = {
   // the matches, groups them per account Trash, and answers with the runs it
   // started; progress arrives through the normal sync-run events.
   scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView }) =>
-    postJSON<ScopeTrashResponse>("/api/messages/scope-trash", csrf, {
+    postJSON<ScopeMoveResponse>("/api/messages/scope-trash", csrf, {
       scope_mailbox_id: scope.mailboxID,
       scope_query: scope.query,
       scope_view: scope.view || ""
+    }),
+  // Archiving by date uses the same scope description plus the cutoff. The
+  // cutoff is the exact instant the chosen day begins in the reader's own
+  // timezone, so the day they name is kept whole wherever they are.
+  scopeArchiveMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView; before: string }) =>
+    postJSON<ScopeMoveResponse>("/api/messages/scope-archive", csrf, {
+      scope_mailbox_id: scope.mailboxID,
+      scope_query: scope.query,
+      scope_view: scope.view || "",
+      before: scope.before
+    }),
+  // Emptying the Trash is the one action that deletes mail on the IMAP server
+  // instead of moving it, so it names a single folder and nothing else.
+  emptyTrash: (csrf: string, mailboxID: number) =>
+    postJSON<{ ok: boolean; run_id: number; mailbox: string }>("/api/messages/empty-trash", csrf, {
+      mailbox_id: mailboxID
     }),
   bulkCopyMessages: async (csrf: string, ids: number[], mailboxID: number) => {
     const results = await Promise.all(chunkMessageIDs(ids).map((chunk) =>

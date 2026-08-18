@@ -202,7 +202,7 @@ func (s *Server) apiSwipePreferences(w http.ResponseWriter, r *http.Request) {
 			s.serverError(w, r, err)
 			return
 		}
-		// The Archive mapping decides what the Unarchived list leaves out, so a
+		// The Archive mapping decides what the Inbox list leaves out, so a
 		// changed mapping makes every cached page of that list wrong.
 		s.noteMailListChanged(cu.User.ID)
 		if s.events != nil {

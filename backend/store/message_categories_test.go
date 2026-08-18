@@ -76,7 +76,7 @@ func TestCategoryListsShowOneCategoryAndSkipArchivedMail(t *testing.T) {
 		t.Fatalf("newsletters = %v, want only %d (archived %d and relevant %d must stay out)",
 			messageIDsOf(messages), newsletter.ID, archivedNewsletter.ID, relevant.ID)
 	}
-	scope, err := f.db.ListCategoryMailScopeMessagesForUser(ctx, f.user.ID, mailparse.CategoryNewsletters, 100)
+	scope, err := f.db.ListCategoryMailScopeMessagesForUser(ctx, f.user.ID, mailparse.CategoryNewsletters, ScopeFilter{}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

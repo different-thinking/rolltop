@@ -863,7 +863,7 @@ function Sidebar({
   ].filter(Boolean).join(" · ");
   const listRoute = mailRoute(currentPath);
   const activeMailbox = listRoute.mailboxID;
-  const unarchivedActive = listRoute.view === "unarchived";
+  const inboxActive = listRoute.view === "inbox";
   const sentActive = listRoute.view === "sent";
   const draftsActive = listRoute.view === "drafts";
   const allMailActive = (currentPath === "/mail" || currentPath.startsWith("/mail/")) && !activeMailbox && !listRoute.view;
@@ -876,8 +876,8 @@ function Sidebar({
   // One ordered list drives both the links and their numbers, so a shortcut can
   // never point at a different entry than the badge beside it claims.
   const namedLists: NamedListEntry[] = [
+    { url: "/mail/inbox", label: "Inbox", icon: "inbox", active: inboxActive, unread: 0, title: "Everything that is not archived yet, across every account" },
     { url: "/mail", label: "All Mail", icon: "mail", active: allMailActive, unread: 0, title: "Every folder that opts into All Mail" },
-    { url: "/mail/unarchived", label: "Unarchived", icon: "inbox", active: unarchivedActive, unread: 0, title: "All Mail without each account's Archive folder" },
     { url: "/mail/sent", label: "Sent", icon: "send", active: sentActive, unread: 0, title: "Sent mail across every account" },
     { url: "/mail/drafts", label: "Drafts", icon: "draft", active: draftsActive, unread: 0, title: "Drafts across every account" },
     { url: "/snoozes", label: "Snoozed", icon: "clock", active: snoozedActive, unread: 0, title: "Threads waiting to come back" },
