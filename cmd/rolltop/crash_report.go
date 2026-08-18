@@ -16,13 +16,17 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,6 +38,12 @@ const (
 	// crashLogMaxBytes bounds the append-only log. Only failures are written,
 	// so this holds many incidents before the oldest are rotated away.
 	crashLogMaxBytes = 1 << 20
+
+	// crashLogBytesUnknown marks a baseline that could not be read back. State
+	// that will not parse says nothing about where the previous run's own
+	// output began, so nothing already in the crash log may be attributed to
+	// it - the reports there belong to runs that were reported long ago.
+	crashLogBytesUnknown = math.MaxInt64
 )
 
 // runState describes the run that wrote it. CrashLogBytes is the crash log size
@@ -107,11 +117,20 @@ func (c *crashReporter) open() {
 func (c *crashReporter) beginRun(version string) {
 	previous, hadPreviousRun := readRunState(c.statePath())
 	size := c.crashLogSize()
+	reported, searched := false, int64(0)
+	// An unknown baseline is not a baseline of zero: reading the log from the
+	// start would find some earlier run's report and file it against a run that
+	// left nothing, hiding the unclean shutdown that lost the state file in the
+	// first place.
+	if hadPreviousRun && previous.CrashLogBytes != crashLogBytesUnknown {
+		reported, searched = c.crashReportSince(previous.CrashLogBytes)
+	}
 	switch {
-	case hadPreviousRun && size > previous.CrashLogBytes:
+	case hadPreviousRun && reported:
 		// Checked before CleanShutdown: a panic dump lands after the process
 		// has already recorded how it thought it was ending.
-		log.Printf("previous run ended with a crash or fatal error; the report is in %s", c.crashLogPath())
+		log.Printf("previous run ended with a crash or fatal error; the report is in %s, among the %d bytes searched past the previous start",
+			c.crashLogPath(), searched)
 	case hadPreviousRun && !previous.CleanShutdown:
 		log.Printf("previous run was terminated without a clean shutdown and left no crash report; "+
 			"it was likely killed externally (kernel OOM kill or SIGKILL) or could not write %s - "+
@@ -120,7 +139,7 @@ func (c *crashReporter) beginRun(version string) {
 	if size > crashLogMaxBytes {
 		c.rotate()
 	}
-	c.appendf("=== rolltop %s started at %s pid=%d ===", version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
+	c.appendf(runStartMarkerFormat, version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
 	c.owned = true
 	c.writeState(false)
 }
@@ -164,6 +183,97 @@ func (c *crashReporter) rotate() {
 	c.open()
 }
 
+// runStartMarkerFormat is the line every run appends to announce itself.
+// isRunStartMarker below has to recognize exactly this shape, so the writer and
+// the reader are defined together: a marker the reader stops matching would be
+// read as a crash report, and every start would announce a failure that never
+// happened.
+const runStartMarkerFormat = "=== rolltop %s started at %s pid=%d ==="
+
+// isRunStartMarker reports whether a crash log line is a run announcement
+// rather than part of a report.
+//
+// Every field is checked, not just the shape. A line this returns true for is
+// skipped when the log is searched, so anything less than a marker it can fully
+// account for has to count as evidence: hiding a report costs an operator the
+// explanation for an incident, while treating a mangled line as one costs a log
+// message that says to go and read the file.
+func isRunStartMarker(line string) bool {
+	const prefix = "=== rolltop "
+	const suffix = " ==="
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, suffix) {
+		return false
+	}
+	body := line[len(prefix) : len(line)-len(suffix)]
+	_, startedAt, found := strings.Cut(body, " started at ")
+	if !found {
+		return false
+	}
+	stamp, pid, found := strings.Cut(startedAt, " pid=")
+	if !found {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+		return false
+	}
+	_, err := strconv.Atoi(pid)
+	return err == nil
+}
+
+// crashReportSince reports whether a crash report was appended past offset, and
+// how many bytes it searched to decide. The two differ when the log no longer
+// shares its bytes with the baseline and the whole file has to be read, so the
+// count is what was searched rather than what the previous run appended.
+//
+// Growth on its own does not mean a crash. Every start appends its own marker,
+// so comparing sizes announces a failure whenever the recorded baseline drifts
+// by as little as one line - and a baseline can drift, because it comes from a
+// stat that a FUSE-backed volume may answer from cache. Reading what was
+// actually appended costs one pass over a file bounded at 1 MiB and cannot
+// produce that false alarm.
+func (c *crashReporter) crashReportSince(offset int64) (bool, int64) {
+	file, err := os.Open(c.crashLogPath())
+	if err != nil {
+		return false, 0
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, 0
+	}
+	if !info.Mode().IsRegular() {
+		// Not a log at all - a directory in its place, say. There is nothing to
+		// have been reported, and claiming otherwise would hide the unclean
+		// shutdown that a log this broken could not record.
+		return false, 0
+	}
+	if offset < 0 || offset > info.Size() {
+		// A rotated or replaced log shares no bytes with the baseline, so an
+		// offset into it means nothing. Read what is there instead.
+		offset = 0
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return false, 0
+	}
+	searched := info.Size() - offset
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), crashLogMaxBytes)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || isRunStartMarker(line) {
+			continue
+		}
+		return true, searched
+	}
+	if scanner.Err() != nil {
+		// A readable log whose contents will not parse still has something in
+		// it. Reporting that keeps a real crash visible, where the alternative
+		// hides one behind a read error.
+		return true, searched
+	}
+	return false, searched
+}
+
 // appendf writes one line to the crash log and reports whether it landed.
 func (c *crashReporter) appendf(format string, args ...any) bool {
 	if c.file == nil {
@@ -176,12 +286,25 @@ func (c *crashReporter) appendf(format string, args ...any) bool {
 	return c.file.Sync() == nil
 }
 
+// crashLogSize reports how large the crash log is.
+//
+// The append handle's own offset is preferred whenever it is ahead of the stat.
+// A stat taken right after a write can still report a cached size on a
+// FUSE-backed volume, and a baseline recorded from that stat sits one line
+// behind the file for the rest of its life. The offset is zero until this
+// process writes, so the stat still answers the call made before a run appends
+// its marker.
 func (c *crashReporter) crashLogSize() int64 {
-	info, err := os.Stat(c.crashLogPath())
-	if err != nil {
-		return 0
+	size := int64(0)
+	if info, err := os.Stat(c.crashLogPath()); err == nil {
+		size = info.Size()
 	}
-	return info.Size()
+	if c.file != nil {
+		if offset, err := c.file.Seek(0, io.SeekCurrent); err == nil && offset > size {
+			size = offset
+		}
+	}
+	return size
 }
 
 // writeState records this run. The size baseline is captured on the first write
@@ -218,7 +341,7 @@ func (c *crashReporter) close() {
 
 // readRunState reports what the previous run recorded, and whether there was a
 // previous run at all. State that cannot be parsed still counts as evidence of
-// an unclean shutdown; it claims an unreachable size so a crash log left from
+// an unclean shutdown; it reports crashLogBytesUnknown so a crash log left from
 // before is not misread as a fresh report.
 func readRunState(path string) (runState, bool) {
 	data, err := os.ReadFile(path)
@@ -227,7 +350,7 @@ func readRunState(path string) (runState, bool) {
 	}
 	var state runState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return runState{CrashLogBytes: math.MaxInt64}, true
+		return runState{CrashLogBytes: crashLogBytesUnknown}, true
 	}
 	return state, true
 }

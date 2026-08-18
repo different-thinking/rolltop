@@ -303,6 +303,12 @@ anything that pipes or redirects only stdout (`docker logs rolltop | grep …`,
 `docker logs rolltop > out.log`) silently drops every log line — use
 `docker logs rolltop 2>&1 | grep …` instead.
 
+A start that reports `previous run ended with a crash or fatal error` has read
+the bytes appended since the last run and found something other than start
+markers there. Growth alone does not count: every start appends its own marker,
+so comparing sizes announced a crash whenever the recorded baseline drifted by a
+single line, and pointed at a report that did not exist.
+
 Crashes are additionally persisted in the data volume so they survive
 container recreation. Unhandled panics and fatal errors are **appended** to
 `/data/crash.log`, which Rolltop never truncates — each start adds a
@@ -418,6 +424,42 @@ not corrupt the database, but it leaves a hot WAL that the next start has to
 replay, and the next start then treats the run as unclean and verifies the
 tenant files before serving (see `ROLLTOP_STARTUP_INTEGRITY_CHECK`).
 
+### Health Checks
+
+`/api/health` answers `200` once this process owns the data directory and has
+finished starting, and `503` until then. The body is the same JSON `/api/startup`
+returns, so a probe that is failing also says which phase it is waiting on:
+
+```text
+$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/health
+503
+$ curl -s http://localhost:8080/api/health
+{"ready":false,"phase":"Database","detail":"running migrations","done":3,"total":9,...}
+```
+
+Point the hosting platform's health check at that path. Without one a platform
+assumes the container is ready the moment it starts, so requests arrive while
+migrations, the instance-lock wait, or a search index recovery are still
+running. They get the startup page or a `503` — correct answers, but not what
+anyone expects from a deploy.
+
+The probe deliberately reads no database, index, or file. Rolltop's failure mode
+under memory pressure is slowness rather than death, and a probe that waits on
+storage turns a slow instance into a killed one; that is how a stalled index
+writer once cost a tenant its entire search index. Readiness here is answered
+from state already in memory. Use the `ROLLTOP_MEMORY_LIMIT` guidance above for
+the slowness itself — that is not what a health check can fix.
+
+**One data directory belongs to one process, so the deployment has to stop the
+old instance before starting the new one.** A platform that instead keeps the
+previous instance running until the replacement reports healthy will deadlock
+against the instance lock: the new process cannot finish starting until the old
+one releases the directory, and the old one is not stopped until the new one is
+healthy. For a single-writer application, stopping first is the correct strategy
+in any case. Where the platform cannot be configured that way, leave the health
+check path unset and accept the startup page during the handover rather than
+pointing the probe at something that answers `200` before it can serve.
+
 ### Overlapping Deployments
 
 One data directory belongs to one Rolltop process. That is enforced with an
@@ -438,10 +480,12 @@ previous rolltop process released /data after 7s
 
 The HTTP listener is up throughout the wait, the same as during migrations: a
 TCP check connects, `/api/startup` answers `200` with the current phase, and a
-page request gets the startup page. A platform that stops the old container once
-the new one looks healthy therefore gets its healthy answer, and the wait ends. Set the value to `0` to
-refuse a directory another process still owns, which is what earlier versions
-always did. A wait that runs out is reported with the process that holds the
+page request gets the startup page. `/api/health` answers `503` for the whole
+wait, because this process cannot serve yet — which is why a deployment that
+holds the old instance until the new one is healthy has to be reconfigured to
+stop first, as the section above describes. Set the value to `0` to refuse a
+directory another process still owns, which is what earlier versions always
+did. A wait that runs out is reported with the process that holds the
 lock and how long it was given.
 
 The maintenance commands that need the directory to themselves — `check-db`,
