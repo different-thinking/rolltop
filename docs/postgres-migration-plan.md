@@ -36,7 +36,7 @@ Verified against the tree as of this writing:
 | `backend/store` | 86 non-test files, ~18.8k LOC (+ ~12.6k test LOC) |
 | Query call sites (`ExecContext`/`QueryContext`/`QueryRowContext`) | 663 non-test, ~1,000 incl. tests |
 | Schema migrations | system 001–004, user 001–035, plus named side migrations and plugin migrations |
-| `CREATE TABLE` statements / resulting tables | 87 statements across the migrations, 55 tables in the final schema |
+| `CREATE TABLE` statements / resulting tables | 87 statements across the migrations, 75 tables in the final schema (55 core + 20 from plugins) |
 | Production triggers | 1 (`messages_clear_duplicate_pointer`, `migration_user_033.go`) |
 | `AUTOINCREMENT` | 54 (all in migration DDL) |
 | `INSERT OR IGNORE` | 13 |

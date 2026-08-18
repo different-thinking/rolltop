@@ -32,8 +32,14 @@ func TestBaselineAppliesToPostgres(t *testing.T) {
 	conn := connect(t, ctx, adminDSN)
 	const name = "rolltop_baseline_probe"
 	mustExec(t, ctx, conn, `DROP DATABASE IF EXISTS `+name)
+	// TEST_DATABASE_URL is documented above as a CI-local, full-privilege
+	// container -- never the hosted database -- so a CREATE DATABASE failure
+	// here is a broken test environment, not the expected shape of things.
+	// Skipping it would repeat the same silent-green mistake connect() had:
+	// a misconfigured or underprivileged CI service would report a passing
+	// suite without ever validating the baseline.
 	if _, err := conn.Exec(ctx, `CREATE DATABASE `+name); err != nil {
-		t.Skipf("cannot create a probe database (needs CREATEDB): %v", err)
+		t.Fatalf("cannot create a probe database with TEST_DATABASE_URL: %v", err)
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)

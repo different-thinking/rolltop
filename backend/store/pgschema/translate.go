@@ -116,6 +116,13 @@ var (
 	createIndexRE = regexp.MustCompile(`(?is)^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_"]+)\s+ON\s+([A-Za-z0-9_"]+)\s*(\(.*)$`)
 	collateBinary = regexp.MustCompile(`(?i)\s+COLLATE\s+BINARY\b`)
 	collateNoCase = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)\s+COLLATE\s+NOCASE\b`)
+	// bareNoCaseRE matches COLLATE NOCASE with nothing captured, for contexts
+	// where the rewrite (lower(...)) makes no sense: a column definition or a
+	// table constraint. Only translateIndex may rewrite NOCASE; everywhere
+	// else it is an error, because PostgreSQL has no NOCASE collation and
+	// silently leaving the keyword in place produces invalid DDL rather than
+	// a build failure.
+	bareNoCaseRE  = regexp.MustCompile(`(?i)\bCOLLATE\s+NOCASE\b`)
 	autoincrement = regexp.MustCompile(`(?i)^INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT$`)
 	// A column-level foreign key with its optional referential actions. The
 	// column list is optional because SQLite allows "REFERENCES t" against the
@@ -205,7 +212,11 @@ func translateTable(ddl string) (string, []string, error) {
 			continue
 		}
 		if tableConstraintRE.MatchString(part) {
-			rendered = append(rendered, "  "+replaceOutsideStrings(part, collateBinary, ""))
+			constraint := replaceOutsideStrings(part, collateBinary, "")
+			if _, _, ok := findOutsideStrings(constraint, bareNoCaseRE); ok {
+				return "", nil, fmt.Errorf("COLLATE NOCASE is only supported on an index column, not a table constraint: %q", constraint)
+			}
+			rendered = append(rendered, "  "+constraint)
 			continue
 		}
 		column, reference, err := translateColumn(part)
@@ -224,6 +235,13 @@ func translateTable(ddl string) (string, []string, error) {
 		// not trip it.
 		if _, _, ok := findOutsideStrings(column, anyReferencesRE); ok {
 			return "", nil, fmt.Errorf("unrecognized foreign-key syntax left inline in column: %q", column)
+		}
+		// SQLite's NOCASE has a translation for an index column (lower()) but
+		// not for a column definition -- PostgreSQL has no such collation
+		// name, so leaving it in place would emit invalid DDL instead of
+		// failing the build.
+		if _, _, ok := findOutsideStrings(column, bareNoCaseRE); ok {
+			return "", nil, fmt.Errorf("COLLATE NOCASE is only supported on an index column, not a column definition: %q", column)
 		}
 		rendered = append(rendered, "  "+column)
 	}

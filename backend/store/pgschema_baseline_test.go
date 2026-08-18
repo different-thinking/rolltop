@@ -143,7 +143,7 @@ func TestBaselineIncludesPluginTables(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("no file-backed plugin migrations found; this test would prove nothing")
 	}
-	tableRE := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)`)
+	tableRE := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z0-9_]+)"?`)
 	checked := 0
 	for _, migration := range migrations {
 		for _, statement := range migration.Statements {

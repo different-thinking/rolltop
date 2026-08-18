@@ -220,6 +220,29 @@ func TestTranslateStripsRealCollateOutsideLiterals(t *testing.T) {
 	}
 }
 
+// TestTranslateRejectsColumnLevelNoCase is the regression test for a
+// COLLATE NOCASE that survives outside an index column: it produced invalid
+// PostgreSQL (a duplicate COLLATE clause naming a collation PostgreSQL does
+// not have) instead of failing the build.
+func TestTranslateRejectsColumnLevelNoCase(t *testing.T) {
+	if _, err := Translate([]SQLiteObject{{Kind: TableKind, Name: "t",
+		SQL: `CREATE TABLE t (name TEXT NOT NULL COLLATE NOCASE)`}}); err == nil {
+		t.Error("a column-level COLLATE NOCASE was accepted")
+	}
+	if _, err := Translate([]SQLiteObject{{Kind: TableKind, Name: "t", SQL: `CREATE TABLE t (
+		name TEXT NOT NULL,
+		UNIQUE(name COLLATE NOCASE)
+	)`}}); err == nil {
+		t.Error("a table-constraint COLLATE NOCASE was accepted")
+	}
+	// The index rewrite this restriction carves out an exception for must
+	// keep working.
+	objects := translateOne(t, IndexKind, "i", `CREATE INDEX i ON t(name COLLATE NOCASE)`)
+	if objects[0].SQL != "CREATE INDEX i ON t (lower(name));" {
+		t.Errorf("the supported index rewrite regressed: %s", objects[0].SQL)
+	}
+}
+
 // TestTranslateSplitsNamedForeignKeys covers the branch-order bug: a named
 // constraint matched the generic table-constraint test first and stayed
 // inline, defeating the phase split.
