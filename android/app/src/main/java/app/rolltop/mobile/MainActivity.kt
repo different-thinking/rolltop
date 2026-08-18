@@ -238,7 +238,10 @@ class MainActivity : ComponentActivity() {
             )
         }
         fun removeLoadingOverlay() {
-            (view.parent as? View)?.setBackgroundColor(Color.WHITE)
+            // The root keeps painting the system-bar inset areas after the
+            // overlay goes, so it stays on the shell colour; white would leave
+            // a bright band around a page whose own ground is the shell colour.
+            (view.parent as? View)?.setBackgroundColor(SHELL_BACKGROUND)
             (loadingOverlay.parent as? ViewGroup)?.removeView(loadingOverlay)
             if (this.loadingOverlay === loadingOverlay) this.loadingOverlay = null
             if (loadingAnimationView === loadingAnimation) loadingAnimationView = null

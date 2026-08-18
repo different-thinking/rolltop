@@ -248,13 +248,28 @@ func TestPaletteContrastMeetsWCAG(t *testing.T) {
 	// Avatar initials are small text on a coloured chip, so every hue carries
 	// the text threshold. Generating the pairs is what catches a ninth hue
 	// added to one theme and forgotten in another.
+	var avatarPairs []pair
 	for hue := 0; hue < avatarHueCount; hue++ {
-		pairs = append(pairs, pair{
+		avatarPairs = append(avatarPairs, pair{
 			what:      fmt.Sprintf("an avatar initial on hue %d", hue),
 			ink:       "--on-avatar",
 			ground:    fmt.Sprintf("--avatar-%d", hue),
 			threshold: textContrast,
 		})
+	}
+	// The avatar chips are opaque in every theme, unlike the translucent
+	// surfaces that keep the matrix palette out of the table above, so its hues
+	// can be held to the same threshold as the built-in ones.
+	matrix := loadPalette(t, matrixThemePath, "matrix")
+	for _, p := range []palette{light, dark, matrix} {
+		for _, pr := range avatarPairs {
+			ink := p.mustResolve(t, pr.ink)
+			ground := p.mustResolve(t, pr.ground)
+			if ratio := contrast(ink, ground); ratio < pr.threshold {
+				t.Errorf("%s: %s (%s on %s) is %.2f:1, want at least %.1f:1",
+					p.name, pr.what, pr.ink, pr.ground, ratio, pr.threshold)
+			}
+		}
 	}
 
 	for _, p := range []palette{light, dark} {

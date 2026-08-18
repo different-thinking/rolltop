@@ -10,7 +10,7 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
-import { dateGroupLabel, displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
+import { dateGroupLabel, displaySnoozeUntil, displayTime, localDayKey, messageCountLabel } from "../../lib/format";
 import { displayInitial, stableHash } from "../../lib/senderIdentity";
 import { archiveMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
@@ -1413,12 +1413,19 @@ function MessageList({
   // date sections — the same rule Gmail follows. Derived here rather than asked
   // of every caller, so a new list cannot be wired up without its headings.
   const groupByDate = !searchQuery;
-  // Headings depend only on which rows are on screen. Selection, swipes and
-  // drags re-render this list without moving a row, and a swipe re-renders it
-  // per touch event, so they are computed once per page rather than per render.
+  // Headings depend only on the rows' dates and on which day it is. Selection,
+  // swipes and drags re-render this list without moving a row, and a swipe
+  // re-renders it per touch event, so they are computed once per page rather
+  // than per render. The key carries the dates themselves, not just the row
+  // ids: a refresh can hand back the same messages with a reminder that has
+  // since come due. It carries the day too, so a list left open past midnight
+  // stops calling yesterday's mail "Today".
+  const sectionKey = groupByDate
+    ? `${localDayKey()}|${visible.map((conversation) => `${conversation.message.id}:${rowDate(conversation, snoozedView)}`).join(",")}`
+    : "";
   const sectionHeadings = useMemo(
     () => groupByDate ? dateSectionHeadings(visible, snoozedView) : [],
-    [visibleKey, groupByDate, snoozedView]
+    [sectionKey, groupByDate, snoozedView]
   );
   const hiddenKey = Array.from(hiddenMessageIDs).sort((a, b) => a - b).join(",");
   const pendingSwipeMoveKey = Array.from(pendingSwipeMoveIDs).sort((a, b) => a - b).join(",");

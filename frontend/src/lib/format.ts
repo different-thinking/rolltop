@@ -49,6 +49,16 @@ function startOfLocalDay(value: Date): Date {
   return day;
 }
 
+/**
+ * localDayKey identifies the reader's current calendar day. Anything that
+ * caches text naming a day relative to today — "Today", "Yesterday" — has to
+ * hold this alongside its own inputs, or a list left open past midnight keeps
+ * yesterday's wording.
+ */
+export function localDayKey(now = new Date()): number {
+  return startOfLocalDay(now).getTime();
+}
+
 function isOlderThanLastYear(date: Date, now = new Date()): boolean {
   const cutoff = startOfLocalDay(now);
   cutoff.setFullYear(cutoff.getFullYear() - 1);

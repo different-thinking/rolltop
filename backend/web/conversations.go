@@ -125,7 +125,10 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		if snooze, ok := activeSnoozes[store.SnoozeThreadKey(seed.Message)]; ok {
 			g.snoozedUntil = snooze.SnoozedUntil
 		}
-		if snooze, ok := dueSnoozes[store.SnoozeThreadKey(seed.Message)]; ok {
+		// Seeds sharing a conversation can carry different reminders, and the
+		// row sorts by the latest of them. Taking the last one iterated would
+		// let an earlier seed's later return time decide nothing.
+		if snooze, ok := dueSnoozes[store.SnoozeThreadKey(seed.Message)]; ok && snooze.SnoozedUntil.After(g.snoozeReturn) {
 			g.snoozeReturn = snooze.SnoozedUntil
 		}
 		g.terms = mergeTerms(g.terms, seed.MatchTerms)

@@ -253,6 +253,7 @@
   // bottom border. The arrival animation lifts the rows below by exactly this,
   // so it has to follow the row box.
   --new-mail-row-height: 49px;
+
   background: transparent;
 
   // Headings ride the arrival shift with the rows they head. Left out, a
