@@ -120,6 +120,32 @@ export function displaySnoozeUntil(value: string | Date, prefs?: DatePrefs, now 
   }).format(date);
 }
 
+/**
+ * dateGroupLabel names the date section a list row belongs to, the way Gmail
+ * heads its list with "Today", "Yesterday" and "This month". Rows outside the
+ * current month fall back to their month, with the year added once the month
+ * alone would be ambiguous. Snoozed lists pass future dates, so "Tomorrow"
+ * exists as well. An unparseable date returns "" and joins the previous group
+ * rather than opening a heading it cannot name.
+ */
+export function dateGroupLabel(value: string, prefs?: DatePrefs, now = new Date()): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const startOfDay = (input: Date) => {
+    const day = new Date(input);
+    day.setHours(0, 0, 0, 0);
+    return day;
+  };
+  const dayDiff = Math.round((startOfDay(date).getTime() - startOfDay(now).getTime()) / 86400000);
+  if (dayDiff === 0) return "Today";
+  if (dayDiff === -1) return "Yesterday";
+  if (dayDiff === 1) return "Tomorrow";
+  if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()) return "This month";
+  const month = date.toLocaleDateString(dateLocale(prefs), { month: "long" });
+  return date.getFullYear() === now.getFullYear() ? month : `${month} ${date.getFullYear()}`;
+}
+
 /** messageCountLabel renders "1 message" / "N messages" for move/copy/delete toasts. */
 export function messageCountLabel(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;

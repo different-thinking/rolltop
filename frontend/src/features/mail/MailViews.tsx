@@ -1,7 +1,7 @@
 // File overview: Mailbox and search result lists. These components fetch paged conversations,
 // surface sync clues, keep selection state stable, and link rows back to their source page.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { Star } from "@phosphor-icons/react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
@@ -11,7 +11,7 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
-import { displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
+import { dateGroupLabel, displaySnoozeUntil, displayTime, messageCountLabel } from "../../lib/format";
 import { archiveMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
@@ -48,6 +48,21 @@ function searchActionNodes(plugins: RuntimePlugin[], query: string, navigate: (u
   return (plugins as SearchActionPlugin[])
     .map((plugin) => plugin.renderSearchActions?.({ query, navigate }))
     .filter(Boolean);
+}
+
+// Gmail-style initial avatars: one of eight fixed hues, picked from the sender
+// text so the same correspondent keeps the same colour between renders.
+const senderAvatarHueCount = 8;
+
+function senderAvatarHue(seed: string): number {
+  let hash = 0;
+  for (let index = 0; index < seed.length; index++) hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  return hash % senderAvatarHueCount;
+}
+
+function senderAvatarInitial(name: string): string {
+  const match = name.match(/[\p{L}\p{N}]/u);
+  return (match ? match[0] : "?").toUpperCase();
 }
 
 function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation["message"]) {
@@ -505,6 +520,7 @@ export function MailView({
                 onMessagesMoved={removeMovedConversations}
                 onListChanged={refreshList}
                 listScope={listScope}
+                groupByDate
                 emptyState={showRecoveryEmptyState && mailbox ? (
                   <MailboxRecoveryEmptyState mailbox={mailbox} activeRun={accountActiveRun} />
                 ) : undefined}
@@ -677,6 +693,7 @@ export function SnoozedView({
               onMessagesMoved={removeMovedConversations}
               onListChanged={() => setRefreshGeneration((current) => current + 1)}
               snoozedView
+              groupByDate
             />
       )}
     </div> : null}
@@ -1299,6 +1316,7 @@ function MessageList({
   listScope,
   snoozedView = false,
   currentMailboxID = 0,
+  groupByDate = false,
   emptyState
 }: {
   csrf: string;
@@ -1327,6 +1345,9 @@ function MessageList({
   snoozedView?: boolean;
   /** The mailbox this list is showing, so Delete can skip rows already in it. */
   currentMailboxID?: number;
+  /** Head date-ordered lists with Gmail-style Today/Yesterday sections. Search
+   * results are ranked by match, so they stay unsectioned the way Gmail's do. */
+  groupByDate?: boolean;
   emptyState?: ReactNode;
 }) {
   const [selectedIDs, setSelectedIDs] = useState<Set<number>>(() => new Set());
@@ -2545,10 +2566,23 @@ function MessageList({
         const participantText = showRecipients
           ? `To: ${conversation.recipient_participants || msg.to_addr || conversation.participants || "undisclosed recipients"}`
           : (conversation.participants || msg.from_addr || "Unknown sender");
+        const avatarSource = showRecipients
+          ? (conversation.recipient_participants || msg.to_addr || conversation.participants || "")
+          : (conversation.participants || msg.from_addr || "");
+        // Snoozed rows sit under the day the reminder returns, everything else
+        // under the day the message arrived. The heading opens wherever the
+        // label changes from the previous row, so both sort directions work.
+        const rowGroupDate = (item: Conversation) => snoozedView && item.snoozed_until ? item.snoozed_until : item.message.date;
+        const groupLabel = groupByDate ? dateGroupLabel(rowGroupDate(conversation), datePrefs) : "";
+        const previousGroupLabel = groupByDate && index > 0 ? dateGroupLabel(rowGroupDate(visible[index - 1]), datePrefs) : "";
+        const showGroupHeading = groupLabel !== "" && groupLabel !== previousGroupLabel;
         return (
+      <Fragment key={msg.id}>
+      {showGroupHeading ? (
+        <div className="message-date-heading" role="heading" aria-level={2}>{groupLabel}</div>
+      ) : null}
       <div
         className={`message-swipe-shell ${activeSwipe ? `revealing-${activeSwipe.direction} swipe-phase-${activeSwipe.phase}` : ""} ${swipeReady ? "swipe-action-ready" : ""}`}
-        key={msg.id}
         style={swipeStyle}
       >
       <div className="message-swipe-actions" aria-hidden="true">
@@ -2607,15 +2641,9 @@ function MessageList({
                 onChange={() => undefined}
               />
             </label>
-            <button
-              className={`star-action ${msg.is_starred ? "starred" : ""}`}
-              type="button"
-              aria-pressed={msg.is_starred}
-              title={msg.is_starred ? "Unstar" : "Star"}
-              onClick={(event) => void toggleStar(event, conversation)}
-            >
-              <Star className="icon" weight={msg.is_starred ? "fill" : "regular"} />
-            </button>
+            <span className={`sender-avatar avatar-hue-${senderAvatarHue(avatarSource)}`} aria-hidden="true">
+              {senderAvatarInitial(avatarSource)}
+            </span>
             <span className="sender">
               <span className="sender-name">
                 <HighlightedText text={participantText} query={searchQuery} terms={matchTerms} />
@@ -2629,6 +2657,7 @@ function MessageList({
               {securityIndicators}
               {annotationNodes}
               <span className={`snippet ${securitySnippetClass}`}>
+                {previewText ? <span className="snippet-separator" aria-hidden="true">&mdash;&nbsp;</span> : null}
                 <HighlightedText text={previewText} query={securitySnippetClass ? "" : searchQuery} terms={securitySnippetClass ? [] : matchTerms} />
               </span>
               {attachmentNames.length > 0 ? (
@@ -2650,6 +2679,15 @@ function MessageList({
         ) : null}
         <span>{displayTime(snoozedView && conversation.snoozed_until ? conversation.snoozed_until : msg.date, datePrefs)}</span>
       </span>
+            <button
+              className={`star-action ${msg.is_starred ? "starred" : ""}`}
+              type="button"
+              aria-pressed={msg.is_starred}
+              title={msg.is_starred ? "Unstar" : "Star"}
+              onClick={(event) => void toggleStar(event, conversation)}
+            >
+              <Star className="icon" weight={msg.is_starred ? "fill" : "regular"} />
+            </button>
       <div className="message-row-actions" role="group" aria-label={`Actions for ${msg.subject || "message"}`}>
         {openAsDraft ? null : (
           <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => replyToConversation(conversation)} title="Reply" aria-label="Reply">
@@ -2694,6 +2732,7 @@ function MessageList({
       </div>
       </div>
           </div>
+      </Fragment>
         );
       })}
     </div>

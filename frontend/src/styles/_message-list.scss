@@ -258,13 +258,23 @@
   }
 }
 
+// The date sections Gmail heads its list with: Today, Yesterday, This month.
+.message-date-heading {
+  padding: 14px 16px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
 .message-row {
   position: relative;
   display: grid;
-  grid-template-columns: 22px 24px minmax(140px, 240px) minmax(0, 1fr) 88px;
+  grid-template-columns: 22px 40px minmax(140px, 220px) minmax(0, 1fr) max-content 28px;
   column-gap: 8px;
   row-gap: 0;
-  min-height: 44px;
+  min-height: 48px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--separator);
   color: var(--text);
@@ -274,6 +284,8 @@
   transition: transform .18s cubic-bezier(.2, .8, .2, 1);
   z-index: 1;
 
+  // Read and unread part ways the same way Gmail's rows do: a shaded ground
+  // and regular weight against a plain ground and bold ink. No accent bar.
   &.read {
     background: var(--row-read);
     color: var(--muted);
@@ -294,17 +306,6 @@
     background: var(--row-unread);
     color: var(--text);
 
-    &::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      top: 9px;
-      bottom: 9px;
-      width: 3px;
-      border-radius: 0 2px 2px 0;
-      background: var(--accent-warm);
-    }
-
     .sender,
     .subject strong,
     .date {
@@ -312,9 +313,12 @@
     }
   }
 
+  // Gmail's hover keeps the row's own ground and floats it: a wash from the
+  // inset spread plus the theme's shadow, which the dark theme's wash carries
+  // where shadows cannot.
   &:hover {
-    background: color-mix(in srgb, var(--hover) 55%, var(--row-read));
-    box-shadow: inset 3px 0 0 var(--accent-warm), 0 1px 0 var(--separator);
+    box-shadow: inset 0 0 0 999px var(--hover), var(--shadow);
+    z-index: 2;
   }
 
   &.selected {
@@ -680,13 +684,14 @@
   animation: message-list-track-right var(--message-list-slide-duration) cubic-bezier(.16, 1, .3, 1) both;
 }
 
+// A flat rounded card on the page ground, the way Gmail's list sits on its
+// cool grey chrome: the surface contrast is the edge, not a border or shadow.
 .message-list-pane {
   flex: 0 0 calc((100% - var(--message-list-slide-gap)) / 2);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 16px;
   overflow: hidden;
-  box-shadow: var(--shadow);
 }
 
 .message-list-pane.outgoing {
@@ -776,8 +781,33 @@
     margin: 0;
     accent-color: var(--accent);
     cursor: pointer;
-    transform: translateY(4px);
   }
+}
+
+// Gmail-style initial avatar. The hue classes are fixed identity colours, the
+// same in both themes, so they live here rather than in the palettes.
+.sender-avatar {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  border-radius: 50%;
+  background: var(--surface-ink);
+  color: var(--on-avatar);
+  font-size: 14px;
+  font-weight: 600;
+  user-select: none;
+
+  &.avatar-hue-0 { background: var(--avatar-0); }
+  &.avatar-hue-1 { background: var(--avatar-1); }
+  &.avatar-hue-2 { background: var(--avatar-2); }
+  &.avatar-hue-3 { background: var(--avatar-3); }
+  &.avatar-hue-4 { background: var(--avatar-4); }
+  &.avatar-hue-5 { background: var(--avatar-5); }
+  &.avatar-hue-6 { background: var(--avatar-6); }
+  &.avatar-hue-7 { background: var(--avatar-7); }
 }
 
 .star-action {
@@ -793,11 +823,11 @@
 
   &:hover {
     background: color-mix(in srgb, var(--border-strong) 22%, transparent);
-    color: var(--accent-warm-strong);
+    color: var(--star);
   }
 
   &.starred {
-    color: var(--accent-warm-strong);
+    color: var(--star);
   }
 }
 
@@ -851,6 +881,12 @@
   flex: 1 1 auto;
   color: var(--muted);
   margin-left: 6px;
+  font-weight: 400;
+}
+
+// The em dash Gmail sets between subject and preview text.
+.snippet-separator {
+  color: var(--muted);
   font-weight: 400;
 }
 
