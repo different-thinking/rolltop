@@ -20,6 +20,11 @@
 -- EXTENSION calls are the one persistent effect, and those extensions are
 -- wanted for the migration anyway.
 --
+-- Do not run this while the admin Database page's preflight runs against the
+-- same database: both use the preflight_scratch schema and each starts by
+-- dropping it, so concurrent runs delete each other's tables. The in-app
+-- preflight serializes its own runs; it cannot see a psql session.
+--
 -- Tip: run once with \timing enabled (psql -c '\timing on' interactively) to
 -- get a feel for round-trip latency — but note that latency via the bastion
 -- is not representative of the app-to-database path inside the platform.
@@ -48,26 +53,39 @@ BEGIN
 END $$;
 
 \echo ''
-\echo '=== 2. Default collation is deterministic (equality is byte-exact) ==='
+\echo '=== 2. Text equality is byte-exact ==='
 -- The store compares hashes, message-ids, and fingerprints with plain "=".
--- Under any *deterministic* collation Postgres compares equality byte-wise,
--- regardless of locale; only a nondeterministic (ICU) default would break
--- that. This is the property that makes the hoster's fixed cluster locale
--- acceptable at all.
+-- Under any deterministic collation Postgres compares equality byte-wise,
+-- regardless of locale, which is what makes the hoster's fixed cluster locale
+-- acceptable at all (migration plan §3.4).
+--
+-- This is deliberately a behavioral probe, not a catalog lookup: the
+-- pg_collation row named 'default' is a pinned placeholder whose
+-- collisdeterministic is hard-wired true and says nothing about this
+-- database, so querying it only looks like a check. Postgres also does not
+-- currently allow a nondeterministic collation as a database default
+-- (verified on 16), so these probes guard against a future relaxation.
 DO $$
-DECLARE det boolean;
 BEGIN
-  SELECT c.collisdeterministic INTO det
-  FROM pg_database d
-  JOIN pg_collation c ON c.collname = 'default'
-  WHERE d.datname = current_database();
-  IF det IS DISTINCT FROM true THEN
-    RAISE EXCEPTION 'FAIL: database default collation is not deterministic';
+  IF 'a' = 'A' THEN
+    RAISE EXCEPTION 'FAIL: default collation is case-insensitive; = is not byte-exact';
   END IF;
-  IF 'a' = 'A' OR 'ss' = 'ß' OR 'abc' = 'abc ' THEN
-    RAISE EXCEPTION 'FAIL: text equality is not byte-exact under the default collation';
+  IF 'ss' = 'ß' THEN
+    RAISE EXCEPTION 'FAIL: default collation is ligature-insensitive; = is not byte-exact';
   END IF;
-  RAISE NOTICE 'PASS: default collation is deterministic; = is byte-exact';
+  IF 'abc' = 'abc ' THEN
+    RAISE EXCEPTION 'FAIL: default collation is padding-insensitive; = is not byte-exact';
+  END IF;
+  -- Written with unicode escapes so no editor normalization can turn the
+  -- two operands into the same bytes: U+00E4 is precomposed 'ä', U+0061
+  -- U+0308 is 'a' plus a combining diaeresis.
+  IF U&'a' = U&'\00E1' THEN
+    RAISE EXCEPTION 'FAIL: default collation is accent-insensitive; = is not byte-exact';
+  END IF;
+  IF U&'\00E4' = U&'a\0308' THEN
+    RAISE EXCEPTION 'FAIL: default collation is normalization-insensitive; = is not byte-exact';
+  END IF;
+  RAISE NOTICE 'PASS: text equality is byte-exact';
 END $$;
 
 \echo ''
@@ -127,21 +145,29 @@ END $$;
 \echo '=== 6. UTF-8 strictness (NUL and invalid bytes are rejected) ==='
 -- Mail is hostile input; the plan requires write-path sanitization. This
 -- check documents that the database really does reject what SQLite accepted.
+-- Each probe must fail with its specific SQLSTATE. Accepting any error would
+-- report a pass for a check that never reached the server.
 DO $$
 BEGIN
   BEGIN
     PERFORM chr(0);
     RAISE EXCEPTION 'FAIL: NUL character was accepted in text';
-  EXCEPTION WHEN OTHERS THEN
-    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
-    RAISE NOTICE 'PASS: NUL character rejected (%)', SQLERRM;
+  EXCEPTION
+    WHEN program_limit_exceeded THEN            -- 54000 null character not permitted
+      RAISE NOTICE 'PASS: NUL character rejected (%)', SQLERRM;
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+      RAISE EXCEPTION 'FAIL: NUL probe did not complete (SQLSTATE %): %', SQLSTATE, SQLERRM;
   END;
   BEGIN
     PERFORM convert_from('\xff'::bytea, 'UTF8');
     RAISE EXCEPTION 'FAIL: invalid UTF-8 byte sequence was accepted';
-  EXCEPTION WHEN OTHERS THEN
-    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
-    RAISE NOTICE 'PASS: invalid UTF-8 rejected (%)', SQLERRM;
+  EXCEPTION
+    WHEN character_not_in_repertoire THEN       -- 22021 invalid byte sequence
+      RAISE NOTICE 'PASS: invalid UTF-8 rejected (%)', SQLERRM;
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+      RAISE EXCEPTION 'FAIL: UTF-8 probe did not complete (SQLSTATE %): %', SQLSTATE, SQLERRM;
   END;
 END $$;
 

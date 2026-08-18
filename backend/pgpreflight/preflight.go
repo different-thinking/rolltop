@@ -1,13 +1,22 @@
 // File overview: PostgreSQL migration preflight, the Go twin of
 // scripts/pg-preflight.sql. It connects to a candidate target database and
 // verifies every capability docs/postgres-migration-plan.md assumes: server
-// version and encoding, deterministic default collation, column- and
-// index-level COLLATE "C" byte ordering, the trusted extensions, UTF-8
-// strictness, and the SQL features the ported queries rely on. Run from the
-// app container it also measures the round-trip latency of the real
-// app-to-database path, which a bastion session cannot. The DSN is used for
-// this one connection and never stored or logged; results carry no
-// credentials.
+// version and encoding, byte-exact text equality, column- and index-level
+// COLLATE "C" byte ordering, the trusted extensions, UTF-8 strictness, and
+// the SQL features the ported queries rely on. Run from the app container it
+// also measures the round-trip latency of the real app-to-database path,
+// which a bastion session cannot.
+//
+// Two properties this file is responsible for, both of which failed review
+// once already:
+//
+//   - The DSN never leaves this process. Driver errors echo the connection
+//     string, and pgx's own redaction misses the libpq keyword form with
+//     spaces (`password = secret`), so redactSecrets below scrubs every
+//     spelling before an error is handed on.
+//   - A run leaves nothing behind but the extensions. The scratch schema is
+//     dropped even when the run's context was cancelled, which force-closes
+//     the pgx connection; the cleanup then reconnects to finish the job.
 
 package pgpreflight
 
@@ -15,20 +24,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Check statuses. The frontend union in types.ts mirrors these three values.
+const (
+	StatusPass = "pass"
+	StatusFail = "fail"
+	StatusInfo = "info"
 )
 
 // scratchSchema must match scripts/pg-preflight.sql so a half-finished run of
-// either tool is cleaned up by the next run of the other.
+// either tool is cleaned up by the next run of the other. TestTwinsAgree
+// asserts the two stay in sync.
 const scratchSchema = "preflight_scratch"
 
-// Check is one verified capability. Status is "pass", "fail", or "info";
-// info rows report facts that need a human judgement rather than having a
-// hard pass condition.
+// minServerVersion is the oldest Postgres the migration plan targets.
+const minServerVersion = 160000
+
+// requiredExtensions are the trusted extensions phase 7 (search) needs.
+var requiredExtensions = []string{"pg_trgm", "citext", "unaccent"}
+
+// wantByteOrder is how the probe values sort under byte order: the UTF-8
+// encodings are B (0x42) < Z (0x5A) < a (0x61) < ä (0xC3A4).
+const wantByteOrder = "B,Z,a,ä"
+
+// defaultConnectTimeout bounds the dial so a blackholed host reports
+// "unreachable" in seconds instead of consuming the caller's whole budget. A
+// DSN that sets connect_timeout itself keeps its own value.
+const defaultConnectTimeout = 10 * time.Second
+
+// cleanupTimeout bounds the post-run scratch-schema drop, including the
+// reconnect the cancelled-context path needs.
+const cleanupTimeout = 15 * time.Second
+
+// ErrBusy reports that another preflight is already running. Runs share one
+// fixed scratch schema and each starts by dropping it, so two concurrent runs
+// against the same target would delete each other's tables mid-battery.
+var ErrBusy = errors.New("a preflight run is already in progress")
+
+// runLock serializes runs process-wide. It does not coordinate with a
+// bastion psql session against the same database; that remains an operator
+// concern, documented in scripts/pg-preflight.sql.
+var runLock sync.Mutex
+
+// Check is one verified capability. Status is StatusPass, StatusFail, or
+// StatusInfo; info rows report facts that need a human judgement rather than
+// having a hard pass condition.
 type Check struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
@@ -37,7 +85,7 @@ type Check struct {
 }
 
 // Report is the outcome of one preflight run. OK is true only when no check
-// failed. Duration covers the whole run including connect.
+// failed. DurationMS covers the whole run including connect.
 type Report struct {
 	OK         bool    `json:"ok"`
 	Checks     []Check `json:"checks"`
@@ -51,49 +99,91 @@ type runner struct {
 }
 
 func (r *runner) pass(id, title, detail string) {
-	r.checks = append(r.checks, Check{ID: id, Title: title, Status: "pass", Detail: detail})
+	r.checks = append(r.checks, Check{ID: id, Title: title, Status: StatusPass, Detail: detail})
 }
 
-func (r *runner) fail(id, title string, err error) {
+// fail records a failure from a plain message. Callers with an error value
+// use failErr so redaction happens in exactly one place.
+func (r *runner) fail(id, title, detail string) {
 	r.failed = true
+	r.checks = append(r.checks, Check{ID: id, Title: title, Status: StatusFail, Detail: detail})
+}
+
+func (r *runner) failErr(id, title string, err error) {
 	detail := ""
 	if err != nil {
-		detail = err.Error()
+		detail = redactSecrets(err.Error())
 	}
-	r.checks = append(r.checks, Check{ID: id, Title: title, Status: "fail", Detail: detail})
+	r.fail(id, title, detail)
 }
 
 func (r *runner) info(id, title, detail string) {
-	r.checks = append(r.checks, Check{ID: id, Title: title, Status: "info", Detail: detail})
+	r.checks = append(r.checks, Check{ID: id, Title: title, Status: StatusInfo, Detail: detail})
+}
+
+// execAll runs statements in order and reports the first failure under id.
+// It returns false once anything failed so callers can stop.
+func (r *runner) execAll(ctx context.Context, id, title string, statements ...string) bool {
+	for _, statement := range statements {
+		if _, err := r.conn.Exec(ctx, statement); err != nil {
+			r.failErr(id, title, err)
+			return false
+		}
+	}
+	return true
+}
+
+// Secret spellings pgx may echo back: the libpq keyword form with any
+// spacing, quoted or bare, and the userinfo section of a URL DSN. pgconn's
+// own redactPW only handles the space-free keyword form, so a DSN written as
+// `password = secret` reaches the caller in cleartext without this.
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)password\s*=\s*'[^']*'`),
+	regexp.MustCompile(`(?i)password\s*=\s*"[^"]*"`),
+	regexp.MustCompile(`(?i)password\s*=\s*[^\s'"]+`),
+	regexp.MustCompile(`(?i)\b(pgpassword|passfile)\s*=\s*\S+`),
+}
+
+// urlUserinfo matches the credentials section of a URL-style DSN, keeping the
+// scheme and user so the message stays useful.
+var urlUserinfo = regexp.MustCompile(`(?i)(postgres(?:ql)?://[^:/@\s]*):[^@/\s]*@`)
+
+// redactSecrets removes credential material from text that may embed a DSN.
+// It is applied to every error this package reports, not only connect
+// failures, because pgx echoes the connection string from several paths.
+func redactSecrets(message string) string {
+	message = urlUserinfo.ReplaceAllString(message, "$1:…@")
+	for _, pattern := range secretPatterns {
+		message = pattern.ReplaceAllString(message, "password=…")
+	}
+	return message
 }
 
 // Run executes the preflight against dsn. It never panics and always returns
-// a report; a connection failure is itself a reported check. The only
-// persistent effects on the target are the three CREATE EXTENSION calls,
-// which the migration wants anyway — the scratch schema is dropped at the
-// end.
-func Run(ctx context.Context, dsn string) Report {
+// a report; a connection failure is itself a reported check. It returns
+// ErrBusy when another run holds the lock. The only persistent effects on the
+// target are the CREATE EXTENSION calls, which the migration wants anyway —
+// the scratch schema is dropped at the end even if the run is cancelled.
+func Run(ctx context.Context, dsn string) (Report, error) {
+	if !runLock.TryLock() {
+		return Report{}, ErrBusy
+	}
+	defer runLock.Unlock()
+
 	started := time.Now()
 	r := &runner{}
-	conn, err := pgx.Connect(ctx, dsn)
+	conn, err := connect(ctx, dsn)
 	if err != nil {
-		// The driver echoes the failing host but not the password; the DSN
-		// itself must not appear here in case it embeds one.
-		r.fail("connect", "Connect to the database", errors.New(sanitizeConnectError(err)))
-		return r.report(started)
+		r.failErr("connect", "Connect to the database", err)
+		return r.report(started), nil
 	}
 	r.conn = conn
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = conn.Exec(cleanupCtx, `DROP SCHEMA IF EXISTS `+scratchSchema+` CASCADE`)
-		_ = conn.Close(cleanupCtx)
-	}()
+	defer dropScratchSchema(conn, dsn)
 	r.pass("connect", "Connect to the database", "")
 
 	r.checkLatency(ctx)
 	r.checkServer(ctx)
-	r.checkDeterministicCollation(ctx)
+	r.checkByteExactEquality(ctx)
 	if r.checkScratchSchema(ctx) {
 		r.checkCollateC(ctx)
 		r.checkExtensions(ctx)
@@ -101,22 +191,54 @@ func Run(ctx context.Context, dsn string) Report {
 		r.checkSQLFeatures(ctx)
 	}
 	r.checkConnectionBudget(ctx)
-	return r.report(started)
+	return r.report(started), nil
+}
+
+// parseWithDefaults applies a default dial timeout unless the DSN sets one,
+// so an unreachable host fails fast instead of holding the caller's whole
+// budget.
+func parseWithDefaults(dsn string) (*pgx.ConnConfig, error) {
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if config.ConnectTimeout == 0 {
+		config.ConnectTimeout = defaultConnectTimeout
+	}
+	return config, nil
+}
+
+func connect(ctx context.Context, dsn string) (*pgx.Conn, error) {
+	config, err := parseWithDefaults(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.ConnectConfig(ctx, config)
+}
+
+// dropScratchSchema removes the scratch schema and closes the connection.
+// When the run ended through a cancelled context, pgx has already destroyed
+// the connection, so the drop is retried over a fresh one: otherwise an
+// aborted run leaves its tables in the candidate database, contradicting what
+// the UI promises.
+func dropScratchSchema(conn *pgx.Conn, dsn string) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_, err := conn.Exec(ctx, `DROP SCHEMA IF EXISTS `+scratchSchema+` CASCADE`)
+	_ = conn.Close(ctx)
+	if err == nil {
+		return
+	}
+	fresh, freshErr := connect(ctx, dsn)
+	if freshErr != nil {
+		return
+	}
+	defer func() { _ = fresh.Close(ctx) }()
+	_, _ = fresh.Exec(ctx, `DROP SCHEMA IF EXISTS `+scratchSchema+` CASCADE`)
 }
 
 func (r *runner) report(started time.Time) Report {
 	return Report{OK: !r.failed, Checks: r.checks, DurationMS: time.Since(started).Milliseconds()}
-}
-
-// sanitizeConnectError keeps driver messages but strips anything that looks
-// like a keyword/value DSN echoed back, so a password never reaches the
-// browser or a log line.
-func sanitizeConnectError(err error) string {
-	message := err.Error()
-	if idx := strings.Index(message, "password="); idx >= 0 {
-		message = message[:idx] + "password=…"
-	}
-	return message
 }
 
 // checkLatency measures round trips on the live connection. Run inside the
@@ -129,7 +251,7 @@ func (r *runner) checkLatency(ctx context.Context) {
 		start := time.Now()
 		var one int
 		if err := r.conn.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
-			r.fail("latency", "Round-trip latency", err)
+			r.failErr("latency", "Round-trip latency", err)
 			return
 		}
 		samples = append(samples, time.Since(start))
@@ -142,70 +264,104 @@ func (r *runner) checkLatency(ctx context.Context) {
 }
 
 func (r *runner) checkServer(ctx context.Context) {
+	const versionTitle = "Server version >= 16"
+	const encodingTitle = "Server encoding is UTF8"
 	var versionNum int
-	var version, encoding string
-	if err := r.conn.QueryRow(ctx,
-		`SELECT current_setting('server_version_num')::int, current_setting('server_version'), current_setting('server_encoding')`).
-		Scan(&versionNum, &version, &encoding); err != nil {
-		r.fail("server", "Server version and encoding", err)
+	var version, encoding, collate, ctype, provider string
+	// One round trip for everything the gate and the locale info row need.
+	// A restrictive host that refuses the catalog read must fail the gate
+	// rather than silently omit it, so both checks report the same error.
+	err := r.conn.QueryRow(ctx, `
+		SELECT current_setting('server_version_num')::int,
+		       current_setting('server_version'),
+		       current_setting('server_encoding'),
+		       d.datcollate, d.datctype, d.datlocprovider::text
+		FROM pg_database d WHERE d.datname = current_database()`).
+		Scan(&versionNum, &version, &encoding, &collate, &ctype, &provider)
+	if err != nil {
+		r.failErr("version", versionTitle, err)
+		r.failErr("encoding", encodingTitle, err)
 		return
 	}
-	if versionNum < 160000 {
-		r.fail("version", "Server version >= 16", fmt.Errorf("server version %s is below 16", version))
+	if versionNum < minServerVersion {
+		r.fail("version", versionTitle, fmt.Sprintf("server version %s is below 16", version))
 	} else {
-		r.pass("version", "Server version >= 16", version)
+		r.pass("version", versionTitle, version)
 	}
 	if encoding != "UTF8" {
-		r.fail("encoding", "Server encoding is UTF8", fmt.Errorf("server encoding is %s", encoding))
+		r.fail("encoding", encodingTitle, fmt.Sprintf("server encoding is %s", encoding))
 	} else {
-		r.pass("encoding", "Server encoding is UTF8", "")
+		r.pass("encoding", encodingTitle, "")
 	}
-	var datname, collate, ctype string
-	if err := r.conn.QueryRow(ctx,
-		`SELECT datname, datcollate, datctype FROM pg_database WHERE datname = current_database()`).
-		Scan(&datname, &collate, &ctype); err == nil {
-		r.info("locale", "Database locale", fmt.Sprintf("%s: LC_COLLATE=%s LC_CTYPE=%s", datname, collate, ctype))
-	}
+	r.info("locale", "Database locale",
+		fmt.Sprintf("LC_COLLATE=%s LC_CTYPE=%s provider=%s", collate, ctype, localeProviderName(provider)))
 }
 
-// checkDeterministicCollation verifies the property the migration plan's
-// §3.4 rests on: under a deterministic default collation, text equality is
-// byte-exact regardless of locale, which keeps every COLLATE BINARY
-// comparison site correct without per-query changes.
-func (r *runner) checkDeterministicCollation(ctx context.Context) {
-	const title = "Default collation is deterministic (equality is byte-exact)"
-	var deterministic bool
+func localeProviderName(code string) string {
+	switch code {
+	case "c":
+		return "libc"
+	case "i":
+		return "icu"
+	case "b":
+		return "builtin"
+	}
+	return code
+}
+
+// checkByteExactEquality verifies the property §3.4 of the migration plan
+// rests on: text equality compares byte-wise, so the 58 COLLATE BINARY
+// comparison sites keep SQLite semantics under whatever locale the hoster's
+// cluster uses.
+//
+// This is deliberately a behavioral probe rather than a catalog lookup. The
+// pg_collation row named "default" is a pinned placeholder whose
+// collisdeterministic is hard-wired true and says nothing about the database,
+// so querying it only looks like a check. Postgres also does not currently
+// allow a nondeterministic collation as a database default — verified against
+// 16, where even an ICU und-u-ks-level1 database still compares 'a' <> 'A' —
+// which makes these probes a guard against a future relaxation rather than a
+// live hazard.
+func (r *runner) checkByteExactEquality(ctx context.Context) {
+	const title = "Text equality is byte-exact"
+	// The accent and normalization operands use unicode escapes so no editor
+	// normalization can collapse the two sides into the same bytes: U+00E4 is
+	// precomposed 'a-umlaut', U+0061 U+0308 is 'a' plus a combining diaeresis.
+	// An earlier revision wrote them as literals and compared a value with
+	// itself, which the SQL twin caught only when run against a live server.
+	var caseFold, ligature, padding, accent, normalization bool
 	if err := r.conn.QueryRow(ctx,
-		`SELECT c.collisdeterministic FROM pg_collation c WHERE c.collname = 'default'`).
-		Scan(&deterministic); err != nil {
-		r.fail("collation-deterministic", title, err)
+		`SELECT 'a' = 'A', 'ss' = U&'\00DF', 'abc' = 'abc ',
+		        'a' = U&'\00E1', U&'\00E4' = U&'a\0308'`).
+		Scan(&caseFold, &ligature, &padding, &accent, &normalization); err != nil {
+		r.failErr("byte-exact-equality", title, err)
 		return
 	}
-	if !deterministic {
-		r.fail("collation-deterministic", title, errors.New("database default collation is not deterministic"))
-		return
+	insensitivities := []struct {
+		got  bool
+		name string
+	}{
+		{caseFold, "case ('a' = 'A')"},
+		{ligature, "ligature ('ss' = 'ß')"},
+		{padding, "padding ('abc' = 'abc ')"},
+		{accent, "accent ('a' = 'á')"},
+		{normalization, "normalization (precomposed = decomposed)"},
 	}
-	var caseFold, ligature, padding bool
-	if err := r.conn.QueryRow(ctx, `SELECT 'a' = 'A', 'ss' = 'ß', 'abc' = 'abc '`).
-		Scan(&caseFold, &ligature, &padding); err != nil {
-		r.fail("collation-deterministic", title, err)
-		return
+	for _, insensitivity := range insensitivities {
+		if insensitivity.got {
+			r.fail("byte-exact-equality", title,
+				"the default collation is "+insensitivity.name+"-insensitive, so = is not byte-exact")
+			return
+		}
 	}
-	if caseFold || ligature || padding {
-		r.fail("collation-deterministic", title, errors.New("text equality is not byte-exact under the default collation"))
-		return
-	}
-	r.pass("collation-deterministic", title, "")
+	r.pass("byte-exact-equality", title, "")
 }
 
 func (r *runner) checkScratchSchema(ctx context.Context) bool {
 	const title = "Privileges: create schema, tables, indexes"
-	if _, err := r.conn.Exec(ctx, `DROP SCHEMA IF EXISTS `+scratchSchema+` CASCADE`); err != nil {
-		r.fail("privileges", title, err)
-		return false
-	}
-	if _, err := r.conn.Exec(ctx, `CREATE SCHEMA `+scratchSchema); err != nil {
-		r.fail("privileges", title, err)
+	if !r.execAll(ctx, "privileges", title,
+		`DROP SCHEMA IF EXISTS `+scratchSchema+` CASCADE`,
+		`CREATE SCHEMA `+scratchSchema) {
 		return false
 	}
 	r.pass("privileges", title, "")
@@ -214,44 +370,37 @@ func (r *runner) checkScratchSchema(ctx context.Context) bool {
 
 func (r *runner) checkCollateC(ctx context.Context) {
 	const title = `Column- and index-level COLLATE "C"`
-	statements := []string{
-		`CREATE TABLE ` + scratchSchema + `.collate_c (key text COLLATE "C" NOT NULL)`,
-		`CREATE INDEX ON ` + scratchSchema + `.collate_c (key)`,
-		`CREATE TABLE ` + scratchSchema + `.collate_default (key text NOT NULL)`,
-		`CREATE INDEX ON ` + scratchSchema + `.collate_default (key COLLATE "C")`,
-		`INSERT INTO ` + scratchSchema + `.collate_c VALUES ('a'), ('B'), ('Z'), ('ä')`,
-		`INSERT INTO ` + scratchSchema + `.collate_default SELECT key FROM ` + scratchSchema + `.collate_c`,
+	if !r.execAll(ctx, "collate-c", title,
+		`CREATE TABLE `+scratchSchema+`.collate_c (key text COLLATE "C" NOT NULL)`,
+		`CREATE INDEX ON `+scratchSchema+`.collate_c (key)`,
+		`CREATE TABLE `+scratchSchema+`.collate_default (key text NOT NULL)`,
+		`CREATE INDEX ON `+scratchSchema+`.collate_default (key COLLATE "C")`,
+		`INSERT INTO `+scratchSchema+`.collate_c VALUES ('a'), ('B'), ('Z'), ('ä')`,
+		`INSERT INTO `+scratchSchema+`.collate_default SELECT key FROM `+scratchSchema+`.collate_c`) {
+		return
 	}
-	for _, statement := range statements {
-		if _, err := r.conn.Exec(ctx, statement); err != nil {
-			r.fail("collate-c", title, err)
+	probes := []struct {
+		query string
+		what  string
+	}{
+		{`SELECT string_agg(key, ',' ORDER BY key) FROM ` + scratchSchema + `.collate_c`,
+			`column declared COLLATE "C"`},
+		{`SELECT string_agg(key, ',' ORDER BY key COLLATE "C") FROM ` + scratchSchema + `.collate_default`,
+			`per-query COLLATE "C"`},
+	}
+	for _, probe := range probes {
+		var order string
+		if err := r.conn.QueryRow(ctx, probe.query).Scan(&order); err != nil {
+			r.failErr("collate-c", title, err)
+			return
+		}
+		if order != wantByteOrder {
+			r.fail("collate-c", title, fmt.Sprintf("%s sorts as %s, want %s", probe.what, order, wantByteOrder))
 			return
 		}
 	}
-	// Byte order of the UTF-8 encodings: B (0x42) < Z (0x5A) < a (0x61) < ä (0xC3A4).
-	const wantByteOrder = "B,Z,a,ä"
-	var columnOrder, queryOrder, defaultOrder string
-	if err := r.conn.QueryRow(ctx,
-		`SELECT string_agg(key, ',' ORDER BY key) FROM `+scratchSchema+`.collate_c`).
-		Scan(&columnOrder); err != nil {
-		r.fail("collate-c", title, err)
-		return
-	}
-	if columnOrder != wantByteOrder {
-		r.fail("collate-c", title, fmt.Errorf(`column declared COLLATE "C" sorts as %s, want %s`, columnOrder, wantByteOrder))
-		return
-	}
-	if err := r.conn.QueryRow(ctx,
-		`SELECT string_agg(key, ',' ORDER BY key COLLATE "C") FROM `+scratchSchema+`.collate_default`).
-		Scan(&queryOrder); err != nil {
-		r.fail("collate-c", title, err)
-		return
-	}
-	if queryOrder != wantByteOrder {
-		r.fail("collate-c", title, fmt.Errorf(`per-query COLLATE "C" sorts as %s, want %s`, queryOrder, wantByteOrder))
-		return
-	}
 	r.pass("collate-c", title, "")
+	var defaultOrder string
 	if err := r.conn.QueryRow(ctx,
 		`SELECT string_agg(key, ',' ORDER BY key) FROM `+scratchSchema+`.collate_default`).
 		Scan(&defaultOrder); err == nil {
@@ -261,10 +410,9 @@ func (r *runner) checkCollateC(ctx context.Context) {
 }
 
 func (r *runner) checkExtensions(ctx context.Context) {
-	const title = "Trusted extensions: pg_trgm, citext, unaccent"
-	for _, extension := range []string{"pg_trgm", "citext", "unaccent"} {
-		if _, err := r.conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS `+extension+` WITH SCHEMA public`); err != nil {
-			r.fail("extensions", title, fmt.Errorf("%s: %w", extension, err))
+	title := "Trusted extensions: " + joinComma(requiredExtensions)
+	for _, extension := range requiredExtensions {
+		if !r.execAll(ctx, "extensions", title, `CREATE EXTENSION IF NOT EXISTS `+extension+` WITH SCHEMA public`) {
 			return
 		}
 	}
@@ -273,95 +421,140 @@ func (r *runner) checkExtensions(ctx context.Context) {
 	if err := r.conn.QueryRow(ctx,
 		`SELECT public.similarity('rolltop', 'roltop'), public.unaccent('Müller')`).
 		Scan(&similarity, &unaccented); err != nil {
-		r.fail("extensions", title, err)
+		r.failErr("extensions", title, err)
 		return
 	}
 	if similarity <= 0 || unaccented != "Muller" {
-		r.fail("extensions", title, fmt.Errorf("similarity=%v unaccent=%q", similarity, unaccented))
+		r.fail("extensions", title, fmt.Sprintf("similarity=%v unaccent=%q", similarity, unaccented))
 		return
 	}
 	r.pass("extensions", title, "")
 }
 
+func joinComma(values []string) string {
+	out := ""
+	for i, value := range values {
+		if i > 0 {
+			out += ", "
+		}
+		out += value
+	}
+	return out
+}
+
+// SQLSTATEs the UTF-8 probes must provoke. Anything else — a transport
+// error, a cancelled context — means the property was never tested, so it
+// cannot be reported as a pass.
+const (
+	sqlstateNullNotPermitted = "54000"
+	sqlstateInvalidEncoding  = "22021"
+)
+
 // checkUTF8Strictness documents that the target rejects what SQLite accepted,
 // which is why the migration plan requires write-path sanitization (§8.1).
-// Both statements are expected to error.
+// Both statements are expected to fail with a specific SQLSTATE.
 func (r *runner) checkUTF8Strictness(ctx context.Context) {
-	var out string
-	if err := r.conn.QueryRow(ctx, `SELECT chr(0)`).Scan(&out); err == nil {
-		r.fail("utf8-nul", "NUL character is rejected", errors.New("NUL character was accepted in text"))
-	} else {
-		r.pass("utf8-nul", "NUL character is rejected", "")
+	probes := []struct {
+		id       string
+		title    string
+		query    string
+		sqlstate string
+	}{
+		{"utf8-nul", "NUL character is rejected", `SELECT chr(0)`, sqlstateNullNotPermitted},
+		{"utf8-invalid", "Invalid UTF-8 is rejected", `SELECT convert_from('\xff'::bytea, 'UTF8')`, sqlstateInvalidEncoding},
 	}
-	if err := r.conn.QueryRow(ctx, `SELECT convert_from('\xff'::bytea, 'UTF8')`).Scan(&out); err == nil {
-		r.fail("utf8-invalid", "Invalid UTF-8 is rejected", errors.New("invalid UTF-8 byte sequence was accepted"))
-	} else {
-		r.pass("utf8-invalid", "Invalid UTF-8 is rejected", "")
+	for _, probe := range probes {
+		var out string
+		err := r.conn.QueryRow(ctx, probe.query).Scan(&out)
+		if err == nil {
+			r.fail(probe.id, probe.title, "the server accepted the value instead of rejecting it")
+			continue
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			// A transport or context error proves nothing about the server's
+			// strictness; reporting a pass here would be a vacuous green row.
+			r.failErr(probe.id, probe.title, fmt.Errorf("check did not complete: %w", err))
+			continue
+		}
+		if pgErr.Code != probe.sqlstate {
+			r.fail(probe.id, probe.title,
+				fmt.Sprintf("rejected with SQLSTATE %s, expected %s: %s", pgErr.Code, probe.sqlstate, pgErr.Message))
+			continue
+		}
+		r.pass(probe.id, probe.title, pgErr.Message)
 	}
 }
 
 func (r *runner) checkSQLFeatures(ctx context.Context) {
 	const title = "SQL features: RETURNING, ON CONFLICT, excluded.*, = ANY, identity setval, tsvector/GIN"
 	features := scratchSchema + ".features"
-	setup := []string{
-		`CREATE TABLE ` + features + ` (
+	if !r.execAll(ctx, "sql-features", title,
+		`CREATE TABLE `+features+` (
 			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 			slot text COLLATE "C" NOT NULL UNIQUE,
 			hits bigint NOT NULL DEFAULT 0,
 			body tsvector
 		)`,
-		`CREATE INDEX ON ` + features + ` USING gin (body)`,
-	}
-	for _, statement := range setup {
-		if _, err := r.conn.Exec(ctx, statement); err != nil {
-			r.fail("sql-features", title, err)
-			return
-		}
+		`CREATE INDEX ON `+features+` USING gin (body)`) {
+		return
 	}
 	var newID int64
 	if err := r.conn.QueryRow(ctx, `INSERT INTO `+features+` (slot) VALUES ('a') RETURNING id`).Scan(&newID); err != nil {
-		r.fail("sql-features", title, fmt.Errorf("INSERT RETURNING: %w", err))
+		r.failErr("sql-features", title, fmt.Errorf("INSERT RETURNING: %w", err))
 		return
 	}
 	tag, err := r.conn.Exec(ctx, `INSERT INTO `+features+` (slot) VALUES ('a') ON CONFLICT DO NOTHING`)
 	if err != nil {
-		r.fail("sql-features", title, fmt.Errorf("ON CONFLICT DO NOTHING: %w", err))
+		r.failErr("sql-features", title, fmt.Errorf("ON CONFLICT DO NOTHING: %w", err))
 		return
 	}
 	if tag.RowsAffected() != 0 {
-		r.fail("sql-features", title, fmt.Errorf("ON CONFLICT DO NOTHING affected %d rows", tag.RowsAffected()))
+		r.fail("sql-features", title, fmt.Sprintf("ON CONFLICT DO NOTHING affected %d rows", tag.RowsAffected()))
 		return
 	}
 	var hits int64
 	if err := r.conn.QueryRow(ctx, `INSERT INTO `+features+` (slot, hits) VALUES ('a', 5)
 			ON CONFLICT (slot) DO UPDATE SET hits = `+features+`.hits + excluded.hits
 			RETURNING hits`).Scan(&hits); err != nil {
-		r.fail("sql-features", title, fmt.Errorf("upsert with excluded.*: %w", err))
+		r.failErr("sql-features", title, fmt.Errorf("upsert with excluded.*: %w", err))
 		return
 	}
 	if hits != 5 {
-		r.fail("sql-features", title, fmt.Errorf("upsert with excluded.* produced hits=%d", hits))
+		r.fail("sql-features", title, fmt.Sprintf("upsert with excluded.* produced hits=%d", hits))
 		return
 	}
 	var count int64
-	if err := r.conn.QueryRow(ctx, `SELECT count(*) FROM `+features+` WHERE id = ANY($1)`, []int64{newID}).Scan(&count); err != nil || count != 1 {
-		r.fail("sql-features", title, fmt.Errorf("= ANY(array): count=%d err=%v", count, err))
+	if err := r.conn.QueryRow(ctx, `SELECT count(*) FROM `+features+` WHERE id = ANY($1)`, []int64{newID}).Scan(&count); err != nil {
+		r.failErr("sql-features", title, fmt.Errorf("= ANY(array): %w", err))
 		return
 	}
-	if _, err := r.conn.Exec(ctx, `SELECT setval(pg_get_serial_sequence('`+features+`', 'id'), 1000000)`); err != nil {
-		r.fail("sql-features", title, fmt.Errorf("setval on identity: %w", err))
+	if count != 1 {
+		r.fail("sql-features", title, fmt.Sprintf("= ANY(array) matched %d rows, want 1", count))
 		return
 	}
-	if err := r.conn.QueryRow(ctx, `INSERT INTO `+features+` (slot) VALUES ('b') RETURNING id`).Scan(&newID); err != nil || newID != 1000001 {
-		r.fail("sql-features", title, fmt.Errorf("identity after setval: id=%d err=%v", newID, err))
+	if !r.execAll(ctx, "sql-features", title,
+		`SELECT setval(pg_get_serial_sequence('`+features+`', 'id'), 1000000)`) {
 		return
 	}
-	if _, err := r.conn.Exec(ctx, `UPDATE `+features+` SET body = to_tsvector('simple', 'quarterly report attached')`); err != nil {
-		r.fail("sql-features", title, fmt.Errorf("to_tsvector: %w", err))
+	if err := r.conn.QueryRow(ctx, `INSERT INTO `+features+` (slot) VALUES ('b') RETURNING id`).Scan(&newID); err != nil {
+		r.failErr("sql-features", title, fmt.Errorf("identity after setval: %w", err))
 		return
 	}
-	if err := r.conn.QueryRow(ctx, `SELECT count(*) FROM `+features+` WHERE body @@ to_tsquery('simple', 'report')`).Scan(&count); err != nil || count < 1 {
-		r.fail("sql-features", title, fmt.Errorf("tsvector @@ tsquery: count=%d err=%v", count, err))
+	if newID != 1000001 {
+		r.fail("sql-features", title, fmt.Sprintf("identity after setval produced id=%d, want 1000001", newID))
+		return
+	}
+	if !r.execAll(ctx, "sql-features", title,
+		`UPDATE `+features+` SET body = to_tsvector('simple', 'quarterly report attached')`) {
+		return
+	}
+	if err := r.conn.QueryRow(ctx, `SELECT count(*) FROM `+features+` WHERE body @@ to_tsquery('simple', 'report')`).Scan(&count); err != nil {
+		r.failErr("sql-features", title, fmt.Errorf("tsvector @@ tsquery: %w", err))
+		return
+	}
+	if count < 1 {
+		r.fail("sql-features", title, "tsvector @@ tsquery matched no rows")
 		return
 	}
 	r.pass("sql-features", title, "")
@@ -374,7 +567,7 @@ func (r *runner) checkConnectionBudget(ctx context.Context) {
 	if err := r.conn.QueryRow(ctx,
 		`SELECT current_setting('max_connections'), rolconnlimit, rolcreatedb FROM pg_roles WHERE rolname = current_user`).
 		Scan(&maxConnections, &roleLimit, &createDB); err != nil {
-		r.info("connections", "Connection budget", "unavailable: "+err.Error())
+		r.info("connections", "Connection budget", "unavailable: "+redactSecrets(err.Error()))
 		return
 	}
 	limit := "no per-role limit"
@@ -383,4 +576,11 @@ func (r *runner) checkConnectionBudget(ctx context.Context) {
 	}
 	r.info("connections", "Connection budget",
 		fmt.Sprintf("max_connections=%s, %s, CREATEDB=%t", maxConnections, limit, createDB))
+}
+
+// LockForTest holds the run lock so tests in other packages can exercise the
+// busy path. The returned function releases it.
+func LockForTest() func() {
+	runLock.Lock()
+	return runLock.Unlock
 }

@@ -12,7 +12,13 @@ import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
 import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
 import type { DatePrefs, Toast } from "../../../appTypes";
-import type { DatabaseOverview, DatabaseStatus, PostgresPreflightReport, ServerLogLine } from "../../../types";
+import type {
+  DatabaseOverview,
+  DatabaseStatus,
+  PostgresPreflightCheck,
+  PostgresPreflightReport,
+  ServerLogLine
+} from "../../../types";
 
 const JOB_POLL_MS = 1500;
 const IDLE_POLL_MS = 15000;
@@ -37,10 +43,13 @@ function databaseState(database: DatabaseStatus): { label: string; tone: "ok" | 
   return { label: "No problems reported", tone: "ok" };
 }
 
-function preflightTone(status: string): string {
-  if (status === "pass") return "database-state is-ok";
-  if (status === "fail") return "database-state is-bad";
-  return "database-state";
+// Mirrors databaseState above so the shared .database-state badge keeps one
+// mapping convention: status in, {label, tone} out, rendered through the same
+// `database-state is-${tone}` template.
+function preflightState(status: PostgresPreflightCheck["status"]): { label: string; tone: "ok" | "warn" | "bad" } {
+  if (status === "pass") return { label: "Pass", tone: "ok" };
+  if (status === "fail") return { label: "Fail", tone: "bad" };
+  return { label: "Info", tone: "warn" };
 }
 
 /**
@@ -75,7 +84,7 @@ function PostgresPreflightCard({ csrf }: { csrf: string }) {
         Checks a candidate PostgreSQL database for the planned migration: version and encoding, collation
         behavior, extensions, UTF-8 strictness, and the SQL features the port relies on. It runs from this
         server, so the measured latency is the path the app would actually use. The connection string is used
-        for this one check and is not stored or logged.
+        for this one check and is not stored or logged. One check runs at a time.
       </p>
       <form
         className="database-log-actions"
@@ -112,8 +121,8 @@ function PostgresPreflightCard({ csrf }: { csrf: string }) {
               {report.checks.map((check) => (
                 <tr key={check.id}>
                   <td>
-                    <span className={preflightTone(check.status)}>
-                      {check.status === "pass" ? "Pass" : check.status === "fail" ? "Fail" : "Info"}
+                    <span className={`database-state is-${preflightState(check.status).tone}`}>
+                      {preflightState(check.status).label}
                     </span>
                   </td>
                   <td>

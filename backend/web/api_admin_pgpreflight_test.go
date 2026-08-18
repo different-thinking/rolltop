@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"rolltop/backend/pgpreflight"
 )
 
 func TestAdminPostgresPreflightRequiresAdmin(t *testing.T) {
@@ -68,6 +70,64 @@ func TestAdminPostgresPreflightUnreachableTarget(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "supersecret") {
 		t.Fatal("response echoes the DSN password")
+	}
+}
+
+// TestAdminPostgresPreflightNeverEchoesCredentials covers every DSN spelling
+// through the HTTP layer, including the keyword form with spaces that pgx's
+// own redaction misses.
+func TestAdminPostgresPreflightNeverEchoesCredentials(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+	const password = "supersecret-do-not-echo"
+	for _, dsn := range []string{
+		"postgres://rolltop:" + password + "@127.0.0.1:1/rolltop?connect_timeout=1",
+		"host=127.0.0.1 port=1 password=" + password + " connect_timeout=1",
+		"host=127.0.0.1 port=1 password = " + password + " connect_timeout=1",
+		"host=127.0.0.1 port=1 password = '" + password + "' connect_timeout=1",
+		"host=127.0.0.1 port=notaport password = " + password,
+	} {
+		recorder := httptest.NewRecorder()
+		request := adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/postgres-preflight",
+			map[string]string{"dsn": dsn})
+		server.apiAdminPostgresPreflight(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("dsn %q: status = %d, body = %s", dsn, recorder.Code, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), password) {
+			t.Errorf("dsn %q leaked the password: %s", dsn, recorder.Body.String())
+		}
+	}
+}
+
+// TestAdminPostgresPreflightRejectsConcurrentRuns proves the 409 path: runs
+// share one scratch schema, so a second one must be refused rather than
+// dropping the first run's tables.
+func TestAdminPostgresPreflightRejectsConcurrentRuns(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+	release := pgpreflight.LockForTest()
+	defer release()
+
+	recorder := httptest.NewRecorder()
+	request := adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/postgres-preflight",
+		map[string]string{"dsn": "host=127.0.0.1 port=1 connect_timeout=1"})
+	server.apiAdminPostgresPreflight(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestAdminPostgresPreflightCapsBodySize keeps the endpoint from buffering an
+// arbitrarily long string before validating it.
+func TestAdminPostgresPreflightCapsBodySize(t *testing.T) {
+	server, admin, _ := newDatabaseAdminServer(t)
+
+	oversized := strings.Repeat("x", pgPreflightMaxBody+1024)
+	recorder := httptest.NewRecorder()
+	request := adminDatabaseRequest(t, server, admin, http.MethodPost, "/api/admin/postgres-preflight",
+		map[string]string{"dsn": oversized})
+	server.apiAdminPostgresPreflight(recorder, request)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("oversized body accepted: status = %d", recorder.Code)
 	}
 }
 

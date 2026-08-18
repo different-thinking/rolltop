@@ -112,8 +112,8 @@ locale, not configurable per database. That is acceptable, for two reasons:
    which every libc locale collation is — Postgres compares text equality
    byte-wise. The 58 `COLLATE BINARY` comparison sites and every implicit
    `=` on hashes/message-ids therefore keep SQLite semantics even under the
-   cluster default. Only a nondeterministic ICU default would break this;
-   the preflight script checks `collisdeterministic` and fails if so.
+   cluster default. Only a nondeterministic default would break this, and
+   both preflight twins probe for it behaviorally (see the note below).
 2. **Ordering is pinned per column.** The WP2 baseline declares
    `COLLATE "C"` on text columns instead of relying on a database-level
    default (`key text COLLATE "C"`), which also applies to their indexes.
@@ -123,15 +123,27 @@ locale, not configurable per database. That is acceptable, for two reasons:
    purely human-facing sort order may use the locale default deliberately.
 
 `scripts/pg-preflight.sql` verifies all of this against the actual target
-database (version/encoding gate, deterministic default, column- and
+database (version/encoding gate, byte-exact equality, column- and
 index-level `COLLATE "C"` byte ordering, extensions, UTF-8 strictness, and
 the SQL features WP3 relies on). The same checks also run from the admin
 Database page ("PostgreSQL preflight", `backend/pgpreflight`), which
 exercises the real app-to-database network path and reports its round-trip
 latency — prefer that over the bastion route. Run either before phase 1;
-both were validated against a stock Postgres 16.
-The startup fail-fast check becomes: default collation is deterministic and
-the baseline's own `COLLATE "C"` columns are present.
+both were validated against a stock Postgres 16, and `TestTwinsAgree` keeps
+them in sync. Only one preflight runs at a time (they share a scratch
+schema); do not run the script and the page against one database at once.
+
+Note on how determinism is verified: a catalog lookup on the `pg_collation`
+row named `default` is *not* a check — that row is a pinned placeholder whose
+`collisdeterministic` is hard-wired true. Both twins therefore probe the
+behavior (`'a' = 'A'`, ligature, padding, accent, normalization). Postgres
+also does not currently accept a nondeterministic collation as a database
+default — verified on 16, where even an ICU `und-u-ks-level1` database still
+compares `'a' <> 'A'` — so these probes guard against a future relaxation
+rather than a live hazard.
+
+The startup fail-fast check becomes: text equality is byte-exact and the
+baseline's own `COLLATE "C"` columns are present.
 
 ## 4. Work packages
 
