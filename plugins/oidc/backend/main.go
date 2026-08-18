@@ -492,12 +492,21 @@ func createOIDCUser(ctx context.Context, st *store.Store, email, name string) (s
 	if err != nil {
 		return store.User{}, err
 	}
-	_, _ = st.EnsureMeContactForEmail(ctx, user.ID, user.Email, firstNonEmpty(user.Name, user.Email))
 	// Identities are never derived from the Me contact, so a provisioned user
 	// needs the one for the address they sign in with asked for here. Without
 	// it compose falls back to a synthetic identity that carries no SMTP
 	// server, signature or Sent folder.
-	_ = st.EnsureMailIdentityForEmail(ctx, user.ID, user.Email)
+	//
+	// A store failure fails the provisioning rather than handing back a user
+	// who cannot send, the way the other two provisioning paths do. Not-found
+	// is the exception they also make: an address that resolves to nothing is
+	// not a broken store.
+	if _, err := st.EnsureMeContactForEmail(ctx, user.ID, user.Email, firstNonEmpty(user.Name, user.Email)); err != nil && !store.IsNotFound(err) {
+		return store.User{}, err
+	}
+	if err := st.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil && !store.IsNotFound(err) {
+		return store.User{}, err
+	}
 	return user, nil
 }
 

@@ -155,8 +155,7 @@ func scanSMTPAccount(row rowScanner) (SMTPAccount, error) {
 }
 
 // SyncMailIdentitiesForMeContacts keeps the outgoing identity rows a user
-// already has aligned with the Me contact email each one sends from, and drops
-// the ones whose address is gone.
+// already has aligned with the Me contact email each one sends from.
 //
 // It deliberately creates nothing. An identity used to be derived from every
 // address on every Me contact, which meant the address book decided what the
@@ -166,14 +165,21 @@ func scanSMTPAccount(row rowScanner) (SMTPAccount, error) {
 // configuring the mailbox they belong to, so the count stays the count the user
 // chose.
 //
-// The re-binding is what that costs. An identity points at a contact_emails
-// row, and saving a contact rewrites those rows from scratch, so every edit of
-// the reader's own card hands their addresses new ids. The derive-everything
-// version survived that by building the rows again -- with fresh ids, losing
-// the signature and server choices on them. This matches an orphaned identity
-// back to the address it stores instead, so a contact edit keeps the identity
-// the user configured, and only an address that really left the card is
-// dropped.
+// It deliberately deletes nothing either. Removing an identity is the user's
+// decision, and the one removal that is not theirs already happens without
+// help: mail_identities cascades on its contact_emails row, so deleting the
+// address an identity sends from takes the identity with it. Deleting the rows
+// this pass could not match instead made clearing `is_me` on a contact -- an
+// edit about the address book -- silently destroy every identity behind it,
+// signature and server choices included.
+//
+// The re-binding is what a stable id costs. An identity points at a
+// contact_emails row; those rows survive an edit now, but one still ends up on
+// a contact that is no longer the reader's own, and matching the address the
+// identity stores puts it back on the card that has it. That only applies to an
+// identity no Me address claims by id: doing it for any unclaimed address would
+// let a second Me card carrying the same address take the first card's identity
+// over, and deleting that card would then cascade the identity away.
 func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int64) error {
 	contacts, err := s.ListMeContactsForUser(ctx, userID)
 	if err != nil {
@@ -183,11 +189,9 @@ func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int6
 	if err != nil {
 		return err
 	}
-	// Which contact_emails rows still exist decides whether an identity is an
-	// orphan. Without it the by-address fallback would fire for any Me address
-	// that simply has no identity of its own, and a second Me card carrying an
-	// address the first one already has would walk the first card's identity
-	// over to itself.
+	// Which contact_emails rows sit on a Me contact decides whether an identity
+	// counts as unclaimed. Without it the by-address fallback would fire for any
+	// Me address that simply has no identity of its own.
 	liveEmailIDs := map[int64]bool{}
 	for _, contact := range contacts {
 		for _, email := range contact.Emails {
@@ -236,14 +240,6 @@ func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int6
 				contact.ID, email.ID, address, display, boolInt(primary), defaultSMTPID, ts, userID, identity.ID); err != nil {
 				return err
 			}
-		}
-	}
-	for _, identity := range identities {
-		if kept[identity.ID] {
-			continue
-		}
-		if _, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `DELETE FROM mail_identities WHERE user_id = ? AND id = ?`, userID, identity.ID); err != nil {
-			return err
 		}
 	}
 	if err := s.ensurePrimaryMailIdentity(ctx, userID); err != nil {
