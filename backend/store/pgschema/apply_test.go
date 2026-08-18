@@ -2,65 +2,42 @@ package pgschema_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"rolltop/backend/pgdsn"
 	"rolltop/backend/store/pgschema"
+	"rolltop/backend/store/pgtestdb"
 )
 
 // TestBaselineAppliesToPostgres is the check the golden-file test cannot make:
 // that PostgreSQL actually accepts the generated baseline, and that what it
 // creates has the properties the migration depends on. It needs a live server
 // with CREATEDB rights (a CI-local container, never the hosted database — the
-// application role there has CREATEDB=false).
+// application role there has CREATEDB=false), which pgtestdb provides: it skips
+// when TEST_DATABASE_URL is unset and fails when the server cannot serve, so a
+// misconfigured CI service cannot leave this merge gate green with its
+// protection silently gone.
 func TestBaselineAppliesToPostgres(t *testing.T) {
-	adminDSN := os.Getenv("TEST_DATABASE_URL")
-	if adminDSN == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	baseline, err := os.ReadFile("baseline.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn := connect(t, ctx, adminDSN)
-	const name = "rolltop_baseline_probe"
-	mustExec(t, ctx, conn, `DROP DATABASE IF EXISTS `+name)
-	// TEST_DATABASE_URL is documented above as a CI-local, full-privilege
-	// container -- never the hosted database -- so a CREATE DATABASE failure
-	// here is a broken test environment, not the expected shape of things.
-	// Skipping it would repeat the same silent-green mistake connect() had:
-	// a misconfigured or underprivileged CI service would report a passing
-	// suite without ever validating the baseline.
-	if _, err := conn.Exec(ctx, `CREATE DATABASE `+name); err != nil {
-		t.Fatalf("cannot create a probe database with TEST_DATABASE_URL: %v", err)
-	}
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cleanupCancel()
-		_, _ = conn.Exec(cleanupCtx, `DROP DATABASE IF EXISTS `+name)
-		_ = conn.Close(cleanupCtx)
-	})
-
-	probe := connectToDatabase(t, ctx, adminDSN, name)
+	probe := connect(t, ctx, pgtestdb.New(t))
 	defer func() { _ = probe.Close(context.Background()) }()
-	if _, err := probe.Exec(ctx, string(baseline)); err != nil {
+	if _, err := probe.Exec(ctx, pgschema.Baseline); err != nil {
 		t.Fatalf("baseline does not apply: %v", err)
 	}
 
 	// Applying twice must fail rather than silently diverge: the baseline is
 	// a create-from-empty script, not an idempotent migration.
-	if _, err := probe.Exec(ctx, string(baseline)); err == nil {
+	if _, err := probe.Exec(ctx, pgschema.Baseline); err == nil {
 		t.Error("re-applying the baseline succeeded; it is meant to require an empty database")
 	}
 
-	assertSchemaProperties(t, ctx, probe, string(baseline))
+	assertSchemaProperties(t, ctx, probe, pgschema.Baseline)
 }
 
 func assertSchemaProperties(t *testing.T, ctx context.Context, conn *pgx.Conn, baseline string) {
@@ -248,15 +225,14 @@ func assertDuplicatePointerTrigger(t *testing.T, ctx context.Context, conn *pgx.
 	}
 }
 
-// connect fails rather than skips. The CI workflows attach a Postgres
-// service precisely so this test runs; if the container is unhealthy, the
-// port mapping breaks, or the credentials drift from the DSN, skipping would
-// leave the merge gate green with its protection silently gone.
+// connect fails rather than skips. pgtestdb has already established that the
+// server is reachable, so a failure here is the probe database being unusable,
+// which is a broken environment rather than an absent one.
 func connect(t *testing.T, ctx context.Context, dsn string) *pgx.Conn {
 	t.Helper()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("TEST_DATABASE_URL is set but unusable: %v", err)
+		t.Fatalf("connect to the probe database: %v", pgdsn.Redact(err.Error()))
 	}
 	return conn
 }
@@ -280,32 +256,4 @@ func mustScanTx(t *testing.T, ctx context.Context, tx pgx.Tx, dest any, sql stri
 	if err := tx.QueryRow(ctx, sql, args...).Scan(dest); err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}
-}
-
-// connectToDatabase dials the same server as dsn but a different database.
-//
-// The config is passed to ConnectConfig rather than serialized back with
-// ConnString(): that method returns the string the config was parsed from and
-// ignores later field changes, so round-tripping silently connects to the
-// original database. An earlier revision did exactly that and applied the
-// baseline into the server's default database.
-func connectToDatabase(t *testing.T, ctx context.Context, dsn, database string) *pgx.Conn {
-	t.Helper()
-	config, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Database = database
-	conn, err := pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("connect to %s: %v", database, err)
-	}
-	var connected string
-	if err := conn.QueryRow(ctx, `SELECT current_database()`).Scan(&connected); err != nil {
-		t.Fatal(err)
-	}
-	if connected != database {
-		t.Fatalf("connected to database %q, want %q", connected, database)
-	}
-	return conn
 }

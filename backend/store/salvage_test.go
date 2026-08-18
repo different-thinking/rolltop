@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+
+	"rolltop/backend/sqlident"
 )
 
 func TestSalvageUserDatabaseCopiesIntactDatabase(t *testing.T) {
@@ -261,7 +263,7 @@ func countRows(t *testing.T, path, table string) int {
 	db := openSalvagedDatabase(t, path)
 	defer db.Close()
 	var count int
-	if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, quoteIdentifier(table))).Scan(&count); err != nil {
+	if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, sqlident.Quote(table))).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	return count

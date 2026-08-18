@@ -331,6 +331,19 @@ the Dockerfile build stages are unchanged in shape.
 
 ### WP7 — One-shot data migration tool
 
+**Open obligation, to be settled before the first durable Postgres database
+exists.** `OpenPostgres` records the baseline as one `schema_migrations` row and
+refuses to start when the recorded checksum differs from the running binary's.
+That is right while every Postgres database is a throwaway test one, but the
+baseline is *designed to be regenerated in place*, so the same signal will mean
+two different things once a real database exists: "the schema was tampered with"
+and "this binary is newer than the database". The second needs an upgrade path,
+not a refusal. Whatever WP3 does to the schema — the `lower()` expression index
+is already queued — regenerates the baseline, so this has to be decided in the
+same phase that creates the first database worth keeping. The likely shape is
+incremental Postgres migrations layered on the baseline, with the baseline row
+pinned to the version it was created at rather than to the current file.
+
 New subcommand `rolltop migrate-to-postgres`:
 
 1. Takes the instance lock (server must be stopped) and opens the system

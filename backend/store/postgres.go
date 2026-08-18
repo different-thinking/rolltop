@@ -4,22 +4,22 @@
 //
 // It deliberately does not run the SQLite migration chain. PostgreSQL gets the
 // squashed baseline from backend/store/pgschema instead, recorded as one row in
-// the same schema_migrations table the SQLite runner uses, so drift is caught by
-// the same checksum rule rather than a second mechanism.
+// the same schema_migrations table and with the same checksum function the
+// SQLite runner uses, so drift is caught by one rule rather than two.
 //
-// Every error leaving this file goes through pgdsn.Redact: pgx echoes the
-// connection string from several of its own error paths, and the DSN carries the
-// database password.
+// Every error leaving this file is a *PostgresError, which redacts the DSN when
+// printed and keeps the driver's error reachable through errors.Is/As: pgx
+// quotes the whole connection string back from its parse paths, and the DSN
+// carries the database password.
 
 package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/stdlib"
@@ -32,8 +32,12 @@ import (
 const (
 	// postgresSchemaScope and postgresSchemaVersion identify the squashed
 	// baseline in schema_migrations. The version is not a sequence number: the
-	// baseline is regenerated in place from the SQLite schema, and a change to
-	// it shows up as a checksum mismatch, not as a new version.
+	// baseline is regenerated in place from the SQLite schema, so a change to it
+	// shows up as a checksum mismatch rather than as a new version. That is the
+	// right behaviour while every PostgreSQL database is a throwaway test one;
+	// the first durable database needs the upgrade path recorded under WP7 in
+	// docs/postgres-migration-plan.md, because a regenerated baseline would
+	// otherwise refuse to start against a database that is merely older.
 	postgresSchemaScope   = "postgres"
 	postgresSchemaVersion = "baseline"
 
@@ -41,6 +45,18 @@ const (
 	// hosted target allows 20 connections per role, so half of that leaves room
 	// for the migration tool, a scheduled pg_dump, and a manual psql session.
 	defaultPostgresMaxConns = 10
+
+	// postgresConnMaxLifetime bounds how long a pooled connection is reused.
+	// Server-side idle timeouts and connection poolers both drop connections a
+	// long-lived pool would otherwise hand out dead.
+	postgresConnMaxLifetime = time.Hour
+
+	// postgresConnMaxIdleTime returns connections the pool is no longer using.
+	// Without it a single burst pins the whole pool idle for a full lifetime,
+	// and during a rolling deploy the outgoing and incoming processes together
+	// hold the role's entire connection budget — including the headroom
+	// defaultPostgresMaxConns exists to leave.
+	postgresConnMaxIdleTime = 5 * time.Minute
 
 	// schemaAdvisoryLock serializes the create-the-schema window across
 	// processes. Two servers started against the same empty database would
@@ -84,10 +100,8 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 	}
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns)
-	// Server-side idle timeouts and connection poolers both drop connections a
-	// long-lived pool would otherwise hand out dead. An hour is far below any
-	// such timeout while still keeping connection churn negligible.
-	db.SetConnMaxLifetime(time.Hour)
+	db.SetConnMaxLifetime(postgresConnMaxLifetime)
+	db.SetConnMaxIdleTime(postgresConnMaxIdleTime)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, postgresError("connect", err)
@@ -116,15 +130,27 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 // the server at somebody else's database, and running a binary whose baseline no
 // longer matches the schema in the database.
 //
-// All of it runs on one pinned connection under an advisory lock, so a second
-// process starting at the same moment waits for the first to finish and then
-// sees a complete schema rather than a half-created one.
+// The recorded-and-matching case — every start after the first — is answered
+// with one read and no locking. Only a database with no baseline row takes the
+// advisory lock, and then re-reads under it, so ordinary restarts never queue
+// behind each other on a server-wide lock.
 func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationReporter) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return postgresError("acquire connection", err)
+		return postgresError("acquire a connection", err)
 	}
 	defer func() { _ = conn.Close() }()
+
+	checksum := baselineChecksum()
+	present, err := verifyPostgresBaseline(ctx, conn, checksum)
+	if err != nil {
+		return err
+	}
+	if present {
+		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "already applied", Done: 1, Total: 1})
+		return nil
+	}
+
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaAdvisoryLock); err != nil {
 		return postgresError("take the schema lock", err)
 	}
@@ -137,99 +163,159 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, schemaAdvisoryLock)
 	}()
 
-	checksum := baselineChecksum()
-	recorded, present, err := postgresBaselineRow(ctx, conn)
+	// Another process may have created the schema while this one waited.
+	present, err = verifyPostgresBaseline(ctx, conn, checksum)
 	if err != nil {
 		return err
 	}
 	if present {
-		if recorded != checksum {
-			return errors.New("postgres: schema baseline checksum mismatch: the database was created from a different baseline than this binary carries")
-		}
 		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "already applied", Done: 1, Total: 1})
 		return nil
 	}
-	empty, err := postgresSchemaIsEmpty(ctx, conn)
+	empty, err := postgresDatabaseIsEmpty(ctx, conn)
 	if err != nil {
 		return err
 	}
 	if !empty {
-		return errors.New("postgres: the target database already contains tables but no recorded Rolltop baseline; point the server at an empty database")
+		return errors.New("postgres: the target database already contains objects but no recorded Rolltop baseline; point the server at an empty database")
 	}
 	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "create schema", Done: 0, Total: 1})
-	if err := applyPostgresBaseline(ctx, conn); err != nil {
+	if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
 		return err
-	}
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO schema_migrations (scope, version, applied_at, checksum) VALUES ($1, $2, $3, $4)`,
-		postgresSchemaScope, postgresSchemaVersion, nowUnix(), checksum); err != nil {
-		return postgresError("record the baseline", err)
 	}
 	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "complete", Done: 1, Total: 1})
 	return nil
 }
 
-// postgresBaselineRow reads the recorded baseline checksum. A database without a
-// schema_migrations table is reported as "no row" rather than as an error, since
-// that is the ordinary empty-database case.
-func postgresBaselineRow(ctx context.Context, conn *sql.Conn) (string, bool, error) {
+// verifyPostgresBaseline reports whether the database already carries this
+// binary's baseline. A database without a schema_migrations table, or with one
+// that has no baseline row, is reported as absent rather than as an error, since
+// that is the ordinary empty-database case. A row that disagrees is an error:
+// serving a schema this binary was not built for is how data gets lost.
+func verifyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string) (bool, error) {
 	var table sql.NullString
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass('public.schema_migrations')::text`).Scan(&table); err != nil {
-		return "", false, postgresError("inspect the schema", err)
+		return false, postgresError("inspect the schema", err)
 	}
 	if !table.Valid {
-		return "", false, nil
+		return false, nil
 	}
-	var checksum string
+	var recorded string
 	err := conn.QueryRowContext(ctx,
 		`SELECT checksum FROM schema_migrations WHERE scope = $1 AND version = $2`,
-		postgresSchemaScope, postgresSchemaVersion).Scan(&checksum)
+		postgresSchemaScope, postgresSchemaVersion).Scan(&recorded)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return false, nil
 	}
 	if err != nil {
-		return "", false, postgresError("read the schema version", err)
+		return false, postgresError("read the schema version", err)
 	}
-	return checksum, true, nil
+	if recorded != checksum {
+		return false, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two yet")
+	}
+	return true, nil
 }
 
-func postgresSchemaIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
-	var tables int
-	if err := conn.QueryRowContext(ctx,
-		`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`).Scan(&tables); err != nil {
-		return false, postgresError("count the tables", err)
-	}
-	return tables == 0, nil
-}
-
-// applyPostgresBaseline runs the whole baseline as one simple-protocol query.
+// postgresDatabaseIsEmpty reports whether the database holds no objects of its
+// own.
 //
-// database/sql sends statements over the extended protocol, which accepts one
-// statement per call, so the baseline would have to be split on semicolons —
-// and it contains a dollar-quoted function body full of them. Handing the script
-// to pgx directly avoids inventing that parser, and PostgreSQL wraps a
-// multi-statement simple query in one implicit transaction, so a failure halfway
-// through leaves no partial schema behind.
-func applyPostgresBaseline(ctx context.Context, conn *sql.Conn) error {
+// Counting only base tables in `public` is not enough to refuse a foreign
+// database: an application that keeps its tables in another schema, or a public
+// schema holding only views or sequences, would read as empty and receive the
+// baseline on top. Relations belonging to an extension are excluded, because the
+// preflight installs pg_trgm, citext and unaccent into a database that is
+// otherwise still untouched.
+func postgresDatabaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var objects int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg_toast%'
+		  AND n.nspname NOT LIKE 'pg_temp%'
+		  AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e'
+		  )`).Scan(&objects); err != nil {
+		return false, postgresError("count the existing objects", err)
+	}
+	return objects == 0, nil
+}
+
+// applyPostgresBaseline creates the schema and records its version as one
+// simple-protocol script.
+//
+// Both halves have to land together. The baseline alone is atomic — PostgreSQL
+// wraps a multi-statement simple query in one implicit transaction — but a
+// separate INSERT afterwards leaves a window in which a crash or a cancelled
+// startup context produces a database full of tables with no baseline row, which
+// every later start then refuses as somebody else's database. Appending the
+// INSERT to the same script puts it inside the same implicit transaction.
+//
+// The script is handed to pgx directly rather than run through database/sql
+// because the extended protocol accepts one statement per call, and splitting
+// the baseline on semicolons would mean parsing around a dollar-quoted function
+// body full of them.
+func applyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string) error {
+	script := pgschema.Baseline + "\n" + recordBaselineStatement(checksum)
 	return conn.Raw(func(driverConn any) error {
 		c, ok := driverConn.(*stdlib.Conn)
 		if !ok {
 			return fmt.Errorf("postgres: unexpected driver connection %T", driverConn)
 		}
-		if _, err := c.Conn().Exec(ctx, pgschema.Baseline); err != nil {
+		if _, err := c.Conn().Exec(ctx, script); err != nil {
 			return postgresError("apply the schema baseline", err)
 		}
 		return nil
 	})
 }
 
-// postgresError attaches what failed while keeping the driver's own message,
-// with any credential material the driver echoed removed.
-func postgresError(what string, err error) error {
-	return fmt.Errorf("postgres: %s: %s", what, pgdsn.Redact(err.Error()))
+// recordBaselineStatement renders the schema_migrations row as literal SQL.
+// The simple protocol carries no parameters, so the values are inlined; all
+// four are values this package produces (two constants, a unix timestamp, and a
+// hex digest), and quoteSQLLiteral covers the text ones regardless.
+func recordBaselineStatement(checksum string) string {
+	return fmt.Sprintf(
+		`INSERT INTO schema_migrations (scope, version, applied_at, checksum) VALUES (%s, %s, %d, %s);`,
+		quoteSQLLiteral(postgresSchemaScope), quoteSQLLiteral(postgresSchemaVersion), nowUnix(), quoteSQLLiteral(checksum))
 }
 
+func quoteSQLLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// baselineChecksum reuses the SQLite runner's checksum function so every row in
+// schema_migrations is checksummed the same way, whichever runner wrote it.
 func baselineChecksum() string {
-	sum := sha256.Sum256([]byte(pgschema.Baseline))
-	return hex.EncodeToString(sum[:])
+	return migrationChecksum(migrationSet{
+		Scope:      postgresSchemaScope,
+		Version:    postgresSchemaVersion,
+		Statements: []string{pgschema.Baseline},
+	})
+}
+
+// PostgresError carries a database failure without printing the DSN.
+//
+// It exists because the two obligations conflict under a plain %w wrap: the
+// message must not contain the password pgx echoes from its parse paths, and
+// callers must still be able to reach the driver's error to tell a cancelled
+// startup from a broken database. Redacting at format time and keeping Unwrap
+// satisfies both. Code that unwraps and prints the inner error defeats it, which
+// is why nothing in the store does.
+type PostgresError struct {
+	// Op names what failed, in the imperative ("connect", "inspect the schema").
+	Op string
+	// Err is the driver error, reachable through errors.Is and errors.As.
+	Err error
+}
+
+func (e *PostgresError) Error() string {
+	return "postgres: " + e.Op + ": " + pgdsn.Redact(e.Err.Error())
+}
+
+func (e *PostgresError) Unwrap() error { return e.Err }
+
+func postgresError(op string, err error) error {
+	return &PostgresError{Op: op, Err: err}
 }

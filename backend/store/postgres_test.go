@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -187,8 +188,77 @@ func TestOpenPostgresRejectsForeignDatabase(t *testing.T) {
 	}
 }
 
+// TestOpenPostgresRejectsDatabasesWithoutBaseTables covers the shapes a foreign
+// database takes that a public-BASE-TABLE count reads as empty. Each of these
+// received the baseline on top of somebody else's objects before the check
+// counted all user relations in every non-system schema.
+func TestOpenPostgresRejectsDatabasesWithoutBaseTables(t *testing.T) {
+	occupants := map[string]string{
+		"table in another schema": `CREATE SCHEMA app; CREATE TABLE app.things (id int)`,
+		"view in public":          `CREATE VIEW v AS SELECT 1 AS x`,
+		"sequence in public":      `CREATE SEQUENCE counter`,
+		"materialized view":       `CREATE MATERIALIZED VIEW m AS SELECT 1 AS x`,
+	}
+	for name, ddl := range occupants {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			dsn := pgtestdb.New(t)
+
+			seed, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := seed.ExecContext(ctx, ddl); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+			if err == nil {
+				_ = s.Close()
+				t.Fatal("opened a database that already holds objects")
+			}
+			if !strings.Contains(err.Error(), "empty database") {
+				t.Errorf("error %q does not tell the operator what to do", err)
+			}
+		})
+	}
+}
+
+// TestOpenPostgresIgnoresExtensionObjects is the other side of that check: the
+// preflight installs pg_trgm, citext and unaccent into a candidate database, and
+// a server started against it afterwards must still see an empty database.
+func TestOpenPostgresIgnoresExtensionObjects(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dsn := pgtestdb.New(t)
+
+	seed, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, extension := range []string{"pg_trgm", "citext", "unaccent"} {
+		if _, err := seed.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS `+extension+` WITH SCHEMA public`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("a database carrying only the preflight's extensions was refused: %v", err)
+	}
+	_ = s.Close()
+}
+
 // TestOpenPostgresBaselineIsAtomic checks the claim applyPostgresBaseline makes
-// about the simple protocol: a script that fails partway leaves nothing behind.
+// about the simple protocol: a script that fails partway leaves nothing behind,
+// and the recorded version lands with the schema rather than after it.
 func TestOpenPostgresBaselineIsAtomic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -199,9 +269,15 @@ func TestOpenPostgresBaselineIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
 	// Re-applying is the readily available multi-statement script that fails
 	// after its first statement, since every table already exists.
-	if err := applyBaselineOnPool(ctx, s); err == nil {
+	if err := applyPostgresBaseline(ctx, conn, baselineChecksum()); err == nil {
 		t.Fatal("re-applying the baseline succeeded")
 	}
 	var partial int
@@ -211,6 +287,48 @@ func TestOpenPostgresBaselineIsAtomic(t *testing.T) {
 	}
 	if partial != 1 {
 		t.Errorf("schema_migrations count is %d after a failed apply", partial)
+	}
+	// The failed re-apply must not have added a second version row either,
+	// which is what proves the INSERT rode inside the same implicit transaction
+	// as the schema rather than following it.
+	var rows int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE scope = $1`, postgresSchemaScope).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("schema_migrations holds %d baseline rows after a failed apply, want 1", rows)
+	}
+}
+
+// TestOpenPostgresRecordsTheVersionAtomically pins the window the separate
+// INSERT used to leave open: a database that received the schema but not its
+// version row is refused forever as somebody else's database, so the two must
+// commit together.
+func TestOpenPostgresRecordsTheVersionAtomically(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dsn := pgtestdb.New(t)
+
+	s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	// Any table existing implies the version row exists: they are written by
+	// one script, so no interruption can produce one without the other.
+	var tables, versions int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE scope = $1 AND version = $2`,
+		postgresSchemaScope, postgresSchemaVersion).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if tables > 0 && versions != 1 {
+		t.Errorf("%d tables exist but %d version rows do", tables, versions)
 	}
 }
 
@@ -243,17 +361,22 @@ func TestOpenPostgresConcurrentFirstStart(t *testing.T) {
 	}
 	ready.Wait()
 	close(release)
+	var opened *Store
 	for i := 0; i < starters; i++ {
 		select {
 		case s := <-stores:
 			t.Cleanup(func() { _ = s.Close() })
+			opened = s
 		case err := <-errs:
 			t.Errorf("concurrent start failed: %v", err)
 		}
 	}
+	if opened == nil {
+		t.Fatal("no starter opened the database")
+	}
 
 	var rows int
-	if err := s0(t, ctx, dsn).QueryRowContext(ctx,
+	if err := opened.DB().QueryRowContext(ctx,
 		`SELECT count(*) FROM schema_migrations WHERE scope = $1`, postgresSchemaScope).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
@@ -262,28 +385,28 @@ func TestOpenPostgresConcurrentFirstStart(t *testing.T) {
 	}
 }
 
-// s0 opens a plain pool for assertions that must not depend on any of the
-// stores the test under way created.
-func s0(t *testing.T, ctx context.Context, dsn string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
+// TestPostgresErrorKeepsTheChain covers the half of the redaction contract that
+// a plain string wrap loses: startup code has to tell a cancelled context from a
+// broken database, and the SQLite path's corruption classification has no
+// PostgreSQL analogue if every error is opaque text.
+func TestPostgresErrorKeepsTheChain(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := OpenPostgres(cancelled, "postgres://rolltop:hunter2@127.0.0.1:1/x?sslmode=disable", PostgresOptions{})
+	if err == nil {
+		t.Fatal("opening with a cancelled context succeeded")
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.PingContext(ctx); err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) is false for %v", err)
 	}
-	return db
-}
-
-// applyBaselineOnPool runs the baseline over a connection from the store's pool,
-// which is what OpenPostgres does under the schema lock.
-func applyBaselineOnPool(ctx context.Context, s *Store) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error leaked the password: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
-	return applyPostgresBaseline(ctx, conn)
+	var pgErr *PostgresError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("error is not a *PostgresError: %v", err)
+	}
+	if pgErr.Op == "" {
+		t.Error("PostgresError carries no operation name")
+	}
 }
