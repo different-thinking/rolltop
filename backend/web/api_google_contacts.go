@@ -95,6 +95,12 @@ func (s *Server) googleContactsSyncNow(w http.ResponseWriter, r *http.Request, u
 // a write it echoes the contact's own data back.
 func (s *Server) writeGoogleContactsError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	// A disabled API is a server-configuration fault, not something the account
+	// holder can grant their way out of, so it must not be answered with the
+	// reconnect instruction they have probably just followed.
+	case errors.Is(err, googlepeople.ErrServiceDisabled):
+		writeAPIError(w, http.StatusConflict,
+			"The People API is switched off for the Google Cloud project this connection's OAuth client belongs to. Enable it there; reconnecting does not help.")
 	case errors.Is(err, googlepeople.ErrScopeMissing), errors.Is(err, googlepeople.ErrForbidden):
 		writeAPIError(w, http.StatusConflict,
 			"This Google account has not granted access to contacts. Reconnect it in Google settings.")

@@ -586,6 +586,12 @@ func (s *Server) googleCalendarSyncNow(w http.ResponseWriter, r *http.Request, u
 // write it echoes the event's own title, notes and guest list back.
 func (s *Server) writeCalendarError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	// A disabled API is a server-configuration fault, not something the account
+	// holder can grant their way out of, so it must not be answered with the
+	// reconnect instruction they have probably just followed.
+	case errors.Is(err, googlecalendar.ErrServiceDisabled):
+		writeAPIError(w, http.StatusConflict,
+			"The Google Calendar API is switched off for the Google Cloud project this connection's OAuth client belongs to. Enable it there; reconnecting does not help.")
 	case errors.Is(err, googlecalendar.ErrScopeMissing), errors.Is(err, googlecalendar.ErrForbidden):
 		writeAPIError(w, http.StatusConflict,
 			"This Google account has not granted access to calendars. Reconnect it in Google settings.")

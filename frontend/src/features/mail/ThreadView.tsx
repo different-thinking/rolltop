@@ -896,6 +896,7 @@ export function ThreadView({
   const [showImages, setShowImages] = useState(() => new URLSearchParams(location.search).get("images") === "1");
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
   const [inlineReply, setInlineReply] = useState<ComposeForm | null>(null);
+  const [pendingReply, setPendingReply] = useState<number>(0);
   const [unsubscribingID, setUnsubscribingID] = useState<number | null>(null);
   const [pendingUnsubscribe, setPendingUnsubscribe] = useState<ThreadMessage | null>(null);
   const [originalSource, setOriginalSource] = useState<OriginalSourceState | null>(null);
@@ -921,6 +922,8 @@ export function ThreadView({
   const brandDomainKey = useMemo(() => brandDomainKeyForThread(thread, pluginSet), [thread, pluginSet]);
   const [brandIcons, setBrandIcons] = useState<Record<string, string>>({});
   const inlineReplyRowRef = useRef<HTMLDivElement | null>(null);
+  const replyRequestRef = useRef(0);
+  const loadRequestRef = useRef(0);
   const autoPGPVerificationRef = useRef<Set<string>>(new Set());
   const pgpWasUnlockedRef = useRef(false);
   const pgpBodiesRef = useRef<Record<number, PGPBodyState>>({});
@@ -943,10 +946,18 @@ export function ThreadView({
     Object.values(pgpBodiesRef.current).forEach((body) => revokeDecryptedMIMEAttachments(body.decryptedAttachments));
   }, []);
 
-  // Loading is split into a quick status probe and the actual message request.
-  // The status dialog is delayed slightly to avoid flashing for local conversations.
+  // The message request goes out first and nothing is allowed in front of it.
+  // The status probe only decides what the waiting dialog says, so it is worth a
+  // round trip only on an open that is already slow enough to want the dialog:
+  // awaiting it first, as this did, added its full latency to every message the
+  // user opened, including the local ones that had nothing to report.
   const load = useCallback(
     async (images: boolean) => {
+      // Opening a second message while the first is still loading leaves that
+      // first load running against the view the second one now owns, so every
+      // answer it produces - the thread, the status, the end of the loading
+      // state - is checked against the load the view is actually waiting for.
+      const loadRequest = ++loadRequestRef.current;
       setLoading(true);
       setError("");
       setLoadStatus(null);
@@ -959,27 +970,38 @@ export function ThreadView({
       setAutocryptGossipImports({});
       autoPGPVerificationRef.current = new Set();
       setSearchExplanations({});
-      let statusTimer = 0;
+      let settled = false;
+      const statusTimer = window.setTimeout(() => {
+        void api
+          .messageLoadStatus(id)
+          .catch(() => null)
+          .then((status) => {
+            if (settled || loadRequest !== loadRequestRef.current) return;
+            if (!shouldShowLoadStatus(status)) return;
+            setLoadStatus(status);
+          });
+      }, 250);
       try {
-        const status = await api.messageLoadStatus(id).catch(() => null);
-        if (shouldShowLoadStatus(status)) {
-          statusTimer = window.setTimeout(() => setLoadStatus(status), 250);
-        }
         const data = await api.message(id, images, highlightQuery);
+        if (loadRequest !== loadRequestRef.current) return;
         setThread(data.thread);
         setSubject(data.message.subject || "(no subject)");
         setMailboxID(data.mailbox_id);
-    setSnoozedUntil(data.snoozed_until || "");
+        setSnoozedUntil(data.snoozed_until || "");
         setComposeFrom(data.compose_from);
         setFromIdentities(data.from_identities || []);
         setExpanded(new Set(data.thread.filter((item) => item.expanded).map((item) => item.message.id)));
         void refreshChrome();
       } catch (err) {
+        if (loadRequest !== loadRequestRef.current) return;
         setError(messageFromError(err));
       } finally {
-        if (statusTimer) window.clearTimeout(statusTimer);
-        setLoadStatus(null);
-        setLoading(false);
+        settled = true;
+        window.clearTimeout(statusTimer);
+        if (loadRequest === loadRequestRef.current) {
+          setLoadStatus(null);
+          setLoading(false);
+        }
       }
     },
     [highlightQuery, id, refreshChrome]
@@ -1555,12 +1577,29 @@ export function ThreadView({
     return `Unsubscribed on ${displayDateTime(item.one_click_unsubscribe_sent_at, datePrefs)}`;
   }
 
+  function closeInlineReply() {
+    // Anything still on its way back from /api/compose belongs to a reply the
+    // user has since dismissed, so retire the token before dropping the state.
+    replyRequestRef.current += 1;
+    setPendingReply(0);
+    setInlineReply(null);
+  }
+
   // Reply setup asks the backend for recipients, identity, threading headers, and
   // reusable attachment metadata so reply/reply-all behavior stays consistent.
+  // That is a server round trip, and on a contended server it is a slow one, so
+  // the composer's row is drawn and scrolled to the moment the button is pressed
+  // rather than when the answer lands. Without it Reply looked broken: nothing
+  // moved, and the only thing the page did in the meantime was print the
+  // sandboxed-iframe notice from the message body it had just expanded.
   async function beginReply(item: ThreadMessage, replyAll = false) {
+    const token = ++replyRequestRef.current;
     setExpanded((current) => new Set(current).add(item.message.id));
+    setInlineReply(null);
+    setPendingReply(item.message.id);
     try {
       const data = await api.compose(`${replyAll ? "reply_all" : "reply"}=${item.message.id}`);
+      if (token !== replyRequestRef.current) return;
       const protectedSubject = pgpBodies[item.message.id]?.protectedSubject || "";
       const compose = securityEnabled && item.message.is_encrypted
         ? {
@@ -1574,7 +1613,10 @@ export function ThreadView({
       setFromIdentities(data.from_identities || []);
       setInlineReply(compose);
     } catch (err) {
+      if (token !== replyRequestRef.current) return;
       addToast(messageFromError(err), "error");
+    } finally {
+      if (token === replyRequestRef.current) setPendingReply(0);
     }
   }
 
@@ -1585,7 +1627,7 @@ export function ThreadView({
   // reopening on the same message flips the key back through 0, so the second
   // reply scrolls too. `nearest` leaves an already-visible composer alone, and
   // the row's scroll-margin keeps it clear of the sticky top bar.
-  const inlineReplyTargetID = inlineReply ? inlineReply.in_reply_to_id : 0;
+  const inlineReplyTargetID = pendingReply || (inlineReply ? inlineReply.in_reply_to_id : 0);
   useEffect(() => {
     if (!inlineReplyTargetID) return;
     const row = inlineReplyRowRef.current;
@@ -1609,6 +1651,15 @@ export function ThreadView({
   useEffect(() => {
     function handleThreadShortcut(event: globalThis.KeyboardEvent) {
       if (event.shiftKey || event.repeat || shouldIgnoreMailShortcut(event)) return;
+      if (pendingReply) {
+        // A reply being prepared holds the thread's keys the way an open
+        // composer does, except that it has no editor to take Escape yet.
+        if (event.key.toLowerCase() === "escape") {
+          event.preventDefault();
+          closeInlineReply();
+        }
+        return;
+      }
       if (inlineReply || originalSource || messagePluginPanel || pendingUnsubscribe) return;
       const key = event.key.toLowerCase();
       if (key === "u" || key === "escape") {
@@ -1626,7 +1677,7 @@ export function ThreadView({
     }
     window.addEventListener("keydown", handleThreadShortcut);
     return () => window.removeEventListener("keydown", handleThreadShortcut);
-  }, [backURL, currentMessageID, inlineReply, loading, messagePluginPanel, originalSource, pendingUnsubscribe, thread]);
+  }, [backURL, currentMessageID, inlineReply, loading, messagePluginPanel, originalSource, pendingReply, pendingUnsubscribe, thread]);
 
   const displaySubject = pgpBodies[currentMessageID]?.protectedSubject || subject;
 
@@ -1923,6 +1974,11 @@ export function ThreadView({
         <section className="thread-shell">
           {thread.map((item, index) => {
             const isExpanded = expanded.has(item.message.id);
+            // A reply owns this message's slot from the click onwards: while
+            // /api/compose is in flight the row holds a placeholder, and the
+            // composer takes the same place when the form arrives.
+            const replyPending = pendingReply === item.message.id;
+            const replyOpen = replyPending || inlineReply?.in_reply_to_id === item.message.id;
             const itemTrashMailbox = trashByAccount.get(item.message.account_id);
             const senderVisual = senderVisualURL(item, brandIcons, pluginSet);
             const unsubscribeSent = unsubscribeSentLabel(item);
@@ -2253,7 +2309,7 @@ export function ThreadView({
                     ))}
                   </div>
                 ) : null}
-                {index === thread.length - 1 && inlineReply?.in_reply_to_id !== item.message.id ? (
+                {index === thread.length - 1 && !replyOpen ? (
                   <div className="thread-actions">
                     <button className="thread-action" type="button" onClick={() => void beginReply(item)}>
                       <Icon name="reply" weight="bold" />
@@ -2275,31 +2331,44 @@ export function ThreadView({
                     </button>
                   </div>
                 ) : null}
-                {inlineReply && inlineReply.in_reply_to_id === item.message.id ? (
+                {replyOpen ? (
                   <div className="inline-reply-row" ref={inlineReplyRowRef}>
                     <div className="avatar inline-reply-avatar">{composeInitial}</div>
-                    <ComposeBox
-                      userID={userID}
-                      csrf={csrf}
-                      composeFrom={composeFrom}
-                      identities={fromIdentities}
-                      initial={inlineReply}
-                      recoveryContext={`reply:${item.message.id}`}
-                      inline
-                      securityEnabled={securityEnabled}
-                      securityPlugins={messageSecurityPlugins}
-                      securityUnlock={securityUnlock}
-                      openSecurityUnlock={openSecurityUnlock}
-                      addToast={addToast}
-                      onSent={() => {
-                        setInlineReply(null);
-                        void load(showImages);
-                      }}
-                      onCancel={() => setInlineReply(null)}
-                    />
+                    {replyPending || !inlineReply ? (
+                      <div className="inline-reply inline-reply-pending" role="status" aria-live="polite">
+                        <span className="spinner" aria-hidden="true" />
+                        <span>Preparing your reply</span>
+                        {/* The composer's own discard control is not here yet, and a
+                            request that never lands would otherwise leave no way out
+                            of the reply but reloading the page. */}
+                        <button className="ghost text-link" type="button" onClick={closeInlineReply}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <ComposeBox
+                        userID={userID}
+                        csrf={csrf}
+                        composeFrom={composeFrom}
+                        identities={fromIdentities}
+                        initial={inlineReply}
+                        recoveryContext={`reply:${item.message.id}`}
+                        inline
+                        securityEnabled={securityEnabled}
+                        securityPlugins={messageSecurityPlugins}
+                        securityUnlock={securityUnlock}
+                        openSecurityUnlock={openSecurityUnlock}
+                        addToast={addToast}
+                        onSent={() => {
+                          closeInlineReply();
+                          void load(showImages);
+                        }}
+                        onCancel={closeInlineReply}
+                      />
+                    )}
                   </div>
                 ) : null}
-                {index === thread.length - 1 && !inlineReply ? <div className="thread-tail" /> : null}
+                {index === thread.length - 1 && !inlineReply && !pendingReply ? <div className="thread-tail" /> : null}
               </article>
             );
           })}
