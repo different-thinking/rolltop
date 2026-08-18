@@ -46,8 +46,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiActivity(w, r)
 	case path == "activity/history":
 		s.apiActivityHistory(w, r)
-	case strings.HasPrefix(path, "activity/workers/"):
-		s.apiActivityWorkerAction(w, r, strings.TrimPrefix(path, "activity/workers/"))
+	case path == "activity/workers/cancel":
+		s.apiActivityWorkerCancel(w, r)
 	case path == "events":
 		s.apiEvents(w, r)
 	case path == "storage":

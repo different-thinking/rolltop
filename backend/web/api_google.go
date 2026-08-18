@@ -5,6 +5,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -71,26 +72,38 @@ func (s *Server) apiGoogleConnections(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"configured": false, "connections": []apiGoogleConnection{}})
 		return
 	}
-	connections, err := s.googleAuth.List(r.Context(), cu.User.ID)
+	out, err := s.googleConnectionsWithSyncState(r.Context(), cu.User.ID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
-	}
-	out := make([]apiGoogleConnection, 0, len(connections))
-	for _, connection := range connections {
-		item := apiGoogleConnectionFromStore(connection)
-		if item.HasContactsScope {
-			item.ContactsSync = s.googleContactsSyncState(r.Context(), cu.User.ID, connection.ID)
-		}
-		if item.HasCalendarScope {
-			item.CalendarSync = s.googleCalendarSyncState(r.Context(), cu.User.ID, connection.ID)
-		}
-		out = append(out, item)
 	}
 	writeJSON(w, map[string]any{
 		"configured":  s.googleAuth.Configured(),
 		"connections": out,
 	})
+}
+
+// googleConnectionsWithSyncState assembles the user's connections with the sync
+// state of every scope each has granted. The settings page and the Activity
+// view both render this, and a scope added to one loop but not a second copy of
+// it is exactly the drift this shared assembly exists to prevent.
+func (s *Server) googleConnectionsWithSyncState(ctx context.Context, userID int64) ([]apiGoogleConnection, error) {
+	connections, err := s.googleAuth.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]apiGoogleConnection, 0, len(connections))
+	for _, connection := range connections {
+		item := apiGoogleConnectionFromStore(connection)
+		if item.HasContactsScope {
+			item.ContactsSync = s.googleContactsSyncState(ctx, userID, connection.ID)
+		}
+		if item.HasCalendarScope {
+			item.CalendarSync = s.googleCalendarSyncState(ctx, userID, connection.ID)
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // apiGoogleConnect starts consent and returns the Google URL for the browser to

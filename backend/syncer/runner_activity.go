@@ -7,7 +7,9 @@
 package syncer
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -60,21 +62,52 @@ func (r *Runner) WorkerActivities(userID int64) []WorkerActivity {
 	}
 	// Work that is queued rather than running has no reservation to report, so
 	// it would be invisible here -- and invisible waiting is exactly what makes
-	// a stalled backlog look like a broken counter.
-	if r.attachmentPending[userID] {
+	// a stalled backlog look like a broken counter. The pending flags stay set
+	// while a turn of the same work is still running, so a queued row is only
+	// added when no live activity already owns its key: two rows under one key
+	// would make the list claim the same worker twice.
+	attachmentKey := runnerMailboxWorkActivityKey(mailboxKey(userID, "__attachments__"))
+	if _, live := r.workActivities[attachmentKey]; !live && r.attachmentPending[userID] {
 		out = append(out, WorkerActivity{
-			Key:  runnerMailboxWorkActivityKey(mailboxKey(userID, "__attachments__")),
-			Kind: runnerWorkAttachmentIndex, Phase: "waiting", Waiting: true,
+			Key: attachmentKey, Kind: runnerWorkAttachmentIndex, Phase: "waiting", Waiting: true,
 		})
 	}
-	if r.senderStatsPending[userID] {
+	senderStatsKey := runnerUserWorkActivityKey(runnerWorkSenderStats, userID)
+	if _, live := r.workActivities[senderStatsKey]; !live && r.senderStatsPending[userID] {
 		out = append(out, WorkerActivity{
-			Key:  runnerUserWorkActivityKey(runnerWorkSenderStats, userID),
-			Kind: runnerWorkSenderStats, Phase: "waiting", Waiting: true,
+			Key: senderStatsKey, Kind: runnerWorkSenderStats, Phase: "waiting", Waiting: true,
 		})
+	}
+	// Folder syncs parked behind a foreground operation wait in their own maps.
+	// They are the "stalled backlog" case in person, so they have to show.
+	appendParkedMailbox := func(reservationKey, mailbox string) {
+		activityKey := runnerMailboxWorkActivityKey(reservationKey)
+		if _, live := r.workActivities[activityKey]; live {
+			return
+		}
+		out = append(out, WorkerActivity{
+			Key: activityKey, Kind: runnerWorkMailboxSync, Phase: "waiting", Mailbox: mailbox, Waiting: true,
+		})
+	}
+	userPrefix := fmt.Sprintf("%d:", userID)
+	for key := range r.mailboxPending {
+		if mailbox, ok := strings.CutPrefix(key, userPrefix); ok {
+			appendParkedMailbox(key, mailbox)
+		}
+	}
+	for key := range r.accountMailboxPending {
+		if keyUserID, _, mailbox, ok := parseAccountMailboxKey(key); ok && keyUserID == userID {
+			appendParkedMailbox(key, mailbox)
+		}
 	}
 	r.mu.Unlock()
+	// Running work first, in the order it started; queued work after it. A
+	// waiting row carries no start time, and sorting its zero time first would
+	// show the queue above the very work it is queued behind.
 	sort.Slice(out, func(a, b int) bool {
+		if out[a].Waiting != out[b].Waiting {
+			return !out[a].Waiting
+		}
 		if out[a].StartedAt.Equal(out[b].StartedAt) {
 			return out[a].Key < out[b].Key
 		}
@@ -87,6 +120,10 @@ func (r *Runner) WorkerActivities(userID int64) []WorkerActivity {
 // snapshot reported. It refuses anything belonging to another user, and answers
 // whether it actually cancelled something rather than whether the key looked
 // plausible.
+//
+// The cancellation is the turn's, not the row's: a reservation batch shares one
+// context, exactly as CancelSyncRun cancels a whole run's keys, so stopping one
+// folder of a multi-folder turn ends the turn. The view says so on the button.
 func (r *Runner) CancelWorkerActivity(userID int64, key string) bool {
 	if r == nil || userID <= 0 || key == "" {
 		return false
@@ -113,9 +150,8 @@ func (r *Runner) CancelWorkerActivity(userID int64, key string) bool {
 // carries. A user-scoped activity has no reservation behind it and yields a key
 // that matches nothing, which is the right answer: there is nothing to cancel.
 func mailboxReservationKeyFromActivityKey(key string) string {
-	const prefix = "mailbox:"
-	if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-		return key[len(prefix):]
+	if reservation, ok := strings.CutPrefix(key, runnerMailboxWorkActivityPrefix); ok && reservation != "" {
+		return reservation
 	}
 	return ""
 }

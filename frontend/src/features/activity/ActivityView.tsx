@@ -11,7 +11,7 @@
  * can be stopped, one place to stop them.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { AddToast, DatePrefs } from "../../appTypes";
 import type { Activity, ActivityService, ActivityWorker, SyncRun } from "../../types";
@@ -19,45 +19,63 @@ import { Icon } from "../../components/Icon";
 import { displayDateTime } from "../../lib/format";
 import { messageFromError } from "../../lib/errors";
 
-/** How often the view re-reads. Fast enough to watch a run move, slow enough to leave the runner alone. */
-const refreshIntervalMS = 2000;
+/**
+ * The fallback poll. The event stream is the real change signal -- sync
+ * progress updates the chrome props, and this view refreshes when they change --
+ * so this only covers worker phases that change without a chrome event.
+ */
+const refreshIntervalMS = 10000;
 
 export function ActivityView({
   csrf,
   datePrefs,
+  activeSyncRuns,
+  mailGeneration,
   navigate,
   addToast
 }: {
   csrf: string;
   datePrefs: DatePrefs;
+  /** SSE-fed run list from the chrome payload; a change here means new state to fetch. */
+  activeSyncRuns: SyncRun[];
+  /** Bumps when a sync stores messages, which is when worker phases move. */
+  mailGeneration: number;
   navigate: (url: string) => void;
   addToast: AddToast;
 }) {
   const [activity, setActivity] = useState<Activity | null>(null);
   const [error, setError] = useState("");
   const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
+  // A slow poll answer must not overwrite the fresh state a cancel just
+  // fetched, so every response is checked against the newest request.
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
-      setActivity(await api.activity());
+      const next = await api.activity();
+      if (refreshSequence.current !== sequence) return;
+      setActivity(next);
       setError("");
     } catch (err) {
+      if (refreshSequence.current !== sequence) return;
       setError(messageFromError(err));
     }
   }, []);
 
+  // The event stream already tells this browser when sync state changes, via
+  // the chrome props above. They trigger a fetch; the interval is only the
+  // fallback for changes no chrome event announces, and it stays quiet while
+  // the tab is hidden.
   useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      if (cancelled) return;
-      void refresh();
-    };
-    tick();
-    const timer = window.setInterval(tick, refreshIntervalMS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+    void refresh();
+  }, [refresh, activeSyncRuns, mailGeneration]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, refreshIntervalMS);
+    return () => window.clearInterval(timer);
   }, [refresh]);
 
   // One busy set for every row action: a row is disabled while its own request
@@ -85,14 +103,24 @@ export function ActivityView({
   const workers = activity?.workers || [];
   const services = activity?.services || [];
   const categoriesPending = activity?.categories_pending || 0;
-  const idle = activeRuns.length === 0 && workers.length === 0 && categoriesPending === 0;
+  // One folder sync is a run row plus its runner-side worker rows, so summing
+  // rows would count the same operation three times. The pill counts the runs
+  // and only the workers that are not the runner's view of one.
+  const independentWorkers = workers.filter(
+    (worker) => !worker.waiting && worker.kind !== "mailbox_sync" && worker.kind !== "account_wide_sync"
+  );
+  const runningCount = activeRuns.length + independentWorkers.length;
+  // idle is only knowable after the first answer: everything defaults to empty
+  // before it, and "Nothing is running" over a busy server is the one flash
+  // this view must never show.
+  const idle = activity !== null && activeRuns.length === 0 && workers.length === 0 && categoriesPending === 0;
 
   return (
     <>
       <div className="content-head">
         <div>
           <h1>Activity</h1>
-          <span className="label-pill">{(activeRuns.length + workers.length).toLocaleString()} running</span>
+          <span className="label-pill">{runningCount.toLocaleString()} running</span>
         </div>
         <div className="activity-actions">
           <button className="secondary" type="button" onClick={() => void refresh()}>
@@ -227,7 +255,7 @@ function ActivityRunRow({
   const running = run.status === "running";
   return (
     <div className={`activity-row ${running ? "running" : ""}`}>
-      <span className={`activity-state ${run.status}`}>
+      <span className={`activity-state ${running ? "running" : run.status === "ok" ? "ok" : "error"}`}>
         <Icon name={running ? "sync" : run.status === "ok" ? "check" : "error"} />
       </span>
       <div className="activity-row-copy">
@@ -281,7 +309,13 @@ function ActivityWorkerRow({
       </div>
       <div className="activity-row-actions">
         {worker.cancellable ? (
-          <button className="secondary" type="button" disabled={busy} onClick={onCancel}>
+          <button
+            className="secondary"
+            type="button"
+            title="Stops the sync turn this task belongs to; its own scheduling decides when it comes back"
+            disabled={busy}
+            onClick={onCancel}
+          >
             {busy ? "Stopping..." : "Stop"}
           </button>
         ) : (

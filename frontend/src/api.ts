@@ -659,13 +659,10 @@ export const api = {
   syncRun: (id: string) => getJSON<{ sync_run: SyncRun; live: SyncRunLiveDetail }>(`/api/sync-runs/${id}`),
   cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf),
   deleteSyncRun: (csrf: string, id: number) => deleteJSON<{ ok: boolean }>(`/api/sync-runs/${id}`, csrf),
-  // The activity feed is read live and never from the request cache: a snapshot
-  // of what a worker was doing a minute ago is the one thing this view must not
-  // show.
-  activity: () => getJSON<Activity>(`/api/activity?t=${Date.now()}`),
-  // The reservation key carries slashes, so the action is appended after a
-  // separator a key cannot contain rather than as another path segment.
+  activity: () => getJSON<Activity>("/api/activity"),
+  // The reservation key embeds a raw IMAP mailbox name, which may contain any
+  // separator a URL scheme could pick, so it travels in the body.
   cancelWorker: (csrf: string, key: string) =>
-    postJSON<{ ok: boolean }>(`/api/activity/workers/${encodeURIComponent(key)}|cancel`, csrf),
+    postJSON<{ ok: boolean }>("/api/activity/workers/cancel", csrf, { key }),
   clearSyncHistory: (csrf: string) => deleteJSON<{ ok: boolean; removed: number }>("/api/activity/history", csrf)
 };

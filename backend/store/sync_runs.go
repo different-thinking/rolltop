@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -354,13 +355,22 @@ func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 	return ids, nil
 }
 
+// ErrSyncRunRunning reports a deletion refused because the run is still in
+// flight. It is distinct from ErrNotFound so the caller can tell "cancel it
+// first" apart from "already gone" -- the second is a success from the user's
+// point of view, and telling them to cancel a run that no longer exists is an
+// instruction that cannot be followed.
+var ErrSyncRunRunning = errors.New("sync run is still running")
+
 // DeleteSyncRunForUser removes one finished run from the history. A running run
 // is refused rather than deleted: the worker behind it would keep writing
 // progress to a row that no longer exists, and what the user wants for a run
 // still in flight is to cancel it.
 //
 // Rows that point at a run -- pending arrivals, rebuild state -- hold it with
-// ON DELETE SET NULL, so removing a run drops the reference and nothing else.
+// ON DELETE SET NULL, so removing a run drops the reference and nothing else;
+// an interrupted run whose worker is still winding down writes its remaining
+// arrivals without attribution rather than failing on the missing row.
 func (s *Store) DeleteSyncRunForUser(ctx context.Context, userID, id int64) error {
 	if userID <= 0 || id <= 0 {
 		return ErrNotFound
@@ -374,10 +384,24 @@ func (s *Store) DeleteSyncRunForUser(ctx context.Context, userID, id int64) erro
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
+	if affected > 0 {
+		return nil
+	}
+	// Nothing deleted: either the row is gone or it is still running. The two
+	// deserve different answers, so look once more.
+	var status string
+	err = s.mustDataDB(ctx, userID).QueryRowContext(ctx,
+		`SELECT status FROM sync_runs WHERE user_id = ? AND id = ?`, userID, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	if status == "running" {
+		return ErrSyncRunRunning
+	}
+	return ErrNotFound
 }
 
 // DeleteFinishedSyncRunsForUser clears one user's finished run history and

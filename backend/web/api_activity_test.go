@@ -143,14 +143,32 @@ func TestDeletingARunningSyncRunIsRefused(t *testing.T) {
 	}
 }
 
+// A delete that finds nothing left to delete is a success, not an instruction:
+// the row is gone, which is what the user asked for, and telling them to cancel
+// a run that no longer exists cannot be followed.
+func TestDeletingAnAlreadyGoneRunAnswersOK(t *testing.T) {
+	f := newActivityFixture(t)
+	if err := f.db.DeleteSyncRunForUser(f.ctx, f.owner.ID, f.done.ID); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	f.server.handleAPI(response, activityRequest(t, f.server, f.owner, http.MethodDelete, "/api/sync-runs/"+strconv.FormatInt(f.done.ID, 10)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("second delete status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
 // Tenant isolation, on the route that deletes: another user's finished run is
-// not theirs to remove, and must not even be found.
+// not theirs to remove. The response deliberately matches the already-gone
+// answer -- a run outside the tenant's scope and a run that never existed must
+// be indistinguishable -- so what this asserts is the part that matters: the
+// row survives.
 func TestActivityDeleteCannotReachAnotherTenantsRun(t *testing.T) {
 	f := newActivityFixture(t)
 	response := httptest.NewRecorder()
 	f.server.handleAPI(response, activityRequest(t, f.server, f.other, http.MethodDelete, "/api/sync-runs/"+strconv.FormatInt(f.done.ID, 10)))
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("cross-tenant delete status = %d, want 404: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("cross-tenant delete status = %d, want the same 200 an unknown id gets: %s", response.Code, response.Body.String())
 	}
 	if _, err := f.db.GetSyncRunForUser(f.ctx, f.owner.ID, f.done.ID); err != nil {
 		t.Fatalf("another tenant's delete removed the run: %v", err)

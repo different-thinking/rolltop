@@ -1,4 +1,4 @@
-// File overview: The Activity view's one endpoint. Everything Rolltop is doing
+// File overview: The Activity view's endpoints. Everything Rolltop is doing
 // for the signed-in user in the background -- mailbox syncs, the workers behind
 // them, and the Google syncs that run on their own timer -- is collected here so
 // there is a single place to look, and a single place to stop something.
@@ -12,9 +12,8 @@ package web
 import (
 	"log"
 	"net/http"
-	"strings"
 
-	"rolltop/backend/store"
+	"rolltop/backend/syncer"
 )
 
 // activityRunHistoryLimit bounds the finished runs the view lists. It is a
@@ -52,27 +51,6 @@ type apiActivityService struct {
 	EverSynced   bool   `json:"ever_synced"`
 }
 
-// workerLabels names each kind of work in the words the view uses. A kind with
-// no entry falls back to its own name, so a worker added to the runner shows up
-// here as soon as it exists rather than being silently left out.
-var workerLabels = map[string]string{
-	"account_wide_sync":          "Account sync",
-	"foreground_operation":       "Waiting for a user action",
-	"sender_stats":               "Sender statistics",
-	"mailbox_sync":               "Folder sync",
-	"mailbox_maintenance":        "Folder maintenance",
-	"mailbox_search_maintenance": "Search index rebuild",
-	"recovery_replay":            "Folder recovery",
-	"attachment_index":           "Attachment index and categories",
-}
-
-func workerLabel(kind string) string {
-	if label, ok := workerLabels[kind]; ok {
-		return label
-	}
-	return kind
-}
-
 func (s *Server) apiActivity(w http.ResponseWriter, r *http.Request) {
 	cu, ok := s.requireAPIAuth(w, r)
 	if !ok {
@@ -87,7 +65,12 @@ func (s *Server) apiActivity(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	_, categoriesPending, err := s.mailCategoryChrome(r.Context(), cu.User.ID)
+	// Only the pending count is shown, so it is read directly rather than
+	// through the category chrome: the chrome's cache keys on the mail-list
+	// generation, which churns exactly while a sync runs -- when this view is
+	// polled -- and each miss would recount every category for an answer this
+	// view throws away.
+	categoriesPending, err := s.store.CountMessagesNeedingCategory(r.Context(), cu.User.ID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -113,7 +96,7 @@ func (s *Server) activityWorkers(userID int64) []apiActivityWorker {
 		out = append(out, apiActivityWorker{
 			Key:         activity.Key,
 			Kind:        activity.Kind,
-			Label:       workerLabel(activity.Kind),
+			Label:       syncer.WorkerKindLabel(activity.Kind),
 			Phase:       activity.Phase,
 			AccountID:   activity.AccountID,
 			Mailbox:     activity.Mailbox,
@@ -133,40 +116,39 @@ func (s *Server) activityServices(r *http.Request, userID int64) []apiActivitySe
 	if s.googleAuth == nil {
 		return out
 	}
-	connections, err := s.googleAuth.List(r.Context(), userID)
+	connections, err := s.googleConnectionsWithSyncState(r.Context(), userID)
 	if err != nil {
 		log.Printf("activity google connections user_id=%d: %v", userID, err)
 		return out
 	}
 	for _, connection := range connections {
-		item := apiGoogleConnectionFromStore(connection)
-		if item.HasContactsScope {
-			if state := s.googleContactsSyncState(r.Context(), userID, connection.ID); state != nil {
-				out = append(out, apiActivityService{
-					Kind: "google_contacts", Label: "Google contacts", Account: item.Email, ConnectionID: connection.ID,
-					Status: state.Status, StatusDetail: state.StatusDetail, LastSyncAt: state.LastSyncAt,
-					LastSuccess: state.LastSuccess, ItemCount: state.ContactCount, EverSynced: state.EverSynced,
-				})
-			}
+		if state := connection.ContactsSync; state != nil {
+			out = append(out, apiActivityService{
+				Kind: "google_contacts", Label: "Google contacts", Account: connection.Email, ConnectionID: connection.ID,
+				Status: state.Status, StatusDetail: state.StatusDetail, LastSyncAt: state.LastSyncAt,
+				LastSuccess: state.LastSuccess, ItemCount: state.ContactCount, EverSynced: state.EverSynced,
+			})
 		}
-		if item.HasCalendarScope {
-			if state := s.googleCalendarSyncState(r.Context(), userID, connection.ID); state != nil {
-				out = append(out, apiActivityService{
-					Kind: "google_calendars", Label: "Google calendars", Account: item.Email, ConnectionID: connection.ID,
-					Status: state.Status, StatusDetail: state.StatusDetail, LastSyncAt: state.LastSyncAt,
-					LastSuccess: state.LastSuccess, ItemCount: state.CalendarCount, EverSynced: state.EverSynced,
-				})
-			}
+		if state := connection.CalendarSync; state != nil {
+			out = append(out, apiActivityService{
+				Kind: "google_calendars", Label: "Google calendars", Account: connection.Email, ConnectionID: connection.ID,
+				Status: state.Status, StatusDetail: state.StatusDetail, LastSyncAt: state.LastSyncAt,
+				LastSuccess: state.LastSuccess, ItemCount: state.CalendarCount, EverSynced: state.EverSynced,
+			})
 		}
 	}
 	return out
 }
 
-// apiActivityWorkerAction stops one background worker. Cancelling is not the
-// same as forbidding: the work is dropped for now and its own scheduling
-// decides when it comes back, which is what a user stopping a job that is in
-// the way of something else wants.
-func (s *Server) apiActivityWorkerAction(w http.ResponseWriter, r *http.Request, rest string) {
+// apiActivityWorkerCancel stops one background worker. The key travels in the
+// request body rather than the path: reservation keys embed raw IMAP mailbox
+// names, which may contain any separator a path scheme could pick, and a POST
+// body has no such invariant to defend.
+//
+// Cancelling stops the sync turn the worker belongs to -- a reservation batch
+// shares one context -- and is not a prohibition: the work's own scheduling
+// decides when it comes back.
+func (s *Server) apiActivityWorkerCancel(w http.ResponseWriter, r *http.Request) {
 	cu, ok := s.requireAPIAuth(w, r)
 	if !ok {
 		return
@@ -178,19 +160,13 @@ func (s *Server) apiActivityWorkerAction(w http.ResponseWriter, r *http.Request,
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	key, action, found := strings.Cut(strings.Trim(rest, "/"), "|")
-	if !found {
-		// The key carries slashes of its own, so the action is separated from
-		// it by a character a reservation key cannot contain.
-		http.NotFound(w, r)
+	var in struct {
+		Key string `json:"key"`
+	}
+	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if action != "cancel" || s.syncRunner == nil {
-		http.NotFound(w, r)
-		return
-	}
-	cancelled := s.syncRunner.CancelWorkerActivity(cu.User.ID, key)
-	if !cancelled {
+	if s.syncRunner == nil || in.Key == "" || !s.syncRunner.CancelWorkerActivity(cu.User.ID, in.Key) {
 		writeAPIError(w, http.StatusConflict, "This background task is no longer running, or cannot be stopped.")
 		return
 	}
@@ -219,23 +195,4 @@ func (s *Server) apiActivityHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	s.events.Notify(cu.User.ID)
 	writeJSON(w, map[string]any{"ok": true, "removed": removed})
-}
-
-// activityRunDelete removes one finished run, and is reached through the
-// sync-run route so a run is cancelled and deleted at the same address.
-func (s *Server) activityRunDelete(w http.ResponseWriter, r *http.Request, userID, runID int64) {
-	if !s.verifyCSRF(w, r) {
-		return
-	}
-	err := s.store.DeleteSyncRunForUser(r.Context(), userID, runID)
-	if store.IsNotFound(err) {
-		writeAPIError(w, http.StatusConflict, "This sync run is still running. Cancel it first.")
-		return
-	}
-	if err != nil {
-		s.serverError(w, r, err)
-		return
-	}
-	s.events.Notify(userID)
-	writeJSON(w, map[string]any{"ok": true})
 }
