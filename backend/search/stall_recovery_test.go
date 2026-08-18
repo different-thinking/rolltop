@@ -76,7 +76,7 @@ func TestActiveWriterStallSurvivesCallerCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("active writer watchdog did not signal")
 	}
-	required, err := svc.SearchIndexRecoveryRequired(17)
+	required, err := searchRecoveryRequired(svc, 17)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestActiveWriterStallSurvivesCallerCancellation(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	required, err = svc.SearchIndexRecoveryRequired(17)
+	required, err = searchRecoveryRequired(svc, 17)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestActiveWriterWatchdogIgnoresCompletedOperation(t *testing.T) {
 		t.Fatalf("completed operation triggered watchdog for user %d", userID)
 	default:
 	}
-	if required, err := svc.SearchIndexRecoveryRequired(23); err != nil {
+	if required, err := searchRecoveryRequired(svc, 23); err != nil {
 		t.Fatal(err)
 	} else if required {
 		t.Fatal("completed operation left a recovery marker")
@@ -293,7 +293,7 @@ func TestActiveWriterStallSignalsBeforeBlockedDiagnostics(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stall diagnostics did not start after restart signal")
 	}
-	if required, markerErr := svc.SearchIndexRecoveryRequired(29); markerErr != nil || !required {
+	if required, markerErr := searchRecoveryRequired(svc, 29); markerErr != nil || !required {
 		t.Fatalf("recovery marker required=%t err=%v, want true, nil", required, markerErr)
 	}
 
@@ -329,7 +329,7 @@ func TestSearchIndexRecoveryMarkerRoundTripWithMalformedIndex(t *testing.T) {
 	if err := svc.MarkSearchIndexRecoveryRequired(31); err != nil {
 		t.Fatalf("idempotent marker write: %v", err)
 	}
-	if required, err := svc.SearchIndexRecoveryRequired(31); err != nil {
+	if required, err := searchRecoveryRequired(svc, 31); err != nil {
 		t.Fatal(err)
 	} else if !required {
 		t.Fatal("recovery marker was not found")
@@ -337,7 +337,7 @@ func TestSearchIndexRecoveryMarkerRoundTripWithMalformedIndex(t *testing.T) {
 	if err := svc.ClearSearchIndexRecoveryRequired(31); err != nil {
 		t.Fatal(err)
 	}
-	if required, err := svc.SearchIndexRecoveryRequired(31); err != nil {
+	if required, err := searchRecoveryRequired(svc, 31); err != nil {
 		t.Fatal(err)
 	} else if required {
 		t.Fatal("recovery marker remained after clear")
@@ -370,7 +370,7 @@ func TestSearchIndexRecoveryMarkerIsRestoredWhenClearCannotBePersisted(t *testin
 	if syncCalls != 2 {
 		t.Fatalf("directory sync calls = %d, want clear and restored-marker sync", syncCalls)
 	}
-	if required, requiredErr := svc.SearchIndexRecoveryRequired(37); requiredErr != nil || !required {
+	if required, requiredErr := searchRecoveryRequired(svc, 37); requiredErr != nil || !required {
 		t.Fatalf("recovery marker required=%t err=%v, want true, nil", required, requiredErr)
 	}
 	if err := svc.ClearSearchIndexRecoveryRequired(37); err != nil {
