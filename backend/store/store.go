@@ -39,6 +39,8 @@ type Store struct {
 	split             bool
 	pluginDefinitions []plugins.Definition
 	pluginMigrations  []plugins.Migration
+	access            AccessMode
+	accessConfigured  AccessMode
 	mu                sync.Mutex
 	userStores        map[int64]*Store
 	healthMu          sync.Mutex
@@ -48,11 +50,11 @@ type Store struct {
 // Open creates a combined store in one SQLite file. It is mostly used by tests
 // and small helpers that do not need the production system/user split.
 func Open(path string) (*Store, error) {
-	return open(path, "", false, schemaCombined, nil, defaultPluginCatalog())
+	return open(path, "", false, schemaCombined, nil, defaultPluginCatalog(), AccessShared)
 }
 
 // OpenServer opens the production system store without progress reporting.
-// cmd/rolltop usually calls OpenServerWithProgress instead.
+// cmd/rolltop usually calls OpenServerWithOptions instead.
 func OpenServer(path string, dataDir string) (*Store, error) {
 	return OpenServerWithProgress(path, dataDir, nil)
 }
@@ -61,44 +63,60 @@ func OpenServer(path string, dataDir string) (*Store, error) {
 // databases are opened lazily through UserStore so tenant-owned data remains in
 // data/users/<id>/rolltop.db.
 func OpenServerWithProgress(path string, dataDir string, progress MigrationReporter) (*Store, error) {
-	return open(path, dataDir, true, schemaSystem, progress, defaultPluginCatalog())
+	return open(path, dataDir, true, schemaSystem, progress, defaultPluginCatalog(), AccessAuto)
 }
 
 // OpenServerWithPluginManifests opens the production system store with a plugin
 // catalog derived from scanned plugin manifests.
 func OpenServerWithPluginManifests(path string, dataDir string, manifests []plugins.Manifest, progress MigrationReporter) (*Store, error) {
-	return open(path, dataDir, true, schemaSystem, progress, pluginCatalogFromManifests(manifests))
+	return OpenServerWithOptions(path, ServerOptions{DataDir: dataDir, Manifests: manifests, Progress: progress})
+}
+
+// ServerOptions carries what the production system store needs beyond its path.
+// It exists so the access mode can reach every database - the system store and
+// each tenant opened later - without a second constructor per combination.
+type ServerOptions struct {
+	DataDir   string
+	Manifests []plugins.Manifest
+	Progress  MigrationReporter
+	// Access selects how SQLite coordinates access to its files. The zero value
+	// is AccessAuto, which is resolved from the filesystem before opening.
+	Access AccessMode
+}
+
+// OpenServerWithOptions is the production entrypoint. An automatic access mode
+// is resolved per database file rather than once for the installation, because
+// ROLLTOP_DB_PATH can put the system database on a different filesystem than the
+// tenant databases under the data directory.
+func OpenServerWithOptions(path string, opts ServerOptions) (*Store, error) {
+	return open(path, opts.DataDir, true, schemaSystem, opts.Progress, pluginCatalogFromManifests(opts.Manifests), opts.Access)
 }
 
 // open is the shared constructor behind all Store entrypoints. It creates the
 // SQLite parent directory, opens the connection with foreign keys and a busy
 // timeout, installs the right migration set, and configures split-mode user-store
 // caching only for the production system database.
-func open(path string, dataDir string, split bool, schema schemaKind, progress MigrationReporter, catalog pluginCatalog) (*Store, error) {
+func open(path string, dataDir string, split bool, schema schemaKind, progress MigrationReporter, catalog pluginCatalog, access AccessMode) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	// Most Rolltop transactions validate tenant/mailbox state before writing.
-	// BEGIN IMMEDIATE queues those transactions for SQLite's single writer at
-	// the start, instead of allowing concurrent readers to deadlock while both
-	// try to upgrade a stale WAL snapshot to a writer.
-	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate")
+	// Resolved here, once the directory exists, so the answer describes the
+	// filesystem this database actually lands on.
+	configured := access
+	access, _ = ResolveAccessMode(access, filepath.Dir(path))
+	db, err := sql.Open(access.driverName(), access.dataSourceName(path))
 	if err != nil {
 		return nil, err
 	}
-	// SQLite permits exactly one writer per database. The sync runner serializes
-	// those writer turns per tenant; retain several additional connections so
-	// message rendering, account settings, and sender decoration reads can take
-	// WAL snapshots without queueing behind the active mirror writer. Separate
-	// users still have separate Store instances.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
+	access.applyConnectionLimits(db)
 	s := &Store{
 		db:                db,
 		path:              path,
 		dataDir:           dataDir,
 		schema:            schema,
 		split:             split,
+		access:            access,
+		accessConfigured:  configured,
 		pluginDefinitions: append([]plugins.Definition(nil), catalog.definitions...),
 		pluginMigrations:  append([]plugins.Migration(nil), catalog.migrations...),
 	}
@@ -222,7 +240,7 @@ func (s *Store) userStore(ctx context.Context, userID int64, progress MigrationR
 	us, err := open(userDBPath, "", false, schemaUser, progress, pluginCatalog{
 		definitions: s.pluginDefinitions,
 		migrations:  s.pluginMigrations,
-	})
+	}, s.accessConfigured)
 	if err != nil {
 		return nil, s.NoteError(userID, err)
 	}

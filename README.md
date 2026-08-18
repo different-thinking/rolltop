@@ -58,6 +58,7 @@ export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
 export ROLLTOP_MEMORY_LIMIT="80%"
 export ROLLTOP_STARTUP_LOCK_WAIT="2m"
+export ROLLTOP_SQLITE_ACCESS="auto"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
@@ -80,6 +81,44 @@ The limit is a ceiling, not a reservation: the process only uses what it needs,
 and going over it makes the collector work harder rather than failing an
 allocation. Give the container at least a gigabyte for a first sync of a large
 mailbox.
+
+`ROLLTOP_SQLITE_ACCESS` decides how SQLite coordinates access to its files, and
+it matters on exactly one kind of volume. WAL keeps its index in a `-shm` file
+that every connection maps with `MAP_SHARED`, and it relies on POSIX byte-range
+locks. A network or FUSE filesystem — CephFS, NFS, virtiofs, a Docker Desktop
+share — guarantees neither. SQLite documents WAL as unsupported there, and the
+symptom is not an error: databases corrupt hours later, repeatedly, with nothing
+in the log connecting the damage to the storage.
+
+`auto`, the default, reads the filesystem under the data directory and picks a
+mode for it:
+
+```text
+rolltop sqlite access=exclusive filesystem=fuse (virtiofs or another FUSE mount)
+rolltop warning: fuse (virtiofs or another FUSE mount) cannot be trusted with
+SQLite's shared WAL index; databases are opened one connection at a time without it
+```
+
+- **`shared`** is ordinary WAL, chosen for local filesystems (ext4, xfs, btrfs,
+  zfs, tmpfs, overlayfs). Each database keeps several connections so reads do not
+  queue behind the sync writer. A filesystem the list does not recognize is
+  treated as local and named in the log line, so it can be reported.
+- **`exclusive`** is WAL without shared memory: SQLite holds the index in heap
+  memory and holds the file lock for as long as the connection lives. That
+  removes both mechanisms the volume cannot provide. Rolltop already guarantees
+  one process per data directory with its instance lock, so the exclusivity costs
+  nothing there — but it does mean **one connection per database**, so reads
+  queue behind writes, and no second process can open a database while Rolltop
+  serves.
+
+Set the value explicitly to overrule the detection in either direction; an
+operator who knows their storage outranks a superblock lookup.
+
+In exclusive mode the admin Database page still checks integrity and writes
+backups, because it runs inside the serving process and uses the handle that
+already owns each file. The `backup-db` command cannot: it is a separate
+process, so it reports that Rolltop is serving and stops rather than failing
+per database. Use the admin page, or stop the server first.
 
 `ROLLTOP_STARTUP_INTEGRITY_CHECK` decides when SQLite files are verified during
 startup. `auto` (the default) verifies them only after a run that did not shut
@@ -311,10 +350,23 @@ Corruption comes from the storage under the data volume, not from a Rolltop
 write path: Rolltop opens SQLite in WAL mode with one writer per tenant and an
 exclusive lock on the data directory. A killed process does not corrupt a WAL
 database — SQLite discards a partially written frame by its checksum on the
-next open. Recurring corruption on the same installation usually means the
-volume is on a network or overlay filesystem that does not honor SQLite's
-locking, that the host lost power, or that the data directory was copied while
-the server was running.
+next open.
+
+Corruption that keeps coming back on the same installation, every few hours and
+without an obvious trigger, is almost always the filesystem. WAL needs a
+coherent shared memory mapping for its index and working POSIX byte-range locks;
+a network or FUSE volume (CephFS, NFS, virtiofs, a Docker Desktop share)
+provides neither reliably. Check what the volume actually is:
+
+```sh
+grep ' /data ' /proc/mounts
+```
+
+Anything other than a local filesystem there is the finding. Rolltop detects
+this at startup and switches to `ROLLTOP_SQLITE_ACCESS=exclusive`, which runs
+WAL without the shared index; moving the volume onto a block device remains the
+better fix, because it costs no concurrency. The other classic causes are a host
+that lost power and a data directory copied while the server was running.
 
 ### Shutdown And Restart
 

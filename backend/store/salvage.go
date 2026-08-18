@@ -115,7 +115,12 @@ func SalvageUserDatabase(ctx context.Context, sourcePath, destPath string, manif
 	source.SetMaxOpenConns(1)
 	defer source.Close()
 
-	dest, err := open(destPath, "", false, schemaUser, nil, pluginCatalogFromManifests(manifests))
+	// Deliberately shared, whatever the server runs with: the salvage writer
+	// holds one reserved connection for the whole run and reads the destination
+	// schema on another, which a single-connection pool could never serve. This
+	// is an offline rebuild of a fresh file, so the shared WAL index it uses
+	// exists only for the length of the command.
+	dest, err := open(destPath, "", false, schemaUser, nil, pluginCatalogFromManifests(manifests), AccessShared)
 	if err != nil {
 		return report, fmt.Errorf("create recovered database %s: %w", destPath, err)
 	}

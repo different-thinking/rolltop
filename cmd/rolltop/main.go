@@ -429,6 +429,14 @@ func run() (runErr error) {
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
 	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
+	// Each database resolves its own mode when it is opened, because the system
+	// database can be configured onto a different filesystem than the tenant
+	// databases. Both are reported here, since the choice changes how SQLite
+	// behaves for the whole run.
+	reportSQLiteAccess(cfg.SQLiteAccess, "data directory", cfg.DataDir)
+	if systemDir := filepath.Dir(cfg.DatabasePath); systemDir != filepath.Clean(cfg.DataDir) {
+		reportSQLiteAccess(cfg.SQLiteAccess, "system database", systemDir)
+	}
 	// A deployment that starts the replacement before stopping the process it
 	// replaces makes both want this directory for a few seconds. Waiting is what
 	// keeps the second process out of SQLite and the Bleve indexes without
@@ -553,6 +561,19 @@ func run() (runErr error) {
 
 // startApp performs the blocking startup work in dependency order: schema,
 // user stores, interrupted sync cleanup, search indexes, then web/sync services.
+// reportSQLiteAccess names the mode one location resolves to. The failure it
+// guards against cannot be diagnosed afterwards: a WAL index on a volume that
+// cannot host it corrupts databases hours later, with nothing in the log tying
+// the damage to the storage.
+func reportSQLiteAccess(configured store.AccessMode, label, path string) {
+	access, filesystem := store.ResolveAccessMode(configured, path)
+	log.Printf("rolltop sqlite access=%s %s filesystem=%s", access, label, filesystem.Name)
+	if !filesystem.SharedMemorySafe {
+		log.Printf("rolltop warning: the %s is on %s, which cannot be trusted with SQLite's shared WAL index; "+
+			"databases there are opened one connection at a time without it", label, filesystem.Name)
+	}
+}
+
 func startApp(ctx context.Context, cfg config.Config, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
 	startup.update("System database", "opening", 0, 1)
 	pluginManifests, err := plugins.LoadManifests(cfg.PluginDir)
@@ -576,7 +597,12 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		detail := strings.TrimSpace(p.Migration + " - " + p.Step)
 		startup.update(phase, detail, p.Done, p.Total)
 	}
-	db, err := store.OpenServerWithPluginManifests(cfg.DatabasePath, cfg.DataDir, pluginManifests, reporter)
+	db, err := store.OpenServerWithOptions(cfg.DatabasePath, store.ServerOptions{
+		DataDir:   cfg.DataDir,
+		Manifests: pluginManifests,
+		Progress:  reporter,
+		Access:    cfg.SQLiteAccess,
+	})
 	if err != nil {
 		return nil, err
 	}

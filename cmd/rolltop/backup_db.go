@@ -95,6 +95,25 @@ func runBackupDatabase(ctx context.Context, args []string, stdout, stderr io.Wri
 		return fmt.Errorf("no databases found under %s", cfg.DataDir)
 	}
 
+	// On a filesystem where SQLite cannot use its shared WAL index, a serving
+	// Rolltop holds each database exclusively and no second process can read it.
+	// Saying so up front beats a row of "database is locked" failures.
+	if access, filesystem := store.ResolveAccessMode(cfg.SQLiteAccess, cfg.DataDir); !access.SharesFiles() {
+		lock, free, lockErr := tryInstanceLock(cfg.DataDir)
+		switch {
+		case lockErr != nil:
+			// Whether anything is serving could not be established. The backup
+			// itself reports the truth either way.
+		case free:
+			// Nothing is serving, so the databases can be read from here. The
+			// lock is released again: this command is not the owner.
+			_ = lock.Close()
+		default:
+			return fmt.Errorf("rolltop is serving this data directory and %s makes it hold every database exclusively; "+
+				"back up from the admin Database page instead, or stop the server first", filesystem.Name)
+		}
+	}
+
 	var total int64
 	var failures []string
 	for _, target := range targets {

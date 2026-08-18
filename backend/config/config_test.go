@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"rolltop/backend/memlimit"
+	"rolltop/backend/store"
 )
 
 const testMasterKey = "12345678901234567890123456789012"
@@ -269,5 +270,33 @@ func TestLoadReadsStartupLockWait(t *testing.T) {
 	t.Setenv("ROLLTOP_STARTUP_LOCK_WAIT", "-30s")
 	if _, err := Load(); err == nil {
 		t.Fatal("negative startup lock wait was accepted")
+	}
+}
+
+func TestLoadReadsSQLiteAccessMode(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SQLiteAccess != store.AccessAuto {
+		t.Fatalf("default sqlite access = %v, want auto", cfg.SQLiteAccess)
+	}
+
+	t.Setenv("ROLLTOP_SQLITE_ACCESS", "exclusive")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SQLiteAccess != store.AccessExclusive {
+		t.Fatalf("configured sqlite access = %v, want exclusive", cfg.SQLiteAccess)
+	}
+
+	// A typo must not silently leave the databases on a mode the storage
+	// cannot support.
+	t.Setenv("ROLLTOP_SQLITE_ACCESS", "wal")
+	if _, err := Load(); err == nil {
+		t.Fatal("an unknown sqlite access mode was accepted")
 	}
 }

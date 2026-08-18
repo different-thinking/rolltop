@@ -323,7 +323,7 @@ func (s *Server) startIntegrityCheck(scope maintenanceScope, userID int64) (*mai
 		problems := 0
 		for _, target := range targets {
 			s.maintenance.appendLog(job.ID, fmt.Sprintf("checking %s", target.label))
-			found, err := store.CheckDatabaseFile(ctx, target.path)
+			found, err := s.store.CheckDatabase(ctx, target.userID, target.path)
 			if err != nil {
 				s.maintenance.appendLog(job.ID, fmt.Sprintf("%s: check failed: %v", target.label, err))
 				problems++
@@ -385,7 +385,7 @@ func (s *Server) startBackup(scope maintenanceScope, userID int64) (*maintenance
 			if target.userID > 0 {
 				dest = filepath.Join(staging, "users", fmt.Sprintf("%d", target.userID), "rolltop.db")
 			}
-			size, err := store.BackupDatabaseFile(ctx, target.path, dest)
+			size, err := s.store.BackupDatabase(ctx, target.userID, target.path, dest)
 			if err != nil {
 				failures++
 				s.maintenance.appendLog(job.ID, fmt.Sprintf("%s: failed: %v", target.label, err))
