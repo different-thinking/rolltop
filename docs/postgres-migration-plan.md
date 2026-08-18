@@ -1,0 +1,461 @@
+# PostgreSQL Migration Plan
+
+Status: proposal, not started. This document describes how to move Rolltop's
+relational storage from per-tenant SQLite files to a single PostgreSQL
+database, what has to change in the code, where the risks are, and what the
+migration deliberately does not cover.
+
+## 1. Why
+
+The production data volume is CephFS. SQLite in WAL mode requires a coherent
+shared memory mapping of the `-shm` file across all connections; CephFS with
+`client cache = auto` does not guarantee that coherence. The result is the
+observed recurring corruption and disk-I/O errors, and it is documented
+SQLite behavior on network filesystems, not an edge case. Roughly 2,000 lines
+of salvage/repair/integrity machinery in this repository exist only to
+compensate for that.
+
+PostgreSQL removes the filesystem from the application's problem space
+entirely: Rolltop speaks TCP to a database whose storage is someone else's
+(working) responsibility — ideally a managed instance, alternatively a
+Postgres container on an RBD block device. **Postgres on CephFS itself would
+inherit the same class of problems and is explicitly out of scope as a
+deployment target.**
+
+Bleve search indexes and raw `.eml`/attachment blobs are *not* part of this
+migration (see §9 and §10). Blobs are write-once whole-file reads and are fine
+on CephFS. Bleve is not fine on CephFS (mmap'd scorch segments) and is the
+follow-up phase.
+
+## 2. Current state (inventory)
+
+Verified against the tree as of this writing:
+
+| Surface | Size |
+| --- | --- |
+| `backend/store` | 86 non-test files, ~18.8k LOC (+ ~12.6k test LOC) |
+| Query call sites (`ExecContext`/`QueryContext`/`QueryRowContext`) | 663 non-test, ~1,000 incl. tests |
+| Schema migrations | system 001–004, user 001–035, plus named side migrations and plugin migrations |
+| `CREATE TABLE` statements | 87 |
+| Production triggers | 1 (`messages_clear_duplicate_pointer`, `migration_user_033.go`) |
+| `AUTOINCREMENT` | 54 (all in migration DDL) |
+| `INSERT OR IGNORE` | 13 |
+| `ON CONFLICT ... DO UPDATE` upserts (`excluded.`) | 214 references |
+| `COLLATE BINARY` / `COLLATE NOCASE` | 58 / 1 |
+| `PRAGMA` (non-test backend/cmd) | 12 sites |
+| `LastInsertId` | 15 |
+| Plugins executing their own SQL | 11 backends |
+| Corruption/salvage/repair machinery | ~2,050 LOC (`salvage.go`, `corruption.go`, `recover_db.go`, `repair_db.go`, `startup_integrity.go`, `repair_marker.go`, `backup_db.go`) |
+
+Architecture today: `OpenServer` opens the system DB (`/data/rolltop.db`);
+`UserStore`/`dataDB` lazily open one SQLite file per tenant
+(`/data/users/<id>/rolltop.db`). Tests mostly use `Open()`, which creates a
+*combined* schema in one file — this matters below.
+
+## 3. Decisions (with recommendations)
+
+### 3.1 One database, not schema-per-user — recommended
+
+Options considered:
+
+- **(A) One database, one schema, `user_id` scoping.** Every user-schema
+  table already carries `user_id` (AGENTS.md makes that a hard rule), and the
+  combined schema already exists and is exercised by the whole test suite via
+  `Open()`. The per-user file split existed for writer sharding (irrelevant in
+  Postgres), corruption blast-radius (irrelevant), and purge-by-file-delete
+  (replaced by `DELETE ... WHERE user_id = ?`, which `account_purge.go`
+  already does row-wise anyway).
+- **(B) Postgres schema per user.** Mirrors today's layout, cheap purge via
+  `DROP SCHEMA`, but multiplies migration runs, breaks connection pooling
+  (search_path juggling), and buys nothing the `user_id` columns don't
+  already provide.
+
+**Recommendation: (A).** It deletes the split-mode machinery
+(`userStores` cache, `mirrorUser`, `PrepareUserStores`, per-tenant health
+latch) instead of porting it.
+
+### 3.2 Hard cutover, no dual-backend support — recommended
+
+Per `docs/local-sqlite-maintenance.md`, this deployment is currently the only
+running instance. Maintaining two SQL dialects behind an abstraction layer is
+the single most expensive way to do this migration and benefits nobody.
+The SQLite driver survives only inside the one-shot data migration command
+(§7), then gets removed from the server path.
+
+Consequence to accept explicitly: Rolltop stops being a single-container app.
+The README's deployment story changes to "app container + Postgres" (compose
+file provided) or "app container + managed Postgres DSN".
+
+### 3.3 Driver: `pgx/v5` via `database/sql` (stdlib adapter) — recommended
+
+- Keeps all 663 call sites on `*sql.DB`/`*sql.Tx`, so the change per call
+  site is the SQL text, not the API.
+- Keeps the compiled-plugin ABI unchanged: plugin hooks receive `*sql.DB`
+  (`backend/plugins/compiled_hooks.go`) and keep working as long as their SQL
+  is ported.
+- Native pgx (batching, `CopyFrom`) is used only inside the data migration
+  tool where it pays off.
+
+### 3.4 Database collation: `C` — recommended
+
+Create the database with `LC_COLLATE=C` (or use `COLLATE "C"` defaults).
+This reproduces SQLite's byte-order `ORDER BY` and byte-exact comparisons,
+which the code assumes in 58 explicit `COLLATE BINARY` sites and implicitly
+everywhere else. Human-facing sorting that wants locale rules should opt in
+explicitly rather than the reverse. The single `COLLATE NOCASE` site becomes
+`lower(...)` or `citext`.
+
+## 4. Work packages
+
+### WP1 — Connection, config, startup
+
+- `backend/config/config.go`: replace `ROLLTOP_DB_PATH` with
+  `ROLLTOP_DATABASE_URL` (standard Postgres DSN). Add pool knobs
+  (`ROLLTOP_DB_MAX_CONNS`, default ~10). Remove
+  `ROLLTOP_STARTUP_INTEGRITY_CHECK`.
+- `backend/store/store.go`: `open()` loses the SQLite DSN parameters, the
+  `MkdirAll`, the corruption classification on migrate, and split mode.
+  `dataDB`/`mustDataDB`/`UserStore`/`UserDB` remain as API but resolve to the
+  one shared pool — callers do not change.
+- Startup ordering: the `flock` instance lock (`cmd/rolltop/instance_lock.go`)
+  **stays** — Bleve still requires a single process on `/data` (README calls
+  it the stricter constraint). Only its justification narrows.
+- Wait-for-database loop at startup (Postgres may come up after the app
+  container; today's code never needed this).
+
+### WP2 — Schema baseline (squash)
+
+Do **not** port 40+ incremental migrations. Freeze the current combined
+schema (what `Open()` produces after all system, user, side, and plugin
+migrations) and write it as one Postgres baseline, keeping the existing
+`schema_migrations` checksum runner (it is dialect-portable).
+
+Translation rules for the baseline:
+
+| SQLite | PostgreSQL |
+| --- | --- |
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY` |
+| `INTEGER` (unix timestamps, counters, 0/1 booleans) | `BIGINT` (keep 0/1 ints — avoids touching every `Scan`; genuine `BOOLEAN` conversion is a later cleanup) |
+| `TEXT` | `TEXT` |
+| `BLOB` (2 columns) | `BYTEA` |
+| `COLLATE BINARY` in DDL | drop (DB is `C`-collated) |
+| `COLLATE NOCASE` | expression index on `lower(col)` |
+| trigger in `migration_user_033.go` | PL/pgSQL function + trigger, same semantics (AGENTS.md documents why this lives in SQL, keep it there) |
+
+Plugin migrations: `plugins.Migration.Statements` get ported per plugin;
+`EnsureColumns` exists because SQLite lacks `ADD COLUMN IF NOT EXISTS` —
+Postgres has it, so the mechanism simplifies but the interface stays.
+
+### WP3 — Dialect codemod over 663 call sites
+
+All queries are constant string literals; this is mechanical but must be
+reviewed, not fully automated blindly:
+
+1. **Placeholders `?` → `$1..$n`.** Includes the dynamic
+   `IN (...)`-builders (`sqlPlaceholders` in `account_purge.go:217`,
+   `int64ListPlaceholders` in `message_lists.go`) which must become
+   position-aware, or better: replace `IN (…)` builders with `= ANY($1)` and
+   pass an int64 slice — pgx supports array binding, which deletes the
+   builder pattern entirely. **Recommended.**
+2. **`INSERT OR IGNORE` (13) → `INSERT ... ON CONFLICT DO NOTHING`.** Where
+   the code inspects `RowsAffected` to detect "was it new" (e.g.
+   `new_mail_events.go:54`), semantics are preserved (`DO NOTHING` reports 0
+   affected rows).
+3. **Upserts:** SQLite's `ON CONFLICT (…) DO UPDATE SET … excluded.…` is
+   already PG syntax. Verify each conflict target has a matching unique
+   index in the baseline schema (PG enforces this; SQLite did too, so
+   mismatches are unlikely but each of the 41 sites gets checked).
+4. **`LastInsertId` (15) → `RETURNING id`** with `QueryRowContext`.
+5. **`COLLATE BINARY` in queries (inbox_arrivals dedup, etc.)**: drop — the
+   `C` database default makes `=` byte-exact.
+6. **`PRAGMA` sites:**
+   - `message_indexing.go` (`synchronous=FULL` pinning + `wal_checkpoint(FULL)`
+     before search indexing): the whole durability dance collapses —
+     a committed PG transaction *is* the durable prerequisite. Delete the
+     dedicated-connection logic.
+   - `table_info` (`plugins.go:330`, `migration_search_preferences.go:57`) →
+     `information_schema.columns`.
+   - `quick_check`, `foreign_keys` toggles: deleted with their files (§6).
+7. **`sqlite_master`** (only `salvage.go`): deleted with the file.
+8. **`strftime`** (only in `migration_user_022`): gone via squash.
+9. **`LIKE`:** the three live sites (`contacts.go`) already wrap both sides
+   in `lower()`, so PG's case-sensitive `LIKE` changes nothing. Audit any
+   future `LIKE` for this.
+
+Suggested mechanics: one PR per store file group, each converting the SQL and
+its tests together, so review stays possible. A `go vet`-style CI grep that
+rejects `?`-placeholders, `PRAGMA`, `INSERT OR`, `AUTOINCREMENT` in
+non-migration code keeps regressions out during the transition.
+
+### WP4 — Behavioral changes in the store layer
+
+- **Transactions:** drop the `BEGIN IMMEDIATE` model (`_txlock=immediate`).
+  Postgres has real MVCC concurrency; the 65 `BeginTx(ctx, nil)` sites work
+  as-is. Add retry-on-serialization-failure only if we later raise the
+  isolation level (default `READ COMMITTED` matches current semantics
+  closely enough).
+- **Busy/locked handling:** `busy_timeout`, `IsCorrupt`, `NoteError`
+  health-latching disappear. Error classification narrows to
+  connection-level errors (retryable) vs constraint violations.
+- **`sync_runs` / syncer:** no logic change, but note the latency shift in
+  §8 — per-row loops that were free against a local file now pay a network
+  round trip each. The syncer's batch writes should be spot-checked with
+  timing logs after cutover; candidates for batching already exist
+  (`contacts_batch.go` pattern).
+
+### WP5 — Admin/maintenance surface rework
+
+`backend/web/database_maintenance.go` + `cmd/rolltop` subcommands:
+
+| Today | After |
+| --- | --- |
+| Integrity check job (`PRAGMA quick_check` over every file) | remove, or replace with a trivial connectivity/`pg_is_in_recovery` health card |
+| Backup job (`VACUUM INTO` per file) | remove from app; document `pg_dump` (and provider snapshots) as the supported path. If the in-app button must survive, shell out to `pg_dump` (adds the client tools to the image) — recommended: drop it |
+| Schedule-repair-at-restart marker flow | remove |
+| `check-db`, `repair-db`, `recover-db`, `backup-db` subcommands | remove (`backup-db` may keep a thin `pg_dump` wrapper if desired) |
+| Crash log on `/data` | keep (unrelated) |
+
+README sections "Backups", "Corruption", "Shutdown And Restart" get rewritten
+accordingly — shutdown no longer needs the WAL-checkpoint grace budget.
+
+### WP6 — Plugins
+
+The 11 SQL-executing plugin backends compile against `*sql.DB` and need the
+same WP3 treatment (their `AUTOINCREMENT`/`ON CONFLICT` DDL sits in their
+migration files). Because plugins load via `-buildmode=plugin`, the main
+binary and plugins must keep identical module versions — adding `pgx` to
+`go.mod` is a lockstep change across all plugin builds (CI already builds
+every plugin, `.github/workflows/ci.yml:101`, so drift is caught). CGO stays
+required by `-buildmode=plugin` regardless of dropping `mattn/go-sqlite3`, so
+the Dockerfile build stages are unchanged in shape.
+
+### WP7 — One-shot data migration tool
+
+New subcommand `rolltop migrate-to-postgres`:
+
+1. Takes the instance lock (server must be stopped) and opens the system
+   SQLite file plus every `data/users/<id>/rolltop.db` **read-only** with the
+   existing driver.
+2. Requires an **empty** target database; runs the WP2 baseline.
+3. Streams tables in FK order via pgx `CopyFrom` (system tables, then per
+   user). Millions of message/location rows are the sizing case; `COPY` is
+   the difference between minutes and hours.
+4. **Sanitizes text on the way over** — see §8.1, this is the step most
+   likely to surface dirty data. Every sanitized value is logged with table,
+   rowid, and column.
+5. Resets identity sequences (`setval`) to `max(id)+1` per table.
+6. Verifies: row counts per table per user, plus spot checksums (e.g.
+   sum of `size`, count by `mailbox_id`) — printed as a report.
+7. All-or-nothing: any failure ⇒ drop and re-run. No partial resume.
+
+The SQLite files are left untouched and serve as the rollback (§11).
+Skipped-as-corrupt tenant databases (the health latch case) must be repaired
+with today's tooling *before* migrating — the tool refuses to silently skip a
+tenant.
+
+### WP8 — Tests and CI
+
+The biggest hidden cost. ~12.6k LOC of store tests plus the web/syncer suites
+all call `store.Open(tempfile)`.
+
+- New helper `storetest.Open(t)`: connects to a Postgres from
+  `TEST_DATABASE_URL`, creates a uniquely named database from a migrated
+  **template database** (`CREATE DATABASE ... TEMPLATE rolltop_test_tmpl`),
+  drops it in `t.Cleanup`. Template creation happens once per `go test`
+  process (sync.Once + advisory lock for parallel packages). Template-clone
+  is ~50–100 ms, which keeps the suite tolerable; running the baseline per
+  test would not be.
+- `Open(path)` callers migrate to `storetest.Open(t)` mostly mechanically.
+- CI (`ci.yml`, `pr.yml`): add a `postgres:17` service container, set
+  `TEST_DATABASE_URL`. Local dev: `docker compose -f compose.dev.yml up db`
+  documented in README/AGENTS.md.
+- Tests that specifically exercise SQLite corruption/salvage/backup are
+  deleted with their subjects.
+
+### WP9 — Docs and deployment
+
+- README: storage model, configuration, backups, corruption section
+  (largely deleted), new compose example with a Postgres service and a named
+  volume **on RBD/local disk, never CephFS**, `stop_grace_period` note
+  simplified.
+- AGENTS.md: replace SQLite-specific guidance (writer turns, WAL) with
+  Postgres equivalents; keep the `user_id`-scoping rule — it is now the
+  *only* tenant isolation layer, which makes review discipline on new
+  queries more important, not less.
+- `docs/local-sqlite-maintenance.md`: superseded; keep for the Bleve parts,
+  rename accordingly.
+
+## 5. Suggested phasing
+
+| Phase | Content | Depends on |
+| --- | --- | --- |
+| 0 | Stopgap on current production: `locking_mode=EXCLUSIVE`, `synchronous=FULL`, `MaxOpenConns(1)` (separate small change; removes the `-shm` coherence dependency and the "database is locked" errors while this plan executes) | — |
+| 1 | WP1 + WP2 + WP8 skeleton (app boots against PG, baseline schema, test helper + CI service) | hoster answer: managed PG or RBD |
+| 2 | WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
+| 3 | WP6 plugins | 2 |
+| 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
+| 5 | WP7 migration tool + dry run against a copy of production data | 2 |
+| 6 | Cutover (§11) | 3–5 |
+| 7 | Bleve → Postgres FTS (§10, separate plan) | 6 |
+
+Phases 2–4 are parallelizable per package. Realistic effort: phase 1 ~2–4
+days, phase 2 the bulk (1–2 weeks of focused work given test conversion),
+phases 3–5 ~1 week combined, plus a dry-run/cutover day. The corruption
+machinery deletion (§6) lands as its own satisfying PR.
+
+## 6. Code that gets deleted
+
+- `backend/store/salvage.go` (731), `corruption.go` (342),
+  `repair_marker.go` (165)
+- `cmd/rolltop/recover_db.go` (302), `repair_db.go` (187),
+  `startup_integrity.go` (173), `backup_db.go` (144)
+- Split-mode plumbing in `store.go` (userStores cache, `mirrorUser`,
+  `PrepareUserStores`, health latch), the `synchronous`/checkpoint logic in
+  `message_indexing.go`, the maintenance jobs in
+  `backend/web/database_maintenance.go`
+- Their tests
+
+Net: roughly 2,500+ LOC of production code whose only job was surviving
+SQLite-on-CephFS.
+
+## 7. What deliberately does not change
+
+- **Blob store** (`backend/blob`): stays on `/data` (CephFS). Write-once
+  files, no locking, no mmap — appropriate workload for CephFS.
+- **Bleve** stays on `/data` *for now* (see §10) — therefore the instance
+  lock, the search recovery marker flow, and the single-process constraint
+  all stay until phase 7.
+- **Store API**: `*Store` method signatures, `dataDB` call shape, plugin
+  hook signatures (`*sql.DB`).
+- Session/auth model, crypto, IMAP/SMTP paths: untouched. (Token hashes are
+  hex-encoded before storage, `backend/crypto/secret.go:74`, so collation and
+  case questions do not reach them.)
+
+## 8. Stolpersteine (the honest list)
+
+### 8.1 UTF-8 strictness — the sneakiest one
+
+SQLite stores any byte sequence in `TEXT`. **Postgres rejects invalid UTF-8
+and NUL bytes (`0x00`) in `TEXT` outright.** Mail is hostile input: subjects,
+sender names, message-ids, and header fragments with broken encodings exist
+in real mailboxes and are almost certainly sitting in the current data.
+
+Two mandatory countermeasures:
+
+1. **Write-path sanitization** at the parse boundary (`backend/mailparse`):
+   `strings.ToValidUTF8(s, "�")` + strip `\x00` for every header-derived
+   string before it reaches the store. Today only scattered sites do this
+   (`api_message.go:228`, `compose.go:415`); it must become systematic, or
+   the syncer will hit insert errors on the first malformed message after
+   cutover.
+2. **Migration-tool sanitization** (WP7) with logging, since existing rows
+   contain whatever SQLite accepted over the years.
+
+Columns that must stay byte-faithful (none known — hashes are hex, tokens are
+base64) would need `BYTEA`; audit during WP2 confirms.
+
+### 8.2 Latency profile
+
+A per-user SQLite file made every query ~µs and made N+1 loops invisible.
+Postgres adds a network round trip per statement. The web request paths are
+fine (few queries per request), but syncer inner loops (per-message location
+upserts, fingerprint checks) deserve measurement in the phase-5 dry run.
+Mitigations if needed: `= ANY($1)` batching (already introduced by WP3),
+multi-row `INSERT ... VALUES (...),(...)`, pgx batch API in hot spots.
+Do not pre-optimize; measure.
+
+### 8.3 Type strictness at `Scan`
+
+SQLite's dynamic typing forgave `Scan(&int64)` on messy columns. PG is
+strict. Keeping 0/1 `BIGINT` booleans and unix-int timestamps (WP2) minimizes
+this, but expect a tail of test failures pointing at spots where a column's
+declared and actual types drifted. The test suite is the safety net; this is
+a reason *not* to shortcut WP8.
+
+### 8.4 Ordering and comparison semantics
+
+With `LC_COLLATE=C` (§3.4), `ORDER BY` on text and all `=` comparisons match
+SQLite's `BINARY` behavior, so no query-by-query collation audit is needed.
+If the database is *not* created with `C` collation, that audit (58+ sites,
+plus every implicit text `ORDER BY`) becomes mandatory — easier to enforce
+the collation at provisioning and verify it at startup (fail fast if
+`datcollate != 'C'`).
+
+### 8.5 Connection pool vs long transactions
+
+`SetMaxOpenConns(4)` becomes a real pool (~10). Watch for transactions held
+across IMAP fetches or Bleve writes — a store-layer audit during WP4 should
+confirm no `*sql.Tx` spans network I/O (spot checks so far found none; the
+message-indexing checkpoint dance was the closest and gets deleted).
+
+### 8.6 Operational surface shift
+
+- Backups: `VACUUM INTO` self-service is gone; the operator story becomes
+  `pg_dump`/provider backups. This is a *feature regression* for
+  self-hosters unless the compose file ships a scheduled `pg_dump` sidecar
+  or the docs cover it well.
+- One more service to run, upgrade (PG major versions), and monitor.
+- Postgres major-version upgrades need `pg_upgrade`/dump-restore — worth a
+  README paragraph so it does not surprise anyone in two years.
+
+### 8.7 Plugin lockstep
+
+Any `go.mod` bump (adding pgx) requires rebuilding all `.so` plugins with the
+identical dependency graph — an existing constraint, but the migration makes
+it bite once. CI already covers it.
+
+## 9. Explicit non-goals of phase 1–6
+
+- No dual SQLite/Postgres backend abstraction.
+- No schema redesign, no `BOOLEAN`/`TIMESTAMPTZ` type modernization beyond
+  the mechanical mapping (candidates for later cleanup, not for the
+  migration diff).
+- No multi-node app deployment (Bleve and the instance lock still force a
+  single process).
+- No Postgres-on-CephFS deployment support.
+
+## 10. Phase 7 sketch: search on Postgres
+
+Kept out of scope above, but the direction that makes the CephFS story
+complete, since Bleve's mmap'd segments are the remaining risk on `/data`:
+
+- `tsvector` column(s) over subject/body/attachment text, GIN index,
+  per-language configs; `pg_trgm` for the fuzzy path and
+  `backend/search/similarity.go`.
+- The user ranking knobs (`search_recency_bias`, `search_sender_boost`,
+  `search_contact_boost`, `search_attachment_weight`, `users.go:18`) map to a
+  `ts_rank_cd` weighting expression plus app-side score blending — feasible,
+  but a real design task of its own.
+- Retires: the search coordinator's byte-budget machinery, the
+  `bleve.recovery-required` restart flow, quarantine/rebuild, and finally the
+  single-process constraint itself.
+- Requires `pg_trgm` (and possibly `unaccent`) — confirm the hoster allows
+  extensions before committing to this phase.
+
+## 11. Cutover and rollback
+
+1. Freeze: stop the container (instance lock released), take a final Ceph
+   snapshot of `/data`.
+2. `rolltop migrate-to-postgres` against the empty target; review the
+   verification report and the sanitization log.
+3. Start the new image with `ROLLTOP_DATABASE_URL`. Bleve indexes on `/data`
+   remain valid — they reference message ids, which the migration preserves
+   (identity values are copied verbatim, sequences bumped past them).
+4. Watch the syncer complete one full cycle per account; compare message
+   counts per mailbox against the report.
+5. Rollback path (until the old image is retired): stop, restart the
+   previous image — the SQLite files were never written after the freeze.
+   Mail changes made in the Postgres interim would be lost locally but
+   re-mirrored from IMAP; locally-created state (snoozes, contacts edits) in
+   the interim would not survive a rollback. Keep the rollback window short.
+
+## 12. Open questions
+
+1. Hosting: managed PostgreSQL available? Which version (target ≥ 16)?
+   Extensions `pg_trgm`/`citext` allowed? If no managed offer: RBD volume for
+   a self-run Postgres container?
+2. Connection limits of the offering (pool sizing input).
+3. Is the in-app backup button a must-keep (→ ship `pg_dump` in the image)
+   or acceptable to drop in favor of provider backups?
+4. Timing of phase 0 (the SQLite `locking_mode=EXCLUSIVE` stopgap) relative
+   to this plan — recommended immediately, independent of everything above.
