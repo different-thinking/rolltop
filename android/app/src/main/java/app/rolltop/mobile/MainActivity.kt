@@ -396,7 +396,7 @@ class MainActivity : ComponentActivity() {
     private fun urlForIntent(sourceIntent: Intent?): String {
         return explicitUrlForIntent(sourceIntent)
             ?: RolltopPrefs.lastVisitedUrl(this).takeIf { it.isNotBlank() }
-            ?: RolltopPrefs.buildUrl(this, "/mail")
+            ?: RolltopPrefs.buildUrl(this, RolltopPrefs.DEFAULT_PATH)
     }
 
     private fun explicitUrlForIntent(sourceIntent: Intent?): String? {

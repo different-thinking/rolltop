@@ -637,6 +637,8 @@ export type ComposeForm = {
   pgp_mime?: boolean;
   pgp_signature?: string;
   attach_public_key?: boolean;
+  /** File the message this replies to once the reply is away. Send and archive sets it. */
+  archive_after_send?: boolean;
 };
 
 /** Account is the IMAP account settings shape used by the settings page. */

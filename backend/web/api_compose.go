@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,8 +56,9 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		archived := s.archiveRepliedMessage(r.Context(), cu.User.ID, form)
 		s.notifyUserChanged(cu.User.ID)
-		writeJSON(w, map[string]any{"ok": true, "message_id": sent.ID})
+		writeJSON(w, map[string]any{"ok": true, "message_id": sent.ID, "archived_mailbox": archived})
 	default:
 		methodNotAllowed(w)
 	}
@@ -496,6 +498,66 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 		return store.MessageRecord{}, fmt.Errorf("message sent through SMTP, but could not save it to %s: %w", sentMailbox.Name, err)
 	}
 	return s.storeSentMessage(ctx, cu.User.ID, imapAccount, sentMailbox, msg, form, fetched)
+}
+
+// archiveRepliedMessage files the message a reply answered, and names the folder
+// it landed in so the browser can say so. It runs after the send, never before:
+// the reply is already gone, and a message that failed to move is still in the
+// list where the reader left it.
+//
+// Nothing here can fail the request. Sending is the part the user cannot redo,
+// and reporting a delivered message as a failure because a folder move went
+// wrong would be a worse answer than the empty string this returns.
+func (s *Server) archiveRepliedMessage(ctx context.Context, userID int64, form composeForm) string {
+	if !form.ArchiveAfterSend || form.InReplyToID <= 0 || s.syncer == nil {
+		return ""
+	}
+	message, err := s.store.GetMessageForUser(ctx, userID, form.InReplyToID)
+	if err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("archive after send user_id=%d message_id=%d: %v", userID, form.InReplyToID, err)
+		}
+		return ""
+	}
+	choices, err := s.store.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		log.Printf("archive after send user_id=%d: %v", userID, err)
+		return ""
+	}
+	destID := int64(0)
+	for _, choice := range choices {
+		if choice.AccountID == message.AccountID {
+			destID = choice.MailboxID
+			break
+		}
+	}
+	// No Archive folder chosen for this account, or the message is already in
+	// it. Both are ordinary states, not failures: the reply went out either way.
+	if destID <= 0 || destID == message.MailboxID {
+		return ""
+	}
+	dest, err := s.store.GetMailboxForUser(ctx, userID, destID)
+	if err != nil {
+		log.Printf("archive after send user_id=%d mailbox_id=%d: %v", userID, destID, err)
+		return ""
+	}
+	refreshMailboxes, err := s.moveRefreshMailboxNames(ctx, userID, []int64{message.ID}, dest)
+	if err != nil {
+		log.Printf("archive after send user_id=%d message_id=%d: %v", userID, message.ID, err)
+		return ""
+	}
+	finishForeground, err := s.beginComposeForegroundOperation(ctx, userID)
+	if err != nil {
+		log.Printf("archive after send user_id=%d message_id=%d: %v", userID, message.ID, err)
+		return ""
+	}
+	defer finishForeground()
+	if err := s.syncer.MoveMessage(ctx, userID, message.ID, destID); err != nil {
+		log.Printf("archive after send user_id=%d message_id=%d: %v", userID, message.ID, err)
+		return ""
+	}
+	s.startMoveRefresh(userID, dest.AccountID, refreshMailboxes)
+	return dest.Name
 }
 
 func (s *Server) beginComposeForegroundOperation(ctx context.Context, userID int64) (func(), error) {

@@ -10,6 +10,7 @@ import type { ContactAutocomplete, ComposeAttachmentUpload, ComposeExistingAttac
 import { Icon, LogoMark } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { textToHTML } from "../../lib/html";
+import { defaultMailURL } from "../../lib/routes";
 import {
   clearComposeRecovery,
   composeContentEqual,
@@ -191,8 +192,8 @@ export function ComposePage({
           securityUnlock={securityUnlock}
           openSecurityUnlock={openSecurityUnlock}
           addToast={addToast}
-          onSent={() => navigate("/mail")}
-          onCancel={() => navigate("/mail")}
+          onSent={() => navigate(defaultMailURL)}
+          onCancel={() => navigate(defaultMailURL)}
         />
       ) : (
         <div className="panel muted">Loading compose...</div>
@@ -244,6 +245,10 @@ export function ComposeBox({
   const [showCc, setShowCc] = useState(Boolean(initial.cc));
   const [showBcc, setShowBcc] = useState(Boolean(initial.bcc));
   const [sending, setSending] = useState(false);
+  // Which button started the submit. A ref rather than state: it is read inside
+  // the submit that the click itself triggers, and a state update would not have
+  // landed by then.
+  const archiveOnSend = useRef(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
@@ -680,7 +685,8 @@ export function ComposeBox({
       from_identity_id: form.from_identity_id || primaryIdentity?.id || 0,
       body: editor?.innerText || "",
       body_html: preparedHTML.html,
-      attach_public_key: composeSecurity.attachPublicKey
+      attach_public_key: composeSecurity.attachPublicKey,
+      archive_after_send: archiveOnSend.current && initial.in_reply_to_id > 0
     };
     let sent = false;
     setSending(true);
@@ -693,14 +699,18 @@ export function ComposeBox({
         composeSecurity.setTransform({ active: true, phase: "ciphertext", ciphertext });
       });
       if (composeSecurity.active) await delay(520);
-      await api.send(csrf, prepared.form, prepared.attachments);
+      const result = await api.send(csrf, prepared.form, prepared.attachments);
       sent = true;
       clearLocalComposeRecovery();
-      addToast("Message sent.");
+      // The move is reported rather than assumed: an account with no Archive
+      // folder chosen, or a conversation already filed in one, sends the reply
+      // and leaves the message where it is.
+      addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
       onSent();
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
+      archiveOnSend.current = false;
       if (!sent) composeSecurity.setTransform({ active: false, phase: "plaintext", ciphertext: "" });
       setSending(false);
     }
@@ -1017,10 +1027,24 @@ export function ComposeBox({
       {composeSecurity.renderSendChoice(formRef)}
       <div className="compose-sendbar">
         <div className="compose-send-actions">
-          <button className="send-button" disabled={sending || savingDraft || resizing}>
+          <button className="send-button" disabled={sending || savingDraft || resizing} onClick={() => { archiveOnSend.current = false; }}>
             <Icon name="send" />
             {composeSecurity.sendButtonLabel(sending)}
           </button>
+          {/* Answering a message is usually the last thing a reader wants to do
+              with it, but not always, so the two outcomes are two buttons rather
+              than one button and a rule. Only a reply has something to file. */}
+          {initial.in_reply_to_id > 0 ? (
+            <button
+              className="send-archive-button"
+              title="Send this reply and file the message it answers"
+              disabled={sending || savingDraft || resizing}
+              onClick={() => { archiveOnSend.current = true; }}
+            >
+              <Icon name="archive" />
+              <span>Send &amp; archive</span>
+            </button>
+          ) : null}
           <button className="secondary save-draft-button" type="button" title="Save draft" aria-label={savingDraft ? "Saving draft" : "Save draft"} disabled={sending || savingDraft || resizing} onClick={() => void saveDraft()}>
             <Icon name="draft" />
             <span>{savingDraft ? "Saving..." : "Save draft"}</span>

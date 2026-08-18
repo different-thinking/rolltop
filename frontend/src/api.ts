@@ -453,7 +453,7 @@ export const api = {
   send: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
     if (attachments.length === 0) {
-      return postJSON<{ ok: boolean; message_id: number }>("/api/compose", csrf, payload);
+      return postJSON<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, payload);
     }
     const body = new FormData();
     body.append("payload", JSON.stringify({
@@ -468,7 +468,7 @@ export const api = {
       }))
     }));
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
-    return postForm<{ ok: boolean; message_id: number }>("/api/compose", csrf, body);
+    return postForm<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, body);
   },
   saveDraft: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
