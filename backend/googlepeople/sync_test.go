@@ -561,6 +561,93 @@ func TestSyncPromotesTheLocalHolderOfAnAddressAMirrorAlreadyShares(t *testing.T)
 	}
 }
 
+// A household address sits on the reader's own contact and on the card of the
+// person they share it with. Adopting the Me card would make the reader's own
+// contact the mirror of somebody else, and their outgoing identity would take
+// that person's name.
+func TestSyncPromotesTheOtherLocalHolderRatherThanTheReadersOwnContact(t *testing.T) {
+	shared := "haushalt@example.test"
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People:        []Person{personWithEmail("people/c1", "etag-1", "Charles Babbage", shared)},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	me, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "The Reader",
+		IsMe:        true,
+		IsPrimary:   true,
+		Emails:      []store.ContactEmail{{Label: "Home", Email: shared, IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spouse, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Charles",
+		Emails:      []store.ContactEmail{{Label: "Home", Email: shared}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	own, err := db.GetContactForUser(ctx, user.ID, me.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.IsGoogleContact() {
+		t.Fatalf("the reader's own contact became a mirror: %+v", own)
+	}
+	if own.DisplayName != "The Reader" {
+		t.Fatalf("own display name = %q, want the reader's own name kept", own.DisplayName)
+	}
+	promoted, err := db.GetContactForUser(ctx, user.ID, spouse.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.ExternalID != "people/c1" {
+		t.Fatalf("other local holder links to %q, want the Google person", promoted.ExternalID)
+	}
+}
+
+// The Me card is still the right answer when it is the only local holder: that
+// is a reader's own Google contact, and refusing it would build a duplicate and
+// strand the identity flags outgoing mail hangs off.
+func TestSyncStillPromotesTheReadersOwnContactWhenItIsTheOnlyLocalHolder(t *testing.T) {
+	fake := &fakePeople{responses: []ConnectionsPage{{
+		People:        []Person{personWithEmail("people/c1", "etag-1", "The Reader", "reader@example.test")},
+		NextSyncToken: "token-1",
+	}}}
+	syncer, db, user := newSyncFixture(t, fake)
+	ctx := context.Background()
+
+	me, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Reader",
+		IsMe:        true,
+		IsPrimary:   true,
+		Emails:      []store.ContactEmail{{Label: "Home", Email: "reader@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncConnection(ctx, user.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := db.ListContactsForUser(ctx, user.ID, store.ContactListFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 {
+		t.Fatalf("address book holds %d contacts, want the single promoted one", len(contacts))
+	}
+	if contacts[0].ID != me.ID || contacts[0].ExternalID != "people/c1" || !contacts[0].IsMe {
+		t.Fatalf("promoted contact = %+v, want the reader's own contact linked and still theirs", contacts[0])
+	}
+}
+
 // A full read re-reports every person. Rewriting all of them each time would
 // churn the database and bump updated_at on contacts nothing changed about.
 func TestSyncSkipsContactsWhoseETagIsUnchanged(t *testing.T) {

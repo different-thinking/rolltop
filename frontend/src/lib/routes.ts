@@ -130,9 +130,31 @@ export function safeInternalURL(value: string | null | undefined, fallback = "/m
   }
 }
 
-/** messageBackURL extracts the safe return target from a message-detail URL. */
-export function messageBackURL(location: LocationState): string {
-  return safeInternalURL(new URLSearchParams(location.search).get("back"), "/mail");
+/**
+ * messageBackURL extracts the safe return target a view was opened with. The
+ * `back` parameter is one convention across message detail and compose, so it is
+ * read in one place; the fallback differs, because a composer that was reached
+ * without one has no conversation to fall back beside.
+ */
+export function messageBackURL(location: LocationState, fallback = "/mail"): string {
+  return safeInternalURL(new URLSearchParams(location.search).get("back"), fallback);
+}
+
+/**
+ * composeURL builds the full-page composer's URL, with the list to return to.
+ *
+ * It is here beside messageURL rather than at its call site because the two
+ * spell the same `back` convention, and a caller assembling this by hand has to
+ * get the separator right as well: `/compose` carries no query of its own until
+ * something is being replied to.
+ */
+export function composeURL(options: { replyID?: number; draftID?: number; backURL?: string }): string {
+  const params = new URLSearchParams();
+  if (options.replyID) params.set("reply", String(options.replyID));
+  if (options.draftID) params.set("draft", String(options.draftID));
+  if (options.backURL) params.set("back", safeInternalURL(options.backURL));
+  const query = params.toString();
+  return query ? `/compose?${query}` : "/compose";
 }
 
 /** messageURL builds a message-detail URL with search highlight terms and back target. */

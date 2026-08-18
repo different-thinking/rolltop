@@ -9,8 +9,9 @@ import type { LocationState, Toast } from "../../appTypes";
 import type { ContactAutocomplete, ComposeAttachmentUpload, ComposeExistingAttachment, ComposeForm, ComposeIdentity } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
+import { isSendChord } from "../../lib/keyboard";
 import { textToHTML } from "../../lib/html";
-import { defaultMailURL, safeInternalURL } from "../../lib/routes";
+import { defaultMailURL, messageBackURL } from "../../lib/routes";
 import {
   clearComposeRecovery,
   composeContentEqual,
@@ -167,8 +168,9 @@ export function ComposePage({
   const [error, setError] = useState("");
   // Where this composer was opened from. Replying from a list is a round trip,
   // so finishing means going back to that list rather than to whichever one the
-  // app happens to open on.
-  const backURL = safeInternalURL(new URLSearchParams(location.search).get("back"), defaultMailURL);
+  // app happens to open on -- which is all a composer reached without a list
+  // behind it can do.
+  const backURL = messageBackURL(location, defaultMailURL);
 
   useEffect(() => {
     let cancelled = false;
@@ -263,9 +265,6 @@ export function ComposeBox({
   // the submit that the click itself triggers, and a state update would not have
   // landed by then.
   const archiveOnSend = useRef(false);
-  // Set between a Ctrl+Enter and the submit it defers, so holding the keys down
-  // queues one send rather than one per repeat.
-  const keyboardSubmitPending = useRef(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
@@ -702,22 +701,15 @@ export function ComposeBox({
    * a security plugin puts in front of a send.
    */
   function handleComposeKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
-    if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (!isSendChord(event)) return;
     event.preventDefault();
-    if (sending || savingDraft || resizing || keyboardSubmitPending.current) return;
+    if (event.repeat || sending || savingDraft || resizing) return;
     archiveOnSend.current = canSendAndArchive;
-    // A recipient the user is still typing lives in the chip field's own input
-    // until something commits it, and clicking Send commits it by taking the
-    // focus away. The keyboard never leaves the field, so the blur is done here
-    // -- and the submit waits a tick for the committed address to reach the
-    // form, which is the state the send actually reads.
-    const focused = document.activeElement;
-    if (focused instanceof HTMLElement && formRef.current?.contains(focused)) focused.blur();
-    keyboardSubmitPending.current = true;
-    window.setTimeout(() => {
-      keyboardSubmitPending.current = false;
-      formRef.current?.requestSubmit();
-    }, 0);
+    // The recipient fields see this keystroke first and hand over whatever they
+    // were still holding -- a highlighted suggestion, a typed address -- which
+    // reaches this form as a state update. The submit waits one tick for it,
+    // because the send reads that state and not the DOM.
+    window.setTimeout(() => formRef.current?.requestSubmit(), 0);
   }
 
   // Before sending, replace inline object URLs with cid: URLs and only upload
@@ -1546,11 +1538,17 @@ function RecipientInput({
   }
 
   function handleRecipientKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
-    // Ctrl+Enter belongs to the composer, which sends. Everything this field
-    // does with a plain Enter -- choose a suggestion, commit what is typed --
-    // would be the wrong answer to a key that means "send now", and the blur
-    // the composer performs first commits the pending address anyway.
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) return;
+    // The send chord belongs to the composer, but this field is holding state
+    // the send is about to read, so it hands that over on the way past rather
+    // than letting the keystroke leave it behind. A highlighted suggestion is
+    // what the user means by that address; the raw text is the fallback. The
+    // event is left to bubble either way, and the form sends a tick later.
+    if (isSendChord(event)) {
+      const highlighted = suggestions[activeSuggestion];
+      if (highlighted) choose(highlighted);
+      else if (inputValue.trim()) commitRecipients(inputValue);
+      return;
+    }
     if (event.key === "ArrowDown" && suggestions.length > 0) {
       event.preventDefault();
       setActiveSuggestion((current) => (current + 1) % suggestions.length);

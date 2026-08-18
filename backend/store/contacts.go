@@ -166,71 +166,103 @@ func (s *Store) GetContactForUser(ctx context.Context, userID, id int64) (Contac
 	return c, nil
 }
 
-// contactEmailOwnerOrder ranks the contacts that share one address. An address
-// book may hold several since user-036 -- Google lets two people carry the same
-// one -- so every lookup by address has to name which of them it means, or the
-// answer changes with SQLite's row order and a Me contact, a merge target or a
-// reply identity silently moves to a different person.
+// contactEmailOwnerOrder ranks the contact_emails rows that carry one address.
+// An address book may hold several since user-036 -- Google lets two people
+// carry the same one -- so every lookup by address has to name which of them it
+// means, or the answer changes with SQLite's row order and a Me contact, a
+// merge target or a reply identity silently moves to a different person.
 //
 // The contact whose primary address this is comes first, then the oldest row:
 // the address book's own idea of whose address it is, and failing that the
 // contact that has been answering to it the longest.
-const contactEmailOwnerOrder = ` ORDER BY is_primary DESC, contact_id ASC, id ASC`
-
-// GetContactByEmailForUser finds a contact by normalized email inside one user's
-// address book. Where several contacts share the address it returns the one
-// contactEmailOwnerOrder names first.
-func (s *Store) GetContactByEmailForUser(ctx context.Context, userID int64, email string) (Contact, error) {
-	normalized := NormalizeContactEmail(email)
-	if normalized == "" {
-		return Contact{}, ErrNotFound
-	}
-	row := s.mustDataDB(ctx, userID).QueryRowContext(ctx, contactSelectSQL()+`
-		WHERE user_id = ? AND id = (
-			SELECT contact_id FROM contact_emails WHERE user_id = ? AND normalized_email = ?`+
-		contactEmailOwnerOrder+` LIMIT 1
-		)`, userID, userID, normalized)
-	c, err := scanContact(row)
-	if err != nil {
-		return Contact{}, err
-	}
-	if err := s.loadContactDetails(ctx, userID, &c); err != nil {
-		return Contact{}, err
-	}
-	return c, nil
+//
+// The user's own contact outranks all of that. An address on the Me card is the
+// identity outgoing mail hangs off, so when a lookup has to name one contact for
+// it, naming somebody else's card -- a shared team mailbox Google also lists,
+// say -- would put their name and picture on the reader's own address.
+//
+// It takes the table aliases because every query applying it joins contacts to
+// contact_emails, and both carry an `id` and a `user_id`. One ordering
+// expression built here rather than one each caller re-spells is what keeps
+// every lookup by address answering with the same contact.
+func contactEmailOwnerOrder(contactAlias, emailAlias string) string {
+	return ` ORDER BY ` + contactAlias + `is_me DESC, ` +
+		emailAlias + `is_primary DESC, ` + emailAlias + `contact_id ASC, ` + emailAlias + `id ASC`
 }
 
-// ListContactsByEmailForUser returns every contact that carries one address, in
-// the order GetContactByEmailForUser would have picked from. Callers that have
-// to choose between the holders rather than accept the first one need the whole
-// set: the contact sync, for one, may only adopt a local contact, and taking
-// the first row and finding it owned by Google would make it create a duplicate
-// instead of looking one row further.
-func (s *Store) ListContactsByEmailForUser(ctx context.Context, userID int64, email string) ([]Contact, error) {
+// ContactEmailHolder is one contact that carries an address, carrying just
+// enough to choose between the holders: whether Google owns the row, and
+// whether it is one of the user's own identities.
+//
+// Choosers get this rather than whole contacts because choosing never needs the
+// detail rows. Loading them for every candidate would mean five queries per
+// rejected holder, and the sync rejects one for every mirrored person whose
+// address is already spoken for.
+type ContactEmailHolder struct {
+	ContactID          int64
+	IsMe               bool
+	Source             string
+	GoogleConnectionID int64
+}
+
+// IsGoogleContact reports whether Google owns this holder, with the same rule
+// the full contact uses.
+func (h ContactEmailHolder) IsGoogleContact() bool {
+	return h.Source == ContactSourceGoogle && h.GoogleConnectionID > 0
+}
+
+// ListContactEmailHoldersForUser returns every contact carrying one address, in
+// owner order. It is the one place that order is applied: everything that
+// resolves an address to a single contact reads the first holder, and everything
+// that has to pick between them -- the sync adopting a local contact, an import
+// choosing a merge target -- walks the list.
+func (s *Store) ListContactEmailHoldersForUser(ctx context.Context, userID int64, email string) ([]ContactEmailHolder, error) {
 	normalized := NormalizeContactEmail(email)
-	if normalized == "" {
+	if userID <= 0 || normalized == "" {
 		return nil, nil
 	}
-	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, contactSelectSQL()+`
-		WHERE user_id = ? AND id IN (
-			SELECT contact_id FROM contact_emails WHERE user_id = ? AND normalized_email = ?
-		)
-		ORDER BY (
-			SELECT min(CASE WHEN e.is_primary = 1 THEN 0 ELSE 1 END) FROM contact_emails e
-			WHERE e.user_id = contacts.user_id AND e.contact_id = contacts.id AND e.normalized_email = ?
-		), id`, userID, userID, normalized, normalized)
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT c.id, c.is_me, c.source, c.google_connection_id
+		FROM contact_emails e
+		JOIN contacts c ON c.user_id = e.user_id AND c.id = e.contact_id
+		WHERE e.user_id = ? AND e.normalized_email = ?`+contactEmailOwnerOrder("c.", "e."), userID, normalized)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	contacts, err := scanContacts(rows)
+	var holders []ContactEmailHolder
+	seen := map[int64]bool{}
+	for rows.Next() {
+		var holder ContactEmailHolder
+		var isMe int
+		if err := rows.Scan(&holder.ContactID, &isMe, &holder.Source, &holder.GoogleConnectionID); err != nil {
+			return nil, err
+		}
+		// One contact listing the address twice is one holder. Saving dedupes
+		// by normalized address, but a database written before that did could
+		// still carry the pair.
+		if seen[holder.ContactID] {
+			continue
+		}
+		seen[holder.ContactID] = true
+		holder.IsMe = isMe != 0
+		holders = append(holders, holder)
+	}
+	return holders, rows.Err()
+}
+
+// GetContactByEmailForUser finds a contact by normalized email inside one user's
+// address book. Where several contacts share the address it returns the holder
+// owner order names first, so a caller that only wants "the" contact for an
+// address gets the same one every time.
+func (s *Store) GetContactByEmailForUser(ctx context.Context, userID int64, email string) (Contact, error) {
+	holders, err := s.ListContactEmailHoldersForUser(ctx, userID, email)
 	if err != nil {
-		return nil, err
+		return Contact{}, err
 	}
-	if err := s.loadContactDetailsForAll(ctx, userID, contacts); err != nil {
-		return nil, err
+	if len(holders) == 0 {
+		return Contact{}, ErrNotFound
 	}
-	return contacts, nil
+	return s.GetContactForUser(ctx, userID, holders[0].ContactID)
 }
 
 // EnsureMeContactForEmail creates or updates the Me contact used for compose identities and reply targeting.
@@ -247,8 +279,33 @@ func (s *Store) EnsureMeContactForEmail(ctx context.Context, userID int64, email
 	if err != nil {
 		return Contact{}, err
 	}
-	contact, err := s.GetContactByEmailForUser(ctx, userID, email)
-	if err == nil {
+	// The reader's own card is never a contact Google owns. Marking a mirror IsMe
+	// is a local write to a Google-sourced row that nothing pushes back, so the
+	// next sync reverts what it can and leaves the flag -- and every address on
+	// that other person's card becomes one of the reader's From identities.
+	//
+	// Holders arrive with any existing Me contact first, so this takes the
+	// reader's own card when they have one and otherwise the first local holder.
+	// When only mirrors hold the address none is adopted; the reader gets a card
+	// of their own beside them, which is only storable because user-036 lets two
+	// contacts carry one address.
+	holders, err := s.ListContactEmailHoldersForUser(ctx, userID, email)
+	if err != nil {
+		return Contact{}, err
+	}
+	adopt := int64(0)
+	for _, holder := range holders {
+		if holder.IsGoogleContact() {
+			continue
+		}
+		adopt = holder.ContactID
+		break
+	}
+	if adopt > 0 {
+		contact, err := s.GetContactForUser(ctx, userID, adopt)
+		if err != nil {
+			return Contact{}, err
+		}
 		contact.IsMe = true
 		if !hasMe {
 			contact.IsPrimary = true
@@ -264,9 +321,6 @@ func (s *Store) EnsureMeContactForEmail(ctx context.Context, userID int64, email
 			return Contact{}, err
 		}
 		return updated, nil
-	}
-	if !IsNotFound(err) {
-		return Contact{}, err
 	}
 	created, err := s.CreateContact(ctx, userID, Contact{
 		DisplayName: displayName,
@@ -702,6 +756,11 @@ func (s *Store) GetContactIconForUser(ctx context.Context, userID, contactID int
 }
 
 // GetContactIconByEmailForUser loads icon metadata by matching a contact email.
+// Several contacts may hold the address, so the picture is the one belonging to
+// the holder owner order names first -- the same contact the name beside it
+// comes from. Without the order the avatar would be whichever row SQLite
+// scanned first and could show one of the two people while the name shows the
+// other.
 func (s *Store) GetContactIconByEmailForUser(ctx context.Context, userID int64, email string) (ContactIcon, error) {
 	normalized := NormalizeContactEmail(email)
 	if normalized == "" {
@@ -711,7 +770,8 @@ func (s *Store) GetContactIconByEmailForUser(ctx context.Context, userID int64, 
 	err := s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT e.contact_id
 		FROM contact_emails e
 		JOIN contact_icons ci ON ci.user_id = e.user_id AND ci.contact_id = e.contact_id
-		WHERE e.user_id = ? AND e.normalized_email = ?
+		JOIN contacts c ON c.user_id = e.user_id AND c.id = e.contact_id
+		WHERE e.user_id = ? AND e.normalized_email = ?`+contactEmailOwnerOrder("c.", "e.")+`
 		LIMIT 1`, userID, normalized).Scan(&contactID)
 	if err != nil {
 		return ContactIcon{}, err
@@ -719,7 +779,11 @@ func (s *Store) GetContactIconByEmailForUser(ctx context.Context, userID int64, 
 	return s.GetContactIconForUser(ctx, userID, contactID)
 }
 
-// ListContactIconsByEmailsForUser loads contact icon metadata for a batch of normalized emails.
+// ListContactIconsByEmailsForUser loads contact icon metadata for a batch of
+// normalized emails. The first row seen for an address wins, so the query
+// carries the same owner order the single lookup uses: a shared address would
+// otherwise be answered by one holder in the mail list and the other in the
+// open thread, and differently again on the next page load.
 func (s *Store) ListContactIconsByEmailsForUser(ctx context.Context, userID int64, emails []string) (map[string]ContactIcon, error) {
 	normalized := make([]string, 0, len(emails))
 	seen := map[string]bool{}
@@ -757,8 +821,10 @@ func (s *Store) ListContactIconsByEmailsForUser(ctx context.Context, userID int6
 		rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT e.normalized_email, ci.id, ci.user_id, ci.contact_id, ci.blob_id, ci.content_type, ci.filename, ci.size, b.path, ci.created_at, ci.updated_at
 			FROM contact_emails e
 			JOIN contact_icons ci ON ci.user_id = e.user_id AND ci.contact_id = e.contact_id
+			JOIN contacts c ON c.user_id = e.user_id AND c.id = e.contact_id
 			JOIN blobs b ON b.user_id = ci.user_id AND b.id = ci.blob_id
-			WHERE e.user_id = ? AND e.normalized_email IN (`+sqlPlaceholders(len(chunk))+`)`, args...)
+			WHERE e.user_id = ? AND e.normalized_email IN (`+sqlPlaceholders(len(chunk))+`)`+
+			contactEmailOwnerOrder("c.", "e."), args...)
 		if err != nil {
 			return nil, err
 		}
@@ -1056,6 +1122,12 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 	// a vCard import, a Google sync -- appends entries that were each primary
 	// on their own side, and replaceContactChildren stores every one of them as
 	// primary. Two primaries is a state nothing downstream is prepared for.
+	// The unique index user-036 dropped was also the only thing stopping one
+	// contact from carrying an address twice -- two labels, two spellings of the
+	// same address. A Me contact that does grows one outgoing identity per row,
+	// so the same address appears twice in the From menu, each half with its own
+	// signature. Google is allowed to hold the pair; Rolltop stores it once.
+	c.Emails = dedupeContactEmails(c.Emails)
 	keepSinglePrimary(c.Emails, func(item *ContactEmail) *bool { return &item.IsPrimary })
 	keepSinglePrimary(c.Phones, func(item *ContactPhone) *bool { return &item.IsPrimary })
 	keepSinglePrimary(c.Addresses, func(item *ContactAddress) *bool { return &item.IsPrimary })
@@ -1066,6 +1138,34 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 		c.RemoteUpdatedAt = time.Time{}
 	}
 	return c
+}
+
+// dedupeContactEmails keeps one entry per normalized address, the first, and
+// gives it the primary flag if any of its copies carried one. Entries that
+// normalize to nothing are left alone: replaceContactChildren drops them, and
+// collapsing them here would merge two unrelated malformed addresses.
+func dedupeContactEmails(emails []ContactEmail) []ContactEmail {
+	if len(emails) < 2 {
+		return emails
+	}
+	out := make([]ContactEmail, 0, len(emails))
+	index := map[string]int{}
+	for _, email := range emails {
+		key := NormalizeContactEmail(email.Email)
+		if key == "" {
+			out = append(out, email)
+			continue
+		}
+		if at, ok := index[key]; ok {
+			if email.IsPrimary {
+				out[at].IsPrimary = true
+			}
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, email)
+	}
+	return out
 }
 
 // keepSinglePrimary leaves the first entry marked primary and clears the rest,

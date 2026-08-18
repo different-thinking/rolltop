@@ -222,10 +222,13 @@ leading system for the contacts it owns:
   its Google counterpart rather than duplicated, keeping its Me identity and any
   detail Google does not have.
 - Two Google contacts may share an address — a household, a shared office
-  mailbox, a role account kept on two cards — and both are mirrored. An address
-  identifies no more than one contact anywhere it has to identify exactly one
-  (the Me contact, a reply identity, an import's merge target), which is the
-  contact whose primary address it is, then the oldest holder.
+  mailbox, a role account kept on two cards — and both are mirrored. Where one
+  contact has to answer for the address anyway (the card and picture beside a
+  sender, a reply identity, an import's merge target) it is your own contact
+  first, then whoever carries the address as their primary one, then the oldest
+  holder. Your own contact is never one Google owns: an address of yours that
+  only a synced contact holds gets a card of its own rather than turning theirs
+  into your identity.
 - Disconnecting an account keeps its contacts and turns them back into local
   ones. Nothing is deleted.
 

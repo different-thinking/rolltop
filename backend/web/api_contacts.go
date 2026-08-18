@@ -470,15 +470,35 @@ func (s *Server) addSenderContact(ctx context.Context, userID int64, from string
 		}
 		addr = &mail.Address{Name: senderDisplayName(from), Address: email}
 	}
-	if existing, err := s.store.GetContactByEmailForUser(ctx, userID, addr.Address); err == nil {
-		if strings.TrimSpace(existing.DisplayName) == "" && strings.TrimSpace(addr.Name) != "" {
+	// Several contacts may hold the sender's address. A local one answers for it
+	// ahead of a mirror, because the naming below is a local write and a mirror
+	// would take it without ever telling Google, leaving the next sync to revert
+	// it.
+	holders, err := s.store.ListContactEmailHoldersForUser(ctx, userID, addr.Address)
+	if err != nil {
+		return store.Contact{}, false, err
+	}
+	if len(holders) > 0 {
+		target := holders[0]
+		for _, holder := range holders {
+			if !holder.IsGoogleContact() {
+				target = holder
+				break
+			}
+		}
+		existing, err := s.store.GetContactForUser(ctx, userID, target.ContactID)
+		if err != nil {
+			return store.Contact{}, false, err
+		}
+		// Naming an unnamed contact after the sender is a courtesy, and it is
+		// skipped on a contact Google owns: that row's name belongs to Google,
+		// and writing it here would be undone by the next sync anyway.
+		if !existing.IsGoogleContact() && strings.TrimSpace(existing.DisplayName) == "" && strings.TrimSpace(addr.Name) != "" {
 			existing.DisplayName = strings.TrimSpace(addr.Name)
 			updated, err := s.store.UpdateContact(ctx, userID, existing.ID, existing)
 			return updated, false, err
 		}
 		return existing, false, nil
-	} else if !store.IsNotFound(err) {
-		return store.Contact{}, false, err
 	}
 	name := strings.TrimSpace(addr.Name)
 	if name == "" {
@@ -581,15 +601,36 @@ func (s *Server) apiExportContacts(w http.ResponseWriter, r *http.Request, cu cu
 	_, _ = w.Write(data)
 }
 
+// findImportMergeTarget picks the contact an imported vCard belongs to, by
+// address.
+//
+// Where several contacts hold the address, a local one is taken ahead of a
+// mirror. Merging into a mirror is a write that has to travel to Google, so
+// choosing one while a local contact holds the same address would push a
+// vCard's name, phone and birthday onto a different person's Google card --
+// the shared household address is the case, and the sync makes the same choice
+// for the same reason when it decides which contact a Google person is.
 func (s *Server) findImportMergeTarget(ctx context.Context, userID int64, contact store.Contact) (store.Contact, bool, error) {
 	for _, email := range contact.Emails {
-		existing, err := s.store.GetContactByEmailForUser(ctx, userID, email.Email)
-		if err == nil {
-			return existing, true, nil
-		}
-		if !store.IsNotFound(err) {
+		holders, err := s.store.ListContactEmailHoldersForUser(ctx, userID, email.Email)
+		if err != nil {
 			return store.Contact{}, false, err
 		}
+		if len(holders) == 0 {
+			continue
+		}
+		target := holders[0]
+		for _, holder := range holders {
+			if !holder.IsGoogleContact() {
+				target = holder
+				break
+			}
+		}
+		existing, err := s.store.GetContactForUser(ctx, userID, target.ContactID)
+		if err != nil {
+			return store.Contact{}, false, err
+		}
+		return existing, true, nil
 	}
 	return store.Contact{}, false, nil
 }
