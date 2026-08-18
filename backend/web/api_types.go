@@ -172,6 +172,7 @@ type apiConversation struct {
 	MatchTerms               []string   `json:"match_terms,omitempty"`
 	MatchQueryTerms          []string   `json:"match_query_terms,omitempty"`
 	SnoozedUntil             string     `json:"snoozed_until,omitempty"`
+	ListDate                 string     `json:"list_date,omitempty"`
 }
 
 type apiAttachment struct {

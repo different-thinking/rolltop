@@ -331,7 +331,10 @@ class RolltopLoadingView @JvmOverloads constructor(
         private const val WORDMARK_HEIGHT = 17.419f
         private const val ARCH_STROKE_WIDTH = 5.5f
 
-        private val BACKGROUND = Color.rgb(242, 240, 235)
+        // The shell ground, kept in step with R.color.shell_background and
+        // theme.LightChrome. ORANGE, ARCH and NAVY below are the logo's own
+        // brand colours and deliberately do not follow the palette.
+        private val BACKGROUND = Color.rgb(246, 248, 252)
         private val ORANGE = Color.rgb(196, 107, 68)
         private val ARCH = Color.rgb(197, 108, 69)
         private val NAVY = Color.rgb(21, 31, 46)

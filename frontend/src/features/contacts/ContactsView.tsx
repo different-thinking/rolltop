@@ -11,6 +11,7 @@ import { messageFromError } from "../../lib/errors";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { contactKeyEditors } from "../../plugins/contactDetails";
 import { loadGoogleConnections, type GoogleConnection } from "../settings/googleConnections";
+import { displayInitial } from "../../lib/senderIdentity";
 
 // "Everything" and "Only Rolltop" are the two source filters that are not a
 // connection; a connection's own id is used for the rest.
@@ -483,7 +484,7 @@ function ContactAvatar({ contact, large = false }: { contact: Contact; large?: b
   if (contact.icon_url) {
     return <img className={`contact-avatar ${large ? "large" : ""}`} src={contact.icon_url} alt="" />;
   }
-  return <span className={`contact-avatar ${large ? "large" : ""}`}>{label.slice(0, 1).toUpperCase()}</span>;
+  return <span className={`contact-avatar ${large ? "large" : ""}`}>{displayInitial(label)}</span>;
 }
 
 function blankContact(): Contact {

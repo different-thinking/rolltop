@@ -1,78 +1,106 @@
 // Classic Dark mirrors the light palette token for token. Nothing here patches a
 // component: if a component needs a colour, it needs a token, in both themes.
+// The palette follows Gmail's dark look: neutral greys instead of a tinted
+// navy, one light-blue accent, and rows that share the card's own ground so
+// unread mail is carried by weight and ink alone.
 @mixin theme {
   color-scheme: dark;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
-  --font-brand: var(--font-display);
+  --font-display: "Google Sans", "Product Sans", "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-brand: "Fraunces", "Georgia", "Times New Roman", serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
   // Elevation is carried by lightness, not by shadows: black shadows are
   // invisible on a dark ground, so each step up is a lighter surface.
-  --chrome: #10161f;
-  --bg: #10161f;
-  --surface-sunken: #0d131b;
-  --surface: #1a2230;
-  --surface-subtle: #202a39;
-  --surface-raised: #232d3d;
-  --field: #141c27;
+  --chrome: #131314;
+  --bg: #131314;
+  --surface-sunken: #0e0e0f;
+  --surface: #1e1f20;
+  --surface-subtle: #28292a;
+  --surface-raised: #2d2e2f;
+  --field: #28292a;
 
-  --surface-ink: #304256;
-  --on-ink: #e9e6e0;
+  --surface-ink: #333537;
+  --on-ink: #e3e3e3;
 
-  // The compose button sat on --surface-ink in both themes, which in the dark
-  // theme was the sidebar's own colour. The primary action carries the accent.
-  --action: #e28c60;
-  --action-hover: #ef9d72;
-  --on-action: #1a1208;
+  // The primary action carries the accent: a light-blue pill with dark ink,
+  // the way Gmail's dark compose button does.
+  --action: #a8c7fa;
+  --action-hover: #c2dbff;
+  --on-action: #062e6f;
 
-  // #e2dfd9 rather than near-white: 12:1 stays comfortable without the halation
-  // that near-white text produces on a dark ground.
-  --text: #e2dfd9;
-  --muted: #a49d94;
-  --text-soft: #cdc9c2;
+  // #e3e3e3 rather than near-white: 12.9:1 stays comfortable without the
+  // halation that near-white text produces on a dark ground.
+  --text: #e3e3e3;
+  --muted: #a2a9b0;
+  --text-soft: #c4c7c5;
 
-  --border: #525f73;
-  --border-strong: #6a7789;
-  --separator: #2a3646;
+  --border: #444746;
+  --border-strong: #5f6368;
+  --separator: #2c2e30;
 
-  --row-read: var(--surface-sunken);
-  --row-unread: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  // Gmail's dark list keeps one ground for every row; unread mail stands out
+  // through bold, brighter text rather than a tinted surface.
+  --row-read: var(--surface);
+  --row-unread: var(--surface);
+  // Both resting grounds are the same here, so the arrival tint has to be its
+  // own colour or a landing row would flash the colour it already is.
+  --row-arriving: #2f3a4a;
 
-  --hover: rgba(226, 140, 96, .16);
-  --active: rgba(226, 140, 96, .24);
-  --active-strong: rgba(226, 140, 96, .62);
-  --selected: rgba(226, 140, 96, .20);
+  --hover: rgba(227, 227, 227, .08);
+  --active: rgba(168, 199, 250, .28);
+  --active-strong: rgba(168, 199, 250, .62);
+  --selected: rgba(168, 199, 250, .16);
 
-  --accent: #e28c60;
-  --accent-strong: #f3b997;
-  --accent-soft: rgba(226, 140, 96, .20);
-  --accent-warm: #e28c60;
-  --accent-warm-strong: #f3b997;
-  --accent-sun: #b7b3aa;
-  --on-accent: #1a1208;
+  --accent: #a8c7fa;
+  --accent-strong: #d3e3fd;
+  --accent-soft: rgba(168, 199, 250, .20);
+  // One accent, like the light palette: the warm pair is kept only because
+  // plugin palettes split it, so change both together here.
+  --accent-warm: #a8c7fa;
+  --accent-warm-strong: #d3e3fd;
+  --accent-sun: #9aa0a6;
+  --on-accent: #062e6f;
   --button-text: var(--on-accent);
-  --focus: #f0a87e;
-  --button-hover-border: rgba(226, 140, 96, .54);
+  --focus: #a8c7fa;
+  --button-hover-border: rgba(168, 199, 250, .54);
+
+  // Gmail's dark star yellow, kept apart from the accent for the same reason
+  // as in the light palette.
+  --star: #fdd663;
+
+  // Sender-initial avatars in the same hue order as the light palette, so a
+  // correspondent keeps their identity across a theme switch even though the
+  // chip inverts: light chips carrying dark initials, the way a dark ground
+  // wants them.
+  --avatar-0: #ce93d8;
+  --avatar-1: #9fa8da;
+  --avatar-2: #90caf9;
+  --avatar-3: #80cbc4;
+  --avatar-4: #a5d6a7;
+  --avatar-5: #ffab91;
+  --avatar-6: #f48fb1;
+  --avatar-7: #bcaaa4;
+  --on-avatar: #131314;
 
   --ok: #5ec7a7;
-  --on-ok: #10161f;
+  --on-ok: #131314;
   --info: #7bb4e0;
-  --on-info: #10161f;
+  --on-info: #131314;
   --warning: #e0b268;
-  --on-warning: #10161f;
+  --on-warning: #131314;
   --danger: #f0907c;
-  --on-danger: #10161f;
+  --on-danger: #131314;
 
   --swipe-read: #5ec7a7;
   --swipe-unread: #7bb4e0;
   --swipe-snooze: #e0b268;
   --swipe-archive: #6fc2d4;
   --swipe-trash: #f0907c;
-  --on-swipe: #10161f;
+  --on-swipe: #131314;
 
-  --scrim: rgba(4, 8, 14, .58);
-  --scrim-strong: rgba(4, 8, 14, .72);
+  --scrim: rgba(0, 0, 0, .58);
+  --scrim-strong: rgba(0, 0, 0, .72);
   --highlight: rgba(224, 182, 77, .30);
   --on-highlight: #f5f2ec;
   --shadow: 0 1px 2px rgba(0, 0, 0, .38), 0 14px 34px rgba(0, 0, 0, .26);

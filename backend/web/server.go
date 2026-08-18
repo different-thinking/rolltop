@@ -221,7 +221,13 @@ type conversationView struct {
 	MatchFields              []string
 	MatchQueryTerms          []string
 	SnoozedUntil             time.Time
-	CanReplyAll              bool
+	// ListDate is the instant the mailbox queries actually sort a row by:
+	// max(snooze return time, message date). A message coming back from a
+	// snooze sorts by its return time while still showing its own date, so a
+	// client grouping rows into date sections has to group by this and not by
+	// the message date, or its sections break sequence.
+	ListDate    time.Time
+	CanReplyAll bool
 }
 
 type composeForm struct {

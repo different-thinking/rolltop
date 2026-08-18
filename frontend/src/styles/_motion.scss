@@ -6,7 +6,7 @@
 
 @keyframes mail-surface-drop {
   0% {
-    transform: translateY(calc(var(--new-mail-row-height, 45px) * -1));
+    transform: translateY(calc(var(--new-mail-row-height, 49px) * -1));
   }
 
   34% {
@@ -22,6 +22,10 @@
   }
 }
 
+// The tint a row carries while it lands. It is its own token rather than
+// --row-unread: a theme is free to give read and unread rows one ground (the
+// dark palette does), and the flash would then be the colour the row already
+// is, leaving the arrival with no colour cue at all.
 @keyframes new-mail-delivery {
   0%, 28% {
     opacity: 0;
@@ -32,14 +36,14 @@
   54% {
     opacity: 1;
     transform: translateX(-5px) scale(1.01);
-    background: var(--row-unread);
+    background: var(--row-arriving);
     box-shadow: inset 4px 0 0 var(--accent-warm), var(--shadow);
   }
 
   76% {
     opacity: 1;
     transform: translateX(2px) scale(1);
-    background: var(--row-unread);
+    background: var(--row-arriving);
     box-shadow: inset 3px 0 0 var(--active-strong), var(--shadow);
   }
 
@@ -120,6 +124,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .message-table.mail-arrival-shift .message-row:not(.new-delivery),
+  .message-table.mail-arrival-shift .message-date-heading,
   .message-row.new-delivery,
   .message-row.moving-out,
   .message-list-track.slide-left,
