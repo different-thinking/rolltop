@@ -40,6 +40,7 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 		bodyHTML = `<div class="plaintext">` + plainTextBodyHTML(bodyText) + `</div>`
 	}
 	bodyHTML = strings.ReplaceAll(bodyHTML, "\x00", "")
+	bodyHTML = removeScriptElements(bodyHTML)
 	bodyHTML = replaceInlineCIDRefs(bodyHTML, attachments)
 	if allowRemoteImages {
 		bodyHTML = normalizeProtocolRelativeRemoteRefs(bodyHTML)
@@ -64,6 +65,20 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	// shell and the PGP plugin share one set of message-body theme colours.
 	documentCSS := `html,body{margin:0;padding:0;background:#fff;color:#1f2328;font:14px/1.55 Arial,sans-serif;overflow:hidden}body{padding:18px}.plaintext{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.55 Arial,sans-serif}.plaintext a{color:#245f80;text-decoration:none;border-bottom:1px solid #9cc5d8}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}`
 	return `<!doctype html><html` + documentClass + `><head><meta charset="utf-8"><base target="_blank"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ` + imgSrc + `; style-src ` + styleSrc + `; font-src ` + fontSrc + `;"><style>` + documentCSS + `</style></head><body>` + bodyHTML + `</body></html>`
+}
+
+// A script in a message body never runs: the document below allows no script
+// source at all, and the iframe around it is sandboxed without allow-scripts.
+// It is removed anyway, because a blocked one is not silent - the browser logs
+// "Blocked script execution in 'about:srcdoc'" for every message the reader
+// opens, which buries the console errors that do mean something.
+var scriptElementRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>|<script\b[^>]*>|</script\s*>`)
+
+func removeScriptElements(bodyHTML string) string {
+	if !strings.Contains(strings.ToLower(bodyHTML), "<script") {
+		return bodyHTML
+	}
+	return scriptElementRE.ReplaceAllString(bodyHTML, "")
 }
 
 var cidURLRE = regexp.MustCompile(`(?i)cid:([^\s"'<>\)]+)`)

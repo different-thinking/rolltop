@@ -297,6 +297,15 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, tokenHash strin
 	return Session{ID: id, UserID: userID, TokenHash: tokenHash, ExpiresAt: expiresAt.UTC(), CreatedAt: unixTime(ts), LastSeenAt: unixTime(ts)}, nil
 }
 
+// sessionLastSeenInterval is how stale sessions.last_seen_at may become before
+// a session lookup refreshes it. Every authenticated request resolves a session,
+// so writing the column on each one put a write on the system database in front
+// of every page, message, and calendar read - enough contention, while a sync
+// holds the single writer, to make the lookup itself fail and answer 503. The
+// column is an activity marker with no minute-level reader, so a coarse refresh
+// carries the same information at a fraction of the writes.
+const sessionLastSeenInterval = time.Minute
+
 // GetSessionUser resolves a hashed session token to its session and user rows.
 func (s *Store) GetSessionUser(ctx context.Context, tokenHash string) (Session, User, error) {
 	var sess Session
@@ -324,7 +333,10 @@ func (s *Store) GetSessionUser(ctx context.Context, tokenHash string) (Session, 
 	u.UpdatedAt = unixTime(userUpdated)
 	u.BackupEmail = cleanEmail(u.BackupEmail)
 	normalizeUserPreferences(&u)
-	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, nowUnix(), sess.ID)
+	if now := nowUnix(); now-lastSeen >= int64(sessionLastSeenInterval/time.Second) {
+		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, now, sess.ID)
+		sess.LastSeenAt = unixTime(now)
+	}
 	return sess, u, nil
 }
 
