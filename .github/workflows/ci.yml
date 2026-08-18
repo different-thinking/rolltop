@@ -38,8 +38,13 @@ jobs:
 
     services:
       # The PostgreSQL migration baseline is verified by applying it to a real
-      # server (backend/store/pgschema). Without this the apply test skips
-      # itself, and a baseline that no longer applies would reach main.
+      # server (backend/store/pgschema); the apply test fails rather than
+      # skips when this DSN is set, so a baseline that no longer applies
+      # cannot reach main.
+      #
+      # This block is duplicated in pr.yml on purpose: GitHub Actions has no
+      # YAML anchors, and the two workflows must gate against the same server
+      # version and credentials. Change both together.
       postgres:
         image: postgres:16
         env:

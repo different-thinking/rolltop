@@ -2,12 +2,20 @@ package store
 
 import (
 	"context"
+	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
+	"rolltop/backend/plugins"
 	"rolltop/backend/store/pgschema"
 )
+
+// updateBaseline rewrites the generated PostgreSQL baseline instead of
+// failing when it differs.
+var updateBaseline = flag.Bool("update", false, "rewrite generated golden files")
 
 // baselinePath is the committed PostgreSQL baseline, generated from the
 // schema this package's migrations produce.
@@ -24,7 +32,7 @@ func TestBaselineMatchesSQLiteSchema(t *testing.T) {
 	generated := generateBaseline(t)
 	committed, err := os.ReadFile(baselinePath)
 	if err != nil {
-		if os.IsNotExist(err) && updateGolden() {
+		if os.IsNotExist(err) && *updateBaseline {
 			writeBaseline(t, generated)
 			return
 		}
@@ -33,7 +41,7 @@ func TestBaselineMatchesSQLiteSchema(t *testing.T) {
 	if string(committed) == generated {
 		return
 	}
-	if updateGolden() {
+	if *updateBaseline {
 		writeBaseline(t, generated)
 		return
 	}
@@ -52,34 +60,64 @@ func TestBaselineCoversEverySQLiteTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]bool{}
-	for _, object := range translated {
-		seen[object.Kind+" "+object.Name] = true
-	}
+	source := map[string]bool{}
 	for _, object := range objects {
-		if !seen[object.Kind+" "+object.Name] {
-			t.Errorf("baseline is missing %s %s", object.Kind, object.Name)
+		source[object.Kind+" "+object.Name] = true
+	}
+	translatedSet := map[string]bool{}
+	for _, object := range translated {
+		translatedSet[object.Kind+" "+object.Name] = true
+	}
+	for key := range source {
+		if !translatedSet[key] {
+			t.Errorf("baseline is missing %s", key)
 		}
 	}
 	// Foreign keys are emitted as their own phase, one object per table that
 	// has any, so the translated set is a superset rather than a 1:1 mapping.
 	for _, object := range translated {
-		if object.Kind == "foreign keys" {
+		if object.Kind == pgschema.ForeignKeysKind {
 			continue
 		}
-		if !hasSQLiteObject(objects, object.Kind, object.Name) {
+		if !source[object.Kind+" "+object.Name] {
 			t.Errorf("baseline invents %s %s", object.Kind, object.Name)
 		}
 	}
 }
 
-func hasSQLiteObject(objects []pgschema.SQLiteObject, kind, name string) bool {
-	for _, object := range objects {
-		if object.Kind == kind && object.Name == name {
-			return true
+// TestBaselineIncludesPluginTables pins the coverage gap that the derivation
+// had at first: Open() installs only the statically compiled plugin catalog,
+// so every table from a file-backed plugin migration was missing from the
+// baseline and no test could see it.
+func TestBaselineIncludesPluginTables(t *testing.T) {
+	baseline, err := os.ReadFile(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := plugins.LoadManifests(pluginRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := plugins.MigrationsFromManifests(manifests, "")
+	if len(migrations) == 0 {
+		t.Fatal("no file-backed plugin migrations found; this test would prove nothing")
+	}
+	tableRE := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)`)
+	checked := 0
+	for _, migration := range migrations {
+		for _, statement := range migration.Statements {
+			for _, match := range tableRE.FindAllStringSubmatch(statement, -1) {
+				checked++
+				if !strings.Contains(string(baseline), "\nCREATE TABLE "+match[1]+" (") {
+					t.Errorf("plugin table %s (from %s) is missing from the baseline", match[1], migration.PluginID)
+				}
+			}
 		}
 	}
-	return false
+	if checked == 0 {
+		t.Fatal("no plugin CREATE TABLE statements were checked")
+	}
+	t.Logf("verified %d plugin tables are in the baseline", checked)
 }
 
 func generateBaseline(t *testing.T) string {
@@ -91,15 +129,43 @@ func generateBaseline(t *testing.T) string {
 	return pgschema.Render(translated)
 }
 
-// readSQLiteSchema opens a throwaway combined store, which runs every
-// migration, and reads the resulting schema.
+// pluginRoot is the repository's plugin tree, relative to this package.
+const pluginRoot = "../../plugins"
+
+// readSQLiteSchema opens a throwaway combined store carrying the *production*
+// plugin catalog and reads the resulting schema.
+//
+// Two things here are load-bearing and were both wrong in the first revision:
+//
+//   - Open() installs only the statically compiled plugin catalog, while
+//     production merges in the file-backed migrations under
+//     plugins/*/migrations/. Deriving from Open() left 20 plugin tables out of
+//     the baseline, and the coverage test could not see it because it compared
+//     the translation against the same incomplete source.
+//   - Plugin migrations run when a plugin is enabled, not when the store is
+//     opened. The baseline must contain every table any plugin could create,
+//     because after the cutover enabling a plugin would otherwise replay
+//     SQLite-dialect DDL against PostgreSQL.
 func readSQLiteSchema(t *testing.T) []pgschema.SQLiteObject {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	manifests, err := plugins.LoadManifests(pluginRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) == 0 {
+		t.Fatalf("no plugin manifests under %s; the baseline would silently omit plugin tables", pluginRoot)
+	}
+	db, err := open(filepath.Join(t.TempDir(), "rolltop.db"), "", false, schemaCombined, nil,
+		pluginCatalogFromManifests(manifests), AccessAuto)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	for _, definition := range db.pluginDefinitions {
+		if err := db.ApplyPluginMigrations(context.Background(), definition.ID); err != nil {
+			t.Fatalf("apply migrations for plugin %s: %v", definition.ID, err)
+		}
+	}
 	// Autoindexes have no CREATE statement and are recreated by the
 	// constraints they belong to, so sql IS NULL filters exactly the objects
 	// the baseline gets for free.
