@@ -296,7 +296,7 @@ all call `store.Open(tempfile)`.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
-| 0 | Stopgap on current production: `locking_mode=EXCLUSIVE`, `synchronous=FULL`, `MaxOpenConns(1)` (separate small change; removes the `-shm` coherence dependency and the "database is locked" errors while this plan executes) | — |
+| 0 | **Done** (shipped on `main`, `f9f686d` + `0552945`): WAL without the shared `-shm` index via `locking_mode=exclusive` and one connection per database, auto-detected from the filesystem superblock (`backend/store/access.go`) with a `ROLLTOP_SQLITE_ACCESS` override; live maintenance rerouted through the owning handle. Deviation from this plan's sketch: `synchronous` stays `NORMAL`, so durability of the most recent commits still depends on checkpoint-time fsync — acceptable residual risk for the interim, since the corruption vector (shm coherence) is gone. | — |
 | 1 | WP1 + WP2 + WP8 skeleton (app boots against PG, baseline schema, test helper + CI service) | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
 | 2 | WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
 | 3 | WP6 plugins | 2 |
@@ -486,5 +486,4 @@ Still open:
    must be created with `LC_COLLATE 'C'` (template0), or our user needs
    `CREATEDB`. Coordinate with the hoster before provisioning; startup
    fail-fast check guards against a mismatch.
-5. Timing of phase 0 (the SQLite `locking_mode=EXCLUSIVE` stopgap) relative
-   to this plan — recommended immediately, independent of everything above.
+5. ~~Timing of phase 0~~ **Done** — shipped on `main` (see §5, phase 0).
