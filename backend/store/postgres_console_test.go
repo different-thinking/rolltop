@@ -367,6 +367,82 @@ func TestOpenPostgresWithRoleNamedSchema(t *testing.T) {
 	_ = second.Close()
 }
 
+// TestPostgresConsoleRejectsNonRelationObjects covers the third way a database
+// is not empty. A relation-only check saw nothing in a database holding a
+// function, an enum, or a domain — verified against Postgres 16 — and created
+// the baseline on top of it.
+func TestPostgresConsoleRejectsNonRelationObjects(t *testing.T) {
+	occupants := map[string]string{
+		"function":       `CREATE FUNCTION someones_helper() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$`,
+		"enum":           `CREATE TYPE mood AS ENUM ('good', 'bad')`,
+		"domain":         `CREATE DOMAIN postcode AS text`,
+		"composite type": `CREATE TYPE address AS (street text, city text)`,
+	}
+	for name, ddl := range occupants {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			dsn := pgtestdb.New(t)
+
+			seed, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := seed.ExecContext(ctx, ddl); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			state, err := InspectPostgres(ctx, dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Stage != PostgresStageForeign {
+				t.Fatalf("a database holding a %s inspects as %q", name, state.Stage)
+			}
+			if len(state.Blocking) == 0 {
+				t.Errorf("state names nothing as blocking: %+v", state)
+			}
+			if _, err := CreatePostgresSchema(ctx, dsn); err == nil {
+				t.Errorf("created the schema over a %s", name)
+			}
+		})
+	}
+}
+
+// TestPostgresConsoleToleratesEmptySchemas is the counterweight. PostgreSQL's
+// default search path names a schema after the connecting role and managed
+// providers create it, so an empty schema must not read as somebody else's
+// database — refusing it would refuse the very shape pinPostgresSearchPath
+// exists to support.
+func TestPostgresConsoleToleratesEmptySchemas(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.New(t)
+
+	seed, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.ExecContext(ctx, `CREATE SCHEMA someones_empty_schema`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := InspectPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Stage != PostgresStageEmpty {
+		t.Fatalf("a database holding only an empty schema inspects as %q (%v)", state.Stage, state.Blocking)
+	}
+	if _, err := CreatePostgresSchema(ctx, dsn); err != nil {
+		t.Fatalf("create over an empty schema: %v", err)
+	}
+}
+
 // TestPostgresConsoleNamesWhatBlocksIt covers the dead end a bare refusal
 // leaves behind. Dropping the schema from a database that also holds an older
 // build's tables — indistinguishable from an operator's own, which is why

@@ -261,12 +261,29 @@ const maxListedBlockingObjects = 10
 // postgresBlockingObjects lists the objects that stop this database from being
 // created into, schema-qualified and name-sorted.
 //
-// Counting only base tables in `public` is not enough to refuse a foreign
-// database: an application that keeps its tables in another schema, or a public
-// schema holding only views or sequences, would read as empty and receive the
-// baseline on top. Relations belonging to an extension are excluded, because the
+// Three catalogs are searched, because a database is not empty in three
+// different ways and each was found to slip through in turn:
+//
+//   - Relations, in every non-system schema and every user kind. Counting only
+//     base tables in `public` let an application that keeps its tables in
+//     another schema, or a public schema holding only views or sequences, read
+//     as empty and receive the baseline on top.
+//   - Functions and procedures. The baseline creates one of its own, so a
+//     foreign function is both a sign the database is somebody else's and a
+//     potential name collision during the apply.
+//   - Domains, enums, and standalone composite types. Row types of tables are
+//     excluded, since the table already accounts for them.
+//
+// Objects belonging to an extension are excluded throughout, because the
 // preflight installs pg_trgm, citext and unaccent into a database that is
-// otherwise still untouched.
+// otherwise still untouched. The dependency lookup is qualified by catalog:
+// object ids are only unique per catalog, so an unqualified match could exempt
+// a table because some function shares its id.
+//
+// Empty schemas are deliberately *not* blocking. PostgreSQL's default search
+// path names a schema after the connecting role, and managed providers create
+// it; refusing that would refuse the very shape pinPostgresSearchPath exists to
+// support.
 //
 // The names matter as much as the count. A database that is not empty cannot be
 // created into, and the console cannot decide on the operator's behalf whether
@@ -282,7 +299,35 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		  AND n.nspname NOT LIKE 'pg_temp%'
 		  AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
 		  AND NOT EXISTS (
-		      SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e'
+		      SELECT 1 FROM pg_depend d
+		      WHERE d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.deptype = 'e'
+		  )
+		UNION ALL
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '()'
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg_toast%'
+		  AND n.nspname NOT LIKE 'pg_temp%'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_depend d
+		      WHERE d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+		  )
+		UNION ALL
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(t.typname)
+		FROM pg_type t
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg_toast%'
+		  AND n.nspname NOT LIKE 'pg_temp%'
+		  AND t.typtype IN ('d', 'e', 'c')
+		  AND (
+		      t.typrelid = 0
+		      OR EXISTS (SELECT 1 FROM pg_class c2 WHERE c2.oid = t.typrelid AND c2.relkind = 'c')
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_depend d
+		      WHERE d.objid = t.oid AND d.classid = 'pg_type'::regclass AND d.deptype = 'e'
 		  )
 		ORDER BY 1`)
 	if err != nil {
