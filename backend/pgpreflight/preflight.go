@@ -12,8 +12,8 @@
 //
 //   - The DSN never leaves this process. Driver errors echo the connection
 //     string, and pgx's own redaction misses the libpq keyword form with
-//     spaces (`password = secret`), so redactSecrets below scrubs every
-//     spelling before an error is handed on.
+//     spaces (`password = secret`), so every error is handed to pgdsn.Redact
+//     before it is reported.
 //   - A run leaves nothing behind but the extensions. The scratch schema is
 //     dropped even when the run's context was cancelled, which force-closes
 //     the pgx connection; the cleanup then reconnects to finish the job.
@@ -24,13 +24,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"rolltop/backend/pgdsn"
 )
 
 // Check statuses. The frontend union in types.ts mirrors these three values.
@@ -112,7 +113,7 @@ func (r *runner) fail(id, title, detail string) {
 func (r *runner) failErr(id, title string, err error) {
 	detail := ""
 	if err != nil {
-		detail = redactSecrets(err.Error())
+		detail = pgdsn.Redact(err.Error())
 	}
 	r.fail(id, title, detail)
 }
@@ -131,32 +132,6 @@ func (r *runner) execAll(ctx context.Context, id, title string, statements ...st
 		}
 	}
 	return true
-}
-
-// Secret spellings pgx may echo back: the libpq keyword form with any
-// spacing, quoted or bare, and the userinfo section of a URL DSN. pgconn's
-// own redactPW only handles the space-free keyword form, so a DSN written as
-// `password = secret` reaches the caller in cleartext without this.
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)password\s*=\s*'[^']*'`),
-	regexp.MustCompile(`(?i)password\s*=\s*"[^"]*"`),
-	regexp.MustCompile(`(?i)password\s*=\s*[^\s'"]+`),
-	regexp.MustCompile(`(?i)\b(pgpassword|passfile)\s*=\s*\S+`),
-}
-
-// urlUserinfo matches the credentials section of a URL-style DSN, keeping the
-// scheme and user so the message stays useful.
-var urlUserinfo = regexp.MustCompile(`(?i)(postgres(?:ql)?://[^:/@\s]*):[^@/\s]*@`)
-
-// redactSecrets removes credential material from text that may embed a DSN.
-// It is applied to every error this package reports, not only connect
-// failures, because pgx echoes the connection string from several paths.
-func redactSecrets(message string) string {
-	message = urlUserinfo.ReplaceAllString(message, "$1:…@")
-	for _, pattern := range secretPatterns {
-		message = pattern.ReplaceAllString(message, "password=…")
-	}
-	return message
 }
 
 // Run executes the preflight against dsn. It never panics and always returns
@@ -567,7 +542,7 @@ func (r *runner) checkConnectionBudget(ctx context.Context) {
 	if err := r.conn.QueryRow(ctx,
 		`SELECT current_setting('max_connections'), rolconnlimit, rolcreatedb FROM pg_roles WHERE rolname = current_user`).
 		Scan(&maxConnections, &roleLimit, &createDB); err != nil {
-		r.info("connections", "Connection budget", "unavailable: "+redactSecrets(err.Error()))
+		r.info("connections", "Connection budget", "unavailable: "+pgdsn.Redact(err.Error()))
 		return
 	}
 	limit := "no per-role limit"

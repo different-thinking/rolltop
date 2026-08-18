@@ -30,7 +30,7 @@ const (
 	databaseFilename               = "rolltop.db"
 )
 
-// Store is the SQLite access layer; in production the root store opens the system DB and caches per-user stores.
+// Store is the database access layer; in production the root store opens the system DB and caches per-user stores.
 type Store struct {
 	db                *sql.DB
 	path              string
