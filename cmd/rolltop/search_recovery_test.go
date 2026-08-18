@@ -384,6 +384,11 @@ func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexDoesNotOpen(t *testin
 		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
+	// A marker left behind makes every later start repeat this recovery and
+	// quarantine the index again, which is the accumulation this bounds.
+	if required, err := searchRecoveryRequired(searchSvc, owner.ID); err != nil || required {
+		t.Fatalf("recovery marker required = %v, %v; want it cleared", required, err)
+	}
 	quarantines, err := filepath.Glob(ownerIndex + ".quarantine-*")
 	if err != nil || len(quarantines) != 1 {
 		t.Fatalf("quarantines = %v, %v; want the unopenable index moved aside", quarantines, err)
@@ -441,6 +446,11 @@ func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexIsMissing(t *testing.
 	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
 		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
 		t.Fatal(err)
+	}
+	// A marker left behind makes every later start repeat this recovery and
+	// quarantine the index again, which is the accumulation this bounds.
+	if required, err := searchRecoveryRequired(searchSvc, owner.ID); err != nil || required {
+		t.Fatalf("recovery marker required = %v, %v; want it cleared", required, err)
 	}
 	pending, err := db.ListMessagesNeedingAttachmentIndex(ctx, owner.ID, 10)
 	if err != nil {
@@ -503,6 +513,11 @@ func TestRecoverMarkedSearchIndexesDeletesDocumentsWhoseMessagesVanished(t *test
 		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
+	// A marker left behind makes every later start repeat this recovery and
+	// quarantine the index again, which is the accumulation this bounds.
+	if required, err := searchRecoveryRequired(searchSvc, owner.ID); err != nil || required {
+		t.Fatalf("recovery marker required = %v, %v; want it cleared", required, err)
+	}
 	count, err := searchSvc.CountUserMessages(ctx, owner.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -554,6 +569,11 @@ func TestRecoverMarkedSearchIndexesRebuildsWhenTheRangeIsTooWideToSweep(t *testi
 	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users,
 		time.Date(2026, 8, 18, 13, 28, 47, 0, time.UTC)); err != nil {
 		t.Fatal(err)
+	}
+	// A marker left behind makes every later start repeat this recovery and
+	// quarantine the index again, which is the accumulation this bounds.
+	if required, err := searchRecoveryRequired(searchSvc, owner.ID); err != nil || required {
+		t.Fatalf("recovery marker required = %v, %v; want it cleared", required, err)
 	}
 	quarantines, err := filepath.Glob(ownerIndex + ".quarantine-*")
 	if err != nil || len(quarantines) != 1 {

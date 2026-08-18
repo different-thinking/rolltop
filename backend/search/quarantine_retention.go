@@ -120,6 +120,9 @@ func expiredIndexQuarantines(candidates []quarantineEntry, keep int, maxAge time
 	return expired
 }
 
+// collectIndexQuarantines lists one tenant's quarantined indexes with the time
+// each was set aside. Sizes are deliberately not measured here; only the
+// directories retention actually removes are worth walking.
 func collectIndexQuarantines(userDir string, userID int64) ([]quarantineEntry, error) {
 	entries, err := os.ReadDir(userDir)
 	if os.IsNotExist(err) {

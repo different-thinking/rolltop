@@ -162,6 +162,8 @@ func (s *Service) markSearchIndexRecovery(userID int64, recovery SearchIndexReco
 // its lifetime, and never on a path where throughput matters.
 var recoveryMarkerMu sync.Mutex
 
+// writeSearchIndexRecoveryMarker publishes a recovery for one tenant, merged
+// with whatever the marker already asks for.
 func writeSearchIndexRecoveryMarker(markerPath, userDir string, recovery SearchIndexRecovery, syncDir func(string) error) error {
 	recoveryMarkerMu.Lock()
 	defer recoveryMarkerMu.Unlock()

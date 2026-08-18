@@ -89,6 +89,8 @@ func (s *Service) recordStallDiagnostics(at time.Time, summary, stack string) er
 	return nil
 }
 
+// rotateStallLog moves an oversized report file aside. It never truncates, and
+// its failure is not fatal to the append that follows.
 func rotateStallLog(path string) error {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
