@@ -42,6 +42,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiComposeDraft(w, r)
 	case path == "sync/status":
 		s.apiSyncStatus(w, r)
+	case path == "activity":
+		s.apiActivity(w, r)
+	case path == "activity/history":
+		s.apiActivityHistory(w, r)
+	case strings.HasPrefix(path, "activity/workers/"):
+		s.apiActivityWorkerAction(w, r, strings.TrimPrefix(path, "activity/workers/"))
 	case path == "events":
 		s.apiEvents(w, r)
 	case path == "storage":

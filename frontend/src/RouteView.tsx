@@ -9,6 +9,7 @@ import { ComposePage } from "./features/compose/ComposeViews";
 import { ContactsView } from "./features/contacts/ContactsView";
 import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
+import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
 import type { RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
@@ -115,6 +116,9 @@ export function RouteView({
   }
   if (location.path === "/admin/database" && user.is_admin) {
     return <AdminDatabaseView csrf={csrf} datePrefs={user} addToast={addToast} />;
+  }
+  if (location.path === "/activity") {
+    return <ActivityView csrf={csrf} datePrefs={user} navigate={navigate} addToast={addToast} />;
   }
   if (location.path.startsWith("/sync-runs/")) {
     return <SyncRunView csrf={csrf} location={location} navigate={navigate} datePrefs={user} />;

@@ -4,6 +4,7 @@
 import type {
   Account,
   AccountPurgeEstimate,
+  Activity,
   Bootstrap,
   CalendarEvent,
   CalendarEventInput,
@@ -656,5 +657,15 @@ export const api = {
   saveRemoteImageBlocklist: (csrf: string, patterns: string[]) =>
     postJSON<{ ok: boolean; patterns: string[] }>("/api/admin/remote-image-blocklist", csrf, { patterns }),
   syncRun: (id: string) => getJSON<{ sync_run: SyncRun; live: SyncRunLiveDetail }>(`/api/sync-runs/${id}`),
-  cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf)
+  cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf),
+  deleteSyncRun: (csrf: string, id: number) => deleteJSON<{ ok: boolean }>(`/api/sync-runs/${id}`, csrf),
+  // The activity feed is read live and never from the request cache: a snapshot
+  // of what a worker was doing a minute ago is the one thing this view must not
+  // show.
+  activity: () => getJSON<Activity>(`/api/activity?t=${Date.now()}`),
+  // The reservation key carries slashes, so the action is appended after a
+  // separator a key cannot contain rather than as another path segment.
+  cancelWorker: (csrf: string, key: string) =>
+    postJSON<{ ok: boolean }>(`/api/activity/workers/${encodeURIComponent(key)}|cancel`, csrf),
+  clearSyncHistory: (csrf: string) => deleteJSON<{ ok: boolean; removed: number }>("/api/activity/history", csrf)
 };

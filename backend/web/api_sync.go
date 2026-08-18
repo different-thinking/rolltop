@@ -184,6 +184,10 @@ func (s *Server) apiSyncRun(w http.ResponseWriter, r *http.Request, rest string)
 		writeJSON(w, map[string]any{"ok": true, "active_worker_cancelled": active})
 		return
 	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		s.activityRunDelete(w, r, cu.User.ID, id)
+		return
+	}
 	if len(parts) != 1 || r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return

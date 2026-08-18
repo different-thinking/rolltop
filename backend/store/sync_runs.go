@@ -353,3 +353,44 @@ func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
 	}
 	return ids, nil
 }
+
+// DeleteSyncRunForUser removes one finished run from the history. A running run
+// is refused rather than deleted: the worker behind it would keep writing
+// progress to a row that no longer exists, and what the user wants for a run
+// still in flight is to cancel it.
+//
+// Rows that point at a run -- pending arrivals, rebuild state -- hold it with
+// ON DELETE SET NULL, so removing a run drops the reference and nothing else.
+func (s *Store) DeleteSyncRunForUser(ctx context.Context, userID, id int64) error {
+	if userID <= 0 || id <= 0 {
+		return ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`DELETE FROM sync_runs WHERE user_id = ? AND id = ? AND status <> 'running'`, userID, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteFinishedSyncRunsForUser clears one user's finished run history and
+// reports how many rows went. Running rows stay, for the same reason a single
+// delete refuses them.
+func (s *Store) DeleteFinishedSyncRunsForUser(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`DELETE FROM sync_runs WHERE user_id = ? AND status <> 'running'`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

@@ -520,6 +520,45 @@ export type MailCategorySummary = {
   unread: number;
 };
 
+/** ActivityWorker is one piece of background work the runner has in progress. */
+export type ActivityWorker = {
+  /** The runner's reservation key, which is what a cancel names. */
+  key: string;
+  /** The runner's own name for the work, unchanged, so a report matches the log. */
+  kind: string;
+  label: string;
+  phase: string;
+  account_id: number;
+  mailbox: string;
+  started_at: string;
+  cancellable: boolean;
+  /** Queued behind something else rather than running. */
+  waiting: boolean;
+};
+
+/** ActivityService is one thing that syncs on its own schedule, outside the mailbox runner. */
+export type ActivityService = {
+  kind: string;
+  label: string;
+  account: string;
+  connection_id: number;
+  status: string;
+  status_detail: string;
+  last_sync_at: string;
+  last_success_at: string;
+  item_count: number;
+  ever_synced: boolean;
+};
+
+/** Activity is everything running in the background for the signed-in user. */
+export type Activity = {
+  sync_runs: SyncRun[];
+  workers: ActivityWorker[];
+  services: ActivityService[];
+  /** Messages still waiting to be filed into a category. */
+  categories_pending: number;
+};
+
 /** Bootstrap is the first API payload that establishes auth, chrome, CSRF, and plugin state. */
 export type Bootstrap = {
   users_exist: boolean;

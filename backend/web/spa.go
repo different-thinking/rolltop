@@ -337,6 +337,9 @@ var spaRoutes = []spaRoute{
 	{path: "/calendar", exact: true, prefix: true},
 	{path: "/messages", prefix: true},
 	{path: "/sync-runs", prefix: true},
+	// Everything running in the background, in one place rather than beside the
+	// mailbox it happens to be touching.
+	{path: "/activity", exact: true},
 	{path: "/settings/account", exact: true, prefix: true},
 	{path: "/admin/users", exact: true},
 	{path: "/admin/database", exact: true},
