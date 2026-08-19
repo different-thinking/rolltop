@@ -11,6 +11,7 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // TestCategoryBackfillReadsStoredMailAndAlwaysDrains covers the property the
@@ -20,7 +21,7 @@ import (
 func TestCategoryBackfillReadsStoredMailAndAlwaysDrains(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := store.Open(filepath.Join(root, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

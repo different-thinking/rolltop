@@ -4,13 +4,12 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 )
 
 func TestContactsAreScopedByUser(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +53,7 @@ func TestContactsAreScopedByUser(t *testing.T) {
 
 func TestContactAutocompleteIncludesOnlyCurrentUsersRecentCorrespondents(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +81,7 @@ func TestContactAutocompleteIncludesOnlyCurrentUsersRecentCorrespondents(t *test
 
 func TestContactIconsAreScopedByUser(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +141,7 @@ func TestContactIconsAreScopedByUser(t *testing.T) {
 // impossible to store, which failed the whole contact sync rather than one row.
 func TestContactsMayShareAnEmailAddressInsideOneAddressBook(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +216,7 @@ func TestContactsMayShareAnEmailAddressInsideOneAddressBook(t *testing.T) {
 // happens to list the same address as their primary one.
 func TestOwnContactOutranksOtherHoldersOfItsAddress(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +274,7 @@ func TestOwnContactOutranksOtherHoldersOfItsAddress(t *testing.T) {
 // contact of the reader's own is created beside the mirror instead.
 func TestEnsureMeContactNeverAdoptsAGoogleMirror(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +329,7 @@ func TestEnsureMeContactNeverAdoptsAGoogleMirror(t *testing.T) {
 // identical From identities.
 func TestContactStoresOneRowPerAddressEvenWhenGivenSeveral(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

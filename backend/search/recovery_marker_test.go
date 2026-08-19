@@ -202,7 +202,7 @@ func TestVerifyPerUserIndexOpensRejectsAMissingIndex(t *testing.T) {
 	if err := service.VerifyPerUserIndexOpens(13); err == nil {
 		t.Fatal("verification accepted a tenant with no live index")
 	}
-	if _, err := os.Stat(filepath.Join(root, "13", liveIndexDirName)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "13", LiveIndexDirName)); !os.IsNotExist(err) {
 		t.Fatalf("verification created an index it was asked to check: %v", err)
 	}
 }

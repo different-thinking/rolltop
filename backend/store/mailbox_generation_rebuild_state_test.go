@@ -5,15 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestLegacyUIDValidityRebuildPreservesDurableMessageStateAcrossRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,15 +71,12 @@ func TestLegacyUIDValidityRebuildPreservesDurableMessageStateAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := db.DB().ExecContext(ctx, `INSERT INTO plugin_one_click_unsubscribe_sends
+	var oneClickID int64
+	if err := db.DB().QueryRowContext(ctx, `INSERT INTO plugin_one_click_unsubscribe_sends
 		(user_id, message_id, sender, unsubscribe_url, sent_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, user.ID, message.ID, "sender@example.test",
-		"https://example.test/unsubscribe", internalDate.Unix(), internalDate.Unix())
-	if err != nil {
-		t.Fatal(err)
-	}
-	oneClickID, err := result.LastInsertId()
-	if err != nil {
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id`, user.ID, message.ID, "sender@example.test",
+		"https://example.test/unsubscribe", internalDate.Unix(), internalDate.Unix()).Scan(&oneClickID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.DB().ExecContext(ctx, `UPDATE messages SET
@@ -118,7 +113,7 @@ func TestLegacyUIDValidityRebuildPreservesDurableMessageStateAcrossRestart(t *te
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +189,7 @@ func TestLegacyUIDValidityRebuildPreservesDurableMessageStateAcrossRestart(t *te
 
 func TestMailboxGenerationRebuildContinuesAfterPartialRefetchRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +284,7 @@ func TestMailboxGenerationRebuildContinuesAfterPartialRefetchRestart(t *testing.
 		}
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +301,7 @@ func TestMailboxGenerationRebuildContinuesAfterPartialRefetchRestart(t *testing.
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -30,7 +30,7 @@ func New(root string) *Store {
 	return &Store{Root: root}
 }
 
-// SaveRawMessage writes a raw RFC822 message under the owning user path and returns metadata for SQLite.
+// SaveRawMessage writes a raw RFC822 message under the owning user path and returns metadata for the database.
 func (s *Store) SaveRawMessage(userID, accountID int64, mailbox string, uid uint32, raw []byte) (Saved, error) {
 	sum := sha256.Sum256(raw)
 	hash := hex.EncodeToString(sum[:])

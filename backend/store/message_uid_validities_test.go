@@ -2,14 +2,13 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestMessageUIDValiditiesForUserIsTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

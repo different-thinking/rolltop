@@ -6,25 +6,27 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"rolltop/backend/store/storetest"
 )
 
 func TestGetImageMetaReturnsScopedMetadata(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite3", ":memory:")
+	store, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	for _, stmt := range Migrations()[0].Statements {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			t.Fatal(err)
-		}
+	db := store.DB()
+	// The plugin's tables are part of the baseline the test database carries, so
+	// its migrations are not re-run here. What the fixture still needs is the
+	// user its rows reference.
+	user, err := store.CreateUser(ctx, "plugin@example.test", "Plugin", "hash", false)
+	if err != nil {
+		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	hash := Hash("sender@example.com")
 	if err := UpsertImage(ctx, db, Image{
-		UserID:      7,
+		UserID:      user.ID,
 		EmailHash:   hash,
 		ContentType: "image/png",
 		Image:       []byte{1, 2, 3, 4},
@@ -35,14 +37,14 @@ func TestGetImageMetaReturnsScopedMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	meta, err := GetImageMeta(ctx, db, 7, hash)
+	meta, err := GetImageMeta(ctx, db, user.ID, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if meta.EmailHash != hash || meta.ContentType != "image/png" || meta.Status != "ok" || !meta.HasImage {
 		t.Fatalf("meta = %+v", meta)
 	}
-	if _, err := GetImageMeta(ctx, db, 8, hash); err != sql.ErrNoRows {
+	if _, err := GetImageMeta(ctx, db, user.ID+1, hash); err != sql.ErrNoRows {
 		t.Fatalf("other user err = %v, want %v", err, sql.ErrNoRows)
 	}
 }

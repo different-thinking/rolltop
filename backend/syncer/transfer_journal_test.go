@@ -192,10 +192,14 @@ func TestMoveMessageCleanupFailureRetriesConsumedTransferWithoutRedispatch(t *te
 	}
 	fixture.service.Fetcher = fetcher
 	ctx := context.Background()
+	if _, err := fixture.store.DB().ExecContext(ctx, `CREATE FUNCTION fail_moved_message_cleanup() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected moved message cleanup failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.store.DB().ExecContext(ctx, `CREATE TRIGGER fail_moved_message_cleanup
-		BEFORE DELETE ON messages BEGIN
-			SELECT RAISE(ABORT, 'injected moved message cleanup failure');
-		END`); err != nil {
+		BEFORE DELETE ON messages
+		FOR EACH ROW EXECUTE FUNCTION fail_moved_message_cleanup()`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,7 +217,7 @@ func TestMoveMessageCleanupFailureRetriesConsumedTransferWithoutRedispatch(t *te
 	if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, fixture.message.ID); err != nil {
 		t.Fatalf("cleanup failure removed retry source: %v", err)
 	}
-	if _, err := fixture.store.DB().ExecContext(ctx, `DROP TRIGGER fail_moved_message_cleanup`); err != nil {
+	if _, err := fixture.store.DB().ExecContext(ctx, `DROP TRIGGER fail_moved_message_cleanup ON messages`); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.service.MoveMessage(ctx, fixture.userID, fixture.message.ID, fixture.destination.ID); err != nil {
@@ -243,10 +247,15 @@ func TestMoveMessageTerminalizationFailureLeavesLocalSourceIntact(t *testing.T) 
 	}
 	fixture.service.Fetcher = fetcher
 	ctx := context.Background()
+	if _, err := fixture.store.DB().ExecContext(ctx, `CREATE FUNCTION fail_move_terminalization() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected move terminalization failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.store.DB().ExecContext(ctx, `CREATE TRIGGER fail_move_terminalization
-		BEFORE UPDATE OF state ON message_transfers WHEN NEW.state = 'consumed' BEGIN
-			SELECT RAISE(ABORT, 'injected move terminalization failure');
-		END`); err != nil {
+		BEFORE UPDATE OF state ON message_transfers
+		FOR EACH ROW WHEN (NEW.state = 'consumed')
+		EXECUTE FUNCTION fail_move_terminalization()`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -378,10 +387,15 @@ func TestMoveMessageConcurrentCallerCannotReopenActiveDispatch(t *testing.T) {
 
 func TestMoveMessageFinishesClaimWhenSuccessPersistenceFails(t *testing.T) {
 	fixture := newMoveTestFixture(t)
+	if _, err := fixture.store.DB().Exec(`CREATE FUNCTION fail_move_transfer_success() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'forced transfer success failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.store.DB().Exec(`CREATE TRIGGER fail_move_transfer_success
 		BEFORE UPDATE OF state ON message_transfers
-		WHEN NEW.state = 'succeeded'
-		BEGIN SELECT RAISE(FAIL, 'forced transfer success failure'); END`); err != nil {
+		FOR EACH ROW WHEN (NEW.state = 'succeeded')
+		EXECUTE FUNCTION fail_move_transfer_success()`); err != nil {
 		t.Fatal(err)
 	}
 	fetcher := &receiptMoveTestFetcher{
@@ -716,10 +730,15 @@ func TestCopyMessageConcurrentCallerCannotReopenActiveDispatch(t *testing.T) {
 
 func TestCopyMessageFinishesClaimWhenSuccessPersistenceFails(t *testing.T) {
 	fixture := newMoveTestFixture(t)
+	if _, err := fixture.store.DB().Exec(`CREATE FUNCTION fail_copy_transfer_success() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'forced transfer success failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.store.DB().Exec(`CREATE TRIGGER fail_copy_transfer_success
 		BEFORE UPDATE OF state ON message_transfers
-		WHEN NEW.state = 'succeeded'
-		BEGIN SELECT RAISE(FAIL, 'forced transfer success failure'); END`); err != nil {
+		FOR EACH ROW WHEN (NEW.state = 'succeeded')
+		EXECUTE FUNCTION fail_copy_transfer_success()`); err != nil {
 		t.Fatal(err)
 	}
 	fetcher := &copyJournalTestFetcher{

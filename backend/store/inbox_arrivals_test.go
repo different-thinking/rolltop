@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -266,8 +265,7 @@ func TestUndispatchedPendingMoveDoesNotSuppressLateIdenticalInboxDelivery(t *tes
 
 func TestPendingArrivalRetainsRacingExpungeEvidenceAcrossRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +310,7 @@ func TestPendingArrivalRetainsRacingExpungeEvidenceAcrossRestart(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1561,7 +1559,7 @@ func TestInboxArrivalCorrelationIsTenantIsolated(t *testing.T) {
 
 func openArrivalTestStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

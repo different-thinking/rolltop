@@ -40,12 +40,10 @@ func (s *Store) CreateUser(ctx context.Context, email, name, passwordHash string
 		return User{}, errors.New("email, name, and password hash are required")
 	}
 	ts := nowUnix()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO users (email, name, password_hash, is_admin, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, email, name, passwordHash, boolInt(isAdmin), ts, ts)
-	if err != nil {
-		return User{}, err
-	}
-	id, err := res.LastInsertId()
+	var id int64
+	err := s.db.QueryRowContext(ctx, `INSERT INTO users (email, name, password_hash, is_admin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id`, email, name, passwordHash, boolInt(isAdmin), ts, ts).Scan(&id)
 	if err != nil {
 		return User{}, err
 	}
@@ -119,9 +117,6 @@ func (s *Store) UpdateUserBackupEmail(ctx context.Context, userID int64, backupE
 	if err != nil {
 		return User{}, err
 	}
-	if err := s.mirrorCachedUser(ctx, updated); err != nil {
-		return User{}, err
-	}
 	return updated, nil
 }
 
@@ -180,23 +175,7 @@ func (s *Store) UpdateUserPreferences(ctx context.Context, userID int64, dateLoc
 	if err != nil {
 		return User{}, err
 	}
-	if err := s.mirrorCachedUser(ctx, updated); err != nil {
-		return User{}, err
-	}
 	return updated, nil
-}
-
-func (s *Store) mirrorCachedUser(ctx context.Context, user User) error {
-	if !s.split || user.ID == 0 {
-		return nil
-	}
-	s.mu.Lock()
-	us := s.userStores[user.ID]
-	s.mu.Unlock()
-	if us == nil {
-		return nil
-	}
-	return us.mirrorUser(ctx, user)
 }
 
 func normalizeUserDateFormat(value string) string {
@@ -285,12 +264,10 @@ func normalizeUserSearchAttachmentWeight(value string) string {
 // CreateSession stores a hashed session token with an expiry time.
 func (s *Store) CreateSession(ctx context.Context, userID int64, tokenHash string, expiresAt time.Time) (Session, error) {
 	ts := nowUnix()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO sessions (user_id, token_hash, expires_at, created_at, last_seen_at)
-		VALUES (?, ?, ?, ?, ?)`, userID, tokenHash, expiresAt.UTC().Unix(), ts, ts)
-	if err != nil {
-		return Session{}, err
-	}
-	id, err := res.LastInsertId()
+	var id int64
+	err := s.db.QueryRowContext(ctx, `INSERT INTO sessions (user_id, token_hash, expires_at, created_at, last_seen_at)
+		VALUES (?, ?, ?, ?, ?)
+		RETURNING id`, userID, tokenHash, expiresAt.UTC().Unix(), ts, ts).Scan(&id)
 	if err != nil {
 		return Session{}, err
 	}

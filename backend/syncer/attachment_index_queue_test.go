@@ -13,6 +13,7 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 
 	"rolltop/internal/testlog"
 )
@@ -466,7 +467,7 @@ func TestRunnerDelayedContinuationReachesHealthyNextPage(t *testing.T) {
 func TestRunnerAutomaticallyWakesAtEarliestAttachmentRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +530,7 @@ func TestRunnerAutomaticallyWakesAtEarliestAttachmentRetry(t *testing.T) {
 func TestRunnerRetryWakeDropsDueKeyForDeletedMessage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +568,7 @@ func TestRunnerRetryWakeDropsDueKeyForDeletedMessage(t *testing.T) {
 
 func TestRunnerCancelsAttachmentRetryTimerOnShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

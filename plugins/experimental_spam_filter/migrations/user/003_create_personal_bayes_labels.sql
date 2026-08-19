@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_plugin_experimental_spam_bayes_labels_expiry
 CREATE INDEX IF NOT EXISTS idx_plugin_experimental_spam_bayes_learn_tokens_hash
   ON plugin_experimental_spam_bayes_learn_tokens(user_id, token_hash, message_fingerprint);
 
-INSERT OR IGNORE INTO plugin_experimental_spam_bayes_labels
+INSERT INTO plugin_experimental_spam_bayes_labels
   (user_id, message_fingerprint, source, origin_key, message_id, label, token_schema, learned_at, updated_at)
 SELECT user_id,
        message_fingerprint,
@@ -36,7 +36,8 @@ SELECT user_id,
        token_schema,
        learned_at,
        updated_at
-FROM plugin_experimental_spam_bayes_learns;
+FROM plugin_experimental_spam_bayes_learns
+ON CONFLICT DO NOTHING;
 
 UPDATE plugin_experimental_spam_bayes_tokens
 SET spam_messages = (

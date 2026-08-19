@@ -25,8 +25,7 @@ type duplicateFixture struct {
 func newDuplicateFixture(t *testing.T) duplicateFixture {
 	t.Helper()
 	ctx := context.Background()
-	dataDir := filepath.Join(t.TempDir(), "data")
-	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

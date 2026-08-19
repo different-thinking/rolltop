@@ -6,11 +6,9 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"rolltop/backend/store/storetest"
 	"testing"
 	"time"
-
-	"rolltop/backend/store"
 )
 
 func TestPublicAuthRoutesAreServedAsAppRoutes(t *testing.T) {
@@ -31,7 +29,7 @@ func TestPublicAuthRoutesAreServedAsAppRoutes(t *testing.T) {
 // a declaration that no mux pattern answers is a page that 404s in production
 // while every predicate insists it is a real route.
 func TestEverySPARouteIsActuallyServed(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

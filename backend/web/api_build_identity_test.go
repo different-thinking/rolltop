@@ -4,12 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/buildinfo"
-	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestBuildCommitIncludedInAuthenticatedChromePayloads(t *testing.T) {
@@ -17,7 +16,7 @@ func TestBuildCommitIncludedInAuthenticatedChromePayloads(t *testing.T) {
 	buildinfo.Commit = "0123456789abcdef0123456789abcdef01234567"
 	t.Cleanup(func() { buildinfo.Commit = oldCommit })
 
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

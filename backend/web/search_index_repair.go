@@ -1,5 +1,5 @@
 // File overview: Lightweight search-index self-healing for request paths that
-// discover SQLite messages missing from the user-scoped Bleve index.
+// discover stored messages missing from the user-scoped Bleve index.
 
 package web
 
@@ -13,7 +13,7 @@ import (
 const recentSearchRepairLimit = 250
 
 // ensureSearchDocuments indexes local message records that are missing from
-// Bleve. This deliberately uses only SQLite-held headers/body preview and does
+// Bleve. This deliberately uses only stored headers/body preview and does
 // not fetch raw IMAP bodies or save attachment blobs; the heavier attachment
 // repair path can still reindex full raw .eml content later.
 func (s *Server) ensureSearchDocuments(ctx context.Context, userID int64, messages []store.MessageRecord) (int, error) {

@@ -1,9 +1,22 @@
 # PostgreSQL Migration Plan
 
-Status: proposal, not started. This document describes how to move Rolltop's
-relational storage from per-tenant SQLite files to a single PostgreSQL
-database, what has to change in the code, where the risks are, and what the
-migration deliberately does not cover.
+Status: phases 0–5 shipped. The app runs on PostgreSQL, the SQLite driver is
+gone from the module, and the whole Go suite is green against a real server.
+What remains is the switch itself (§11).
+
+This document described how to move Rolltop's relational storage from
+per-tenant SQLite files to a single PostgreSQL database. It is kept as the
+record of what was decided and why — several sections are now history rather
+than plan, and say so.
+
+**Decision (2026-08-19): no data migration.** The app starts over like a new
+installation: an empty PostgreSQL database, users created anew, mailboxes
+connected one by one, their data arriving step by step through the normal
+sync path. The existing local data is abandoned; there is no cutover-scale
+data transfer or resync to plan, schedule, or verify. WP7's one-shot
+migration tool is dropped; §11 describes the fresh start. Everything about
+*code and schema* in this plan is unaffected by that decision — only the
+sections that moved data are.
 
 ## 1. Why
 
@@ -76,11 +89,12 @@ latch) instead of porting it.
 
 ### 3.2 Hard cutover, no dual-backend support — recommended
 
-Per `docs/local-sqlite-maintenance.md`, this deployment is currently the only
+Per `docs/local-search-maintenance.md`, this deployment is currently the only
 running instance. Maintaining two SQL dialects behind an abstraction layer is
 the single most expensive way to do this migration and benefits nobody.
-The SQLite driver survives only inside the one-shot data migration command
-(§7), then gets removed from the server path.
+With no data migration (WP7 dropped), nothing needs the SQLite driver after
+the cutover — `mattn/go-sqlite3` leaves the module entirely once WP3–WP6
+land.
 
 Consequence to accept explicitly: Rolltop stops being a single-container app.
 The README's deployment story changes to "app container + Postgres" (compose
@@ -93,8 +107,8 @@ file provided) or "app container + managed Postgres DSN".
 - Keeps the compiled-plugin ABI unchanged: plugin hooks receive `*sql.DB`
   (`backend/plugins/compiled_hooks.go`) and keep working as long as their SQL
   is ported.
-- Native pgx (batching, `CopyFrom`) is used only inside the data migration
-  tool where it pays off.
+- Native pgx (batching, `CopyFrom`) stays available for hot spots that
+  measurement identifies later (§8.2); nothing needs it up front.
 
 ### 3.4 Database collation: `C` — recommended
 
@@ -182,7 +196,7 @@ migration will actually meet:
 | Drop schema | removes Rolltop's tables and trigger function, keeps extensions | yes |
 
 The point is rehearsal rather than one attempt: create, look, drop, repeat,
-long before any data moves and long before the server is pointed at it. Two
+long before the server is pointed at it. Two
 safety rules are enforced server-side rather than in the UI, so a mislabelled
 button cannot become a dropped database — a database holding anything that is
 not Rolltop's is refused for both create and drop, and the create step refuses
@@ -222,15 +236,34 @@ enabled, not at open, so the baseline has to contain every table any plugin
 could create: after the cutover, enabling one would otherwise replay
 SQLite-dialect DDL against PostgreSQL.
 
-The baseline is **derived, not written**:
-`TestBaselineMatchesSQLiteSchema` opens a fully migrated combined SQLite
-store, translates its `sqlite_master` contents, and fails when the committed
-`baseline.sql` differs — so a SQLite migration landing during the transition
-cannot silently leave the two schemas apart (`-update` regenerates).
-`TestBaselineAppliesToPostgres` then applies it to a real server and asserts
-the properties the migration depends on: every text column C-collated, the
-foreign keys present, identity sequences accepting `setval`, and the
-translated trigger behaving like the SQLite original.
+**The derivation ran once and is now over.** It required the SQLite migration
+chain to be executable, and the chain cannot survive the conversion: the
+plugin migrations it applies are PostgreSQL DDL now, and the `After` steps it
+runs are app code whose SQL is PostgreSQL's. The chain, its upgrade tests, and
+the derivation test were deleted once `baseline.sql` was final. The translator
+itself was deleted with them: ~600 lines whose only caller was the deleted
+test, kept alive by its own unit test, describing a mechanism a reader could
+no longer run. The rules it encoded are the table below, and the output it
+produced is `baseline.sql`, which now carries them in its own header.
+
+`baseline.sql` is the schema's source of truth from here, and it is
+**hand-owned**: edit it directly. That reaches only a database that does not
+exist yet, because the edit changes the checksum recorded in
+`schema_migrations` and a server whose database carries the older one refuses
+to start. Changing the schema of a database already in service needs a
+migration layered on the baseline — see §11, which is where that mechanism
+still has to be built.
+
+How the derivation worked while it ran: `TestBaselineMatchesSQLiteSchema`
+opened a fully migrated combined SQLite store, translated its `sqlite_master`
+contents, and failed when the committed `baseline.sql` differed, so a SQLite
+migration landing during the transition could not silently leave the two
+schemas apart. What survives it is `TestBaselineAppliesToPostgres`, which
+applies the baseline to a real server and asserts the properties the schema
+depends on: every text column C-collated, the foreign keys present, identity
+sequences accepting `setval`, and the trigger behaving as intended.
+`TestBaselineDeclaresEveryObject` holds the file to its `-- <kind> <name>`
+header convention, which the admin console's drop step reads.
 
 Two things the derivation surfaced that hand-writing would likely have
 missed:
@@ -243,10 +276,10 @@ missed:
 - The final schema has 75 tables (55 core plus 20 from plugins), not the 87
   the inventory above counts; that number counts `CREATE TABLE` statements
   across migrations, several of which recreate the same table.
-- The plugin migrations carry SQLite-only constructs the core schema does
+- The plugin migrations carried SQLite-only constructs the core schema does
   not: `WITHOUT ROWID` (dropped — PostgreSQL has no equivalent storage form)
   and one `NOT GLOB` check, translated deliberately to a regex match. The
-  translator fails closed on any other SQLite-only construct rather than
+  translator failed closed on any other SQLite-only construct rather than
   passing it through, because a silently dropped CHECK is a constraint the
   database stops enforcing.
 
@@ -277,7 +310,7 @@ reviewed, not fully automated blindly:
    position-aware, or better: replace `IN (…)` builders with `= ANY($1)` and
    pass an int64 slice — pgx supports array binding, which deletes the
    builder pattern entirely. **Recommended.**
-2. **`INSERT OR IGNORE` (13) → `INSERT ... ON CONFLICT DO NOTHING`.** Where
+2. **`INSERT OR IGNORE` (9) → `INSERT ... ON CONFLICT DO NOTHING`.** Where
    the code inspects `RowsAffected` to detect "was it new" (e.g.
    `new_mail_events.go:54`), semantics are preserved (`DO NOTHING` reports 0
    affected rows).
@@ -302,10 +335,31 @@ reviewed, not fully automated blindly:
    in `lower()`, so PG's case-sensitive `LIKE` changes nothing. Audit any
    future `LIKE` for this.
 
-Suggested mechanics: one PR per store file group, each converting the SQL and
-its tests together, so review stays possible. A `go vet`-style CI grep that
-rejects `?`-placeholders, `PRAGMA`, `INSERT OR`, `AUTOINCREMENT` in
-non-migration code keeps regressions out during the transition.
+What the conversion actually turned up, none of which the inventory predicted,
+and all of which the suite caught only because it runs against a real server:
+
+- **`INSERT ... SELECT` types its SELECT list before the target columns**, so a
+  bare parameter there defaults to `text` and is rejected against a `bigint`
+  column. Five sites; each takes `CAST(? AS BIGINT)`.
+- **`CASE WHEN ?` requires a boolean**, and this schema stores booleans as 0/1
+  integers. `CASE WHEN ? <> 0`.
+- **`SELECT EXISTS (…)` returns a boolean**, not 0/1. Every such scan target
+  became a `bool`.
+- **An error aborts the whole transaction.** `CreateMessage` inserted, caught
+  the unique violation, and carried on in the same transaction to adopt the
+  existing row — which PostgreSQL refuses. It now asks for the outcome instead:
+  `ON CONFLICT (…) DO NOTHING` with an empty `RETURNING`.
+- **SQLite's two-argument `MAX`/`MIN` are `GREATEST`/`LEAST`**, and `printf` is
+  not a function at all (the mail list's sort key became `lpad(…)::text`).
+- **`GROUP BY` needs every selected column of a *joined* table**, since the
+  functional dependency PostgreSQL derives from a grouped primary key is
+  per-table.
+- **Foreign keys are enforced.** Several fixtures inserted messages referencing
+  accounts, mailboxes, and blobs that did not exist.
+
+A CI grep that rejects `PRAGMA`, `INSERT OR`, and `AUTOINCREMENT` outside the
+baseline is still worth adding. It must *not* reject `?` placeholders: those
+are the house style now, and the driver translates them.
 
 ### WP4 — Behavioral changes in the store layer
 
@@ -349,45 +403,53 @@ every plugin, `.github/workflows/ci.yml:101`, so drift is caught). CGO stays
 required by `-buildmode=plugin` regardless of dropping `mattn/go-sqlite3`, so
 the Dockerfile build stages are unchanged in shape.
 
-### WP7 — One-shot data migration tool
+### WP7 — Dropped: fresh start instead of a data migration
 
-**Open obligation, to be settled before the first durable Postgres database
-exists.** `OpenPostgres` records the baseline as one `schema_migrations` row and
-refuses to start when the recorded checksum differs from the running binary's.
-That is right while every Postgres database is a throwaway test one, but the
-baseline is *designed to be regenerated in place*, so the same signal will mean
-two different things once a real database exists: "the schema was tampered with"
-and "this binary is newer than the database". The second needs an upgrade path,
-not a refusal. Whatever WP3 does to the schema — the `lower()` expression index
-is already queued — regenerates the baseline, so this has to be decided in the
-same phase that creates the first database worth keeping. The likely shape is
-incremental Postgres migrations layered on the baseline, with the baseline row
-pinned to the version it was created at rather than to the current file.
+Decision (2026-08-19): the existing data is **not** migrated. The planned
+`rolltop migrate-to-postgres` subcommand — read-only SQLite opens, `CopyFrom`
+streaming in FK order, sequence `setval` resets, row-count/checksum
+verification, migration-side text sanitization — is not built. The switch
+(§11) starts the app against the empty, hoster-created database instead;
+`OpenPostgres` applies the WP2 baseline on first start (WP1), and nothing
+else is needed.
 
-New subcommand `rolltop migrate-to-postgres`:
+What the fresh start abandons, explicitly: all locally stored state — user
+accounts, mail-account/IMAP configuration, contacts, snoozes, tags,
+settings, plugin data. Mail arrives again through the normal sync path as
+each mailbox is reconnected, step by step, at whatever pace the accounts are
+added. Blobs and Bleve indexes on `/data` reference database ids that the
+fresh database does not share, so `/data` is cleared during the switch
+(§11) and both build up from scratch.
 
-1. Takes the instance lock (server must be stopped) and opens the system
-   SQLite file plus every `data/users/<id>/rolltop.db` **read-only** with the
-   existing driver.
-2. Requires an **empty** target database; runs the WP2 baseline.
-3. Streams tables in FK order via pgx `CopyFrom` (system tables, then per
-   user). Sizing input (2026-08): the deployment holds 200k+ messages and
-   growing — with the 4 KB preview compaction that is roughly 1–2M rows and
-   a low single-digit GB, which `CopyFrom` moves in minutes. The cutover
-   window is therefore dominated by verification, not transfer, and dry
-   runs against a production copy are cheap to repeat.
-4. **Sanitizes text on the way over** — see §8.1, this is the step most
-   likely to surface dirty data. Every sanitized value is logged with table,
-   rowid, and column.
-5. Resets identity sequences (`setval`) to `max(id)+1` per table.
-6. Verifies: row counts per table per user, plus spot checksums (e.g.
-   sum of `size`, count by `mailbox_id`) — printed as a report.
-7. All-or-nothing: any failure ⇒ drop and re-run. No partial resume.
+One consequence for §8.1: there are no legacy rows to sanitize, but
+connecting a mailbox still mirrors its history from the IMAP server — years
+of hostile input reach the write path whenever an account is added. The
+parse-boundary sanitization must therefore be in place before the first
+mailbox is connected.
 
-The SQLite files are left untouched and serve as the rollback (§11).
-Skipped-as-corrupt tenant databases (the health latch case) must be repaired
-with today's tooling *before* migrating — the tool refuses to silently skip a
-tenant.
+**What survives from this work package — the baseline upgrade path, to be
+settled before the fresh production database is created.** `OpenPostgres`
+records the baseline as one `schema_migrations` row and refuses to start when
+the recorded checksum differs from the running binary's. That is right while
+every PostgreSQL database is a throwaway test one, and it is exactly wrong the
+day after the first durable one exists: the checksum then means two different
+things — "the schema was tampered with" and "this binary is newer than the
+database" — and only the first deserves a refusal. Any edit to `baseline.sql`
+produces the second, and `baseline.sql` is now the hand-owned place schema
+changes are made, so *every* schema change from here produces it.
+
+Nothing in the tree answers this yet. `backend/store/migrations.go` holds the
+checksum and the progress type and no runner at all — the SQLite runner that
+used to sit there was dead code and was deleted rather than left as a
+misleading answer. The shape this needs is incremental PostgreSQL migrations
+layered on the baseline, with the baseline row pinned to the version it was
+created at rather than to the current file, and a startup path that applies
+the outstanding ones instead of refusing. Plugin migrations already work that
+way (`plugin_migrations`, one row per migration, checksummed, applied under
+the schema lock only when something is outstanding) and are the model to copy.
+
+Until it exists, the operating rule is the honest one: editing `baseline.sql`
+only reaches a database that does not exist yet.
 
 ### WP3 query obligations from the baseline
 
@@ -399,8 +461,11 @@ are easy to regress by porting a query mechanically:
   `ORDER BY display_name` cannot use it; it has to say `lower(display_name)`.
   The store's contact queries already do, but a new one would not by default.
 - **Identity columns are `GENERATED BY DEFAULT`**, not `GENERATED ALWAYS`, so
-  an explicit id on insert is accepted. That is what lets WP7 copy ids
-  verbatim; do not "tighten" it to ALWAYS.
+  an explicit id on insert is accepted. The original reason — WP7 copying ids
+  verbatim — is gone with the data migration, but BY DEFAULT stays: it is
+  harmless in normal operation (the sequence still assigns ids when none is
+  given), and tightening it would change the baseline generator for no
+  operational gain.
 
 ### WP8 — Tests and CI
 
@@ -411,35 +476,50 @@ all call `store.Open(tempfile)`.
   `TEST_DATABASE_URL` and drops it in `t.Cleanup`. It skips when the variable
   is unset and *fails* when it is set but unusable, so a broken CI service
   cannot report a green suite that verified nothing.
-- The **template database** the plan called for is not built yet, because the
-  measurement it was justified by came out differently: applying the baseline
-  to an empty database takes ~360 ms locally. A template clone would save most
-  of that, but only matters once the suite has hundreds of store tests — which
-  is exactly when WP3 converts them. Build it then, with the real number in
-  hand, rather than now against five tests. When it lands, template creation
-  happens once per `go test` process (sync.Once + advisory lock for parallel
-  packages).
+- The **template database** landed with the conversion, which is when it
+  started to matter: ~350 test call sites each paying a baseline apply is
+  minutes of pure DDL per run, and `CREATE DATABASE … TEMPLATE` is a file copy.
+  Two things about it were not obvious in advance and both cost a debugging
+  round:
+  - The template is **named after the schema** (`SchemaTag`, a hash of the
+    baseline) rather than being dropped and rebuilt when stale. Rebuilding
+    races the other test binaries cloning from it, and the loser fails every
+    one of its tests with "template database does not exist".
+  - The tag covers the baseline and **not** the plugin catalog, because the
+    catalog is not a constant: a binary that loads a compiled plugin registers
+    more migrations than one that does not, so including them changed the tag
+    part-way through a run. Plugin migrations are applied per test database on
+    open instead, which is what they do in production anyway.
+- `storetest.DSN(t)` hands out the connection string for tests that drive a
+  command which opens its own store from the environment.
 - New helper `storetest.Open(t)` wrapping `pgtestdb` and `OpenPostgres`, added
   alongside the first converted package so it has callers on the day it lands.
-- `Open(path)` callers migrate to `storetest.Open(t)` mostly mechanically.
+- `Open(path)` callers migrated to `storetest.Open(t)` mechanically (346
+  sites). One thing did not survive the mechanical pass and had to be found by
+  hand: a test that closes its store and opens another one to check that state
+  survived a restart got a *fresh* database, so it silently verified nothing.
+  The helper now remembers the database it gave a test and hands the same one
+  back.
 - CI (`ci.yml`, `pr.yml`): add a `postgres:17` service container, set
   `TEST_DATABASE_URL`. Local dev: `docker compose -f compose.dev.yml up db`
   documented in README/AGENTS.md.
 - Tests that specifically exercise SQLite corruption/salvage/backup are
   deleted with their subjects.
 
-### WP9 — Docs and deployment
+### WP9 — Docs and deployment — **done**
 
-- README: storage model, configuration, backups, corruption section
-  (largely deleted), new compose example with a Postgres service and a named
-  volume **on RBD/local disk, never CephFS**, `stop_grace_period` note
-  simplified.
-- AGENTS.md: replace SQLite-specific guidance (writer turns, WAL) with
-  Postgres equivalents; keep the `user_id`-scoping rule — it is now the
-  *only* tenant isolation layer, which makes review discipline on new
-  queries more important, not less.
-- `docs/local-sqlite-maintenance.md`: superseded; keep for the Bleve parts,
-  rename accordingly.
+- README: storage model, configuration, backups, and the corruption section
+  (replaced by "Database Unavailable"); `compose.yml` ships the app plus a
+  PostgreSQL service on a named volume, with the CephFS warning attached to
+  it; `stop_grace_period` no longer covers a WAL checkpoint.
+- `compose.dev.yml` runs the throwaway server the suite needs.
+- AGENTS.md: SQLite-specific guidance replaced with the PostgreSQL rules the
+  conversion actually tripped over, and the `user_id`-scoping rule promoted —
+  it is now the *only* tenant isolation layer, which makes review discipline
+  on new queries more important, not less.
+- `docs/local-sqlite-maintenance.md`: **done** — renamed to
+  `local-search-maintenance.md`, keeping the Bleve half and dropping the
+  SQLite-surgery half.
 
 ## 5. Suggested phasing
 
@@ -447,32 +527,42 @@ all call `store.Open(tempfile)`.
 | --- | --- | --- |
 | 0 | **Done** (shipped on `main`, `f9f686d` + `0552945`): WAL without the shared `-shm` index via `locking_mode=exclusive` and one connection per database, auto-detected from the filesystem superblock (`backend/store/access.go`) with a `ROLLTOP_SQLITE_ACCESS` override; live maintenance rerouted through the owning handle. Deviation from this plan's sketch: `synchronous` stays `NORMAL`, so durability of the most recent commits still depends on checkpoint-time fsync — acceptable residual risk for the interim, since the corruption vector (shm coherence) is gone. | — |
 | 1 | WP2 baseline + CI Postgres service (**done**). WP1's config/pool and WP8's per-test template-database helper both move to phase 2, where the store conversion gives them a consumer; landing either earlier would be unused code | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
-| 2 | WP1's connection/schema layer (**done**: `OpenPostgres`, `pgtestdb`), then WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
-| 3 | WP6 plugins | 2 |
-| 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
-| 5 | WP7 migration tool + dry run against a copy of production data | 2 |
-| 6 | Cutover (§11) | 3–5 |
+| 2 | WP1's connection/schema layer, then WP3 + WP4 store conversion (**done**) | 1 |
+| 3 | WP6 plugins (**done**) | 2 |
+| 4 | WP5 maintenance-surface removal + WP9 docs (**done**) | 2 |
+| 5 | WP7 residue: settle the baseline upgrade path, rehearse create/drop against the provisioned target via the migration console | 2 |
+| 6 | Fresh start (§11) | 3–5 |
 | 7 | Bleve → Postgres FTS (§10, separate plan) | 6 |
 
-Phases 2–4 are parallelizable per package. Realistic effort: phase 1 ~2–4
-days, phase 2 the bulk (1–2 weeks of focused work given test conversion),
-phases 3–5 ~1 week combined, plus a dry-run/cutover day. The corruption
-machinery deletion (§6) lands as its own satisfying PR.
+Phases 2–4 landed together rather than package by package, because the test
+suite could not be run at all until the store, the plugins, and the fixtures
+were converted as one — a half-converted store has no green baseline to
+review a package against. The switch itself is small: stop the old instance,
+start the new one against the empty database (§11); data builds up afterwards
+as mailboxes are reconnected.
 
-## 6. Code that gets deleted
+**Still open before phase 6:** the baseline upgrade path (WP7's surviving
+obligation). Today `OpenPostgres` refuses to start when the recorded checksum
+differs from the running binary's, which is right for a throwaway database and
+wrong for a production one that is merely older. It has to be settled before
+the first database worth keeping exists — that is, before the switch.
 
-- `backend/store/salvage.go` (731), `corruption.go` (342),
-  `repair_marker.go` (165)
-- `cmd/rolltop/recover_db.go` (302), `repair_db.go` (187),
-  `startup_integrity.go` (173), `backup_db.go` (144)
+## 6. Code that got deleted — **done**
+
+- `backend/store/salvage.go`, `corruption.go`, `repair_marker.go`,
+  `access*.go`, `live_maintenance.go`, `backup.go`, `unavailable.go`
+- `cmd/rolltop/recover_db.go`, `repair_db.go`, `startup_integrity.go`,
+  `backup_db.go`
 - Split-mode plumbing in `store.go` (userStores cache, `mirrorUser`,
-  `PrepareUserStores`, health latch), the `synchronous`/checkpoint logic in
+  `PrepareUserStores`, health latch), the `synchronous`/checkpoint dance in
   `message_indexing.go`, the maintenance jobs in
   `backend/web/database_maintenance.go`
+- The SQLite migration chain (`migration_*.go`, ~3.6k LOC) and its upgrade
+  tests, once the baseline was final (see WP2)
 - Their tests
 
-Net: roughly 2,500+ LOC of production code whose only job was surviving
-SQLite-on-CephFS.
+Net: well over 5,000 LOC, all of it either surviving SQLite-on-CephFS or
+describing a schema history no database will ever walk again.
 
 ## 7. What deliberately does not change
 
@@ -496,16 +586,17 @@ and NUL bytes (`0x00`) in `TEXT` outright.** Mail is hostile input: subjects,
 sender names, message-ids, and header fragments with broken encodings exist
 in real mailboxes and are almost certainly sitting in the current data.
 
-Two mandatory countermeasures:
-
-1. **Write-path sanitization** at the parse boundary (`backend/mailparse`):
-   `strings.ToValidUTF8(s, "�")` + strip `\x00` for every header-derived
-   string before it reaches the store. Today only scattered sites do this
-   (`api_message.go:228`, `compose.go:415`); it must become systematic, or
-   the syncer will hit insert errors on the first malformed message after
-   cutover.
-2. **Migration-tool sanitization** (WP7) with logging, since existing rows
-   contain whatever SQLite accepted over the years.
+The mandatory countermeasure: **write-path sanitization** at the parse
+boundary (`backend/mailparse`): `strings.ToValidUTF8(s, "�")` + strip `\x00`
+for every header-derived string before it reaches the store. Today only
+scattered sites do this (`api_message.go:228`, `compose.go:415`); it must
+become systematic, or the syncer will hit insert errors on the first
+malformed message. The fresh start (no data migration, WP7) removes the
+second half of this problem — there are no legacy rows to carry over — but
+not this half: reconnecting a mailbox mirrors its history from the IMAP
+server, so every broken encoding that accumulated over the years still
+reaches the parse path, account by account. This must be in place before
+the first mailbox is connected.
 
 Columns that must stay byte-faithful (none known — hashes are hex, tokens are
 base64) would need `BYTEA`; audit during WP2 confirms.
@@ -515,12 +606,13 @@ base64) would need `BYTEA`; audit during WP2 confirms.
 A per-user SQLite file made every query ~µs and made N+1 loops invisible.
 Postgres adds a network round trip per statement. The web request paths are
 fine (few queries per request), but syncer inner loops (per-message location
-upserts, fingerprint checks) deserve measurement in the phase-5 dry run.
-Note the shape of the risk with the current 200k+ message corpus:
-incremental sync touches deltas only, so steady-state cost barely changes —
-the paths that walk the whole corpus are the rebuild flows (mailbox
-generation rebuild, index hydration), and those are what the dry run must
-time at full production scale.
+upserts, fingerprint checks) deserve measurement. Note the shape of the
+risk: incremental sync touches deltas only, so steady-state cost barely
+changes — the paths that walk a whole mailbox are a mailbox's first sync
+after it is connected (§11) and the rebuild flows (mailbox generation
+rebuild, index hydration). There is no big-bang moment in the fresh start;
+the corpus builds up account by account. Watch the timing logs when the
+first large mailbox syncs, and batch where it hurts.
 Mitigations if needed: `= ANY($1)` batching (already introduced by WP3),
 multi-row `INSERT ... VALUES (...),(...)`, pgx batch API in hot spots.
 Do not pre-optimize; measure.
@@ -599,22 +691,46 @@ complete, since Bleve's mmap'd segments are the remaining risk on `/data`:
 - Requires `pg_trgm` (and possibly `unaccent`) — confirm the hoster allows
   extensions before committing to this phase.
 
-## 11. Cutover and rollback
+## 11. The switch (fresh start) and rollback
 
-1. Freeze: stop the container (instance lock released), take a final Ceph
-   snapshot of `/data`.
-2. `rolltop migrate-to-postgres` against the empty target; review the
-   verification report and the sanitization log.
-3. Start the new image with `ROLLTOP_DATABASE_URL`. Bleve indexes on `/data`
-   remain valid — they reference message ids, which the migration preserves
-   (identity values are copied verbatim, sequences bumped past them).
-4. Watch the syncer complete one full cycle per account; compare message
-   counts per mailbox against the report.
-5. Rollback path (until the old image is retired): stop, restart the
-   previous image — the SQLite files were never written after the freeze.
-   Mail changes made in the Postgres interim would be lost locally but
-   re-mirrored from IMAP; locally-created state (snoozes, contacts edits) in
-   the interim would not survive a rollback. Keep the rollback window short.
+No data moves, and no data arrives at switch time either — the app starts
+over like a new installation, and the mailboxes fill it step by step
+afterwards:
+
+1. Stop the old container (instance lock released), take a final Ceph
+   snapshot of `/data`. The snapshot is the only remaining copy of the old
+   world (accounts, snoozes, contacts edits, settings) — it is an archive
+   and the rollback point, not an input to the new instance.
+2. Clear `/data`: SQLite files (system + `users/`), blob store, Bleve
+   indexes. Nothing in it means anything to the fresh database — blobs and
+   indexes reference ids it does not share. Keep the crash-log location.
+3. Verify the hoster-created, empty database with the preflight (§3.4) if
+   not already done, then start the new image with `ROLLTOP_DATABASE_URL` —
+   `OpenPostgres` applies the WP2 baseline to the empty database.
+4. Set the app up as a new installation: create users, then connect
+   mailboxes one by one, at whatever pace is convenient. Each mailbox's
+   history mirrors from IMAP through the normal sync path when it is
+   connected — there is no switch-scale sync to schedule or verify. Watch
+   the first large mailbox's sync for sanitization hits (§8.1) and latency
+   hot spots (§8.2).
+5. Rollback path (until the old image is retired): stop the new stack,
+   restore the `/data` snapshot, start the previous image. Everything set
+   up in the Postgres interim is lost; mail itself re-mirrors from IMAP
+   either way.
+
+**Settle the baseline upgrade path before step 3.** The database created there
+is the first one worth keeping, and from that moment `baseline.sql` can no
+longer be edited: the next edit changes the checksum and the server refuses to
+start against the database it just created. See the end of §WP7 for what has
+to exist instead. Doing it before the switch costs a day; doing it after means
+doing it on a database that is already carrying somebody's mail.
+
+**One server per database.** The new stack must not be scaled past one app
+container, and a second deployment must not be pointed at the same DSN.
+`OpenPostgres` now takes a session-scoped advisory lock for the process
+lifetime and refuses to start when another server holds it, waiting out a
+rolling deploy on `ROLLTOP_STARTUP_LOCK_WAIT` first. Before that guard existed
+both servers started and each stamped the other's live sync runs interrupted.
 
 ## 12. Open questions
 
@@ -625,9 +741,8 @@ Hoster answers received 2026-08-18:
    database user may `CREATE EXTENSION` them directly. Phase 7 (search) is
    therefore unblocked in principle.
 2. ~~Connection limits?~~ **20 connections per database user.** App pool
-   default `ROLLTOP_DB_MAX_CONNS=10` (WP1) leaves headroom for the
-   migration tool, scheduled `pg_dump`, and manual `psql` without ever
-   tripping the limit.
+   default `ROLLTOP_DB_MAX_CONNS=10` (WP1) leaves headroom for a scheduled
+   `pg_dump` and manual `psql` without ever tripping the limit.
 3. ~~Backup story?~~ Hoster-side: continuous WAL archiving + hourly base
    backups, 7-day retention — **disaster recovery only, not self-service.**
    Our own backups: scheduled `pg_dump` via SSH bastion (or in-platform),
@@ -672,18 +787,20 @@ as designed: equality needs nothing, ordering needs the column collation.
 
 **Latency sets the batching budget.** 0.58 ms per round trip is good for a
 network hop, and web request paths (a handful of queries each) will not
-notice. The number to watch is the full-corpus walk: with 200k+ messages, a
+notice. The number to watch is the full-mailbox walk: at 200k messages, a
 per-row loop costs about two minutes of pure round trips. That is the
-concrete threshold for the phase-5 dry run in §8.2 — measure the mailbox
-generation rebuild and index hydration, and batch with `= ANY($1)` or
+concrete threshold for a large mailbox's first sync after it is connected
+(§8.2, §11) and for the rebuild flows (mailbox generation, index
+hydration) — watch their timing logs and batch with `= ANY($1)` or
 multi-row inserts wherever they exceed it.
 
-**`CREATEDB=false` constrains two work packages.** The application role
+**`CREATEDB=false` constrains the cutover and WP8.** The application role
 cannot create databases, so:
 
-- WP7's migration tool cannot provision its own target. The hoster must
-  create the (empty) destination database before the cutover, and the tool
-  should verify emptiness rather than attempt creation.
+- The app cannot provision its own database. The hoster must create the
+  (empty) production database before the cutover; `OpenPostgres` then
+  verifies it is empty and applies the baseline (WP1 behaviour) rather than
+  attempting creation.
 - WP8's test strategy — `CREATE DATABASE ... TEMPLATE rolltop_test_tmpl` per
   test — cannot run against this instance. That is fine as designed, because
   tests run against a CI-local Postgres container with full privileges, but
@@ -692,5 +809,5 @@ cannot create databases, so:
   database.
 
 The per-role limit of 20 confirms the hoster's figure and leaves the planned
-pool of 10 room for the migration tool, a scheduled `pg_dump`, and a manual
-`psql` session at the same time.
+pool of 10 room for a scheduled `pg_dump` and a manual `psql` session at the
+same time.

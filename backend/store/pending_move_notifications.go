@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -23,28 +24,29 @@ func (s *Store) CreatePendingMoveNotification(ctx context.Context, userID, sourc
 		return 0, err
 	}
 	now := nowUnix()
-	result, err := db.ExecContext(ctx, `INSERT INTO pending_move_notifications
+	var id int64
+	err = db.QueryRowContext(ctx, `INSERT INTO pending_move_notifications
 		(user_id, account_id, destination_mailbox_id, raw_sha256, created_at, expires_at)
-		SELECT message.user_id, message.account_id, destination.id, blob.sha256, ?, ?
+		SELECT message.user_id, message.account_id, destination.id, blob.sha256, CAST(? AS BIGINT), CAST(? AS BIGINT)
 		FROM messages AS message
 		JOIN blobs AS blob
 			ON blob.user_id = message.user_id AND blob.id = message.blob_id
 		JOIN mailboxes AS destination
 			ON destination.user_id = message.user_id AND destination.account_id = message.account_id
 		WHERE message.user_id = ? AND message.id = ? AND destination.id = ?
-			AND blob.sha256 <> ''`,
-		now, now+int64(pendingMoveNotificationTTL/time.Second), userID, sourceMessageID, destinationMailboxID)
-	if err != nil {
-		return 0, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	if rows != 1 {
+			AND blob.sha256 <> ''
+		RETURNING id`,
+		now, now+int64(pendingMoveNotificationTTL/time.Second), userID, sourceMessageID, destinationMailboxID).Scan(&id)
+	// The SELECT feeding the insert is what decides whether a row is written:
+	// no matching message, blob, or destination means no row, which RETURNING
+	// reports as no rows rather than as an error.
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
-	return result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // DeletePendingMoveNotification removes a staged marker when the remote move
@@ -91,7 +93,7 @@ func consumePendingMoveNotification(ctx context.Context, tx *sql.Tx, userID, mes
 			ON blob.user_id = message.user_id AND blob.id = message.blob_id
 		WHERE message.user_id = ? AND message.id = ?
 			AND pending.consumed_message_id = message.id
-			AND pending.raw_sha256 = blob.sha256 COLLATE BINARY
+			AND pending.raw_sha256 = blob.sha256
 			AND pending.expires_at > ?
 		LIMIT 1`, userID, messageID, now).Scan(&existing)
 	if err == nil {
@@ -114,7 +116,7 @@ func consumePendingMoveNotification(ctx context.Context, tx *sql.Tx, userID, mes
 				ON blob.user_id = message.user_id AND blob.id = message.blob_id
 			WHERE message.user_id = ? AND message.id = ?
 				AND pending.consumed_message_id IS NULL
-				AND pending.raw_sha256 = blob.sha256 COLLATE BINARY
+				AND pending.raw_sha256 = blob.sha256
 				AND pending.expires_at > ?
 			ORDER BY pending.id
 			LIMIT 1

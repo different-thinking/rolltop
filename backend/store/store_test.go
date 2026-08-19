@@ -15,57 +15,9 @@ import (
 	"time"
 )
 
-func TestOpenServerStoresMailDataInUserDatabase(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	dataDir := filepath.Join(root, "data")
-	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	user, err := db.CreateUser(ctx, "split@example.test", "Split", "hash", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	account, err := db.CreateMailAccount(ctx, MailAccount{UserID: user.ID, Email: "split@example.test", Host: "imap.example.test", Port: 993, Username: "split", EncryptedPassword: "secret", UseTLS: true, Mailbox: "*"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if account.ID == 0 {
-		t.Fatal("account was not created")
-	}
-	userDBPath := filepath.Join(dataDir, "users", strconv.FormatInt(user.ID, 10), "rolltop.db")
-	if _, err := os.Stat(userDBPath); err != nil {
-		t.Fatalf("user database was not created: %v", err)
-	}
-	var systemMailTable string
-	if err := db.DB().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mail_accounts'`).Scan(&systemMailTable); err != ErrNotFound {
-		t.Fatalf("system database mail_accounts table lookup err = %v, want not found", err)
-	}
-	userDB, err := db.UserDB(ctx, user.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var userAccounts int
-	if err := userDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_accounts WHERE user_id = ?`, user.ID).Scan(&userAccounts); err != nil {
-		t.Fatal(err)
-	}
-	if userAccounts != 1 {
-		t.Fatalf("user database has %d mail accounts, want 1", userAccounts)
-	}
-	accounts, err := db.ListAccounts(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accounts) != 1 || accounts[0].UserID != user.ID || accounts[0].ID != account.ID {
-		t.Fatalf("ListAccounts = %+v", accounts)
-	}
-}
-
 func TestCreateBlobIsIdempotentForUserPath(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +54,7 @@ func TestCreateBlobIsIdempotentForUserPath(t *testing.T) {
 
 func TestDeleteBlobIfUnreferencedPreservesReattachedBlob(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +135,7 @@ func TestDeleteBlobIfUnreferencedPreservesReattachedBlob(t *testing.T) {
 
 func TestCreateMessageRejectsStalePositiveMailboxGeneration(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +192,7 @@ func TestCreateMessageRejectsStalePositiveMailboxGeneration(t *testing.T) {
 
 func TestWebPushSubscriptionsAreUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +265,7 @@ func TestWebPushSubscriptionsAreUserScoped(t *testing.T) {
 
 func TestThreadMessagesForUserUsesReferencesAndSubjectFallback(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +312,7 @@ func TestThreadMessagesForUserUsesReferencesAndSubjectFallback(t *testing.T) {
 
 func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +420,7 @@ func TestListLatestThreadMessagesForUserUsesNewestMessagePerThread(t *testing.T)
 
 func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +503,7 @@ func TestUnarchivedListsExcludeArchiveMailbox(t *testing.T) {
 
 func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +615,7 @@ func TestArchiveMailboxResolutionPrefersTheIdentityChoice(t *testing.T) {
 // A role view spans every account the user owns, and never another user's.
 func TestRoleViewsSpanAccountsAndStayTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +698,7 @@ func messageIDsOf(messages []MessageRecord) []int64 {
 
 func TestRoleViewsReadTheFoldersCarryingThatRole(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +782,7 @@ func TestRoleViewsReadTheFoldersCarryingThatRole(t *testing.T) {
 
 func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -873,7 +825,7 @@ func TestListLatestThreadMessagesPagesForwardWhenOldestFirst(t *testing.T) {
 func TestBackfillThreadHeadersFromBlobsRepairsRowsMissingThreadHeaders(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,7 +897,7 @@ func TestBackfillThreadHeadersFromBlobsRepairsRowsMissingThreadHeaders(t *testin
 
 func TestReadSenderStatsAreUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,17 +942,17 @@ func TestReadSenderStatsAreUserScoped(t *testing.T) {
 		t.Fatalf("sender counts = %+v", stats[0])
 	}
 	var indexName string
-	if err := db.DB().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_user_from_read'`).Scan(&indexName); err != nil {
+	if err := db.DB().QueryRowContext(ctx, `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_messages_user_from_read'`).Scan(&indexName); err != nil {
 		t.Fatalf("sender stats index lookup: %v", err)
 	}
-	if err := db.DB().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_sender_read_stats_user_boost'`).Scan(&indexName); err != nil {
+	if err := db.DB().QueryRowContext(ctx, `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_sender_read_stats_user_boost'`).Scan(&indexName); err != nil {
 		t.Fatalf("materialized sender stats index lookup: %v", err)
 	}
 }
 
 func TestUpdateMessageBodiesIsUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,7 +1001,7 @@ func TestUpdateMessageBodiesIsUserScoped(t *testing.T) {
 
 func TestSyncRunStoresLatestNewMessageDetails(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1050,7 @@ func TestSyncRunStoresLatestNewMessageDetails(t *testing.T) {
 
 func TestListSyncRunsForUserCollapsesNoopFolderRuns(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,7 +1106,7 @@ func TestListSyncRunsForUserCollapsesNoopFolderRuns(t *testing.T) {
 
 func TestListLatestSyncRunsByMailboxForUserIsUnboundedAndTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,13 +1125,11 @@ func TestListLatestSyncRunsByMailboxForUserIsUnboundedAndTenantScoped(t *testing
 	}
 	insertRun := func(userID, accountID int64, mailbox string, updated int64) int64 {
 		t.Helper()
-		result, insertErr := db.DB().ExecContext(ctx, `INSERT INTO sync_runs
+		var id int64
+		insertErr := db.DB().QueryRowContext(ctx, `INSERT INTO sync_runs
 			(user_id, account_id, status, started_at, finished_at, updated_at, current_mailbox, current_uid)
-			VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)`, userID, accountID, updated, updated, updated, mailbox, updated)
-		if insertErr != nil {
-			t.Fatal(insertErr)
-		}
-		id, insertErr := result.LastInsertId()
+			VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)
+			RETURNING id`, userID, accountID, updated, updated, updated, mailbox, updated).Scan(&id)
 		if insertErr != nil {
 			t.Fatal(insertErr)
 		}
@@ -1232,7 +1182,7 @@ func TestListLatestSyncRunsByMailboxForUserIsUnboundedAndTenantScoped(t *testing
 
 func TestMarkRunningSyncRunsInterruptedSurvivesLateFinish(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,7 +1246,7 @@ func TestMarkRunningSyncRunsInterruptedSurvivesLateFinish(t *testing.T) {
 
 func TestUpdateUserDisplayPreferencesPersistsTheme(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1361,7 +1311,7 @@ func TestUpdateUserDisplayPreferencesPersistsTheme(t *testing.T) {
 
 func TestStorageMessageCountsAreTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1429,7 +1379,7 @@ func TestStorageMessageCountsAreTenantScoped(t *testing.T) {
 
 func TestListSearchIndexedMessageIDsForMailboxIsTenantAndMailboxScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1668,7 +1618,7 @@ func TestListSearchIndexedMessageIDsForMailboxIsTenantAndMailboxScoped(t *testin
 
 func TestOnboardingMailboxDefaultsDiscoverAllButAutoSyncInboxOnly(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1726,7 +1676,7 @@ func TestOnboardingMailboxDefaultsDiscoverAllButAutoSyncInboxOnly(t *testing.T) 
 
 func TestDiscoveredMailboxRoleFillsEmptyRoleWithoutChangingSyncDefaults(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1767,54 +1717,9 @@ func TestDiscoveredMailboxRoleFillsEmptyRoleWithoutChangingSyncDefaults(t *testi
 	}
 }
 
-func TestSeedJunkMailboxRolesUsesExactNames(t *testing.T) {
-	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	user, err := db.CreateUser(ctx, "migration@example.test", "Migration", "hash", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	account, err := db.CreateMailAccount(ctx, MailAccount{UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993, Username: user.Email, EncryptedPassword: "secret", UseTLS: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	spam, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Spam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	child, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX.spam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.db.ExecContext(ctx, `UPDATE mailboxes SET role = '', icon = 'folder' WHERE user_id = ?`, user.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := seedJunkMailboxRoles(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-	spam, err = db.GetMailboxForUser(ctx, user.ID, spam.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	child, err = db.GetMailboxForUser(ctx, user.ID, child.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if spam.Role != "junk" || spam.Icon != "report" || spam.ShowInAllMail {
-		t.Fatalf("exact Spam backfill = role %q icon %q all-mail %t", spam.Role, spam.Icon, spam.ShowInAllMail)
-	}
-	if child.Role != "" {
-		t.Fatalf("substring mailbox backfill role = %q, want unassigned", child.Role)
-	}
-}
-
 func TestUpdateMailboxSettingsRejectsInheritForTopLevelFolder(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1860,7 +1765,7 @@ func TestUpdateMailboxSettingsRejectsInheritForTopLevelFolder(t *testing.T) {
 
 func TestUpdateMailboxSettingsRejectsDuplicateSpecialRole(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1909,7 +1814,7 @@ func TestUpdateMailboxSettingsRejectsDuplicateSpecialRole(t *testing.T) {
 // reader's own card.
 func TestOnboardingIdentityTakesTheDefaultSMTPAccount(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1960,7 +1865,7 @@ func TestOnboardingIdentityTakesTheDefaultSMTPAccount(t *testing.T) {
 
 func TestCachedMailIdentitiesDoNotSyncMeContacts(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2017,7 +1922,7 @@ func TestCachedMailIdentitiesDoNotSyncMeContacts(t *testing.T) {
 
 func TestMailAccountsAndIdentitiesStayScopedByUser(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2093,7 +1998,7 @@ func TestMailAccountsAndIdentitiesStayScopedByUser(t *testing.T) {
 
 func TestMailIdentityDefaultsChooseMatchingIMAPAndFolders(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2146,7 +2051,7 @@ func TestMailIdentityDefaultsChooseMatchingIMAPAndFolders(t *testing.T) {
 
 func TestCreateMailIdentityForUserCreatesMeIdentity(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2189,7 +2094,7 @@ func TestCreateMailIdentityForUserCreatesMeIdentity(t *testing.T) {
 
 func TestUpdateMailIdentityValidatesIMAPAndMailboxScope(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2262,7 +2167,7 @@ func TestUpdateMailIdentityValidatesIMAPAndMailboxScope(t *testing.T) {
 
 func TestDeleteSMTPAccountForUserUnlinksIdentities(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2351,7 +2256,7 @@ func testMailbox(t *testing.T, ctx context.Context, db *Store) (User, MailAccoun
 // over rows that a newest-first limit already threw the old ones out of.
 func TestScopeFilterCutoffSelectsOldMailWithinTheLimit(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

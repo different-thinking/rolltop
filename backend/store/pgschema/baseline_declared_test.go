@@ -7,11 +7,13 @@ import (
 	"rolltop/backend/store/pgschema"
 )
 
-// TestDeclaredMatchesTheRenderedSQL keeps the header parser honest against the
-// SQL it claims to describe. The drop step in the admin console removes exactly
-// the names Declared returns, so a table the parser misses would survive a drop
-// and then block the next create.
-func TestDeclaredMatchesTheRenderedSQL(t *testing.T) {
+// TestBaselineDeclaresEveryObject keeps the header parser and the SQL beneath
+// it in step, in both directions. The drop step in the admin console removes
+// exactly the names Declared returns, so a table the parser misses would
+// survive a drop and then block the next create — and now that baseline.sql is
+// hand-edited rather than regenerated, a forgotten header is a plausible edit
+// rather than a generator bug.
+func TestBaselineDeclaresEveryObject(t *testing.T) {
 	tables := pgschema.DeclaredNames(pgschema.TableKind)
 	if len(tables) == 0 {
 		t.Fatal("the baseline declares no tables")

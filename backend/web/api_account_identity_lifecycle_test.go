@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // TestEditingAMailboxDoesNotRecreateARemovedIdentity pins where identities come
@@ -19,8 +19,7 @@ import (
 // -- is not, and must not hand back an identity the user removed.
 func TestEditingAMailboxDoesNotRecreateARemovedIdentity(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +67,7 @@ func TestEditingAMailboxDoesNotRecreateARemovedIdentity(t *testing.T) {
 // must learn nothing beyond "no such identity".
 func TestIdentityDeletionIsScopedToItsOwner(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

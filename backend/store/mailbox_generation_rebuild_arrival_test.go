@@ -3,15 +3,13 @@ package store
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestPendingInboxArrivalSurvivesGenerationResetAndRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +75,7 @@ func TestPendingInboxArrivalSurvivesGenerationResetAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +192,7 @@ func TestPendingInboxArrivalSurvivesGenerationResetAndRestart(t *testing.T) {
 
 func TestPendingInboxArrivalRebuildFailsClosedForAmbiguousDuplicate(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +282,7 @@ func TestPendingInboxArrivalRebuildFailsClosedForAmbiguousDuplicate(t *testing.T
 
 func TestPendingInboxArrivalCanonicalRebuildUsesRefetchedFingerprint(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +357,7 @@ func TestPendingInboxArrivalCanonicalRebuildUsesRefetchedFingerprint(t *testing.
 
 func TestPostFloorCurrentGenerationInboxArrivalFinalizesDuringRebuild(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

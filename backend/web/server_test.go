@@ -19,6 +19,7 @@ import (
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestWriteJSONCachedETagNotModified(t *testing.T) {
@@ -107,7 +108,7 @@ func TestHandleAppServesContactsRoute(t *testing.T) {
 
 func TestHandleAppEmbedsOnlyCurrentUserBootstrap(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +369,7 @@ func TestWarmMailFirstPageInvalidatesOnUserChange(t *testing.T) {
 
 func TestAPISearchCachedETagShortCircuitsBeforeSearch(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +413,7 @@ func TestAPISearchCachedETagShortCircuitsBeforeSearch(t *testing.T) {
 func TestAPISearchWritesTimingHeaders(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +457,7 @@ func TestAPISearchWritesTimingHeaders(t *testing.T) {
 func TestAPISearchRepairsRecentMissingSearchDocument(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +534,7 @@ func TestAPISearchRepairsRecentMissingSearchDocument(t *testing.T) {
 func TestAPIMessageSearchExplanationRepairsAndPrefersClickedMessage(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,8 +668,7 @@ func TestSyncProgressNotificationDoesNotInvalidateMailList(t *testing.T) {
 
 func TestCreateMailIdentityEndpointCreatesMeIdentity(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +746,7 @@ func TestCreateMailIdentityEndpointCreatesMeIdentity(t *testing.T) {
 
 func TestPGPPrivateKeyAPIAutocryptDefaultsOnForFirstIdentityKey(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,8 +807,7 @@ func TestPGPPrivateKeyAPIAutocryptDefaultsOnForFirstIdentityKey(t *testing.T) {
 
 func TestDeleteSMTPAccountEndpointUnlinksIdentities(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,8 +855,7 @@ func TestDeleteSMTPAccountEndpointUnlinksIdentities(t *testing.T) {
 }
 
 func TestSetupCreatesFirstAdmin(t *testing.T) {
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,11 +973,8 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 	writeStorageFile(filepath.Join(dir, "users", "2", "bleve", "index"), "other index should not count for user one")
 	writeStorageFile(filepath.Join(dir, "users", "2", "blobs", "blob"), "other blob should not count for user one")
 
-	server := &Server{dataDir: dir, databasePath: filepath.Join(dir, "rolltop.db"), indexPath: filepath.Join(dir, "bleve")}
+	server := &Server{dataDir: dir, indexPath: filepath.Join(dir, "bleve")}
 	stats := server.cachedStorageStats(1)
-	if stats.DatabaseBytes != 8 {
-		t.Fatalf("database bytes = %d", stats.DatabaseBytes)
-	}
 	if stats.IndexBytes != 27 {
 		t.Fatalf("index bytes = %d", stats.IndexBytes)
 	}
@@ -998,15 +993,17 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 	if stats.BlobBytes != 8 {
 		t.Fatalf("blob bytes = %d", stats.BlobBytes)
 	}
-	if stats.TotalBytes != 43 {
+	// The database is not on this volume any more, so the total is the index
+	// and the blobs.
+	if stats.TotalBytes != 35 {
 		t.Fatalf("total bytes = %d", stats.TotalBytes)
 	}
-	if strings.Contains(stats.DatabasePath, "users/2") || strings.Contains(stats.IndexPath, "users/2") || strings.Contains(stats.BlobPath, "users/2") {
+	if strings.Contains(stats.IndexPath, "users/2") || strings.Contains(stats.BlobPath, "users/2") {
 		t.Fatalf("storage paths include another user: %+v", stats)
 	}
 
 	other := server.cachedStorageStats(2)
-	if other.DatabaseBytes == stats.DatabaseBytes && other.IndexBytes == stats.IndexBytes && other.BlobBytes == stats.BlobBytes {
+	if other.IndexBytes == stats.IndexBytes && other.BlobBytes == stats.BlobBytes {
 		t.Fatalf("per-user storage cache returned same stats for different users: user1=%+v user2=%+v", stats, other)
 	}
 }
@@ -1014,7 +1011,7 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 func TestSyncFolderViewsUsesCommittedSearchMarkers(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1163,7 +1160,7 @@ func TestSyncFolderViewsUsesCommittedSearchMarkers(t *testing.T) {
 
 func TestSyncFolderViewsUsesUnboundedTenantScopedMailboxHistory(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1198,13 +1195,11 @@ func TestSyncFolderViewsUsesUnboundedTenantScopedMailboxHistory(t *testing.T) {
 	}
 	insertRun := func(userID, accountID int64, mailbox string, updated int64) int64 {
 		t.Helper()
-		result, insertErr := db.DB().ExecContext(ctx, `INSERT INTO sync_runs
+		var id int64
+		insertErr := db.DB().QueryRowContext(ctx, `INSERT INTO sync_runs
 			(user_id, account_id, status, started_at, finished_at, updated_at, current_mailbox, current_uid)
-			VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)`, userID, accountID, updated, updated, updated, mailbox, updated)
-		if insertErr != nil {
-			t.Fatal(insertErr)
-		}
-		id, insertErr := result.LastInsertId()
+			VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)
+			RETURNING id`, userID, accountID, updated, updated, updated, mailbox, updated).Scan(&id)
 		if insertErr != nil {
 			t.Fatal(insertErr)
 		}
@@ -1256,8 +1251,7 @@ func TestSyncFolderViewsUsesUnboundedTenantScopedMailboxHistory(t *testing.T) {
 
 func TestMoveRefreshMailboxNamesIncludesSourceAndDestination(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

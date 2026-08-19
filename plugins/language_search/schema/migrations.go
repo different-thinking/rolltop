@@ -26,11 +26,12 @@ func Migrations() []plugins.Migration {
 			`CREATE INDEX IF NOT EXISTS idx_plugin_language_messages_user_language ON plugin_language_messages(user_id, language_code)`,
 		},
 		Apply: func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO plugin_language_messages
+			_, err := tx.ExecContext(ctx, `INSERT INTO plugin_language_messages
 					(user_id, message_id, language_code, detected_at)
 				SELECT user_id, id, lower(trim(language_code)), updated_at
 				FROM messages
-				WHERE trim(language_code) <> ''`)
+				WHERE trim(language_code) <> ''
+				ON CONFLICT DO NOTHING`)
 			return err
 		},
 	}}

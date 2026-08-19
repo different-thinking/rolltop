@@ -28,7 +28,7 @@ type MailboxGenerationBlobCleanup struct {
 func queueMailboxGenerationBlobCleanupTx(ctx context.Context, tx *sql.Tx, userID, accountID, mailboxID, targetUIDValidity, now int64) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO mailbox_generation_blob_cleanup
 		(user_id, account_id, mailbox_id, target_uid_validity, blob_id, blob_path, created_at, updated_at)
-		SELECT DISTINCT message.user_id, message.account_id, message.mailbox_id, ?, blob.id, blob.path, ?, ?
+		SELECT DISTINCT message.user_id, message.account_id, message.mailbox_id, CAST(? AS BIGINT), blob.id, blob.path, CAST(? AS BIGINT), CAST(? AS BIGINT)
 		FROM messages message
 		JOIN blobs blob ON blob.user_id = message.user_id AND blob.id = message.blob_id
 		WHERE message.user_id = ? AND message.account_id = ? AND message.mailbox_id = ?
@@ -126,7 +126,7 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 	case err == nil && currentPath != queuedPath:
 		return finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID)
 	case err == nil:
-		var referenced int
+		var referenced bool
 		if err := tx.QueryRowContext(ctx, `SELECT
 			EXISTS (SELECT 1 FROM messages WHERE user_id = ? AND blob_id = ?)
 			OR EXISTS (SELECT 1 FROM attachments WHERE user_id = ? AND blob_id = ?)
@@ -135,7 +135,7 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 			userID, blobID, userID, blobID, userID, blobID, userID, blobID).Scan(&referenced); err != nil {
 			return err
 		}
-		if referenced != 0 {
+		if referenced {
 			return finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID)
 		}
 		if deletePath != nil && queuedPath != "" {

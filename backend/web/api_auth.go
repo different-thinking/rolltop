@@ -73,12 +73,11 @@ func (s *Server) bootstrapPayload(w http.ResponseWriter, r *http.Request) (map[s
 		err := s.addTenantBootstrap(r, cu.User.ID, resp)
 		switch {
 		case err == nil:
-		case store.IsCorrupt(err):
-			// The account itself lives in the system database, so a tenant
-			// whose mail data cannot be read must not cost the browser its
-			// session: failing here served a 500 for /login and /api/bootstrap
-			// alike, which locked the operator out of the admin database page
-			// that repairs the very tenant at fault.
+		case store.IsUnavailable(err):
+			// A database that is down or failing over must not cost the browser
+			// its session. Answering 500 here took /login and /api/bootstrap
+			// down together, which locked the operator out of the admin
+			// database page that says what is wrong.
 			applyUnavailableTenantBootstrap(cu.User.ID, resp)
 		default:
 			return nil, err

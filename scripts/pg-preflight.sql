@@ -198,7 +198,7 @@ BEGIN
   -- IN (?,?,...) replacement: = ANY(array).
   SELECT count(*) INTO n FROM preflight_scratch.features WHERE id = ANY(ARRAY[new_id]);
   IF n <> 1 THEN RAISE EXCEPTION 'FAIL: = ANY(array)'; END IF;
-  -- Migration tool: identity sequences accept setval past imported rows.
+  -- Identity sequences accept setval and continue past the set value.
   PERFORM setval(pg_get_serial_sequence('preflight_scratch.features', 'id'), 1000000);
   INSERT INTO preflight_scratch.features (slot) VALUES ('b') RETURNING id INTO new_id;
   IF new_id <> 1000001 THEN RAISE EXCEPTION 'FAIL: setval on identity (next id %)', new_id; END IF;

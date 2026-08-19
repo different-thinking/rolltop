@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // TestAPIMailSortsByDateInBothDirections covers the list control that flips a
@@ -20,7 +20,7 @@ import (
 // not be shared between the two orders.
 func TestAPIMailSortsByDateInBothDirections(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestAPIMailSortsByDateInBothDirections(t *testing.T) {
 // tenant's request for the same list URL.
 func TestAPIMailSortCacheIsTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

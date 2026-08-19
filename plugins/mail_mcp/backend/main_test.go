@@ -14,11 +14,12 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestMailMessageGetRequiresUserOwnedMessage(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +38,7 @@ func TestMailMessageGetRequiresUserOwnedMessage(t *testing.T) {
 
 func TestListMessagesRequiresUserOwnedMailbox(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +77,11 @@ func TestBearerUserIDRequiresIssuedAccessToken(t *testing.T) {
 
 func TestGrantRevokeClearsActiveTokens(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	createGrantTable(t, ctx, db)
 	user, err := db.CreateUser(ctx, "grant@example.test", "Grant", "hash", false)
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestConsentPageCSPRejectsUnsafeRedirectHost(t *testing.T) {
 
 func TestListMessagesSupportsDateQuery(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

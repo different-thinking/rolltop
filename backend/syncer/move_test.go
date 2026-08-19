@@ -5,13 +5,13 @@ package syncer
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 
 	"rolltop/internal/testlog"
 )
@@ -102,7 +102,7 @@ type moveTestFixture struct {
 func newMoveTestFixture(t *testing.T) moveTestFixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

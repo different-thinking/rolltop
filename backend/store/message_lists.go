@@ -534,9 +534,11 @@ const messageColumns = `m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, 
 func latestThreadMessagesQuery(source, predicate, direction string) string {
 	return fmt.Sprintf(`WITH keyed AS (
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
-				MAX(printf('%%020d:%%020d',
-					CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END,
-					m.id)) AS latest_key
+				-- A sortable composite of (effective date, id): both halves are
+				-- zero-padded to a fixed width so ordering the text orders the
+				-- numbers, and the id is read back out by offset below.
+				MAX(lpad((CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END)::text, 20, '0')
+					|| ':' || lpad(m.id::text, 20, '0')) AS latest_key
 			FROM messages m%[1]s
 			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
@@ -546,7 +548,7 @@ func latestThreadMessagesQuery(source, predicate, direction string) string {
 			ORDER BY latest_key %[3]s LIMIT ? OFFSET ?
 		)
 		SELECT `+messageColumns+`
-		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS INTEGER)
+		FROM keyed k JOIN messages m ON m.id = CAST(substr(k.latest_key, 22) AS bigint)
 		ORDER BY k.latest_key %[3]s`, source, predicate, direction)
 }
 

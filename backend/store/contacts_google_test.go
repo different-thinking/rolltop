@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ import (
 // unnoticed against a single-tenant fixture.
 func openContactStore(t *testing.T) (*Store, User, User) {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

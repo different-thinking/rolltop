@@ -5,17 +5,10 @@ package store
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
-
-const searchRecoverySynchronousRestoreTimeout = 5 * time.Second
-
-type setSQLiteSynchronousFunc func(context.Context, *sql.Conn, string) error
-type sqliteDurabilityBarrierFunc func(context.Context, *sql.Conn) error
 
 // MarkSearchVisibleMessagesPendingIndex schedules a complete, tenant-scoped
 // search rebuild without changing message content, IMAP state, or blob rows.
@@ -27,8 +20,7 @@ func (s *Store) MarkSearchVisibleMessagesPendingIndex(ctx context.Context, userI
 	if err != nil {
 		return 0, err
 	}
-	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID, searchPendingScope{},
-		setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	return markSearchMessagesPendingIndex(ctx, db, userID, searchPendingScope{})
 }
 
 // MarkSearchMessagesPendingIndexRange is the targeted form: it queues only the
@@ -46,8 +38,7 @@ func (s *Store) MarkSearchMessagesPendingIndexRange(ctx context.Context, userID,
 	if err != nil {
 		return 0, err
 	}
-	return markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db, userID,
-		searchPendingScope{firstID: firstID, lastID: lastID}, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
+	return markSearchMessagesPendingIndex(ctx, db, userID, searchPendingScope{firstID: firstID, lastID: lastID})
 }
 
 // searchPendingScope selects which messages a pending-index write covers. The
@@ -87,100 +78,29 @@ func (s searchPendingScope) filter(userID int64) (string, []any) {
 				AND id BETWEEN ? AND ?`, []any{userID, s.firstID, s.lastID}
 }
 
-// markSearchVisibleMessagesPendingIndexWithSynchronous commits the recovery
-// prerequisite with synchronous=FULL on one dedicated SQLite connection. In
-// WAL mode that commit is durable before the caller fsyncs the Bleve quarantine
-// rename and removes the recovery marker.
-func markSearchVisibleMessagesPendingIndexWithSynchronous(ctx context.Context, db *sql.DB, userID int64, scope searchPendingScope, setSynchronous setSQLiteSynchronousFunc, durabilityBarrier sqliteDurabilityBarrierFunc) (marked int64, err error) {
+// markSearchMessagesPendingIndex records the recovery prerequisite: the rows
+// the caller is about to drop from the search index have to be marked pending
+// *before* the index is quarantined, or a crash in between leaves messages that
+// are in neither the index nor the rebuild queue.
+//
+// Under SQLite this needed a dedicated connection, synchronous=FULL, and a full
+// WAL checkpoint to guarantee the commit had reached the disk before the
+// quarantine rename. None of that survives the move: a committed PostgreSQL
+// transaction is durable by definition, which is the whole barrier this
+// function used to construct by hand.
+func markSearchMessagesPendingIndex(ctx context.Context, db *sql.DB, userID int64, scope searchPendingScope) (int64, error) {
 	if !scope.valid() {
 		return 0, fmt.Errorf("message id range %d-%d is not usable", scope.firstID, scope.lastID)
 	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("reserve durable search recovery connection: %w", err)
-	}
-	fullEnabled := false
-	discarded := false
-	defer func() {
-		if fullEnabled {
-			restoreCtx, cancel := context.WithTimeout(context.Background(), searchRecoverySynchronousRestoreTimeout)
-			restoreErr := setSynchronous(restoreCtx, conn, "NORMAL")
-			cancel()
-			if restoreErr != nil {
-				discardErr := discardSQLConnection(conn)
-				discarded = discardErr == nil
-				err = errors.Join(err, fmt.Errorf("restore SQLite synchronous mode after durable search recovery write: %w", restoreErr), discardErr)
-			}
-		}
-		if !discarded {
-			err = errors.Join(err, conn.Close())
-		}
-	}()
-
-	// Restore NORMAL even if a driver reports an error after partially applying
-	// the PRAGMA; setting NORMAL on an unchanged connection is harmless.
-	fullEnabled = true
-	if err := setSynchronous(ctx, conn, "FULL"); err != nil {
-		return 0, fmt.Errorf("enable durable SQLite search recovery write: %w", err)
-	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("begin durable search recovery write: %w", err)
-	}
-	defer tx.Rollback()
 	filter, filterArguments := scope.filter(userID)
-	result, err := tx.ExecContext(ctx, `UPDATE messages
+	result, err := db.ExecContext(ctx, `UPDATE messages
 			SET attachment_indexed_at = 0
 			WHERE user_id = ?
 				`+filter, append([]any{userID}, filterArguments...)...)
 	if err != nil {
 		return 0, err
 	}
-	marked, err = result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit durable search recovery write: %w", err)
-	}
-	// SQLite can optimize an UPDATE whose target values are already zero into a
-	// read-only transaction. A FULL checkpoint is therefore the durability
-	// barrier: it syncs any pre-existing WAL frame that made those zero values
-	// visible before Bleve is quarantined and the marker is cleared.
-	if err := durabilityBarrier(ctx, conn); err != nil {
-		return marked, fmt.Errorf("checkpoint durable search recovery write: %w", err)
-	}
-	return marked, nil
-}
-
-func setSQLiteSynchronous(ctx context.Context, conn *sql.Conn, mode string) error {
-	if mode != "FULL" && mode != "NORMAL" {
-		return fmt.Errorf("unsupported SQLite synchronous mode %q", mode)
-	}
-	_, err := conn.ExecContext(ctx, "PRAGMA synchronous = "+mode)
-	return err
-}
-
-func fullSQLiteWALCheckpoint(ctx context.Context, conn *sql.Conn) error {
-	var busy, logFrames, checkpointedFrames int
-	if err := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(FULL)`).Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
-		return err
-	}
-	if logFrames < 0 || checkpointedFrames < 0 {
-		return fmt.Errorf("WAL checkpoint unavailable: log_frames=%d checkpointed_frames=%d", logFrames, checkpointedFrames)
-	}
-	if busy != 0 || checkpointedFrames != logFrames {
-		return fmt.Errorf("WAL checkpoint incomplete: busy=%d log_frames=%d checkpointed_frames=%d", busy, logFrames, checkpointedFrames)
-	}
-	return nil
-}
-
-func discardSQLConnection(conn *sql.Conn) error {
-	err := conn.Raw(func(any) error { return driver.ErrBadConn })
-	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
-		return nil
-	}
-	return err
+	return result.RowsAffected()
 }
 
 // ListMessagesNeedingAttachmentIndex returns messages whose raw bodies still need attachment text extraction.

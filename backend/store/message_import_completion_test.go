@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -10,7 +9,7 @@ import (
 
 func TestPendingMessageImportIsExcludedUntilCompleted(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +51,7 @@ func TestPendingMessageImportIsExcludedUntilCompleted(t *testing.T) {
 
 func TestCreateMessageCompletionIsMonotonicAcrossRetries(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +78,7 @@ func TestCreateMessageCompletionIsMonotonicAcrossRetries(t *testing.T) {
 
 func TestMarkMessagesImportCompletedIgnoresMissingAndForeignRows(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

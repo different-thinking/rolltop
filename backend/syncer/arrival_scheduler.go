@@ -248,6 +248,14 @@ func (r *Runner) startMailboxGenerationRebuildRecoveryLoop(wakeNow bool) {
 					r.finishMailboxGenerationRebuildRecoveryLoop()
 					return
 				}
+				// A closed store is not a failure to retry: the process is
+				// shutting down and there is nothing left to read. Retrying
+				// logs the same line forever and keeps a goroutine doing
+				// database round trips against a pool that is gone.
+				if store.IsClosed(err) {
+					r.finishMailboxGenerationRebuildRecoveryLoop()
+					return
+				}
 				log.Printf("recover mailbox generation rebuilds: %v", err)
 				resetRecoveryTimer(timer, interval)
 				continue

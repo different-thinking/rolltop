@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"rolltop/backend/plugins"
 )
 
@@ -202,15 +204,11 @@ func (s *Store) ApplyPluginMigrations(ctx context.Context, pluginID string) erro
 	return nil
 }
 
+// pluginMigrationScopes returns both scopes. The split between a system and a
+// per-tenant database is what made this a choice; one database holds both, so a
+// plugin's system and user migrations apply to the same place.
 func (s *Store) pluginMigrationScopes() []string {
-	switch s.schema {
-	case schemaSystem:
-		return []string{plugins.ScopeSystem}
-	case schemaUser:
-		return []string{plugins.ScopeUser}
-	default:
-		return []string{plugins.ScopeSystem, plugins.ScopeUser}
-	}
+	return []string{plugins.ScopeSystem, plugins.ScopeUser}
 }
 
 func (s *Store) pluginDefinition(ctx context.Context, id string) (plugins.Definition, bool, bool, error) {
@@ -326,26 +324,80 @@ func (s *Store) applyPluginMigrationsForScope(ctx context.Context, scope string)
 	return nil
 }
 
-func pluginColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+// undefinedTable is PostgreSQL's SQLSTATE for a missing relation.
+const undefinedTable = "42P01"
+
+// pluginMigrationsUpToDate reports whether every compiled plugin migration is
+// already recorded, in one query and without taking the schema lock.
+//
+// This is the ordinary case on every start after the first, and it is worth a
+// fast path of its own: the alternative serialises each starting process behind
+// the server-wide schema lock for a pass that changes nothing, which during a
+// rolling deploy means the incoming process waiting on the outgoing one.
+//
+// A checksum that disagrees is reported here rather than deferred to the locked
+// pass: it is a refusal, not work to be done, and taking a global lock to
+// produce it helps nobody.
+func (s *Store) pluginMigrationsUpToDate(ctx context.Context) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT plugin_id, migration_id, checksum FROM plugin_migrations`)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
+			// No bookkeeping table yet, so nothing can be recorded.
+			return false, nil
+		}
 		return false, err
 	}
 	defer rows.Close()
+	type migrationKey struct{ pluginID, migrationID string }
+	applied := make(map[migrationKey]string)
 	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+		var key migrationKey
+		var checksum string
+		if err := rows.Scan(&key.pluginID, &key.migrationID, &checksum); err != nil {
 			return false, err
 		}
-		if name == column {
-			return true, nil
+		applied[key] = checksum
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, scope := range s.pluginMigrationScopes() {
+		for _, migration := range s.pluginMigrationsForScope(scope) {
+			existing, ok := applied[migrationKey{pluginID: migration.PluginID, migrationID: migration.ID}]
+			if !ok {
+				return false, nil
+			}
+			if existing != pluginMigrationChecksum(migration) {
+				return false, fmt.Errorf("plugin migration checksum mismatch for %s/%s", migration.PluginID, migration.ID)
+			}
 		}
 	}
-	return false, rows.Err()
+	return true, nil
+}
+
+// pluginColumnExists answers whether a plugin's table already carries a column.
+//
+// It exists because SQLite had no ADD COLUMN IF NOT EXISTS, and it survives the
+// move because the interface plugins are written against does — EnsureColumns
+// still takes a column list and adds what is missing.
+//
+// to_regclass resolves the table through search_path, which is deliberately the
+// same resolution the ALTER TABLE that follows will use. Looking the column up
+// in current_schema() instead asks about a different table whenever the two
+// disagree — which they do on a server that has a schema named after the
+// connecting role, where current_schema() is that schema while an unqualified
+// table name still falls through to public.
+func pluginColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_attribute
+			WHERE attrelid = to_regclass(?) AND attname = ? AND attnum > 0 AND NOT attisdropped
+		)`, table, column).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func (s *Store) pluginMigrationsForScope(scope string) []plugins.Migration {
@@ -372,7 +424,24 @@ func (s *Store) pluginDefinitionByID(id string) (plugins.Definition, bool) {
 	return plugins.Definition{}, false
 }
 
+// ensurePluginMigrationTable creates the bookkeeping table if it is missing.
+//
+// The baseline already contains it, so this is a fallback for a store opened
+// against a database built some other way. It runs at most once per store:
+// CREATE TABLE IF NOT EXISTS takes catalog locks even when it does nothing, and
+// this used to run once per migration on every open.
 func (s *Store) ensurePluginMigrationTable(ctx context.Context) error {
+	if s.pluginMigrationTableReady.Load() {
+		return nil
+	}
+	if err := s.createPluginMigrationTable(ctx); err != nil {
+		return err
+	}
+	s.pluginMigrationTableReady.Store(true)
+	return nil
+}
+
+func (s *Store) createPluginMigrationTable(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS plugin_migrations (
 		plugin_id TEXT NOT NULL,
 		migration_id TEXT NOT NULL,

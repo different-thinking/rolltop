@@ -7,7 +7,6 @@ require (
 	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/pemistahl/lingua-go v1.4.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/text v0.37.0

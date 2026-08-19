@@ -115,7 +115,7 @@ export function RouteView({
     return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
   }
   if (location.path === "/admin/database" && user.is_admin) {
-    return <AdminDatabaseView csrf={csrf} datePrefs={user} addToast={addToast} />;
+    return <AdminDatabaseView csrf={csrf} datePrefs={user} />;
   }
   if (location.path === "/activity") {
     return <ActivityView csrf={csrf} datePrefs={user} activeSyncRuns={activeSyncRuns} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;

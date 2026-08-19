@@ -125,12 +125,10 @@ func (s *Store) DeleteBlobIfUnreferencedForUser(ctx context.Context, userID, id 
 // CreateAttachment records attachment metadata for a stored message.
 func (s *Store) CreateAttachment(ctx context.Context, a Attachment) (Attachment, error) {
 	ts := nowUnix()
-	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO attachments (user_id, message_id, blob_id, filename, content_type, content_id, is_inline, size, blob_path, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, a.UserID, a.MessageID, a.BlobID, a.Filename, a.ContentType, a.ContentID, boolInt(a.IsInline), a.Size, a.BlobPath, ts)
-	if err != nil {
-		return Attachment{}, err
-	}
-	id, err := res.LastInsertId()
+	var id int64
+	err := s.mustDataDB(ctx, a.UserID).QueryRowContext(ctx, `INSERT INTO attachments (user_id, message_id, blob_id, filename, content_type, content_id, is_inline, size, blob_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`, a.UserID, a.MessageID, a.BlobID, a.Filename, a.ContentType, a.ContentID, boolInt(a.IsInline), a.Size, a.BlobPath, ts).Scan(&id)
 	if err != nil {
 		return Attachment{}, err
 	}

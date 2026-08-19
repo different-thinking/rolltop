@@ -746,85 +746,41 @@ export type MailIdentity = {
   is_primary: boolean;
 };
 
-/** DatabaseSalvageTable is one table's outcome in a repair report. */
-export type DatabaseSalvageTable = {
-  table: string;
-  copied: number;
-  skipped: number;
-  dropped: number;
-  gaps: number;
-  failure?: string;
-};
-
-/** DatabaseRepairOutcome is what a startup repair recovered for one tenant. */
-export type DatabaseRepairOutcome = {
-  user_id: number;
-  started_at: string;
-  finished_at: string;
-  succeeded: boolean;
-  error?: string;
-  quarantine_path?: string;
-  report: {
-    source_path: string;
-    dest_path: string;
-    tables?: DatabaseSalvageTable[];
-    missing_tables?: string[];
-    rows_copied: number;
-    rows_skipped: number;
-    rows_dropped: number;
-    gaps: number;
-  };
-};
-
-/** DatabaseStatus is one SQLite file on the admin maintenance page. */
+/** DatabaseStatus is the connection and size card for the one database. */
 export type DatabaseStatus = {
-  scope: "system" | "user";
-  user_id: number;
-  email?: string;
-  path: string;
-  bytes: number;
-  wal_bytes: number;
-  missing: boolean;
-  corrupt: boolean;
-  corrupt_detail?: string;
-  corrupt_detected_at?: string;
-  repair_scheduled: boolean;
-  repair_requested_at?: string;
-  last_repair?: DatabaseRepairOutcome;
-};
-
-/** DatabaseMaintenanceJob is a running or finished check/backup job. */
-export type DatabaseMaintenanceJob = {
-  id: number;
-  kind: "check" | "backup";
-  user_id: number;
-  running: boolean;
-  started_at: string;
-  finished_at?: string;
-  detail: string;
-  log: string[];
+  /** role@host/database — never the password. */
+  target: string;
+  reachable: boolean;
   error?: string;
-  problems: number;
-};
-
-/** DatabaseBackup is one previously written backup directory. */
-export type DatabaseBackup = {
-  name: string;
-  path: string;
+  server_version?: string;
   bytes: number;
-  created_at: string;
+  latency_millis: number;
+  in_recovery: boolean;
+  connections: number;
+  pool_max_conns: number;
 };
 
-/** DatabaseOverview is the admin database maintenance payload. */
-export type DatabaseOverview = {
+/** VolumeStatus is the data volume, which still holds blobs and search
+ * indexes even though the relational data no longer does. */
+export type VolumeStatus = {
   data_dir: string;
   free_bytes: number;
   total_bytes: number;
-  databases: DatabaseStatus[];
-  backups?: DatabaseBackup[] | null;
-  backup_dir: string;
-  job?: DatabaseMaintenanceJob | null;
-  restart_supported: boolean;
+  blob_bytes: number;
+  index_bytes: number;
+  /** Under users/ but neither a blob nor a live index — a quarantined index,
+   * most often. Without it the figures fail to add up to the used space. */
+  other_bytes: number;
+  /** When the walk behind the three figures above ran, or 0 if none has
+   * finished yet: measuring costs one stat per stored file, so it runs on a
+   * timer rather than per request. */
+  measured_at_unix: number;
+};
+
+/** DatabaseOverview is the admin database page payload. */
+export type DatabaseOverview = {
+  database: DatabaseStatus;
+  volume: VolumeStatus;
 };
 
 /** PostgresPreflightCheck is one verified capability of a candidate

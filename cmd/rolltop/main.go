@@ -18,10 +18,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +32,7 @@ import (
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
 	"rolltop/backend/memlimit"
+	"rolltop/backend/pgdsn"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
@@ -459,20 +458,12 @@ func run() (runErr error) {
 	// Name the resolved storage paths before anything opens them, so a
 	// misconfigured deployment (volume mounted somewhere Rolltop does not
 	// write) is visible in the first lines of the container log.
-	log.Printf("rolltop storage data_dir=%s db=%s index=%s", cfg.DataDir, cfg.DatabasePath, cfg.IndexPath)
+	log.Printf("rolltop storage data_dir=%s index=%s database=%s", cfg.DataDir, cfg.IndexPath, pgdsn.Describe(cfg.DatabaseURL))
 	// Measuring the index means stat-walking every tenant's segment files, on the
 	// storage whose latency this warning is about. Nothing depends on the result,
 	// so it must not stand between the process and serving traffic - least of all
 	// during the recovery restarts this release exists to make cheap.
 	go reportIndexMemoryHeadroom(appliedMemory, cfg.SearchRoot())
-	// Each database resolves its own mode when it is opened, because the system
-	// database can be configured onto a different filesystem than the tenant
-	// databases. Both are reported here, since the choice changes how SQLite
-	// behaves for the whole run.
-	reportSQLiteAccess(cfg.SQLiteAccess, "data directory", cfg.DataDir)
-	if systemDir := filepath.Dir(cfg.DatabasePath); systemDir != filepath.Clean(cfg.DataDir) {
-		reportSQLiteAccess(cfg.SQLiteAccess, "system database", systemDir)
-	}
 	// A deployment that starts the replacement before stopping the process it
 	// replaces makes both want this directory for a few seconds. Waiting is what
 	// keeps the second process out of SQLite and the Bleve indexes without
@@ -512,16 +503,9 @@ func run() (runErr error) {
 	defer func() { crash.finish(runErr) }()
 	crash.beginRun(buildinfo.Version)
 
-	// The marker is claimed after the instance lock, so only the process that
-	// owns the data directory can decide what the previous run's exit means.
-	uncleanShutdown := claimRunningMarker(cfg.DataDir)
-	if uncleanShutdown {
-		log.Printf("previous rolltop run did not shut down cleanly")
-	}
-
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
-	app, err := startApp(appCtx, cfg, startup, uncleanShutdown)
+	app, err := startApp(appCtx, cfg, startup)
 	if err != nil {
 		startup.fail(err)
 		log.Printf("rolltop startup failed: %v", err)
@@ -536,19 +520,9 @@ func run() (runErr error) {
 		return err
 	}
 	restartShutdownOwnsClose := false
-	// The restart path closes the app on a goroutine that outlives its own
-	// timeout, so this flag crosses goroutines and needs atomic access.
-	var databasesClosed atomic.Bool
 	defer func() {
 		if !restartShutdownOwnsClose {
 			app.close()
-			databasesClosed.Store(true)
-		}
-		// The marker outlives any exit that did not get as far as closing
-		// SQLite, so the next start treats that exit as unclean and verifies
-		// the files before serving.
-		if databasesClosed.Load() {
-			releaseRunningMarker(cfg.DataDir)
 		}
 	}()
 	gate.setHandler(app.handler)
@@ -577,7 +551,6 @@ func run() (runErr error) {
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
 			shutdownErr := shutdownServingApp(app, server, serverErr)
 			app.close()
-			databasesClosed.Store(true)
 			return shutdownErr
 		})
 		if cleanupErr != nil {
@@ -597,21 +570,8 @@ func run() (runErr error) {
 
 // startApp performs the blocking startup work in dependency order: schema,
 // user stores, interrupted sync cleanup, search indexes, then web/sync services.
-// reportSQLiteAccess names the mode one location resolves to. The failure it
-// guards against cannot be diagnosed afterwards: a WAL index on a volume that
-// cannot host it corrupts databases hours later, with nothing in the log tying
-// the damage to the storage.
-func reportSQLiteAccess(configured store.AccessMode, label, path string) {
-	access, filesystem := store.ResolveAccessMode(configured, path)
-	log.Printf("rolltop sqlite access=%s %s filesystem=%s", access, label, filesystem.Name)
-	if !filesystem.SharedMemorySafe {
-		log.Printf("rolltop warning: the %s is on %s, which cannot be trusted with SQLite's shared WAL index; "+
-			"databases there are opened one connection at a time without it", label, filesystem.Name)
-	}
-}
-
-func startApp(ctx context.Context, cfg config.Config, startup *startupState, uncleanShutdown bool) (*appRuntime, error) {
-	startup.update("System database", "opening", 0, 1)
+func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*appRuntime, error) {
+	startup.update("Database", "connecting", 0, 1)
 	pluginManifests, err := plugins.LoadManifests(cfg.PluginDir)
 	if err != nil {
 		return nil, err
@@ -626,18 +586,22 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 		}
 	}
 	reporter := func(p store.MigrationProgress) {
-		phase := "System database"
-		if p.Scope == "user" {
-			phase = "User databases"
-		}
 		detail := strings.TrimSpace(p.Migration + " - " + p.Step)
-		startup.update(phase, detail, p.Done, p.Total)
+		startup.update("Database", detail, p.Done, p.Total)
 	}
-	db, err := store.OpenServerWithOptions(cfg.DatabasePath, store.ServerOptions{
-		DataDir:   cfg.DataDir,
-		Manifests: pluginManifests,
-		Progress:  reporter,
-		Access:    cfg.SQLiteAccess,
+	db, err := store.OpenPostgres(ctx, cfg.DatabaseURL, store.PostgresOptions{
+		MaxConns:       cfg.DatabaseMaxConns,
+		Manifests:      pluginManifests,
+		Progress:       reporter,
+		DataDir:        cfg.DataDir,
+		ConnectTimeout: cfg.DatabaseConnectTimeout,
+		// One server per database. The data-directory lock above only catches
+		// two containers sharing a volume; this catches two deployments with
+		// their own volumes pointed at one DSN, which nothing else would.
+		// It waits out a rolling deploy on the same budget the directory lock
+		// uses, so an overlapping restart is not a failure.
+		ExclusiveInstance: true,
+		InstanceLockWait:  cfg.StartupLockWait,
 	})
 	if err != nil {
 		return nil, err
@@ -648,37 +612,6 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 			_ = db.Close()
 		}
 	}()
-
-	// Repairs scheduled from the admin UI run here, while the tenant databases
-	// still have no open handles. Failures are recorded per tenant and do not
-	// stop the other tenants from starting.
-	startup.update("User databases", "checking scheduled repairs", 0, 1)
-	if _, err := runScheduledDatabaseRepairs(ctx, cfg.DataDir, pluginManifests, time.Now(), func(done, total int, detail string) {
-		startup.update("User databases", detail, done, total)
-	}); err != nil {
-		return nil, err
-	}
-
-	if startupIntegrityCheckRequired(cfg.StartupIntegrityCheck, uncleanShutdown) {
-		startup.update("User databases", "verifying after unclean shutdown", 0, 1)
-		damaged, err := verifyUserDatabases(ctx, db, cfg.DataDir, func(done, total int, detail string) {
-			startup.update("User databases", detail, done, total)
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(damaged) > 0 {
-			log.Printf("startup integrity check found %d damaged user database(s); repair them with rolltop recover-db", len(damaged))
-		}
-	}
-
-	startup.update("User databases", "opening per-user stores", 0, 1)
-	if err := db.PrepareUserStores(ctx, reporter); err != nil {
-		return nil, err
-	}
-	for _, warning := range damagedDatabaseWarnings(db.CorruptDatabases()) {
-		log.Print(warning)
-	}
 
 	startup.update("Sync state", "marking interrupted sync runs", 0, 1)
 	if n, err := db.MarkRunningSyncRunsInterrupted(context.Background()); err != nil {
@@ -760,24 +693,24 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState, unc
 	}
 	syncRunner := syncer.NewRunnerWithContext(ctx, syncSvc)
 	webServer, err := web.New(web.Options{
-		Store:          db,
-		Blobs:          blobStore,
-		Search:         searchSvc,
-		Syncer:         syncSvc,
-		SyncRunner:     syncRunner,
-		MasterKey:      cfg.MasterKey,
-		DataDir:        cfg.DataDir,
-		DatabasePath:   cfg.DatabasePath,
-		IndexPath:      cfg.IndexPath,
-		PluginDir:      cfg.PluginDir,
-		SessionTTL:     cfg.SessionTTL,
-		CookieSecure:   cfg.CookieSecure,
-		WebhookToken:   cfg.WebhookToken,
-		Google:         cfg.Google,
-		GoogleAuth:     googleAuth,
-		GoogleContacts: googleContacts,
-		GoogleCalendar: googleCalendar,
-		RequestRestart: requestRestart,
+		Store:            db,
+		Blobs:            blobStore,
+		Search:           searchSvc,
+		Syncer:           syncSvc,
+		SyncRunner:       syncRunner,
+		MasterKey:        cfg.MasterKey,
+		DataDir:          cfg.DataDir,
+		DatabaseTarget:   pgdsn.Describe(cfg.DatabaseURL),
+		DatabaseMaxConns: db.MaxConns(),
+		IndexPath:        cfg.IndexPath,
+		PluginDir:        cfg.PluginDir,
+		SessionTTL:       cfg.SessionTTL,
+		CookieSecure:     cfg.CookieSecure,
+		WebhookToken:     cfg.WebhookToken,
+		Google:           cfg.Google,
+		GoogleAuth:       googleAuth,
+		GoogleContacts:   googleContacts,
+		GoogleCalendar:   googleCalendar,
 	})
 	if err != nil {
 		return nil, err

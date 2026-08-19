@@ -14,13 +14,14 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
 func TestRecoverMarkedSearchIndexesQuarantinesOnlyTargetAndQueuesEveryVisibleLocalFolder(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestRecoverMarkedSearchIndexesQuarantinesOnlyTargetAndQueuesEveryVisibleLoc
 func TestRecoverMarkedSearchIndexesKeepsMarkerWhenQuarantineFailsAfterPendingWrite(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +265,7 @@ func assertSearchRecoveryMessagePreserved(t *testing.T, ctx context.Context, db 
 func TestRecoverMarkedSearchIndexesRepairsNamedRangeAndKeepsIndex(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +344,7 @@ func TestRecoverMarkedSearchIndexesRepairsNamedRangeAndKeepsIndex(t *testing.T) 
 func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexDoesNotOpen(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +416,7 @@ func searchRecoveryRequired(service *search.Service, userID int64) (bool, error)
 func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexIsMissing(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +468,7 @@ func TestRecoverMarkedSearchIndexesRebuildsWhenTheKeptIndexIsMissing(t *testing.
 func TestRecoverMarkedSearchIndexesDeletesDocumentsWhoseMessagesVanished(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +534,7 @@ func TestRecoverMarkedSearchIndexesDeletesDocumentsWhoseMessagesVanished(t *test
 func TestRecoverMarkedSearchIndexesRebuildsWhenTheRangeIsTooWideToSweep(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

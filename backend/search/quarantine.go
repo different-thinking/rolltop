@@ -15,9 +15,11 @@ import (
 // or stamp that drifts between the two makes pruning silently stop matching, and
 // quarantines then accumulate unbounded with nothing reporting it.
 const (
-	// liveIndexDirName is the per-user Bleve directory inside a tenant's data
-	// directory.
-	liveIndexDirName = "bleve"
+	// LiveIndexDirName is the per-user Bleve directory inside a tenant's data
+	// directory. It is exported because the admin volume card attributes bytes
+	// by directory name, and a second spelling of "bleve" there would quietly
+	// file every tenant's index under "other".
+	LiveIndexDirName = "bleve"
 	// quarantineDirSuffix separates the live index name from its timestamp.
 	quarantineDirSuffix = ".quarantine-"
 	// quarantineStampLayout is the UTC stamp appended to a quarantine.
@@ -26,7 +28,7 @@ const (
 
 // quarantineDirPrefix is what a quarantined index directory is named before its
 // timestamp, for callers scanning a tenant directory.
-func quarantineDirPrefix() string { return liveIndexDirName + quarantineDirSuffix }
+func quarantineDirPrefix() string { return LiveIndexDirName + quarantineDirSuffix }
 
 // IndexQuarantine is the reversible result of moving one tenant's Bleve index
 // out of the live path. An empty QuarantinePath means no index existed.
@@ -97,7 +99,7 @@ func inspectPerUserIndex(root string, userID int64) (IndexQuarantine, bool, erro
 		return IndexQuarantine{}, false, fmt.Errorf("resolve per-user index root: %w", err)
 	}
 	userDir := filepath.Join(root, strconv.FormatInt(userID, 10))
-	indexPath := filepath.Join(userDir, liveIndexDirName)
+	indexPath := filepath.Join(userDir, LiveIndexDirName)
 	result := IndexQuarantine{IndexPath: indexPath}
 	rootInfo, err := os.Lstat(root)
 	if errorsIsNotExist(err) {

@@ -24,7 +24,7 @@ It changes only derived search completion state; it does not delete or alter
 message content, IMAP state, attachments, or blobs.
 `
 
-const commandUsage = resetSearchUsage + "\n" + databaseMaintenanceUsage + "\n" + backupDatabaseUsage
+const commandUsage = resetSearchUsage
 
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -33,12 +33,6 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	switch args[0] {
 	case "reset-search":
 		return runResetSearch(ctx, args[1:], stdout, stderr)
-	case "check-db":
-		return runCheckDatabase(ctx, args[1:], stdout, stderr)
-	case "recover-db":
-		return runRecoverDatabase(ctx, args[1:], stdout, stderr)
-	case "backup-db":
-		return runBackupDatabase(ctx, args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		_, _ = io.WriteString(stdout, commandUsage)
 		return nil
@@ -83,7 +77,19 @@ func runResetSearch(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return err
 	}
-	db, err := store.OpenServerWithPluginManifests(cfg.DatabasePath, cfg.DataDir, manifests, nil)
+	db, err := store.OpenPostgres(ctx, cfg.DatabaseURL, store.PostgresOptions{
+		MaxConns:       cfg.DatabaseMaxConns,
+		Manifests:      manifests,
+		DataDir:        cfg.DataDir,
+		ConnectTimeout: cfg.DatabaseConnectTimeout,
+		// This command marks message rows pending and moves an index directory
+		// under the server's feet, so it may only run while no server serves
+		// this database. The directory lock above catches one sharing this
+		// volume; this catches one on its own volume. No wait: --confirm-offline
+		// already says the operator believes nothing is running, and the point
+		// is to contradict them immediately when something is.
+		ExclusiveInstance: true,
+	})
 	if err != nil {
 		return err
 	}
@@ -98,18 +104,13 @@ func runResetSearch(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err := search.ValidatePerUserIndexPath(indexRoot, *userID); err != nil {
 		return fmt.Errorf("validate local user %d data path: %w", *userID, err)
 	}
-	// Open and migrate the selected tenant database before touching its index.
-	if _, err := db.UserStore(ctx, *userID); err != nil {
-		return fmt.Errorf("open local user %d store: %w", *userID, err)
-	}
-
 	marked, err := db.MarkSearchVisibleMessagesPendingIndex(ctx, *userID)
 	if err != nil {
 		return fmt.Errorf("mark user %d messages pending search reindex: %w", *userID, err)
 	}
 	// Pending flags are deliberately written first. If the process stops before
 	// the rename, rebuilding documents in the old index is harmless. The inverse
-	// ordering could leave an empty index with every SQLite row marked complete.
+	// ordering could leave an empty index with every row marked complete.
 	quarantine, err := search.QuarantinePerUserIndex(indexRoot, *userID, time.Now())
 	if err != nil {
 		return fmt.Errorf("messages were safely marked pending, but the index could not be quarantined: %w", err)

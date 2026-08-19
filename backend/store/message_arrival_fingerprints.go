@@ -203,19 +203,17 @@ func (s *Store) StageMessageTransfer(ctx context.Context, userID, sourceMessageI
 	if activeCount >= maxUnconsumedMessageTransfersPerUser {
 		return MessageTransfer{}, fmt.Errorf("too many unresolved message transfers; sync destination mailboxes before starting another")
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO message_transfers
+	var id int64
+	err = tx.QueryRowContext(ctx, `INSERT INTO message_transfers
 		(user_id, source_account_id, destination_account_id, source_mailbox_id,
 		 destination_mailbox_id, source_message_id, source_uid, source_uid_validity, operation_kind, state,
 		 raw_sha256, canonical_sha256, message_id_hash, internal_date_unix, message_size,
 		 created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		userID, sourceAccountID, destinationAccountID, sourceMailboxID, destinationMailboxID,
 		sourceMessageID, sourceUID, sourceUIDValidity, kind, rawSHA, canonicalSHA, messageIDHash, internalDate, size,
-		now, now, now+int64(messageTransferTTL/time.Second))
-	if err != nil {
-		return MessageTransfer{}, err
-	}
-	id, err := result.LastInsertId()
+		now, now, now+int64(messageTransferTTL/time.Second)).Scan(&id)
 	if err != nil {
 		return MessageTransfer{}, err
 	}
@@ -455,7 +453,7 @@ func (s *Store) MarkMessageTransferFailed(ctx context.Context, userID, transferI
 	now := nowUnix()
 	result, err := db.ExecContext(ctx, `UPDATE message_transfers
 		SET state = 'failed', completed_at = CASE WHEN completed_at = 0 THEN ? ELSE completed_at END,
-			updated_at = ?, expires_at = MIN(expires_at, ?)
+			updated_at = ?, expires_at = LEAST(expires_at, ?)
 		WHERE user_id = ? AND id = ? AND state IN ('pending', 'failed')`,
 		now, now, now+int64(expungedFingerprintTTL/time.Second), userID, transferID)
 	if err != nil {

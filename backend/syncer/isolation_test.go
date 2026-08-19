@@ -16,6 +16,7 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -45,7 +46,7 @@ type blockingStatusFetcher struct {
 func TestDiscoverMailboxesPreservesJunkSpecialUseRole(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestDiscoverMailboxesPreservesJunkSpecialUseRole(t *testing.T) {
 func TestNewMailEventsExcludeInitialInboxImport(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestNewMailEventsExcludeInitialInboxImport(t *testing.T) {
 func TestNewMailEventsIncludeFirstArrivalAfterEmptyInboxSync(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +234,7 @@ func TestNewMailEventsIncludeFirstArrivalAfterEmptyInboxSync(t *testing.T) {
 func TestIncrementalNonInboxArrivalCancelsConversationSnoozeWithoutNewMailEvent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +565,7 @@ func (f *fakeFetcher) MoveMessageWithReceipt(ctx context.Context, account store.
 func TestFakeSyncTenantIsolation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +701,7 @@ func TestFakeSyncTenantIsolation(t *testing.T) {
 func TestRequestedMailboxSyncRepairsIncompleteCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +772,7 @@ func TestRequestedMailboxSyncRepairsIncompleteCheckpoint(t *testing.T) {
 func TestRepairMailboxSearchIndexPrunesStaleAndIndexesMissingIDsWhenCountsMatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +952,7 @@ func TestRepairMailboxSearchIndexPrunesStaleAndIndexesMissingIDsWhenCountsMatch(
 func TestPurgeMailboxLocalReferencesClearsSearchAndResetsCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1064,7 +1065,7 @@ func TestPurgeMailboxLocalReferencesClearsSearchAndResetsCheckpoint(t *testing.T
 func TestSyncModesControlAutomaticAndManualFolders(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1162,7 @@ func TestSyncModesControlAutomaticAndManualFolders(t *testing.T) {
 func TestDiscoverMailboxesCreatesRowsWithoutSyncingMessages(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1223,7 +1224,7 @@ func TestDiscoverMailboxesCreatesRowsWithoutSyncingMessages(t *testing.T) {
 func TestCanceledSyncRunIsMarkedInterrupted(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1273,7 +1274,7 @@ func TestCanceledSyncRunIsMarkedInterrupted(t *testing.T) {
 func TestTargetedSyncAttributesRunBeforeRemoteStatusReturns(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1344,7 +1345,7 @@ func TestTargetedSyncAttributesRunBeforeRemoteStatusReturns(t *testing.T) {
 func TestOnDemandFetchCachesRawBlobButPlainFetchDoesNot(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1427,7 +1428,7 @@ func TestOnDemandFetchCachesRawBlobButPlainFetchDoesNot(t *testing.T) {
 func TestCopyMessageAcrossAccountsAppendsAndStoresDestination(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1536,7 +1537,7 @@ func TestCopyMessageAcrossAccountsAppendsAndStoresDestination(t *testing.T) {
 func TestCopyMessagesPreservesSourceDateWhenDestinationUsesAppendDate(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

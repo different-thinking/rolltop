@@ -2,15 +2,13 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestListPendingMailboxGenerationRebuildsPrioritizesInboxWithinEachUser(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
-	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +73,7 @@ func TestListPendingMailboxGenerationRebuildsPrioritizesInboxWithinEachUser(t *t
 
 func TestHasPendingMailboxGenerationRebuildsForUserIsTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
-	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

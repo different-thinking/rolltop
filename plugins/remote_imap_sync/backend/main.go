@@ -473,20 +473,16 @@ func (p *remoteIMAPSyncBackend) prepareRoutine(ctx context.Context, host plugins
 func persistRoutine(ctx context.Context, db *sql.DB, item routine) (routine, error) {
 	now := time.Now().UTC().Unix()
 	if item.ID == 0 {
-		res, err := db.ExecContext(ctx, `INSERT INTO plugin_remote_imap_sync_routines
+		if err := db.QueryRowContext(ctx, `INSERT INTO plugin_remote_imap_sync_routines
 			(user_id, name, enabled, source_provider, source_host, source_port, source_username,
 			 encrypted_source_password, source_use_tls, source_mailbox, destination_account_id,
 			 destination_mailbox_id, after_date, marker_secret, state, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			RETURNING id`,
 			item.UserID, item.Name, boolInt(item.Enabled), item.SourceProvider, item.SourceHost,
 			item.SourcePort, item.SourceUsername, item.EncryptedSourcePassword, boolInt(item.SourceUseTLS),
 			item.SourceMailbox, item.DestinationAccountID, item.DestinationMailboxID,
-			unixOrZero(item.AfterDate), item.MarkerSecret, item.State, now, now)
-		if err != nil {
-			return routine{}, err
-		}
-		item.ID, err = res.LastInsertId()
-		if err != nil {
+			unixOrZero(item.AfterDate), item.MarkerSecret, item.State, now, now).Scan(&item.ID); err != nil {
 			return routine{}, err
 		}
 		return getRoutine(ctx, db, item.UserID, item.ID)

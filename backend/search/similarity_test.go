@@ -18,6 +18,7 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type contextBlockingSimilarityIndex struct {
@@ -98,7 +99,7 @@ func TestSimilarityBleveFailureIsLoggedWhenPluginCallerTreatsItAsOptional(t *tes
 
 func TestSimilarMessagesRecentReadCandidatesUseAuthoritativeSQLiteState(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestSimilarMessagesRecentReadCandidatesUseAuthoritativeSQLiteState(t *testi
 
 func TestSimilarMessagesExplicitCandidatesAreOwnershipCheckedAndReportCoverage(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +224,7 @@ func TestSimilarMessagesExplicitCandidatesAreOwnershipCheckedAndReportCoverage(t
 
 func TestSimilarMessagesFromDomainRequiresEveryComponent(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +273,7 @@ func TestSimilarMessagesFromDomainRequiresEveryComponent(t *testing.T) {
 
 func TestSimilarMessagesSubjectMultiTokenTermKeepsAnyComponentBehavior(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,6 @@ package syncer
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type autoForegroundPriorityFetcher struct {
@@ -374,7 +374,7 @@ func TestRunnerGlobalReleaseCollectsAccountQualifiedPendingRerun(t *testing.T) {
 
 func TestRunnerMailboxMaintenanceBlocksSyncUntilFinished(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestRunnerMailboxMaintenanceBlocksSyncUntilFinished(t *testing.T) {
 
 func TestRunnerMailboxMaintenanceAllowsDifferentMailboxAndHonorsRecoveryGate(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +543,7 @@ func waitForRunnerSyncRun(t *testing.T, ctx context.Context, db *store.Store, us
 func TestGenerationRecoveryCancelsActiveMailboxMaintenance(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestGenerationRecoveryCancelsActiveMailboxMaintenance(t *testing.T) {
 
 func TestRunnerAttachmentIndexWaitsForForegroundOperation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +891,7 @@ func TestRunnerCanceledForegroundWaitReleasesReservation(t *testing.T) {
 func TestGenerationRecoveryDerivedMaintenanceRunsOutsideReplayGate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestGenerationRecoveryDerivedMaintenanceRunsOutsideReplayGate(t *testing.T)
 }
 
 func TestSenderStatsRefreshPreservesNewGenerationRecoveryRequest(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,7 +995,7 @@ func TestSenderStatsRefreshPreservesNewGenerationRecoveryRequest(t *testing.T) {
 }
 
 func TestSenderStatsRefreshWaitsForOrdinaryMailboxWriter(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,7 +1033,7 @@ func TestSenderStatsRefreshWaitsForOrdinaryMailboxWriter(t *testing.T) {
 }
 
 func TestMailboxReservationWaitsForActiveSenderStats(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1155,7 +1155,7 @@ func TestForegroundOperationSerializesExistingAndNewMailboxWriters(t *testing.T)
 func TestForegroundOperationDoesNotCancelExplicitMailboxMaintenance(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1234,7 +1234,7 @@ func TestForegroundOperationDoesNotCancelExplicitMailboxMaintenance(t *testing.T
 func TestForegroundOperationProceedsDuringSearchRebuild(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1328,7 +1328,7 @@ func TestForegroundOperationsAreSerializedPerUser(t *testing.T) {
 func TestForegroundOperationPreemptsNextAutoMailbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1410,7 +1410,7 @@ func TestForegroundOperationPreemptsNextAutoMailbox(t *testing.T) {
 func TestForegroundOperationPreemptsAutoPlanningWaitingOnAttachmentWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1476,7 +1476,7 @@ func TestForegroundOperationPreemptsAutoPlanningWaitingOnAttachmentWorker(t *tes
 func TestForegroundOperationPreemptsAndReplaysAutoPlanning(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1531,7 +1531,7 @@ func TestForegroundOperationPreemptsAndReplaysAutoPlanning(t *testing.T) {
 func TestCanceledForegroundAcquisitionDrainsAndReplaysAutoPlanning(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1629,7 +1629,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysAutoPlanning(t *testing.T)
 func TestCanceledForegroundAcquisitionDrainsAndReplaysRecoveryMailbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1738,7 +1738,7 @@ func TestForegroundQueueDefersWithoutWaitingOnItsOwnReservation(t *testing.T) {
 func TestForegroundReleaseDoesNotInventDerivedMaintenance(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1791,7 +1791,7 @@ func TestOrdinaryMailboxSyncWaitsForCanceledAttachmentWorker(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+			db, err := storetest.Open(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1833,7 +1833,7 @@ func TestOrdinaryMailboxSyncWaitsForCanceledAttachmentWorker(t *testing.T) {
 func TestAccountSyncDoesNotWaitForeverForCanceledAttachmentWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1880,7 +1880,7 @@ func TestAccountSyncDoesNotWaitForeverForCanceledAttachmentWorker(t *testing.T) 
 func TestLiveInboxSyncTimeoutReleasesReservation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1896,13 +1896,17 @@ func TestLiveInboxSyncTimeoutReleasesReservation(t *testing.T) {
 	if !runner.StartAccountMailboxes(user.ID, account.ID, []string{mailbox.Name}) {
 		t.Fatal("Inbox sync did not start")
 	}
+	// Generous on purpose. What this test is about is the 25 ms bounded turn
+	// above releasing its reservation; how long the sync takes to reach the
+	// fetcher in the first place is not the subject, and it now includes a
+	// handful of database round trips.
 	select {
 	case <-fetcher.started:
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Inbox fetch did not start")
 	}
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for runner.IsAccountMailboxRunning(user.ID, account.ID, mailbox.Name) {
 		if time.Now().After(deadline) {
 			close(fetcher.release)
@@ -1916,7 +1920,7 @@ func TestLiveInboxSyncTimeoutReleasesReservation(t *testing.T) {
 func TestGenerationRecoveryReplayKeepsTimedOutInboxPending(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1965,7 +1969,7 @@ func TestGenerationRecoveryReplayKeepsTimedOutInboxPending(t *testing.T) {
 func TestGenerationRecoverySignalCancelsBroadMailboxTurn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2030,7 +2034,7 @@ func TestSenderStatsRefreshHasBoundedTurn(t *testing.T) {
 func TestMailboxMaintenanceWaitsForCanceledAttachmentWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2090,7 +2094,7 @@ func TestMailboxMaintenanceWaitsForCanceledAttachmentWorker(t *testing.T) {
 func TestMailboxMaintenanceWithSetupFailureReleasesReservation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2135,7 +2139,7 @@ func TestMailboxMaintenanceWithSetupFailureReleasesReservation(t *testing.T) {
 func TestMailboxMaintenanceWithCommittedSetupFinishesAcrossGenerationRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2207,7 +2211,7 @@ func TestMailboxMaintenanceWithCommittedSetupFinishesAcrossGenerationRecovery(t 
 
 func TestMailboxMaintenanceCancellationReleasesReservationWhileWaitingForAttachment(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2318,7 +2322,7 @@ func waitForRunnerUserIdle(t *testing.T, r *Runner, userID int64) {
 
 func TestRunnerAttachmentIndexWaitsForMailboxReservation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2358,7 +2362,7 @@ func TestRunnerAttachmentIndexWaitsForMailboxReservation(t *testing.T) {
 func TestRunnerSerializesAttachmentAndSenderStatsHandoffs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

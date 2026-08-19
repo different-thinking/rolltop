@@ -4,71 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/elliptic"
-	"database/sql"
 	"encoding/base64"
-	"path/filepath"
 	"testing"
 )
 
-func TestWebPushDeliveryCursorMigrationBaselinesExistingSubscriptions(t *testing.T) {
-	ctx := context.Background()
-	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "prior-user.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, statement := range []string{
-		`CREATE TABLE web_push_subscriptions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL,
-			endpoint TEXT NOT NULL,
-			p256dh TEXT NOT NULL,
-			auth TEXT NOT NULL,
-			user_agent TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			last_seen_at INTEGER NOT NULL,
-			UNIQUE(user_id, endpoint)
-		)`,
-		`CREATE TABLE new_mail_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL,
-			message_id INTEGER NOT NULL,
-			from_addr TEXT NOT NULL DEFAULT '',
-			subject TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL,
-			UNIQUE(user_id, message_id)
-		)`,
-		`INSERT INTO web_push_subscriptions
-			(user_id, endpoint, p256dh, auth, created_at, updated_at, last_seen_at)
-			VALUES (7, 'https://push.example.test/existing', 'key', 'auth', 1, 1, 1)`,
-		`INSERT INTO new_mail_events (id, user_id, message_id, created_at) VALUES (41, 7, 101, 1)`,
-		`INSERT INTO new_mail_events (id, user_id, message_id, created_at) VALUES (42, 7, 102, 1)`,
-		`INSERT INTO new_mail_events (id, user_id, message_id, created_at) VALUES (99, 8, 201, 1)`,
-	} {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	testStore := &Store{db: db}
-	if err := testStore.applyMigrationSet(ctx, userWebPushDeliveryCursorMigrationSet(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := testStore.applyMigrationSet(ctx, userWebPushDeliveryCursorMigrationSet(), nil); err != nil {
-		t.Fatalf("migration was not idempotent: %v", err)
-	}
-	var cursor int64
-	if err := db.QueryRowContext(ctx, `SELECT last_new_mail_event_id FROM web_push_subscriptions WHERE user_id = 7`).Scan(&cursor); err != nil {
-		t.Fatal(err)
-	}
-	if cursor != 42 {
-		t.Fatalf("migrated cursor = %d, want tenant high-water mark 42", cursor)
-	}
-}
-
 func TestWebPushDeliveryCursorBaselinesPersistsAndIsUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +114,7 @@ func TestWebPushDeliveryCursorBaselinesPersistsAndIsUserScoped(t *testing.T) {
 
 func TestWebPushSubscriptionRejectsNonPublicEndpoints(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2286,7 +2286,7 @@ export function SettingsView({
     return (
       <section className="panel">
         <div className="storage-grid">
-		  <Stat label="Headers" value={formatBytes(storage.DatabaseBytes)} detail={storageEmailDetail(storage.MessageHeaderCount)} />
+		  <Stat label="Headers" value={formatStatCount(storage.MessageHeaderCount)} detail="emails in the database" />
 		  <Stat label="Full Text Search" value={formatBytes(storage.IndexBytes)} detail={storageEmailDetail(storage.IndexMessageCount)} />
 		  <Stat label="Local Cache" value={formatBytes(storage.BlobBytes)} detail={storageEmailDetail(storage.MessageBodyCount)} />
           <Stat label="Total" value={formatBytes(storage.TotalBytes)} detail={String(storage.Error || "")} />

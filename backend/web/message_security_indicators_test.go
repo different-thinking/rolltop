@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestReportedAuthenticationUsesFirstRecognizedHeaderAndLabelsSource(t *testing.T) {
@@ -118,7 +118,7 @@ func TestMessageSecurityIndicatorsOmitEmptyJSON(t *testing.T) {
 func TestMessageSecurityIndicatorsAppearOnlyOnOwningUsersThreadAPI(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

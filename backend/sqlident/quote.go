@@ -1,6 +1,6 @@
 // File overview: Quoting SQL identifiers. Both engines in this repository take
 // the SQL-standard form — double quotes, with an embedded quote doubled — so
-// one implementation serves the SQLite salvage paths and the PostgreSQL test
+// one implementation serves every PostgreSQL identifier this codebase quotes
 // helper alike. It lives in its own leaf package because those two callers
 // cannot import each other.
 

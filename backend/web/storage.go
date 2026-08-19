@@ -11,12 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"rolltop/backend/search"
 )
 
 // StorageStats is the per-user disk usage summary shown on the settings page.
+//
+// There is no per-tenant database figure here. PostgreSQL reports one size for
+// the whole database, which is a number for the admin page rather than for a
+// user's own settings, and no honest share of it can be attributed to one
+// tenant. MessageHeaderCount is what this view can say about the relational
+// side, and it says it as a count.
 type StorageStats struct {
-	DatabasePath               string
-	DatabaseBytes              int64
 	MessageHeaderCount         int
 	IndexPath                  string
 	IndexBytes                 int64
@@ -71,18 +77,13 @@ func (s *Server) cachedStorageStats(userID int64) StorageStats {
 }
 
 func (s *Server) storageStatsForUser(userID int64) StorageStats {
-	databasePath, indexPath, blobPath := s.userStoragePaths(userID)
+	indexPath, blobPath := s.userStoragePaths(userID)
 	stats := StorageStats{
-		DatabasePath: joinedStoragePaths(databasePath),
-		IndexPath:    joinedStoragePaths(indexPath),
-		BlobPath:     joinedStoragePaths(blobPath),
+		IndexPath: joinedStoragePaths(indexPath),
+		BlobPath:  joinedStoragePaths(blobPath),
 	}
 	var errs []string
 	var err error
-	stats.DatabaseBytes, err = sqliteFileSetSize(databasePath)
-	if err != nil {
-		errs = append(errs, fmt.Sprintf("message headers: %v", err))
-	}
 	if s.store != nil {
 		stats.MessageHeaderCount, err = s.store.CountMessagesForUser(context.Background(), userID)
 		if err != nil {
@@ -115,26 +116,26 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, fmt.Sprintf("message body count: %v", err))
 		}
 	}
-	stats.TotalBytes = stats.DatabaseBytes + stats.IndexBytes + stats.BlobBytes
+	stats.TotalBytes = stats.IndexBytes + stats.BlobBytes
 	stats.Error = strings.Join(errs, "; ")
 	return stats
 }
 
-func (s *Server) userStoragePaths(userID int64) (databasePath, indexPath, blobPath string) {
+// userStoragePaths resolves the two directories a tenant still owns on this
+// volume. The relational data is in PostgreSQL and has no per-user path.
+func (s *Server) userStoragePaths(userID int64) (indexPath, blobPath string) {
 	if userID <= 0 {
-		return "", "", ""
+		return "", ""
 	}
 	id := strconv.FormatInt(userID, 10)
 	if strings.TrimSpace(s.dataDir) != "" {
 		userDir := filepath.Join(s.dataDir, "users", id)
-		return filepath.Join(userDir, "rolltop.db"),
-			filepath.Join(userDir, "bleve"),
-			filepath.Join(userDir, "blobs")
+		return filepath.Join(userDir, search.LiveIndexDirName), filepath.Join(userDir, "blobs")
 	}
 	if s.blobs != nil && strings.TrimSpace(s.blobs.Root) != "" {
 		blobPath = filepath.Join(s.blobs.Root, "users", id, "blobs")
 	}
-	return s.databasePath, s.indexPath, blobPath
+	return s.indexPath, blobPath
 }
 
 func joinedStoragePaths(paths ...string) string {
@@ -210,21 +211,6 @@ func relativeStoragePath(root, path string) string {
 		return filepath.Base(path)
 	}
 	return filepath.ToSlash(rel)
-}
-
-func sqliteFileSetSize(path string) (int64, error) {
-	if strings.TrimSpace(path) == "" {
-		return 0, nil
-	}
-	var total int64
-	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		n, err := pathSize(p)
-		if err != nil {
-			return total, err
-		}
-		total += n
-	}
-	return total, nil
 }
 
 func pathSize(path string) (int64, error) {

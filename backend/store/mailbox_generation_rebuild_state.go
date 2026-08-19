@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sort"
 )
 
 // snapshotMailboxGenerationStateTx copies non-derived state before message rows
@@ -44,7 +43,10 @@ func snapshotMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, userID, a
 		 snooze_reminded_at, snooze_created_at, snooze_updated_at,
 		 has_new_mail_event, new_mail_event_id, new_mail_from_addr, new_mail_subject,
 		 new_mail_created_at, created_at, updated_at)
-		SELECT message.user_id, message.account_id, message.mailbox_id, ?, message.id, message.uid,
+		-- The casts are load-bearing: in INSERT ... SELECT, PostgreSQL types the
+		-- SELECT list before it looks at the target columns, so a bare parameter
+		-- there defaults to text and is then rejected against a bigint column.
+		SELECT message.user_id, message.account_id, message.mailbox_id, CAST(? AS BIGINT), message.id, message.uid,
 			blob.sha256, message.canonical_sha256, message.message_id_hash,
 			message.internal_date_unix, message.size,
 			message.is_read, message.read_sync_pending, message.is_starred, message.star_sync_pending,
@@ -54,7 +56,7 @@ func snapshotMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, userID, a
 			COALESCE(snooze.created_at, 0), COALESCE(snooze.updated_at, 0),
 			CASE WHEN event.id IS NULL THEN 0 ELSE 1 END, COALESCE(event.id, 0),
 			COALESCE(event.from_addr, ''), COALESCE(event.subject, ''), COALESCE(event.created_at, 0),
-			?, ?
+			CAST(? AS BIGINT), CAST(? AS BIGINT)
 		FROM messages message
 		JOIN blobs blob ON blob.user_id = message.user_id AND blob.id = message.blob_id
 		LEFT JOIN message_snoozes snooze ON snooze.user_id = message.user_id AND snooze.message_id = message.id
@@ -128,7 +130,7 @@ func snapshotMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, userID, a
 			updated_at = excluded.updated_at`, userID, accountID, mailboxID, targetUIDValidity); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO mailbox_generation_rebuild_snooze_events
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_generation_rebuild_snooze_events
 		(rebuild_message_id, user_id, original_event_id, snooze_generation, from_addr, subject, due_at, created_at)
 		SELECT rebuild.id, reminder.user_id, reminder.id, reminder.snooze_generation,
 			reminder.from_addr, reminder.subject, reminder.due_at, reminder.created_at
@@ -136,17 +138,19 @@ func snapshotMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, userID, a
 		JOIN mailbox_generation_rebuild_messages rebuild
 			ON rebuild.user_id = reminder.user_id AND rebuild.source_message_id = reminder.message_id
 		WHERE rebuild.user_id = ? AND rebuild.account_id = ? AND rebuild.mailbox_id = ?
-			AND rebuild.target_uid_validity = ?`, userID, accountID, mailboxID, targetUIDValidity); err != nil {
+			AND rebuild.target_uid_validity = ?
+		ON CONFLICT DO NOTHING`, userID, accountID, mailboxID, targetUIDValidity); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO mailbox_generation_rebuild_unsubscribe_sends
+	_, err := tx.ExecContext(ctx, `INSERT INTO mailbox_generation_rebuild_unsubscribe_sends
 		(rebuild_message_id, user_id, original_send_id, sender, unsubscribe_url, sent_at, created_at)
 		SELECT rebuild.id, send.user_id, send.id, send.sender, send.unsubscribe_url, send.sent_at, send.created_at
 		FROM plugin_one_click_unsubscribe_sends send
 		JOIN mailbox_generation_rebuild_messages rebuild
 			ON rebuild.user_id = send.user_id AND rebuild.source_message_id = send.message_id
 		WHERE rebuild.user_id = ? AND rebuild.account_id = ? AND rebuild.mailbox_id = ?
-			AND rebuild.target_uid_validity = ?`, userID, accountID, mailboxID, targetUIDValidity)
+			AND rebuild.target_uid_validity = ?
+		ON CONFLICT DO NOTHING`, userID, accountID, mailboxID, targetUIDValidity)
 	return err
 }
 
@@ -202,8 +206,8 @@ func restoreMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, messageID 
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,
 		CASE
-			WHEN raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY THEN 0
-			WHEN canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY THEN 1
+			WHEN raw_sha256 <> '' AND raw_sha256 = ? THEN 0
+			WHEN canonical_sha256 <> '' AND canonical_sha256 = ? THEN 1
 			ELSE 2
 		END AS strength,
 		is_read, read_sync_pending, is_starred, star_sync_pending,
@@ -212,9 +216,9 @@ func restoreMailboxGenerationStateTx(ctx context.Context, tx *sql.Tx, messageID 
 		has_new_mail_event, new_mail_event_id, new_mail_from_addr, new_mail_subject, new_mail_created_at
 		FROM mailbox_generation_rebuild_messages
 		WHERE user_id = ? AND account_id = ? AND mailbox_id = ? AND target_uid_validity = ?
-		AND ((raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY)
-			OR (canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY)
-			OR (message_id_hash <> '' AND message_id_hash = ? COLLATE BINARY
+		AND ((raw_sha256 <> '' AND raw_sha256 = ?)
+			OR (canonical_sha256 <> '' AND canonical_sha256 = ?)
+			OR (message_id_hash <> '' AND message_id_hash = ?
 				AND internal_date_unix = ? AND message_size = ?))
 		ORDER BY strength, id LIMIT 2`,
 		rawSHA, m.CanonicalSHA256,
@@ -430,12 +434,12 @@ func (s *Store) MailboxGenerationRebuildPending(ctx context.Context, userID, acc
 	if err != nil {
 		return false, err
 	}
-	var exists int
+	var exists bool
 	err = db.QueryRowContext(ctx, `SELECT EXISTS (
 		SELECT 1 FROM mailbox_generation_rebuilds
 		WHERE user_id = ? AND account_id = ? AND mailbox_id = ? AND target_uid_validity = ?
 	)`, userID, accountID, mailboxID, targetUIDValidity).Scan(&exists)
-	return exists != 0, err
+	return exists, err
 }
 
 // MailboxGenerationRebuildArrivalUIDFloor returns the first UID that was not
@@ -548,12 +552,12 @@ func (s *Store) MailboxGenerationRebuildExists(ctx context.Context, userID, acco
 	if err != nil {
 		return false, err
 	}
-	var exists int
+	var exists bool
 	err = db.QueryRowContext(ctx, `SELECT EXISTS (
 		SELECT 1 FROM mailbox_generation_rebuilds
 		WHERE user_id = ? AND account_id = ? AND mailbox_id = ?
 	)`, userID, accountID, mailboxID).Scan(&exists)
-	return exists != 0, err
+	return exists, err
 }
 
 // HasPendingMailboxGenerationRebuildsForUser reports whether any mailbox for
@@ -566,11 +570,11 @@ func (s *Store) HasPendingMailboxGenerationRebuildsForUser(ctx context.Context, 
 	if err != nil {
 		return false, err
 	}
-	var exists int
+	var exists bool
 	err = db.QueryRowContext(ctx, `SELECT EXISTS (
 		SELECT 1 FROM mailbox_generation_rebuilds WHERE user_id = ?
 	)`, userID).Scan(&exists)
-	return exists != 0, err
+	return exists, err
 }
 
 // PendingMailboxGenerationRebuild identifies one tenant mailbox that must
@@ -587,42 +591,6 @@ type PendingMailboxGenerationRebuild struct {
 // ListPendingMailboxGenerationRebuilds supports crash recovery without
 // broadening a resume to same-named mailboxes on another account or tenant.
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var out []PendingMailboxGenerationRebuild
-		for _, user := range users {
-			userStore, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
-			}
-			items, err := userStore.ListPendingMailboxGenerationRebuilds(ctx)
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				if item.UserID != user.ID {
-					return nil, errors.New("mailbox generation rebuild crossed tenant boundary")
-				}
-			}
-			out = append(out, items...)
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if out[i].UserID != out[j].UserID {
-				return out[i].UserID < out[j].UserID
-			}
-			if out[i].inboxPriority != out[j].inboxPriority {
-				return out[i].inboxPriority < out[j].inboxPriority
-			}
-			if out[i].AccountID != out[j].AccountID {
-				return out[i].AccountID < out[j].AccountID
-			}
-			return out[i].MailboxID < out[j].MailboxID
-		})
-		return out, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT rebuild.user_id, rebuild.account_id,
 		rebuild.mailbox_id, mailbox.name, rebuild.target_uid_validity,
 		CASE WHEN lower(trim(mailbox.role)) = 'inbox' OR lower(trim(mailbox.name)) = 'inbox' THEN 0 ELSE 1 END

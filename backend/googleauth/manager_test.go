@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +20,7 @@ import (
 
 	"rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 var testMasterKey = []byte("0123456789abcdef0123456789abcdef")
@@ -159,7 +159,7 @@ type testEnv struct {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestErrorsDoNotEchoResponseBodies(t *testing.T) {
 }
 
 func TestUnconfiguredManagerRefusesToStartFlow(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestUnconfiguredManagerRefusesToStartFlow(t *testing.T) {
 }
 
 func TestManagerRefusesWeakMasterKey(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,13 +10,14 @@ import (
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
 func TestServerStartupRecoversPendingBlobCleanup(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := store.Open(filepath.Join(root, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

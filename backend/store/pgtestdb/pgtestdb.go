@@ -46,10 +46,29 @@ var counter atomic.Uint64
 // what makes a broken CI service report a green suite that verified nothing.
 func New(t *testing.T) string {
 	t.Helper()
+	return newDatabase(t, adminDSNOrSkip(t), "")
+}
+
+// adminDSNOrSkip resolves the server tests may create databases on, skipping
+// the test when none is configured.
+//
+// Skipping an unset variable and failing an unusable one is the whole contract:
+// a developer without a database gets a suite that says so, while a CI service
+// that failed to come up gets a red run rather than a green one that verified
+// nothing.
+func adminDSNOrSkip(t *testing.T) string {
+	t.Helper()
 	adminDSN := strings.TrimSpace(os.Getenv(EnvVar))
 	if adminDSN == "" {
 		t.Skipf("%s not set", EnvVar)
 	}
+	return adminDSN
+}
+
+// newDatabase creates one empty database and registers its cleanup. A non-empty
+// template clones that database's schema instead of starting from nothing.
+func newDatabase(t *testing.T, adminDSN, template string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -64,7 +83,11 @@ func New(t *testing.T) string {
 	// killed run therefore also cannot be reclaimed by name here — cleaning
 	// those up is a job for the test server, not for an unrelated test.
 	name := databaseName(t.Name())
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+sqlident.Quote(name)); err != nil {
+	create := `CREATE DATABASE ` + sqlident.Quote(name)
+	if template != "" {
+		create += ` TEMPLATE ` + sqlident.Quote(template)
+	}
+	if _, err := admin.Exec(ctx, create); err != nil {
 		t.Fatalf("cannot create a test database on %s (the server must be a test-local instance whose role has CREATEDB): %v", EnvVar, pgdsn.Redact(err.Error()))
 	}
 	t.Cleanup(func() {

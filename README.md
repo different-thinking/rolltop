@@ -1,10 +1,12 @@
 # rolltop
 
-rolltop is a single-container Go app that mirrors multiple IMAP inboxes per local user into local storage for search, viewing, composing, and mailbox moves. Production mail data stays in the user's own Docker instance. Project site: https://rolltop.app, coming soon. Contact: graham@rolltop.app.
+rolltop is a Go app that mirrors multiple IMAP inboxes per local user into storage you run, for search, viewing, composing, and mailbox moves. It needs a PostgreSQL database beside it; the compose file below runs both. Production mail data stays in the user's own instance. Project site: https://rolltop.app, coming soon. Contact: graham@rolltop.app.
 
 ## What It Stores
 
-- SQLite metadata at `/data/rolltop.db`
+- Relational metadata — users, accounts, mailboxes, message headers, sync
+  state — in PostgreSQL, one database for the whole installation with every
+  row scoped by `user_id`
 - Per-user Bleve search indexes at `/data/users/{user_id}/bleve`
 - Raw `.eml` and attachment blobs under `/data/users/{user_id}/blobs/...`
 - Incremental sync progress in `sync_runs`
@@ -14,7 +16,7 @@ rolltop is a single-container Go app that mirrors multiple IMAP inboxes per loca
 
 - Browser routes derive the current user from a server-side session.
 - Normal user routes never accept `user_id` from browser input.
-- Sessions use opaque random tokens; only SHA-256 token hashes are stored in SQLite.
+- Sessions use opaque random tokens; only SHA-256 token hashes are stored.
 - Cookies are `HttpOnly` and `SameSite=Lax`.
 - POST routes require CSRF tokens.
 - App passwords are hashed with Argon2id.
@@ -28,13 +30,16 @@ rolltop is a single-container Go app that mirrors multiple IMAP inboxes per loca
 
 ## Configuration
 
-Required:
+Required — a master key and a PostgreSQL connection string:
 
 ```sh
 test -f .env.rolltop || (
   umask 077
   printf 'ROLLTOP_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" > .env.rolltop
 )
+# The database must exist and be empty on first start; rolltop creates its
+# schema but not the database itself.
+export ROLLTOP_DATABASE_URL="postgres://rolltop:password@db:5432/rolltop?sslmode=require"
 
 set -a
 . ./.env.rolltop
@@ -46,8 +51,9 @@ Common optional variables:
 ```sh
 export ROLLTOP_ADDR=":8080"
 export ROLLTOP_DATA_DIR="/data"
-export ROLLTOP_DB_PATH="/data/rolltop.db"
 export ROLLTOP_INDEX_PATH="/data/bleve"
+export ROLLTOP_DB_MAX_CONNS="10"
+export ROLLTOP_DB_CONNECT_TIMEOUT="2m"
 export ROLLTOP_SESSION_TTL="720h"
 export ROLLTOP_SYNC_INTERVAL="15m"
 export ROLLTOP_INBOX_POLL_INTERVAL="1m"
@@ -55,7 +61,6 @@ export ROLLTOP_BLOB_RETENTION="336h"
 export ROLLTOP_COOKIE_SECURE="false"
 export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
-export ROLLTOP_STARTUP_INTEGRITY_CHECK="auto"
 export ROLLTOP_MEMORY_LIMIT="80%"
 export ROLLTOP_STARTUP_LOCK_WAIT="2m"
 export ROLLTOP_SQLITE_ACCESS="auto"
@@ -101,51 +106,23 @@ and going over it makes the collector work harder rather than failing an
 allocation. Give the container at least a gigabyte for a first sync of a large
 mailbox.
 
-`ROLLTOP_SQLITE_ACCESS` decides how SQLite coordinates access to its files, and
-it matters on exactly one kind of volume. WAL keeps its index in a `-shm` file
-that every connection maps with `MAP_SHARED`, and it relies on POSIX byte-range
-locks. A network or FUSE filesystem — CephFS, NFS, virtiofs, a Docker Desktop
-share — guarantees neither. SQLite documents WAL as unsupported there, and the
-symptom is not an error: databases corrupt hours later, repeatedly, with nothing
-in the log connecting the damage to the storage.
+`ROLLTOP_DATABASE_URL` is the PostgreSQL connection string and is required —
+there is no local fallback. The database has to exist and be empty on first
+start: rolltop creates its own schema, records the schema version, and refuses
+to start against a database holding tables it did not create, which is what
+stops it from being pointed at somebody else's data.
 
-`auto`, the default, reads the filesystem under the data directory and picks a
-mode for it:
+`ROLLTOP_DB_MAX_CONNS` sizes the connection pool (default `10`, and the admin
+Database page shows the number in force). Size it below
+the connection limit your database role has, leaving room for a scheduled
+`pg_dump` and a `psql` session; two rolltop processes overlap during a rolling
+deploy, so the practical peak is twice this number for a few seconds.
 
-```text
-rolltop sqlite access=exclusive filesystem=fuse (virtiofs or another FUSE mount)
-rolltop warning: fuse (virtiofs or another FUSE mount) cannot be trusted with
-SQLite's shared WAL index; databases are opened one connection at a time without it
-```
-
-- **`shared`** is ordinary WAL, chosen for local filesystems (ext4, xfs, btrfs,
-  zfs, tmpfs, overlayfs). Each database keeps several connections so reads do not
-  queue behind the sync writer. A filesystem the list does not recognize is
-  treated as local and named in the log line, so it can be reported.
-- **`exclusive`** is WAL without shared memory: SQLite holds the index in heap
-  memory and holds the file lock for as long as the connection lives. That
-  removes both mechanisms the volume cannot provide. Rolltop already guarantees
-  one process per data directory with its instance lock, so the exclusivity costs
-  nothing there — but it does mean **one connection per database**, so reads
-  queue behind writes, and no second process can open a database while Rolltop
-  serves.
-
-Set the value explicitly to overrule the detection in either direction; an
-operator who knows their storage outranks a superblock lookup.
-
-In exclusive mode the admin Database page still checks integrity and writes
-backups, because it runs inside the serving process and uses the handle that
-already owns each file. The `backup-db` command cannot: it is a separate
-process, so it reports that Rolltop is serving and stops rather than failing
-per database. Use the admin page, or stop the server first.
-
-`ROLLTOP_STARTUP_INTEGRITY_CHECK` decides when SQLite files are verified during
-startup. `auto` (the default) verifies them only after a run that did not shut
-down cleanly, `always` verifies on every start, `never` disables the check.
-Verification reads every page, so `always` costs startup time proportional to
-the size of the mirror. A database found damaged is reported and set aside, not
-repaired: startup continues so every other tenant keeps working and the admin
-Database page stays reachable to schedule the repair.
+`ROLLTOP_DB_CONNECT_TIMEOUT` (default `2m`) is how long startup waits for a
+database that is not up yet. The app container and the database start
+independently, so a refused first connection is normal rather than fatal;
+without the wait it becomes a crash loop whose restarts are the slowest possible
+retry.
 
 `ROLLTOP_LOG_LEVEL` defaults to `info`, which hides verbose `debug ...` log
 lines (plugin loading, one-click unsubscribe traces). Set it to `debug` to
@@ -261,11 +238,20 @@ keeps working until they do.
 
 ## Run Locally
 
+A PostgreSQL server has to be running first — `compose.dev.yml` starts a
+throwaway one that keeps nothing on disk. The test suite and the app want
+separate databases on it: the suite creates and drops one per test, so pointing
+it at the database you are developing against would drop it.
+
 ```sh
 npm install
 npm run build
 npm run build:plugins
-go test ./...
+
+docker compose -f compose.dev.yml up -d db
+TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' go test -p 2 ./...
+
+createdb -h 127.0.0.1 -U postgres rolltop
 test -f .env.rolltop || (
   umask 077
   printf 'ROLLTOP_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" > .env.rolltop
@@ -273,28 +259,65 @@ test -f .env.rolltop || (
 set -a
 . ./.env.rolltop
 set +a
-ROLLTOP_DATA_DIR="./data" go run ./cmd/rolltop
+ROLLTOP_DATA_DIR="./data" \
+ROLLTOP_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/rolltop?sslmode=disable' \
+  go run ./cmd/rolltop
 ```
 
 Open `http://localhost:8080`. If no users exist, `/setup` creates the first admin.
 
+`-p 2` bounds how many test packages run at once. The suite is I/O-heavy
+against one server, and the default lets enough packages compete that
+timing-sensitive tests fail on scheduling rather than on behaviour.
+
 ## Docker
 
-```sh
-docker pull ghcr.io/grahamsz/rolltop:latest
+Rolltop needs a PostgreSQL database beside it, so the deployment is two
+containers. `compose.yml` in this repository runs both; take it and the two
+environment files below, and nothing else is needed:
 
+```sh
+curl -O https://raw.githubusercontent.com/grahamsz/rolltop/main/compose.yml
+
+# POSTGRES_PASSWORD is read by Compose itself, which only ever looks in your
+# shell environment and in a file named exactly `.env`. The alphabet is
+# restricted on purpose: this password is substituted into the database
+# connection string, and a quote or a backslash there would break it.
+test -f .env || (
+  umask 077
+  printf 'POSTGRES_PASSWORD=%s\n' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)" > .env
+)
+
+# .env.rolltop is the app's own configuration, handed to the rolltop container.
 test -f .env.rolltop || (
   umask 077
   printf 'ROLLTOP_MASTER_KEY=%s\nROLLTOP_COOKIE_SECURE=false\n' "$(openssl rand -base64 32)" > .env.rolltop
 )
 
+docker compose up -d
+```
+
+Keep both files with the same care as the Docker volumes. Changing or losing
+`ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable; losing
+`POSTGRES_PASSWORD` while the database volume survives locks you out of your
+own data.
+
+Running the image on its own still works, but it has to be told where its
+database is — `ROLLTOP_DATABASE_URL` is required and the container exits at
+once without it, which `--restart unless-stopped` turns into a crash loop:
+
+```sh
 docker run -d --name rolltop --restart unless-stopped -p 8080:8080 \
   --env-file .env.rolltop \
+  -e ROLLTOP_DATABASE_URL='postgres://rolltop:PASSWORD@db.example:5432/rolltop?sslmode=require' \
   -v rolltop-data:/data \
   ghcr.io/grahamsz/rolltop:latest
 ```
 
-Keep `.env.rolltop` with the same care as the Docker volume. Changing or losing `ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable.
+In the URL form above a password containing `@`, `/`, `?`, or `#` must be
+percent-encoded, or the DSN parses as pointing somewhere else entirely. The
+keyword form `host=db.example port=5432 user=rolltop password='…'
+dbname=rolltop sslmode=require` is accepted too and needs no encoding.
 
 ### Logs and crash reports
 
@@ -329,88 +352,34 @@ configuration is read, so a port conflict or an unusable `ROLLTOP_MASTER_KEY`
 also lands in `/data/crash.log`. The deliberate restart for search index
 recovery (below) is not a crash and is not recorded as one.
 
-### Corrupt SQLite Databases
+### Database Unavailable
 
-`database disk image is malformed` is SQLite reporting that the file itself is
-damaged, so every operation for that tenant fails until the file is repaired.
-Rolltop names the damaged file and the repair command in its logs, for example:
+When PostgreSQL is unreachable — restarting, failing over, or behind a broken
+network — rolltop keeps serving what it can rather than answering 500 to
+everything. A signed-in browser gets the app shell with a "database
+unavailable" banner instead of a failed sign-in, so the admin Database page
+stays reachable, and background sync logs the failure and retries on its next
+turn.
 
-```text
-sync user_id=1 mailboxes=INBOX: store message mailbox "INBOX" UID 48882: user 1
-database /data/users/1/rolltop.db is corrupt: database disk image is malformed;
-stop rolltop and run "rolltop recover-db --user-id 1 --confirm-offline"
-```
+Startup is deliberately patient for the same reason: the app container and the
+database come up independently, so a first connection that is refused is waited
+out for `ROLLTOP_DB_CONNECT_TIMEOUT` (default two minutes) rather than crash-
+looping the container.
 
-Everything below is also available to admins under **Account menu → Database**,
-which is the shorter path: it lists every database with its size, WAL size, and
-integrity state next to the free space on the data volume, runs the integrity
-check and backups in the background while Rolltop keeps serving, and schedules
-a repair. Scheduling a repair writes a durable marker and restarts Rolltop,
-because a database can only be replaced while nothing holds a handle on it; the
-repair then runs during startup and its report appears on the same page. The
-commands below do the same work from a shell.
-
-Repair is always an explicit step, and it never modifies the damaged file.
-Stop every Rolltop process that mounts the data volume, then check which files
-SQLite considers damaged:
-
-```sh
-ROLLTOP_SERVICE=<your-service-name>
-docker compose stop "$ROLLTOP_SERVICE"
-docker compose run --rm --no-deps "$ROLLTOP_SERVICE" check-db --confirm-offline
-```
-
-`check-db` runs SQLite's `quick_check` against the installation database and
-every `/data/users/<id>/rolltop.db`, changes nothing, and exits non-zero when a
-file is damaged. Repair a damaged tenant database with:
-
-```sh
-docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
-  recover-db --user-id 1 --confirm-offline
-```
-
-`recover-db` copies every readable row into a freshly migrated database, steps
-over the damaged pages, repairs foreign key references the lost rows leave
-behind, moves the damaged file aside as
-`/data/users/<id>/rolltop.db.corrupt-<stamp>`, and installs the recovered file
-only after verifying it. A recovered database that fails that verification is
-discarded and the original is restored, so a failing disk under the destination
-cannot cost you the file you still had.
-It prints what survived per table. Mail that the IMAP server still holds is
-re-downloaded by the next sync; locally created state on lost pages (contacts,
-snoozes, identities, pending flag changes) is not recoverable. Because the row
-set changed, the command prints the matching `reset-search` invocation when
-anything was lost. The quarantined file is kept, so nothing is deleted.
-
-Corruption comes from the storage under the data volume, not from a Rolltop
-write path: Rolltop opens SQLite in WAL mode with one writer per tenant and an
-exclusive lock on the data directory. A killed process does not corrupt a WAL
-database — SQLite discards a partially written frame by its checksum on the
-next open.
-
-Corruption that keeps coming back on the same installation, every few hours and
-without an obvious trigger, is almost always the filesystem. WAL needs a
-coherent shared memory mapping for its index and working POSIX byte-range locks;
-a network or FUSE volume (CephFS, NFS, virtiofs, a Docker Desktop share)
-provides neither reliably. Check what the volume actually is:
-
-```sh
-grep ' /data ' /proc/mounts
-```
-
-Anything other than a local filesystem there is the finding. Rolltop detects
-this at startup and switches to `ROLLTOP_SQLITE_ACCESS=exclusive`, which runs
-WAL without the shared index; moving the volume onto a block device remains the
-better fix, because it costs no concurrency. The other classic causes are a host
-that lost power and a data directory copied while the server was running.
+What used to live here — `database disk image is malformed`, the repair and
+salvage commands, the integrity check — was SQLite-on-a-network-volume and is
+gone with it. Storage integrity is the database server's job now, and the
+admin Database page reports what it says about itself: version, size, replica
+state, connection count, and the round-trip latency the sync loops are budgeted
+against.
 
 ### Shutdown And Restart
 
-Rolltop's shutdown ends with closing SQLite, which checkpoints the WAL into the
-database file. Everything before that step is bounded so the close is reached:
-the HTTP drain gets 3 seconds, the plugin host and search index together get 3
-more, and whatever has not finished by then is abandoned. Give the container
-enough grace for that sequence plus the checkpoint:
+Rolltop's shutdown closes the search index and the plugin host, then the
+database pool. Everything is bounded: the HTTP drain gets 3 seconds, the plugin
+host and search index together get 3 more, and whatever has not finished by then
+is abandoned. A committed transaction is already durable, so nothing has to be
+flushed on the way out — the grace period is about the index, not the database:
 
 ```yaml
 services:
@@ -463,14 +432,16 @@ pointing the probe at something that answers `200` before it can serve.
 ### Overlapping Deployments
 
 One data directory belongs to one Rolltop process. That is enforced with an
-`flock` on `/data/.rolltop-instance.lock`, taken before anything opens SQLite,
-the Bleve indexes, or the blob store, and held until the process exits.
+`flock` on `/data/.rolltop-instance.lock`, taken before anything opens the
+Bleve indexes or the blob store, and held until the process exits. The database
+no longer needs it — PostgreSQL handles concurrent clients — but Bleve still
+does: a second process cannot open those indexes at all.
 
 Platforms that deploy without downtime start the replacement container before
 stopping the one it replaces, so for a few seconds two processes want the same
 directory. The starting process waits for the lock instead of refusing it, for
 up to `ROLLTOP_STARTUP_LOCK_WAIT` (default `2m`), which covers the previous
-process draining HTTP, closing its plugins and index, and checkpointing SQLite.
+process draining HTTP and closing its plugins and index.
 The wait is visible in the log and on the startup page:
 
 ```text
@@ -488,40 +459,43 @@ directory another process still owns, which is what earlier versions always
 did. A wait that runs out is reported with the process that holds the
 lock and how long it was given.
 
-The maintenance commands that need the directory to themselves — `check-db`,
-`recover-db`, and `reset-search` — keep failing immediately instead of waiting,
+The maintenance command that needs the directory to itself — `reset-search` —
+keeps failing immediately instead of waiting,
 because the answer there is to stop the server rather than to wait for it.
-`backup-db` takes no lock at all and is meant to run while Rolltop serves.
 
 Two notes on what this does and does not protect:
 
-- SQLite itself does allow several processes on one database file; that is what
+- PostgreSQL allows as many client processes as its connection limit does; that is what
   its locking and `busy_timeout` are for. What it cannot survive is a
   filesystem where locking is unreliable, which is the case on NFS and SMB
-  volumes. Keep `/data` on a local volume. The Bleve indexes are the stricter
-  constraint: a second process cannot open them at all.
+  volumes. Keep `/data` on a local volume — the Bleve indexes cannot be opened
+  by a second process at all, and their memory-mapped segments are as unsafe on
+  a network filesystem as SQLite was.
 - The lock only works if `flock` works on the volume. If the log shows two
   processes serving the same directory at once, that is what to check first.
 
 ### Backups
 
-Copying `/data` with `cp`, `rsync`, `docker cp`, or a volume snapshot while
-Rolltop runs produces a torn database: the committed state is split between
-`rolltop.db` and its WAL. Use `backup-db`, which writes each database with
-SQLite's `VACUUM INTO` from a single read transaction and is safe to run while
-the server is serving:
+Back up the database with `pg_dump`, not by copying a volume:
 
 ```sh
-docker compose exec "$ROLLTOP_SERVICE" \
-  rolltop backup-db --output /data/backups/$(date -u +%Y%m%dT%H%M%SZ)
+pg_dump --format=custom --no-owner "$ROLLTOP_DATABASE_URL" \
+  > "rolltop-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 
-The copies mirror the data directory layout (`rolltop.db` and
-`users/<id>/rolltop.db`) and are already checkpointed, so no WAL sidecar is
-needed to read them. Message blobs and the Bleve index are deliberately not
-copied: blobs are re-fetchable from IMAP and the index is rebuilt from the
-database. Write backups outside the data volume if you want them to survive
-losing that volume.
+Run it on a schedule and keep the output somewhere other than the machine the
+database runs on. A managed provider's own backups are disaster recovery for
+the provider's failure; they are usually neither browsable nor restorable by
+you, so they do not replace this.
+
+Restore with `pg_restore` into an **empty** database. Rolltop refuses to start
+against a database that holds tables it did not create, which is what stops a
+half-restored target from being served.
+
+Message blobs and the Bleve index under `/data` are deliberately not part of
+this: blobs are re-fetchable from IMAP and the index is rebuilt from the
+database. Snapshot `/data` if you would rather not re-download them, but it is
+not required to recover.
 
 ### Automatic Search Index Recovery
 
@@ -537,7 +511,7 @@ Docker restart policy such as `--restart unless-stopped` (or Compose
 `restart: unless-stopped`) is required for hands-off recovery.
 
 The marker records which messages the abandoned batch owned. On restart, before
-opening that tenant's index, Rolltop durably marks exactly those SQLite rows
+opening that tenant's index, Rolltop durably marks exactly those rows
 pending with a full WAL checkpoint, clears the marker, and leaves the index in
 place:
 
@@ -562,7 +536,7 @@ A stall the marker cannot attribute to a message range falls back to the full
 rebuild, as does one whose index is missing or no longer opens: Rolltop then renames `/data/users/<id>/bleve` to a timestamped
 quarantine directory, persists that rename before clearing the recovery marker,
 and creates a new derived index. The normal local indexing worker rebuilds it
-from SQLite and retained local `.eml` blobs, including folders configured for
+from the database and retained local `.eml` blobs, including folders configured for
 `manual` or `never` sync. Mail rows, IMAP state, and blobs are not deleted. If
 retained raw data has expired, existing indexing behavior may retrieve it from
 IMAP.
@@ -590,7 +564,7 @@ The numeric local user ID is the number in `/data/users/<id>` and in log fields
 such as `user_id=1`.
 
 This resets only derived search data. It does not restore messages that are
-absent from the user's SQLite mirror. Deploy the mailbox-recovery fix and let
+absent from the user's local mirror. Deploy the mailbox-recovery fix and let
 the local mailbox row count reach the remote count first; use `reset-search`
 only if Bleve repair remains stalled after that. During the later rebuild,
 Rolltop may fetch raw messages from the configured IMAP server when retained
@@ -602,18 +576,24 @@ Stop every Rolltop process that mounts the data volume, then run:
 docker stop <rolltop-container>
 docker run --rm \
   --env-file .env.rolltop \
+  -e ROLLTOP_DATABASE_URL="$ROLLTOP_DATABASE_URL" \
   -v rolltop-data:/data \
   ghcr.io/grahamsz/rolltop:latest \
   reset-search --user-id 1 --confirm-offline
 ```
 
-For Docker Compose, use your actual service name; the one-off command inherits
-that service's image, environment, and volumes:
+The command marks message rows pending before it quarantines the index, so it
+needs the database and refuses to start without `ROLLTOP_DATABASE_URL`.
+
+With the bundled `compose.yml` the one-off run inherits the image, environment,
+and volumes of the `rolltop` service, including that variable, so nothing has
+to be repeated. `--no-deps` keeps it from starting the database container, which
+means the database has to be reachable already — with the bundled file it is,
+because only the app is stopped:
 
 ```sh
-ROLLTOP_SERVICE=<your-service-name>
-docker compose stop "$ROLLTOP_SERVICE"
-docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
+docker compose stop rolltop
+docker compose run --rm --no-deps rolltop \
   reset-search --user-id 1 --confirm-offline
 ```
 
@@ -634,7 +614,7 @@ operator check.
 6. Every mailbox turn is time-bounded so one folder cannot hold the account-wide pass forever. A turn that runs out of time stops at a message boundary, commits what it mirrored, and is rescheduled immediately: a first mirror of a large folder therefore completes over many turns and is recorded as a series of normal runs rather than a failure. Each paused turn doubles the next one, up to ten minutes, so a backfill spends its time fetching instead of replanning the same folder; the folder returns to the short freshness budget as soon as a turn finishes cleanly. A turn that spends its whole budget without mirroring anything is still reported as an error.
 7. A sync turn also has a memory budget. Fetch batches are planned from the sizes the server reports before the bodies are requested, so a batch is bounded in bytes and not only in messages, and a message larger than the budget is fetched on its own; search documents are trimmed to what Bleve can index before they are queued, and the queue commits when either its document count or its payload budget is reached. A folder holding a few very large mails therefore no longer decides how much memory the process needs.
 8. Message bodies, attachment names, and searchable text-like attachments are indexed with the current user's `user_id`.
-9. SQLite stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
+9. The database stores compact body previews; full body search lives in Bleve and message display uses the local raw `.eml` or fetches the message from IMAP by UID when the raw blob has aged out.
 10. Raw `.eml` blobs are retained for `ROLLTOP_BLOB_RETENTION` only, defaulting to 14 days. Set it to `0` to keep all raw blobs.
 11. Attachment bytes are read from the raw `.eml` while indexing and are not stored as separate blobs for new syncs.
 12. `/mail`, folder views, `/search`, and `/messages/{id}` only return current-user records.

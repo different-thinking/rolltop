@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-// The category names are stored in SQLite and appear in URLs, so they are part
+// The category names are stored in the database and appear in URLs, so they are part
 // of the wire format and must not be renamed without a migration.
 const (
 	// CategoryRelevant is mail that carries no list or automation markers:

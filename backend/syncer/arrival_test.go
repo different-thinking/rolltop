@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type arrivalProbeFetcher struct {
@@ -72,7 +72,7 @@ func (f *batchAtomicArrivalProbeFetcher) ExistingUIDsWithValidity(_ context.Cont
 
 func TestFinalizePendingInboxArrivalsRequiresPositiveMoveEvidence(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestFinalizePendingInboxArrivalsRequiresPositiveMoveEvidence(t *testing.T) 
 
 func TestFinalizePendingInboxArrivalsDoesNotFailOpenAfterMoveEvidencePersistenceError(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,9 +229,14 @@ func TestFinalizePendingInboxArrivalsDoesNotFailOpenAfterMoveEvidencePersistence
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := userDB.ExecContext(ctx, `CREATE FUNCTION fail_expunged_fingerprint_insert() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected expunged fingerprint failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := userDB.ExecContext(ctx, `CREATE TRIGGER fail_expunged_fingerprint_insert
 		BEFORE INSERT ON expunged_message_fingerprints
-		BEGIN SELECT RAISE(ABORT, 'injected expunged fingerprint failure'); END`); err != nil {
+		FOR EACH ROW EXECUTE FUNCTION fail_expunged_fingerprint_insert()`); err != nil {
 		t.Fatal(err)
 	}
 	created, _, err := service.FinalizePendingInboxArrivals(ctx, user.ID, account.ID, decision.Arrival.AvailableAt)
@@ -255,7 +260,7 @@ func TestFinalizePendingInboxArrivalsDoesNotFailOpenAfterMoveEvidencePersistence
 	if len(due) != 1 || due[0].MessageID != inboxMessage.ID || due[0].Classification != store.ArrivalPending {
 		t.Fatalf("arrival after failed persistence = %+v, want original pending arrival", due)
 	}
-	if _, err := userDB.ExecContext(ctx, `DROP TRIGGER fail_expunged_fingerprint_insert`); err != nil {
+	if _, err := userDB.ExecContext(ctx, `DROP TRIGGER fail_expunged_fingerprint_insert ON expunged_message_fingerprints`); err != nil {
 		t.Fatal(err)
 	}
 	created, _, err = service.FinalizePendingInboxArrivals(ctx, user.ID, account.ID, decision.Arrival.AvailableAt)
@@ -269,7 +274,7 @@ func TestFinalizePendingInboxArrivalsDoesNotFailOpenAfterMoveEvidencePersistence
 
 func TestFinalizePendingInboxArrivalsDefersOnlyUncertainPlausibleSources(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +341,7 @@ func TestFinalizePendingInboxArrivalsDefersOnlyUncertainPlausibleSources(t *test
 	}
 
 	candidateRaw := []byte("Message-ID: <candidate-store-error@example.test>\r\nSubject: Candidate error\r\n\r\nbody")
-	source := arrivalTestMessage(t, ctx, db, user.ID, account.ID, spam, 11, candidateRaw, base.Add(time.Minute))
+	arrivalTestMessage(t, ctx, db, user.ID, account.ID, spam, 11, candidateRaw, base.Add(time.Minute))
 	candidateMessage := arrivalTestMessage(t, ctx, db, user.ID, account.ID, inbox, 103, candidateRaw, base.Add(time.Minute))
 	candidateDecision, err := db.HoldOrClassifyInboxArrival(ctx, user.ID, 0, candidateMessage,
 		store.MessageArrivalFingerprint(candidateRaw, candidateMessage.MessageIDHeader,
@@ -348,8 +353,11 @@ func TestFinalizePendingInboxArrivalsDefersOnlyUncertainPlausibleSources(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := userDB.ExecContext(ctx, `UPDATE messages SET uid = 'invalid-uid'
-		WHERE user_id = ? AND id = ?`, user.ID, source.ID); err != nil {
+	// The store error is injected by taking the table the candidate lookup
+	// joins out from under it. The original injection wrote a non-numeric UID,
+	// which only SQLite's dynamic typing allowed; what the test is about is the
+	// read failing, not how it was made to fail.
+	if _, err := userDB.ExecContext(ctx, `ALTER TABLE blobs RENAME TO blobs_hidden`); err != nil {
 		t.Fatal(err)
 	}
 	created, nextDue, err = service.FinalizePendingInboxArrivals(ctx, user.ID, account.ID,
@@ -361,8 +369,7 @@ func TestFinalizePendingInboxArrivalsDefersOnlyUncertainPlausibleSources(t *test
 	if !nextDue.Equal(wantCandidateRetry) {
 		t.Fatalf("candidate store-error retry=%v, want %v", nextDue, wantCandidateRetry)
 	}
-	if _, err := userDB.ExecContext(ctx, `UPDATE messages SET uid = 11
-		WHERE user_id = ? AND id = ?`, user.ID, source.ID); err != nil {
+	if _, err := userDB.ExecContext(ctx, `ALTER TABLE blobs_hidden RENAME TO blobs`); err != nil {
 		t.Fatal(err)
 	}
 	fetcher.existsByUID["spam:11"] = true
@@ -374,7 +381,7 @@ func TestFinalizePendingInboxArrivalsDefersOnlyUncertainPlausibleSources(t *test
 
 func TestFinalizePendingInboxArrivalsProbesWholeFinalizationBatch(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

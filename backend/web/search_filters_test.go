@@ -11,6 +11,7 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func searchConversationMessageIDs(t *testing.T, server *Server, user store.User, query string) []int64 {
@@ -43,7 +44,7 @@ func searchConversationMessageIDs(t *testing.T, server *Server, user store.User,
 func TestSearchSkipsTrashUnlessTheQueryNamesIt(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func TestSearchSkipsTrashUnlessTheQueryNamesIt(t *testing.T) {
 
 func TestSearchMailboxFilterExcludesOnlyTrashRole(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

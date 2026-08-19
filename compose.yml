@@ -1,0 +1,69 @@
+# Rolltop and the PostgreSQL database it needs.
+#
+# Two files hold configuration, and which one a value goes in is not a matter
+# of taste:
+#
+#   .env          POSTGRES_PASSWORD, read by Compose itself. Compose substitutes
+#                 ${...} in this file from your shell environment and from a
+#                 file named exactly `.env` in the project directory — never
+#                 from `env_file:` below, which is only handed to a container.
+#   .env.rolltop  ROLLTOP_MASTER_KEY and the app's own settings, handed to the
+#                 rolltop container and never read by Compose.
+#
+# Create both before the first `docker compose up` (see the README's Docker
+# section). Keep them with the same care as the data volume.
+#
+# The database volume belongs on a local disk or a block device, never on a
+# network filesystem — that is the storage class the whole migration to
+# PostgreSQL was about, and putting the server's data directory back on CephFS,
+# NFS, or a Docker Desktop share reintroduces it one layer down.
+#
+# `/data` still holds the message blobs and the Bleve search indexes, and is
+# still one-process-only: the app takes an exclusive lock on it at startup.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rolltop
+      POSTGRES_DB: rolltop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a file named .env next to this one}
+    volumes:
+      - rolltop-db:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits for the database itself (ROLLTOP_DB_CONNECT_TIMEOUT), so
+      # this is for `docker compose ps` and for ordering, not a correctness
+      # requirement.
+      test: ["CMD-SHELL", "pg_isready -U rolltop -d rolltop"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  rolltop:
+    image: ghcr.io/grahamsz/rolltop:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.rolltop
+    environment:
+      # The keyword form rather than a postgres:// URL, because the password is
+      # substituted in verbatim: in a URL it would have to be percent-encoded,
+      # and a password containing `@`, `/`, or `?` would silently produce a DSN
+      # pointing somewhere else. Quoted here, it only has to avoid `'` and `\`,
+      # which the README's generator cannot produce.
+      ROLLTOP_DATABASE_URL: "host=db port=5432 user=rolltop password='${POSTGRES_PASSWORD}' dbname=rolltop sslmode=disable"
+    volumes:
+      - rolltop-data:/data
+    # One data directory belongs to one process, so the replacement container
+    # has to wait for this one to let go of it. The grace period covers draining
+    # HTTP and closing the search index; the database needs nothing flushed.
+    stop_grace_period: 30s
+
+volumes:
+  rolltop-db:
+  rolltop-data:

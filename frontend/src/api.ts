@@ -11,7 +11,6 @@ import type {
   CalendarSummary,
   Contact,
   ContactAutocomplete,
-  DatabaseMaintenanceJob,
   DatabaseOverview,
   DuplicateCopyReport,
   ComposeAttachmentUpload,
@@ -645,15 +644,6 @@ export const api = {
   postgresSchema: (csrf: string, dsn: string, action: PostgresSchemaAction) =>
     postJSON<PostgresState>("/api/admin/postgres-schema", csrf, { dsn, action }),
   database: () => getJSON<DatabaseOverview>("/api/admin/database"),
-  databaseJob: () => getJSON<{ job: DatabaseMaintenanceJob | null }>("/api/admin/database/job"),
-  checkDatabases: (csrf: string, scope = "", userID = 0) =>
-    postJSON<{ job: DatabaseMaintenanceJob }>("/api/admin/database/check", csrf, { scope, user_id: userID }),
-  backupDatabases: (csrf: string, scope = "", userID = 0) =>
-    postJSON<{ job: DatabaseMaintenanceJob }>("/api/admin/database/backup", csrf, { scope, user_id: userID }),
-  scheduleDatabaseRepair: (csrf: string, userID: number) =>
-    postJSON<{ ok: boolean; restarting: boolean }>("/api/admin/database/repair", csrf, { user_id: userID, confirm: true }),
-  cancelDatabaseRepair: (csrf: string, userID: number) =>
-    postJSON<{ ok: boolean }>("/api/admin/database/repair/cancel", csrf, { user_id: userID }),
   // The tail answers without an ETag, so every call reaches the server: a
   // revalidated answer is the one thing this endpoint must never give.
   serverLog: (limit = 200) => getJSON<{ lines: ServerLogLine[] }>(`/api/admin/log?limit=${limit}`),

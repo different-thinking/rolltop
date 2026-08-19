@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 const emptyTrashUIDValidity uint32 = 900
@@ -121,7 +122,7 @@ type emptyTrashFixture struct {
 func newEmptyTrashFixture(t *testing.T, uids []uint32) emptyTrashFixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,11 +6,11 @@ package web
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -67,7 +67,7 @@ func TestUnfinishedMoveRun(t *testing.T) {
 // reported.
 func TestUnfinishedMoveRunSurvivesLaterSyncActivity(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestUnfinishedMoveRunSurvivesLaterSyncActivity(t *testing.T) {
 // A user who has never moved anything has nothing to report rather than an error.
 func TestUnfinishedMoveRunWithoutAnyMoves(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

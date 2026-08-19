@@ -15,6 +15,7 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -104,7 +105,7 @@ func planMessageIDs(plan scopeMovePlan) []int64 {
 
 func TestScopeTrashPlanCoversAllMailAndSkipsTrash(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +164,7 @@ func TestScopeTrashPlanCoversAllMailAndSkipsTrash(t *testing.T) {
 
 func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestScopeTrashPlanUnarchivedSkipsArchiveFolder(t *testing.T) {
 
 func TestScopeTrashPlanRoleViewsCoverOnlyTheirRoleFolders(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestScopeTrashPlanRoleViewsCoverOnlyTheirRoleFolders(t *testing.T) {
 func TestScopeTrashPlanResolvesSearchFilter(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +313,7 @@ func TestScopeTrashPlanResolvesSearchFilter(t *testing.T) {
 func TestScopeTrashPlanPagesBeyondOneSearchBatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +358,7 @@ func TestScopeTrashPlanPagesBeyondOneSearchBatch(t *testing.T) {
 // that produces more than one group, and one background run per account.
 func TestScopeTrashPlanGroupsPerAccount(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +416,7 @@ func TestScopeTrashPlanGroupsPerAccount(t *testing.T) {
 // pass rather than pretending the whole filter was handled.
 func TestScopeTrashPlanReportsTruncation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +451,7 @@ func TestScopeTrashPlanReportsTruncation(t *testing.T) {
 
 func TestScopeTrashPlanIsUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +491,7 @@ func TestScopeTrashPlanIsUserScoped(t *testing.T) {
 
 func TestScopeTrashRequiresTrashMailbox(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +551,7 @@ func TestScopeTrashRejectsNonPost(t *testing.T) {
 
 func TestScopeArchivePlanMovesOnlyMailOlderThanTheCutoff(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +606,7 @@ func TestScopeArchivePlanMovesOnlyMailOlderThanTheCutoff(t *testing.T) {
 // received backlog must not empty them.
 func TestScopeArchiveLeavesTheUsersOwnFoldersAlone(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +663,7 @@ func TestScopeArchiveLeavesTheUsersOwnFoldersAlone(t *testing.T) {
 // same folder layout.
 func TestScopeArchivePlanStaysInsideOneTenant(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +712,7 @@ func TestScopeArchivePlanStaysInsideOneTenant(t *testing.T) {
 // directly either, and saying so beats a successful pass that moved nothing.
 func TestScopeArchiveRefusesAProtectedFolder(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +738,7 @@ func TestScopeArchiveRefusesAProtectedFolder(t *testing.T) {
 
 func TestScopeArchivePlanReportsAccountsWithoutAnArchiveFolder(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +760,7 @@ func TestScopeArchivePlanReportsAccountsWithoutAnArchiveFolder(t *testing.T) {
 
 func TestScopeArchiveRequestRequiresACutoff(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -49,20 +49,26 @@ const (
 
 // Options wires concrete dependencies and runtime values into a new HTTP Server.
 type Options struct {
-	Store        *store.Store
-	Blobs        *blob.Store
-	Search       *search.Service
-	Syncer       *syncer.Service
-	SyncRunner   *syncer.Runner
-	Sender       mailSender
-	MasterKey    []byte
-	DataDir      string
-	DatabasePath string
-	IndexPath    string
-	PluginDir    string
-	SessionTTL   time.Duration
-	CookieSecure bool
-	WebhookToken string
+	Store      *store.Store
+	Blobs      *blob.Store
+	Search     *search.Service
+	Syncer     *syncer.Service
+	SyncRunner *syncer.Runner
+	Sender     mailSender
+	MasterKey  []byte
+	DataDir    string
+	// DatabaseTarget is the connection summary the admin page shows:
+	// role@host/database. It is derived from the DSN by pgdsn.Describe and
+	// deliberately carries no password.
+	DatabaseTarget string
+	// DatabaseMaxConns is the configured pool size, shown beside the number of
+	// connections the role actually has open.
+	DatabaseMaxConns int
+	IndexPath        string
+	PluginDir        string
+	SessionTTL       time.Duration
+	CookieSecure     bool
+	WebhookToken     string
 	// Google carries the validated OAuth client settings from config.Load.
 	Google config.GoogleConfig
 	// GoogleAuth overrides the manager built from Google. Tests set it to point
@@ -73,10 +79,6 @@ type Options struct {
 	GoogleContacts *googlepeople.Syncer
 	// GoogleCalendar syncs Google calendars, wired the same way.
 	GoogleCalendar *googlecalendar.Syncer
-	// RequestRestart asks the process supervisor for a controlled restart. The
-	// admin database repair needs one, because a tenant database can only be
-	// replaced while nothing holds a handle on it. Nil disables the action.
-	RequestRestart func(userID int64, reason string)
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -93,7 +95,8 @@ type Server struct {
 	sender                    mailSender
 	masterKey                 []byte
 	dataDir                   string
-	databasePath              string
+	databaseTarget            string
+	databaseMaxConns          int
 	indexPath                 string
 	pluginDir                 string
 	pluginManifests           []plugins.Manifest
@@ -109,10 +112,6 @@ type Server struct {
 	googleAuth                *googleauth.Manager
 	googleContacts            *googlepeople.Syncer
 	googleCalendar            *googlecalendar.Syncer
-	requestRestart            func(userID int64, reason string)
-	maintenance               maintenanceState
-	backupSizeMu              sync.Mutex
-	backupSizes               map[string]backupSize
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -121,6 +120,9 @@ type Server struct {
 	deletingIMAPAccounts      map[int64]map[int64]bool
 	storageMu                 sync.Mutex
 	storageCached             map[int64]storageStatsCacheEntry
+	volumeUsageMu             sync.Mutex
+	volumeUsageCached         volumeUsage
+	volumeUsageMeasuring      bool
 	mailWarmMu                sync.Mutex
 	mailWarmRunning           map[int64]bool
 	mailListCache             *mailListCache
@@ -321,13 +323,23 @@ func New(opts Options) (*Server, error) {
 		opts.GoogleCalendar = googlecalendar.NewSyncer(
 			opts.Store, opts.GoogleAuth, opts.GoogleAuth, googleauth.ScopeCalendar)
 	}
+	// Every failure from here on has to release the sync runner's context: it
+	// is this function's to own until the Server exists to own it, and a
+	// returned error would otherwise leave the runner's goroutine running
+	// against a server nobody has a handle to.
+	failed := func(err error) (*Server, error) {
+		if ownedSyncRunnerCancel != nil {
+			ownedSyncRunnerCancel()
+		}
+		return nil, err
+	}
 	pluginManifests, err := plugins.LoadManifests(opts.PluginDir)
 	if err != nil {
-		return nil, err
+		return failed(err)
 	}
 	if opts.Store != nil {
 		if err := opts.Store.SyncPluginDefinitions(context.Background(), plugins.DefinitionsFromManifests(pluginManifests)); err != nil {
-			return nil, err
+			return failed(err)
 		}
 	}
 	backendPlugins := plugins.NewBackendManager(opts.PluginDir, pluginManifests)
@@ -350,7 +362,8 @@ func New(opts Options) (*Server, error) {
 		sender:                opts.Sender,
 		masterKey:             opts.MasterKey,
 		dataDir:               opts.DataDir,
-		databasePath:          opts.DatabasePath,
+		databaseTarget:        opts.DatabaseTarget,
+		databaseMaxConns:      opts.DatabaseMaxConns,
 		indexPath:             opts.IndexPath,
 		pluginDir:             opts.PluginDir,
 		pluginManifests:       pluginManifests,
@@ -364,7 +377,6 @@ func New(opts Options) (*Server, error) {
 		googleAuth:            opts.GoogleAuth,
 		googleContacts:        opts.GoogleContacts,
 		googleCalendar:        opts.GoogleCalendar,
-		requestRestart:        opts.RequestRestart,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},
@@ -404,10 +416,6 @@ func New(opts Options) (*Server, error) {
 		} {
 			err := recovery.run()
 			if err == nil {
-				continue
-			}
-			if store.IsCorrupt(err) {
-				log.Printf("%s: %v", recovery.label, err)
 				continue
 			}
 			if ownedSyncRunnerCancel != nil {

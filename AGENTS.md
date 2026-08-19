@@ -2,7 +2,17 @@
 
 ## Project Notes
 
-Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-owned data scoped by `user_id` at every layer: SQLite rows, blob paths, search documents, sync runs, and HTTP reads.
+Rolltop V1 is a Go, PostgreSQL, Bleve, and local-blob email mirror. Keep all
+user-owned data scoped by `user_id` at every layer: database rows, blob paths,
+search documents, sync runs, and HTTP reads.
+
+**`user_id` scoping is now the only tenant isolation there is.** Every tenant's
+rows live in one database and one set of tables; there is no per-tenant file to
+fall back on. A query that forgets its `user_id` predicate reads another
+person's mail, so every method that touches user-owned data takes a `userID` and
+resolves its handle through `dataDB`/`mustDataDB` — not because the handle
+differs any more, but because that is what keeps the tenant visible at the call
+site and in review.
 
 ## Rules For Future Agents
 
@@ -150,22 +160,58 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   twice is recoverable; hiding the only copy is not.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - One data directory belongs to one process, and the instance lock is taken
-  before anything opens SQLite, Bleve, or the blob store. A serving start waits
-  for the lock (`ROLLTOP_STARTUP_LOCK_WAIT`) because deployments overlap the old
-  and new container. The maintenance commands that take the lock - `check-db`,
-  `recover-db`, `reset-search` - keep failing immediately instead, and
-  `backup-db` deliberately takes no lock because it runs against a serving
-  instance. Do not move any open ahead of the lock, and do not make the
-  maintenance commands wait.
-- WAL's shared index (`-shm`) and POSIX byte-range locks are unavailable on
-  network and FUSE volumes, where they cause corruption rather than errors. The
-  store detects the filesystem and falls back to `AccessExclusive`: WAL without
-  shared memory, which requires **one connection per database**. Anything that
-  reserves a `*sql.Conn` or a transaction and then queries the same `*sql.DB`
-  deadlocks under that limit, so keep those paths single-connection (see the
-  salvage writer, which deliberately opens its destination shared). Online
-  integrity checks and backups must go through the live handle for the same
-  reason.
+  before anything opens Bleve or the blob store. The database no longer needs it
+  — PostgreSQL handles concurrent clients — but Bleve does, and that is now the
+  whole justification. A serving start waits for the lock
+  (`ROLLTOP_STARTUP_LOCK_WAIT`) because deployments overlap the old and new
+  container; `reset-search` keeps failing immediately instead. Do not move any
+  open ahead of the lock, and do not make `reset-search` wait.
+- One **database** also belongs to one process, enforced separately: the
+  directory lock is per volume and misses two deployments with their own volumes
+  pointed at one DSN. `PostgresOptions.ExclusiveInstance` holds a session-scoped
+  advisory lock for the store's lifetime (`backend/store/instance_lock.go`), on
+  the same wait budget, and `reset-search` takes it without waiting. Without it
+  both servers start, each start's `MarkRunningSyncRunsInterrupted` stamps the
+  other's live sync runs interrupted, and every mailbox is fetched twice. Tests
+  leave it off on purpose: they open several stores against one database.
+- The schema is `backend/store/pgschema/baseline.sql`, applied to an empty
+  database and recorded as one row in `schema_migrations` under a checksum over
+  its text. It was derived once from the SQLite schema that preceded it; that
+  derivation and its translator are gone, so the file is now **hand-owned and
+  authoritative — edit it directly**, keeping the conventions its header lists.
+  What that reaches is only a database that does not exist yet: editing it
+  changes the recorded checksum, and a server whose database was built from an
+  older version refuses to start rather than run against a schema it does not
+  recognise. Changing the schema of a database already in service needs a
+  migration layered on the baseline, and **that mechanism does not exist yet** —
+  building it is the open item before the first durable database (§11 of
+  `docs/postgres-migration-plan.md`). There is no migration runner in
+  `backend/store/migrations.go` to revive; only the checksum and the progress
+  type live there.
+- SQL is written with `?` placeholders and translated to `$1..$n` in the driver
+  (`backend/pgbind`). That is deliberate: many statements are assembled at run
+  time from fragments, and numbering them in the source would mean every
+  fragment knowing how many parameters the fragments before it contributed.
+  Write `?`. Mixing the two styles inside one statement is refused rather than
+  guessed at — `Rebind` returns a `*pgbind.MixedPlaceholderError`, because
+  numbering `?` from `$1` in a statement that already says `$1` binds two
+  arguments to one slot and returns another tenant's rows without failing.
+- Four PostgreSQL rules the SQLite schema let us ignore, each of which produced
+  a real failure during the move:
+  - In `INSERT ... SELECT`, a bare parameter in the SELECT list is typed
+    **before** the target column is consulted, so it defaults to `text` and is
+    then rejected. Write `CAST(? AS BIGINT)` — the SQL is executed only against
+    PostgreSQL, but the cast spelling stays portable.
+  - `CASE WHEN ?` needs a boolean. Pass `CASE WHEN ? <> 0` for the 0/1 integers
+    this schema stores booleans as.
+  - `SELECT EXISTS (...)` returns a boolean, not 0/1. Scan it into a `bool`.
+  - An error inside a transaction aborts the whole transaction; there is no
+    recovering and carrying on the way SQLite allowed. Where a write may
+    legitimately conflict, ask for that outcome — `ON CONFLICT ... DO NOTHING`
+    with an empty `RETURNING` — instead of provoking the error and handling it.
+- `GROUP BY` must list every selected column that is not functionally dependent
+  on a grouped primary key, and PostgreSQL derives that dependency per table:
+  grouping by `mb.id` covers `mb`'s columns and none of a joined table's.
 - Keep sync bounded in memory as well as in time. Anything that accumulates
   message content between commits - IMAP fetch batches, the search-index batch -
   must be bounded in **bytes**, not only in message count: mail sizes span four
@@ -182,8 +228,21 @@ Run before handing off:
 
 ```sh
 npm run build:themes
-go test ./...
+TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable go test -p 2 ./...
 ```
+
+`-p 2` bounds how many package binaries run at once. Every test does real
+database I/O now, and the default — one per core — oversubscribes a small
+machine badly enough that timing-sensitive tests miss deadlines they normally
+clear in under a second. The same run is green at 2 and red at 4,
+reproducibly; CI sets it for the same reason.
+
+`TEST_DATABASE_URL` names a **test-local** PostgreSQL the run may create and
+drop databases on; `docker compose -f compose.dev.yml up -d db` starts one. Tests
+skip without it and fail when it is set but unusable, so a broken database
+service cannot report a green suite that verified nothing. Each test gets its
+own database, cloned from a template named after the schema — which is why a
+schema change does not need any template to be cleaned up by hand.
 
 `npm run build:themes` is a prerequisite, not a convenience: manifest validation
 stats the theme CSS a plugin manifest declares, so the Go suite fails on a clean

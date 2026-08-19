@@ -2,12 +2,8 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"path/filepath"
 	"testing"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
 
 	"rolltop/backend/mailparse"
 )
@@ -31,7 +27,7 @@ type sentListFixture struct {
 func newSentListFixture(t *testing.T) sentListFixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +137,7 @@ func TestSentFolderStaysOutOfTheWholeAccountLists(t *testing.T) {
 // that at the next restart to a migration or a startup seed running twice.
 func TestSentFolderReturnedToAllMailSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +165,7 @@ func TestSentFolderReturnedToAllMailSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(path)
+	reopened, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,59 +189,3 @@ func TestSentFolderReturnedToAllMailSurvivesReopen(t *testing.T) {
 // Accounts that were already mirrored carry a Sent folder created under the old
 // default, so the backfill is what decides their behavior. It runs over the
 // role rather than over folder names, because the role is what every list reads.
-func TestSentAllMailMigrationBackfillsExistingFolders(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	ctx := context.Background()
-	for _, statement := range []string{
-		`CREATE TABLE mailboxes (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL,
-			name TEXT NOT NULL,
-			role TEXT NOT NULL DEFAULT '',
-			show_in_all_mail INTEGER NOT NULL DEFAULT 1,
-			updated_at INTEGER NOT NULL DEFAULT 0
-		)`,
-		`INSERT INTO mailboxes (id, user_id, name, role, show_in_all_mail, updated_at) VALUES
-			(1, 1, '[Gmail]/Sent Mail', 'sent', 1, 10),
-			(2, 1, 'INBOX', 'inbox', 1, 11),
-			(3, 2, 'Sent Items', 'sent', 1, 12),
-			(4, 2, 'Projects', '', 1, 13),
-			(5, 2, 'Trash', 'trash', 0, 14)`,
-	} {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, statement := range userSentMailboxAllMailMigrationSet().Statements {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatalf("apply %q: %v", statement, err)
-		}
-	}
-
-	for _, tt := range []struct {
-		id   int64
-		want bool
-	}{{1, false}, {2, true}, {3, false}, {4, true}, {5, false}} {
-		var showInAllMail bool
-		if err := db.QueryRowContext(ctx, `SELECT show_in_all_mail FROM mailboxes WHERE id = ?`, tt.id).Scan(&showInAllMail); err != nil {
-			t.Fatal(err)
-		}
-		if showInAllMail != tt.want {
-			t.Fatalf("mailbox %d show_in_all_mail = %t, want %t", tt.id, showInAllMail, tt.want)
-		}
-	}
-	// The flag moved, so the row's own timestamp has to say so: the folder list
-	// the browser caches is refreshed from it.
-	var updated int64
-	if err := db.QueryRowContext(ctx, `SELECT updated_at FROM mailboxes WHERE id = 1`).Scan(&updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated <= 10 {
-		t.Fatalf("backfilled updated_at = %d, want the row restamped", updated)
-	}
-}
