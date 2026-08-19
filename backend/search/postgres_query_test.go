@@ -236,3 +236,83 @@ func TestPostgresBackendDateFilters(t *testing.T) {
 		t.Fatalf("after hits = %v, err = %v, want just %d", hits, err, newer.ID)
 	}
 }
+
+func TestPostgresBackendFuzzyMatching(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	if err := db.EnsureTrigramSearch(ctx); err != nil {
+		t.Fatalf("ensure trigram search: %v", err)
+	}
+	if !db.TrigramSearchEnabled() {
+		t.Fatal("trigram search not enabled after ensure")
+	}
+
+	invoice := seedPostgresSearchMessage(t, db, user, mailbox, 50, "Rechnung Februar", "anbei die rechnung")
+	exact := seedPostgresSearchMessage(t, db, user, mailbox, 51, "Rehcnung wörtlich", "genau dieser dreher steht hier")
+	other := seedPostgresSearchMessage(t, db, user, mailbox, 52, "Kantinenplan", "essen der woche")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: invoice}, {Message: exact}, {Message: other}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	// The transposition typo finds the real word by similarity, and the exact
+	// occurrence of the typo itself by lexeme. The exact lexeme match must
+	// rank above the similarity match.
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "rehcnung", 10, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("fuzzy search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("fuzzy hits = %v, want the typo document and the similar one", hits)
+	}
+	if hits[0].ID != exact.ID || hits[1].ID != invoice.ID {
+		t.Fatalf("order = %d, %d; want exact lexeme %d above similarity %d", hits[0].ID, hits[1].ID, exact.ID, invoice.ID)
+	}
+
+	// Multi-term queries stay AND-composed: one fuzzy term plus one exact term
+	// that only the invoice satisfies.
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "rehcnung februar", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 || hits[0].ID != invoice.ID {
+		t.Fatalf("fuzzy+exact hits = %v, err = %v, want just %d", hits, err, invoice.ID)
+	}
+
+	// Fuzzy off keeps the typo unmatched by similarity.
+	off := SearchOptions{Behavior: SearchBehavior{Fuzzy: "off"}}
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "rehcnung", 10, 0, off)
+	if err != nil || len(hits) != 1 || hits[0].ID != exact.ID {
+		t.Fatalf("fuzzy-off hits = %v, err = %v, want just the literal document", hits, err)
+	}
+
+	// Short terms stay exact even with fuzzy on: no trigram noise.
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "esen", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("short-term hits = %v, err = %v, want none", hits, err)
+	}
+
+	// Quoted phrases never fuzz.
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, `"rehcnung februar"`, 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("quoted fuzzy hits = %v, err = %v, want none", hits, err)
+	}
+}
+
+func TestPostgresBackendFuzzyDegradesWithoutTrigram(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	// EnsureTrigramSearch deliberately not called: the flag stays off, and the
+	// query path must stay exact instead of failing on a missing operator.
+	msg := seedPostgresSearchMessage(t, db, user, mailbox, 60, "Rechnung März", "anbei")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: msg}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "rehcnung", 10, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("search without trigram: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits = %v, want none without fuzzy", hits)
+	}
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("exact hits = %v, err = %v, want 1", hits, err)
+	}
+}

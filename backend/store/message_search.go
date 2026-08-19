@@ -27,6 +27,10 @@ type MessageSearchDoc struct {
 	TextB     string
 	TextC     string
 	TextD     string
+	// Words is the distinct normalized word list of the four streams, the
+	// haystack pg_trgm word similarity probes for fuzzy matching. Empty when
+	// the row predates the words column; a re-index fills it.
+	Words string
 }
 
 // messageSearchVectorSQL renders one row's tsvector. The 'simple'
@@ -61,11 +65,11 @@ func (s *Store) UpsertMessageSearch(ctx context.Context, userID int64, docs []Me
 		if i > 0 {
 			values.WriteString(", ")
 		}
-		values.WriteString("(?, ?, " + messageSearchVectorSQL + ")")
-		args = append(args, doc.MessageID, doc.UserID, doc.TextA, doc.TextB, doc.TextC, doc.TextD)
+		values.WriteString("(?, ?, " + messageSearchVectorSQL + ", ?)")
+		args = append(args, doc.MessageID, doc.UserID, doc.TextA, doc.TextB, doc.TextC, doc.TextD, doc.Words)
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO message_search (message_id, user_id, tsv) VALUES `+values.String()+`
-		ON CONFLICT (message_id) DO UPDATE SET user_id = EXCLUDED.user_id, tsv = EXCLUDED.tsv`, args...)
+	_, err = db.ExecContext(ctx, `INSERT INTO message_search (message_id, user_id, tsv, words) VALUES `+values.String()+`
+		ON CONFLICT (message_id) DO UPDATE SET user_id = EXCLUDED.user_id, tsv = EXCLUDED.tsv, words = EXCLUDED.words`, args...)
 	return err
 }
 
@@ -246,4 +250,42 @@ func (s *Store) MessageSearchBytes(ctx context.Context, userID int64) (int64, er
 	var bytes int64
 	err = db.QueryRowContext(ctx, `SELECT coalesce(sum(pg_column_size(tsv)), 0) FROM message_search WHERE user_id = ?`, userID).Scan(&bytes)
 	return bytes, err
+}
+
+// EnsureTrigramSearch makes fuzzy search available when the server allows it:
+// the pg_trgm extension and a trigram index over the word lists. Both are
+// deliberately not migrations — CREATE EXTENSION needs privileges a managed
+// database may withhold, and search has to degrade to exact matching then
+// rather than refuse to start. Call once at startup on the postgres backend;
+// TrigramSearchEnabled answers for the query path afterwards.
+//
+// The returned error describes why fuzzy is unavailable and is for the log:
+// the caller keeps serving either way.
+func (s *Store) EnsureTrigramSearch(ctx context.Context) error {
+	// IF NOT EXISTS still needs privileges when the extension is absent, so
+	// probe first and only create when it is genuinely missing.
+	var installed bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')`).Scan(&installed); err != nil {
+		return postgresError("probe pg_trgm", err)
+	}
+	if !installed {
+		if _, err := s.db.ExecContext(ctx, `CREATE EXTENSION pg_trgm`); err != nil {
+			return postgresError("create the pg_trgm extension (fuzzy search stays off)", err)
+		}
+	}
+	// Idempotent, and cheap while the table is small; on an already filled
+	// table this is a one-time index build at startup.
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_message_search_words_trgm ON message_search USING GIN (words gin_trgm_ops)`); err != nil {
+		return postgresError("create the trigram index (fuzzy search stays off)", err)
+	}
+	s.trigramSearch.Store(true)
+	return nil
+}
+
+// TrigramSearchEnabled reports whether EnsureTrigramSearch succeeded, which is
+// what lets the query side offer fuzzy matching.
+func (s *Store) TrigramSearchEnabled() bool {
+	return s.trigramSearch.Load()
 }

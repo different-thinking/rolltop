@@ -139,7 +139,7 @@ Translation of the parsed query:
 | free text, unquoted | AND of lexemes, prefix match (`:*`) on the final term |
 | free text, quoted | phrase query (`<->` / `phraseto_tsquery`) |
 | negated terms | `AND NOT (tsv @@ ...)` |
-| fuzzy (`Behavior.Fuzzy`) | phase C+: `pg_trgm` similarity on a bounded needle set — requires the extension, degrade to off when absent |
+| fuzzy (`Behavior.Fuzzy`) | **shipped**: per-term `pg_trgm` word similarity against a distinct-words column (migration 0002), OR-composed with the term's lexeme match; floors 0.35 (balanced) / 0.30 (forgiving) set per query with `SET LOCAL`, minimum term length 5/4 runes, quoted phrases never fuzz. Extension and trigram index are runtime-optional (`EnsureTrigramSearch`) — absent privileges degrade to exact matching, never block startup |
 | ranking boosts (subject > from > body > attachments) | `ts_rank_cd` weight array `{D,C,B,A}` |
 | recency bias | multiply by an exponential decay on `messages.date_unix`, in the `ORDER BY` expression |
 | sender/contact boosts | `CASE WHEN from_addr = ANY($senders) THEN boost` factors |
@@ -165,16 +165,18 @@ index, stale for the interim, and the existing repair closes the gap.
 |---|---|---|
 | A | **Done**: incremental schema migrations (§2) — `backend/store/postgres_migrations.go` | yes — independently valuable |
 | B | **Done**: migration 0001, Postgres write path + counts/ids/purge/drop, backfill trigger, `ROLLTOP_SEARCH_BACKEND` flag | yes |
-| C | **Done**: read path — search/match/similar via one SQL spec (`message_search_query.go`), ranking knobs (weights, sender boosts, recency buckets), explain as weight-class matches. Fuzzy deferred (pg_trgm), query-side compound splitting leans on the indexed split terms | yes |
+| C | **Done**: read path — search/match/similar via one SQL spec (`message_search_query.go`), ranking knobs (weights, sender boosts, recency buckets), explain as weight-class matches. query-side compound splitting leans on the indexed split terms; fuzzy shipped via pg_trgm word similarity (runtime-optional) | yes |
 | D | flip the default after comparing result quality on real mail, README/compose, observe | small |
 | E | retire Bleve: delete the watchdog/quarantine/coordinator/footprint machinery, drop the index from `/data`, revisit the single-process constraint | yes |
 
 ## 8. Open questions
 
-- **Extensions at the hoster.** `pg_trgm` (fuzzy) and `unaccent` are wanted
-  for phase C polish. The managed database (`hpr-…`) must be checked with
-  `SELECT name FROM pg_available_extensions WHERE name IN ('pg_trgm','unaccent')`
-  before promising fuzzy; core FTS needs nothing beyond stock PostgreSQL.
+- **Extensions at the hoster.** Fuzzy detects `pg_trgm` at startup
+  (`EnsureTrigramSearch`) and degrades to exact matching when the managed
+  database (`hpr-…`) withholds `CREATE EXTENSION` — the startup log says which
+  way it went. `SELECT name FROM pg_available_extensions WHERE name = 'pg_trgm'`
+  answers whether the hoster ships it at all; `unaccent` remains unused so far.
+  Core FTS needs nothing beyond stock PostgreSQL.
 - **Database sizing.** The tsv column and GIN index move ~the index's bytes
   into the database. The hoster sizing answers in `postgres-migration-plan.md`
   §12 were collected before this; re-check the plan's growth numbers.

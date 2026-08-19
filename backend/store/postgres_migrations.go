@@ -50,6 +50,18 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_message_search_user ON message_search (user_id)`,
 		},
 	},
+	{
+		// The fuzzy-match word list beside the vector: the distinct normalized
+		// words of the indexed text, probed with pg_trgm word similarity. Only
+		// the column is a migration — the extension and its trigram index are
+		// runtime-optional (EnsureTrigramSearch), because a hoster may not
+		// allow CREATE EXTENSION and search must degrade to exact matching
+		// then, not refuse to start.
+		Version: "0002-message-search-words",
+		Statements: []string{
+			`ALTER TABLE message_search ADD COLUMN words text NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

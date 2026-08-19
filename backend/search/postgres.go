@@ -26,6 +26,9 @@ const (
 	pgMaxAddressBytes    = 128 * 1024
 	pgMaxBodyBytes       = 512 * 1024
 	pgMaxAttachmentBytes = 256 * 1024
+	// pgMaxWordsBytes bounds the fuzzy word list. Distinct words only, so this
+	// covers the vocabulary of even a large message comfortably.
+	pgMaxWordsBytes = 128 * 1024
 )
 
 // OpenPostgresBackend serves search from the given store's message_search
@@ -88,6 +91,31 @@ func buildMessageSearchTexts(doc MessageIndexDocument) (a, b, c, d string) {
 	return a, b, c, d
 }
 
+// messageSearchWords renders the distinct normalized words of the four
+// streams, the haystack pg_trgm probes for fuzzy matching. Order follows first
+// appearance so truncation drops the tail of the attachment text, not the
+// subject.
+func messageSearchWords(streams ...string) string {
+	seen := map[string]bool{}
+	var b strings.Builder
+	for _, stream := range streams {
+		for _, word := range strings.Fields(normalizeSearchText(stream)) {
+			if seen[word] {
+				continue
+			}
+			if b.Len()+len(word)+1 > pgMaxWordsBytes {
+				return b.String()
+			}
+			seen[word] = true
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(word)
+		}
+	}
+	return b.String()
+}
+
 func joinIndexTexts(values ...string) string {
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
@@ -117,6 +145,7 @@ func (s *Service) pgIndexMessages(ctx context.Context, documents []MessageIndexD
 			MessageID: doc.Message.ID,
 			UserID:    doc.Message.UserID,
 			TextA:     a, TextB: b, TextC: c, TextD: d,
+			Words: messageSearchWords(a, b, c, d),
 		})
 	}
 	for _, userID := range order {

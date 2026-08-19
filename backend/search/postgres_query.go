@@ -24,6 +24,18 @@ import (
 	"rolltop/backend/store"
 )
 
+// Fuzzy tuning. pg_trgm word similarity of the classic transposition typo
+// ("rehcnung" against a text containing "rechnung") measures 0.38, so the
+// floors sit below that; anything at 0.22 and lower measured as unrelated.
+// Short terms stay exact — two or three letters share trigrams with half the
+// vocabulary.
+const (
+	pgFuzzyThresholdBalanced  = 0.35
+	pgFuzzyThresholdForgiving = 0.30
+	pgFuzzyMinRunesBalanced   = 5
+	pgFuzzyMinRunesForgiving  = 4
+)
+
 // pgWeights orders {D, C, B, A}: attachments, body, addresses, subject — the
 // same precedence the Bleve field boosts encode, normalized to ts_rank_cd's
 // convention. The attachment weight scales with the user's knob.
@@ -56,7 +68,7 @@ func pgTSQuery(text string, quoted, prefixLast bool) string {
 // pgSearchSpec compiles a parsed query and the ranking options into the
 // store's spec. Shared by search, match and explain so the three stay one
 // grammar with one scoring.
-func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, offset int) store.MessageSearchQuery {
+func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, offset int, fuzzyAvailable bool) store.MessageSearchQuery {
 	behavior := opts.Behavior.normalized()
 	spec := store.MessageSearchQuery{
 		UserID:        userID,
@@ -71,6 +83,30 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 		Limit:         limit,
 		Offset:        offset,
 		NowUnix:       time.Now().UTC().Unix(),
+	}
+	if fuzzyAvailable && !parsed.TextQuoted && behavior.Fuzzy != "off" && spec.TSQuery != "" {
+		minRunes := pgFuzzyMinRunesBalanced
+		spec.FuzzyThreshold = pgFuzzyThresholdBalanced
+		if behavior.Fuzzy == "forgiving" {
+			minRunes = pgFuzzyMinRunesForgiving
+			spec.FuzzyThreshold = pgFuzzyThresholdForgiving
+		}
+		terms := strings.Fields(normalizeSearchText(parsed.Text))
+		anyFuzzy := false
+		for i, term := range terms {
+			entry := store.MessageSearchTextTerm{TSQuery: pgTSQuery(term, false, i == len(terms)-1)}
+			if len([]rune(term)) >= minRunes {
+				entry.FuzzyTerm = term
+				anyFuzzy = true
+			}
+			spec.TextTerms = append(spec.TextTerms, entry)
+		}
+		// All terms too short to fuzz: keep the single-tsquery plan, which the
+		// planner serves straight from the GIN index.
+		if !anyFuzzy {
+			spec.TextTerms = nil
+			spec.FuzzyThreshold = 0
+		}
 	}
 	for _, negated := range parsed.NegatedText {
 		if q := pgTSQuery(negated.Text, negated.Quoted, false); q != "" {
@@ -168,7 +204,7 @@ func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText stri
 	}
 	offset = max(offset, 0)
 	parsed := parseQuery(queryText)
-	spec := pgSearchSpec(userID, parsed, opts, limit, offset)
+	spec := pgSearchSpec(userID, parsed, opts, limit, offset, s.pg.TrigramSearchEnabled())
 	rows, err := s.pg.SearchMessageIDs(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("postgres search: %w", err)
@@ -189,7 +225,7 @@ func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText stri
 
 func (s *Service) pgExplainMessageIDs(ctx context.Context, userID int64, messageIDs []int64, queryText string, opts SearchOptions) (ExplanationResult, bool, error) {
 	parsed := parseQuery(queryText)
-	spec := pgSearchSpec(userID, parsed, opts, 1, 0)
+	spec := pgSearchSpec(userID, parsed, opts, 1, 0, s.pg.TrigramSearchEnabled())
 	ids := make([]int64, 0, len(messageIDs))
 	for _, id := range messageIDs {
 		if id > 0 {

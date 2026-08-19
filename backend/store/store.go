@@ -48,6 +48,9 @@ type Store struct {
 	// or found, so the fallback CREATE TABLE IF NOT EXISTS runs once per store
 	// rather than once per migration.
 	pluginMigrationTableReady atomic.Bool
+	// trigramSearch records that EnsureTrigramSearch found or installed
+	// pg_trgm and its index, which is what lets search offer fuzzy matching.
+	trigramSearch atomic.Bool
 }
 
 // MaxConns is the pool cap in force, for the admin page and anything else that

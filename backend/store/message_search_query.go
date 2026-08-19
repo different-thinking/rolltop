@@ -11,6 +11,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -30,13 +31,30 @@ type MessageSearchRecencyBucket struct {
 	Boost         float64
 }
 
+// MessageSearchTextTerm is one free-text term when fuzzy matching is on: the
+// term's own lexeme query, plus the raw term to probe against the word list
+// when FuzzyTerm is set (short terms keep it empty and stay exact).
+type MessageSearchTextTerm struct {
+	TSQuery   string
+	FuzzyTerm string
+}
+
 // MessageSearchQuery is the neutral spec the search package compiles a parsed
 // query into. Zero values mean "no constraint" throughout.
 type MessageSearchQuery struct {
 	UserID int64
 	// TSQuery is to_tsquery('simple', ...) input. Empty means no text
 	// constraint: filters alone select, and ranking is boosts plus recency.
+	// With TextTerms set it only ranks and reports weight classes; the
+	// per-term conditions decide membership.
 	TSQuery string
+	// TextTerms replaces the single tsquery condition when fuzzy matching is
+	// on: a message matches when every term matches exactly or by similarity.
+	TextTerms []MessageSearchTextTerm
+	// FuzzyThreshold is the pg_trgm word-similarity floor for this query,
+	// applied with SET LOCAL inside the query's transaction. Required when any
+	// TextTerms carry a FuzzyTerm.
+	FuzzyThreshold float64
 	// NotTSQueries exclude matches, one per negated term.
 	NotTSQueries []string
 	// Weights orders {D, C, B, A} for ts_rank_cd, matching PostgreSQL's
@@ -96,6 +114,17 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 	}
 	hasText := strings.TrimSpace(q.TSQuery) != ""
 
+	fuzzy := false
+	for _, term := range q.TextTerms {
+		if term.FuzzyTerm != "" {
+			fuzzy = true
+			break
+		}
+	}
+	if fuzzy && !(q.FuzzyThreshold > 0 && q.FuzzyThreshold <= 1) {
+		return nil, fmt.Errorf("fuzzy terms need a similarity threshold in (0, 1], got %g", q.FuzzyThreshold)
+	}
+
 	var score strings.Builder
 	var args []any
 	if hasText {
@@ -103,6 +132,17 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		args = append(args, formatWeightArray(q.Weights), q.TSQuery)
 	} else {
 		score.WriteString(`0::float4`)
+	}
+	if fuzzy {
+		// Rank fuzzy evidence below exact lexeme rank: similarity tops out at
+		// 0.3 per term, so an exact subject hit always outranks a typo match.
+		for _, term := range q.TextTerms {
+			if term.FuzzyTerm == "" {
+				continue
+			}
+			score.WriteString(` + (0.3 * word_similarity(?, ms.words))::float4`)
+			args = append(args, term.FuzzyTerm)
+		}
 	}
 	for _, boost := range q.SenderBoosts {
 		pattern := strings.ToLower(strings.TrimSpace(boost.Pattern))
@@ -134,7 +174,21 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 
 	conditions := []string{"ms.user_id = ?", "m.user_id = ?"}
 	args = append(args, q.UserID, q.UserID)
-	if hasText {
+	switch {
+	case len(q.TextTerms) > 0:
+		for _, term := range q.TextTerms {
+			if strings.TrimSpace(term.TSQuery) == "" {
+				continue
+			}
+			if term.FuzzyTerm != "" {
+				conditions = append(conditions, `(ms.tsv @@ to_tsquery('simple', ?) OR ? <% ms.words)`)
+				args = append(args, term.TSQuery, term.FuzzyTerm)
+				continue
+			}
+			conditions = append(conditions, `ms.tsv @@ to_tsquery('simple', ?)`)
+			args = append(args, term.TSQuery)
+		}
+	case hasText:
 		conditions = append(conditions, `ms.tsv @@ to_tsquery('simple', ?)`)
 		args = append(args, q.TSQuery)
 	}
@@ -220,9 +274,32 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		WHERE ` + strings.Join(conditions, " AND ") + `
 		ORDER BY score DESC, m.date_unix DESC, ms.message_id DESC
 		LIMIT ? OFFSET ?`
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
+	var rows *sql.Rows
+	if fuzzy {
+		// The <% operator reads its floor from a GUC, and the useful floor for
+		// typo matching (~0.35) is far below the server default (0.6). SET
+		// LOCAL scopes the change to this transaction; the value is a bounded
+		// number this function validated, rendered as a literal because SET
+		// takes no parameters.
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`SET LOCAL pg_trgm.word_similarity_threshold = %.2f`, q.FuzzyThreshold)); err != nil {
+			return nil, err
+		}
+		rows, err = tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		rows, err = db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer rows.Close()
 	var hits []MessageSearchHit

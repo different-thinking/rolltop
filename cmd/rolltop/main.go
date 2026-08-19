@@ -660,6 +660,13 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		// folders marked here, and the sync repair path refills them the same
 		// way it refills a quarantined Bleve index.
 		searchSvc = search.OpenPostgresBackend(db)
+		// Fuzzy matching needs pg_trgm and its index; both are optional at the
+		// hoster's discretion, so a refusal only costs fuzzy, never the start.
+		if err := db.EnsureTrigramSearch(ctx); err != nil {
+			log.Printf("postgres search: fuzzy matching unavailable: %v", err)
+		} else {
+			log.Printf("postgres search: fuzzy matching enabled (pg_trgm)")
+		}
 		startup.update("Search", "checking postgres search coverage", 0, max(1, len(users)))
 		for i, user := range users {
 			if err := markPostgresSearchBackfill(ctx, db, user.ID); err != nil {
