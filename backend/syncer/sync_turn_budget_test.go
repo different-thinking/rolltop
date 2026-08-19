@@ -326,7 +326,7 @@ func TestPausedInboxTurnResumesWithoutWaitingForTheNextPoll(t *testing.T) {
 	if !runner.StartAccountMailboxes(user.ID, account.ID, []string{mailbox.Name}) {
 		t.Fatal("Inbox sync did not start")
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		stored, err := db.CountMessagesForMailbox(ctx, user.ID, mailbox.ID)
 		if err != nil {
@@ -584,7 +584,7 @@ func TestBackfillTurnsGrowUntilTheFolderIsMirrored(t *testing.T) {
 	}
 	key := accountMailboxKey(user.ID, account.ID, mailbox.Name)
 	var peak time.Duration
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		if earned := runner.mailboxTurnBudgets[key]; earned > peak {

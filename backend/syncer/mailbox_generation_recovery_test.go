@@ -170,13 +170,13 @@ func TestMailboxGenerationRecoveryRetriesUntilMarkerClears(t *testing.T) {
 		if second.UserID != user.ID || second.AccountID != account.ID || second.MailboxID != mailbox.ID {
 			t.Fatalf("retry recovery queue=%+v, want exact marker", second)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("failed recovery pass was not retried")
 	}
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		pending, err := db.MailboxGenerationRebuildExists(ctx, user.ID, account.ID, mailbox.ID)
 		if err != nil {
@@ -219,7 +219,7 @@ func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 	if err := runner.RecoverPendingInboxArrivals(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for fetcher.calls.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("initial recovery attempt did not run")
@@ -230,7 +230,7 @@ func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 	if got := fetcher.calls.Load(); got != 1 {
 		t.Fatalf("failed recovery retried immediately: calls=%d", got)
 	}
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(waitForEvent)
 	for fetcher.calls.Load() < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("failed recovery did not retry on the timer: calls=%d", fetcher.calls.Load())
@@ -301,11 +301,11 @@ func TestMailboxGenerationRecoveryDeadlineReleasesReservationAndKeepsMarker(t *t
 	}
 	select {
 	case <-fetcher.started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("generation recovery did not reach IMAP status")
 	}
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		running := runner.generationRecoveryRuns[user.ID]
@@ -460,7 +460,7 @@ func TestMailboxGenerationRecoveryRotatesFailingAccountAndReopensRecoveredAccoun
 	runner.QueueAccountMailboxes(user.ID, healthyAccount.ID, []string{healthyInbox.Name})
 	select {
 	case <-fetcher.started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("deferred healthy-account sync did not start after its marker cleared")
 	}
 	if !runner.IsAccountMailboxRunning(user.ID, healthyAccount.ID, healthyInbox.Name) {
@@ -477,7 +477,7 @@ func TestMailboxGenerationRecoveryRotatesFailingAccountAndReopensRecoveredAccoun
 	}
 
 	close(fetcher.release)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for runner.IsAccountMailboxRunning(user.ID, healthyAccount.ID, healthyInbox.Name) {
 		if time.Now().After(deadline) {
 			t.Fatal("healthy account sync did not release its reservation")
@@ -591,7 +591,7 @@ func TestMailboxGenerationRecoveryPollingDoesNotQueueBehindActiveMailbox(t *test
 	}
 
 	cancel()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		recoveryLoopRunning := runner.rebuildRecoveryRunning
@@ -738,7 +738,7 @@ func TestMailboxGenerationRecoveryGateDefersTenantWorkUntilFinalMarker(t *testin
 			!replay.senderStats || !replay.attachments {
 			t.Fatalf("replayed tenant work=%+v", replay)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("deferred tenant work was not replayed after the final marker")
 	}
 }
@@ -799,7 +799,7 @@ func TestMailboxGenerationRecoverySignalWakesAndStopsEmptyLoop(t *testing.T) {
 	runner := NewRunnerWithContext(ctx, &Service{Store: db})
 	runner.replayGenerationRecovery = func(generationRecoveryReplay) {}
 	runner.SignalMailboxGenerationRecovery(user.ID)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		loopRunning := runner.rebuildRecoveryRunning
@@ -847,7 +847,7 @@ func TestMailboxGenerationRecoverySignalDuringLoopStopIsNotLost(t *testing.T) {
 	runner.wakeMailboxGenerationRebuildRecovery()
 	select {
 	case <-reachedStop:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("empty recovery loop did not reach its stop boundary")
 	}
 	insertRecoveryTestMarker(t, ctx, db, user.ID, account.ID, mailbox.ID, 701)
@@ -872,7 +872,7 @@ func TestMailboxGenerationRecoverySignalDuringLoopStopIsNotLost(t *testing.T) {
 			running, gated, wakeCount, rebuilds, queryErr)
 	}
 	cancel()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		running := runner.rebuildRecoveryRunning
@@ -916,7 +916,7 @@ func TestMailboxGenerationRecoveryWaitsForCanceledAttachmentWorkerExit(t *testin
 	runner.SignalMailboxGenerationRecovery(user.ID)
 	select {
 	case <-workerCtx.Done():
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("generation recovery did not cancel the existing attachment worker")
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -941,11 +941,11 @@ func TestMailboxGenerationRecoveryWaitsForCanceledAttachmentWorkerExit(t *testin
 		if replay.userID != user.ID || !replay.attachments {
 			t.Fatalf("post-worker replay=%+v", replay)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("recovery did not replay after the canceled attachment worker exited")
 	}
 	cancel()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		running := runner.rebuildRecoveryRunning
@@ -987,7 +987,7 @@ func TestMailboxGenerationRecoveryStopsOnCancellation(t *testing.T) {
 		t.Fatalf("initial recovery calls=%d, want one", calls.Load())
 	}
 	cancel()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		running := runner.rebuildRecoveryRunning

@@ -69,7 +69,7 @@ func TestGenerationRecoveryHeartbeatReportsActiveStage(t *testing.T) {
 				t.Fatalf("heartbeat %q does not contain %q", line, want)
 			}
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		close(done)
 		t.Fatal("generation recovery heartbeat was not emitted")
 	}

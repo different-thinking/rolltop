@@ -1046,7 +1046,7 @@ func TestPurgeMailboxLocalReferencesClearsSearchAndResetsCheckpoint(t *testing.T
 	if summaries[0].LocalMessageCount != 0 || summaries[0].LocalSyncPercent != 0 {
 		t.Fatalf("local summary after purge = count %d percent %d", summaries[0].LocalMessageCount, summaries[0].LocalSyncPercent)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		_, err := db.GetBlobForUser(ctx, user.ID, msg.BlobID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -1316,7 +1316,7 @@ func TestTargetedSyncAttributesRunBeforeRemoteStatusReturns(t *testing.T) {
 
 	select {
 	case <-fetcher.entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("targeted sync did not reach remote mailbox status")
 	}
 	runs, err := db.ListSyncRunsForUser(ctx, user.ID, 10)
@@ -1337,7 +1337,7 @@ func TestTargetedSyncAttributesRunBeforeRemoteStatusReturns(t *testing.T) {
 		if completed.err != nil {
 			t.Fatal(completed.err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("targeted sync did not complete after releasing mailbox status")
 	}
 }

@@ -143,7 +143,7 @@ func TestInboxArrivalSchedulerTimerRespectsContextCancellation(t *testing.T) {
 	scheduler.schedule(7, 11, time.Now().Add(200*time.Millisecond))
 	cancel()
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		scheduler.mu.Lock()
 		remaining := len(scheduler.schedules)
@@ -159,7 +159,7 @@ func TestInboxArrivalSchedulerTimerRespectsContextCancellation(t *testing.T) {
 	select {
 	case <-finalized:
 		t.Fatal("canceled scheduler ran the finalizer")
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(waitForEvent):
 	}
 	if scheduler.schedule(7, 11, time.Now()) {
 		t.Fatal("canceled scheduler accepted new work")

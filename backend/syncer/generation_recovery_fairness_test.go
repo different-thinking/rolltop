@@ -194,7 +194,7 @@ func TestBoundedGenerationRecoveryDoesNotLetDeferredInboxStarveNextBatch(t *test
 	}
 	select {
 	case <-fetcher.historyStarted:
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("first recovery history batch did not start")
 	}
 	if !runner.QueueAccountMailboxes(user.ID, healthyAccount.ID, []string{healthyMailbox.Name}) {
@@ -209,7 +209,10 @@ func TestBoundedGenerationRecoveryDoesNotLetDeferredInboxStarveNextBatch(t *test
 		if healthyReserved {
 			t.Fatal("deferred Inbox was allowed to take priority over the next recovery batch")
 		}
-	case <-time.After(10 * time.Second):
+	// Waiting out a batch of 600 messages through PostgreSQL and the index is not
+	// what this test is about, so the wait is generous: it costs nothing when the
+	// rescan arrives, and only a broken fairness rule makes it run out.
+	case <-time.After(waitForRecoveryPass):
 		t.Fatal("bounded recovery did not release and rescan pending work")
 	}
 	select {
@@ -218,7 +221,7 @@ func TestBoundedGenerationRecoveryDoesNotLetDeferredInboxStarveNextBatch(t *test
 	default:
 	}
 	cancel()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		recoveryRunning := runner.generationRecoveryRuns[user.ID] || runner.rebuildRecoveryRunning

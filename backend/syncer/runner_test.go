@@ -425,7 +425,7 @@ func TestRunnerMailboxMaintenanceBlocksSyncUntilFinished(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatalf("maintenance task did not start")
 	}
 	if !r.IsAccountMailboxRunning(user.ID, account.ID, "archive") {
@@ -439,7 +439,7 @@ func TestRunnerMailboxMaintenanceBlocksSyncUntilFinished(t *testing.T) {
 	}
 
 	close(release)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		if !r.IsAccountMailboxRunning(user.ID, account.ID, "archive") {
 			break
@@ -451,7 +451,7 @@ func TestRunnerMailboxMaintenanceBlocksSyncUntilFinished(t *testing.T) {
 	}
 	select {
 	case <-senderStatsCalled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats did not refresh after maintenance released its mailbox reservation")
 	}
 	saved, err := db.GetSyncRunForUser(ctx, user.ID, run.ID)
@@ -524,7 +524,7 @@ func TestRunnerMailboxMaintenanceAllowsDifferentMailboxAndHonorsRecoveryGate(t *
 
 func waitForRunnerSyncRun(t *testing.T, ctx context.Context, db *store.Store, userID, runID int64) store.SyncRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		run, err := db.GetSyncRunForUser(ctx, userID, runID)
 		if err != nil {
@@ -578,16 +578,16 @@ func TestGenerationRecoveryCancelsActiveMailboxMaintenance(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("maintenance did not start")
 	}
 	r.SignalMailboxGenerationRecovery(user.ID)
 	select {
 	case <-canceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("generation recovery did not cancel mailbox maintenance")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for r.IsAccountMailboxRunning(user.ID, account.ID, mailbox.Name) {
 		if time.Now().After(deadline) {
 			t.Fatal("mailbox maintenance reservation was not released after recovery cancellation")
@@ -635,7 +635,7 @@ func TestRunnerAttachmentIndexWaitsForForegroundOperation(t *testing.T) {
 	}
 
 	finish()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		r.mu.Lock()
 		pending = r.attachmentPending[user.ID]
@@ -782,13 +782,13 @@ func TestRunnerForegroundPreemptsActiveGenerationRecoveryRun(t *testing.T) {
 	}()
 	select {
 	case <-recoveryCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not cancel generation recovery")
 	}
 	var startedResult result
 	select {
 	case startedResult = <-started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not acquire after generation recovery yielded")
 	}
 	if startedResult.err != nil {
@@ -873,7 +873,7 @@ func TestRunnerCanceledForegroundWaitReleasesReservation(t *testing.T) {
 	r.mu.Lock()
 	delete(r.generationRecoveryRuns, userID)
 	r.mu.Unlock()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		r.mu.Lock()
 		foreground = r.foregroundRunning[userID]
@@ -925,11 +925,11 @@ func TestGenerationRecoveryDerivedMaintenanceRunsOutsideReplayGate(t *testing.T)
 			if active {
 				t.Fatalf("%s ran while the recovery replay gate was active", name)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForEvent):
 			t.Fatalf("%s was not scheduled after recovery replay", name)
 		}
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	var senderPending, attachmentPending bool
 	for {
 		r.mu.Lock()
@@ -976,14 +976,14 @@ func TestSenderStatsRefreshPreservesNewGenerationRecoveryRequest(t *testing.T) {
 	}()
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats refresh did not start")
 	}
 	r.SignalMailboxGenerationRecovery(userID)
 	close(release)
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats refresh did not finish")
 	}
 	r.mu.Lock()
@@ -1027,7 +1027,7 @@ func TestSenderStatsRefreshWaitsForOrdinaryMailboxWriter(t *testing.T) {
 	r.RefreshSenderStats(userID)
 	select {
 	case <-called:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats did not run after mailbox writer released")
 	}
 }
@@ -1054,7 +1054,7 @@ func TestMailboxReservationWaitsForActiveSenderStats(t *testing.T) {
 	}()
 	select {
 	case <-statsStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats did not start")
 	}
 
@@ -1075,13 +1075,13 @@ func TestMailboxReservationWaitsForActiveSenderStats(t *testing.T) {
 	close(releaseStats)
 	select {
 	case <-statsDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("sender stats did not finish")
 	}
 	var result reservation
 	select {
 	case result = <-reserved:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox reservation did not resume after sender stats")
 	}
 	if !result.ok {
@@ -1117,7 +1117,7 @@ func TestForegroundOperationSerializesExistingAndNewMailboxWriters(t *testing.T)
 	var foreground foregroundResult
 	select {
 	case foreground = <-foregroundStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not start after mailbox writer released")
 	}
 	if foreground.err != nil {
@@ -1143,7 +1143,7 @@ func TestForegroundOperationSerializesExistingAndNewMailboxWriters(t *testing.T)
 	var mailbox reservation
 	select {
 	case mailbox = <-newMailbox:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox writer did not resume after foreground operation")
 	}
 	if !mailbox.ok {
@@ -1193,7 +1193,7 @@ func TestForegroundOperationDoesNotCancelExplicitMailboxMaintenance(t *testing.T
 	}
 	select {
 	case <-maintenanceStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("explicit maintenance did not start")
 	}
 
@@ -1220,7 +1220,7 @@ func TestForegroundOperationDoesNotCancelExplicitMailboxMaintenance(t *testing.T
 			t.Fatal(result.err)
 		}
 		result.finish()
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not acquire after explicit maintenance finished")
 	}
 	select {
@@ -1272,7 +1272,7 @@ func TestForegroundOperationProceedsDuringSearchRebuild(t *testing.T) {
 	}
 	select {
 	case <-rebuildStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("search rebuild did not start")
 	}
 
@@ -1320,7 +1320,7 @@ func TestForegroundOperationsAreSerializedPerUser(t *testing.T) {
 			t.Fatal("second foreground operation failed")
 		}
 		secondFinish()
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("second foreground operation did not start after the first released")
 	}
 }
@@ -1365,7 +1365,7 @@ func TestForegroundOperationPreemptsNextAutoMailbox(t *testing.T) {
 	}
 	select {
 	case <-fetcher.firstStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("first auto mailbox did not start")
 	}
 
@@ -1380,14 +1380,14 @@ func TestForegroundOperationPreemptsNextAutoMailbox(t *testing.T) {
 	}()
 	select {
 	case <-fetcher.firstCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not cancel the active auto mailbox")
 	}
 
 	var foreground foregroundResult
 	select {
 	case foreground = <-foregroundStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not acquire after first auto mailbox")
 	}
 	if foreground.err != nil {
@@ -1401,7 +1401,7 @@ func TestForegroundOperationPreemptsNextAutoMailbox(t *testing.T) {
 	foreground.finish()
 	select {
 	case <-fetcher.secondStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("second auto mailbox did not resume after foreground work")
 	}
 	waitForRunnerUserIdle(t, r, user.ID)
@@ -1433,7 +1433,7 @@ func TestForegroundOperationPreemptsAutoPlanningWaitingOnAttachmentWorker(t *tes
 	}
 	select {
 	case <-attachmentCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("auto planning did not cancel attachment worker")
 	}
 	if _, err := db.GetMailbox(ctx, user.ID, account.ID, "Archive"); !store.IsNotFound(err) {
@@ -1460,7 +1460,7 @@ func TestForegroundOperationPreemptsAutoPlanningWaitingOnAttachmentWorker(t *tes
 		if finish == nil {
 			t.Fatal("foreground operation failed while waiting for auto planning")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not start after auto planning")
 	}
 	if _, err := db.GetMailbox(ctx, user.ID, account.ID, "Archive"); !store.IsNotFound(err) {
@@ -1509,7 +1509,7 @@ func TestForegroundOperationPreemptsAndReplaysAutoPlanning(t *testing.T) {
 	}
 	select {
 	case <-planningCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground operation did not cancel auto planning")
 	}
 	r.mu.Lock()
@@ -1593,7 +1593,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysAutoPlanning(t *testing.T)
 	}
 	select {
 	case <-planningCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground acquisition did not cancel auto planning")
 	}
 	r.mu.Lock()
@@ -1610,7 +1610,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysAutoPlanning(t *testing.T)
 	close(releasePlanningCleanup)
 	select {
 	case <-fetcher.secondStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("auto planning was not replayed after canceled worker drained")
 	}
 	waitForRunnerUserIdle(t, r, user.ID)
@@ -1658,7 +1658,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysRecoveryMailbox(t *testing
 	go r.runGenerationRecoveryReplay(generationRecoveryReplay{userID: user.ID, mailboxes: []string{"Archive"}})
 	select {
 	case <-fetcher.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("recovery replay did not start")
 	}
 
@@ -1671,7 +1671,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysRecoveryMailbox(t *testing
 	}
 	select {
 	case <-fetcher.canceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground acquisition did not cancel recovery replay")
 	}
 	r.mu.Lock()
@@ -1685,7 +1685,7 @@ func TestCanceledForegroundAcquisitionDrainsAndReplaysRecoveryMailbox(t *testing
 	close(fetcher.release)
 	select {
 	case <-fetcher.resumed:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("recovery mailbox was not replayed after canceled worker drained")
 	}
 	waitForRunnerUserIdle(t, r, user.ID)
@@ -1719,7 +1719,7 @@ func TestForegroundQueueDefersWithoutWaitingOnItsOwnReservation(t *testing.T) {
 		if !ok {
 			t.Fatal("foreground mailbox refresh was not queued")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("foreground mailbox refresh waited on its own reservation")
 	}
 
@@ -1804,14 +1804,14 @@ func TestOrdinaryMailboxSyncWaitsForCanceledAttachmentWorker(t *testing.T) {
 			}
 			select {
 			case <-attachmentCanceled:
-			case <-time.After(time.Second):
+			case <-time.After(waitForEvent):
 				t.Fatal("ordinary mailbox sync did not cancel attachment worker")
 			}
 			if runs, err := db.ListSyncRunsForUser(ctx, user.ID, 20); err != nil || len(runs) != 0 {
 				t.Fatalf("sync entered Service before attachment exit: runs=%d err=%v", len(runs), err)
 			}
 			releaseAttachment()
-			deadline := time.Now().Add(2 * time.Second)
+			deadline := time.Now().Add(waitForEvent)
 			for {
 				runs, err := db.ListSyncRunsForUser(ctx, user.ID, 20)
 				if err != nil {
@@ -1855,11 +1855,11 @@ func TestAccountSyncDoesNotWaitForeverForCanceledAttachmentWorker(t *testing.T) 
 	}
 	select {
 	case <-attachmentCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("account-wide sync did not cancel attachment worker")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runs, err := db.ListSyncRunsForUser(ctx, user.ID, 20)
 		if err != nil {
@@ -1892,21 +1892,28 @@ func TestLiveInboxSyncTimeoutReleasesReservation(t *testing.T) {
 		release:         make(chan struct{}),
 	}
 	runner := NewRunnerWithContext(ctx, &Service{Store: db, Fetcher: fetcher})
-	runner.liveInboxSyncTimeout = 25 * time.Millisecond
+	// The budget has to outlast the database round trips the sync makes before
+	// it reaches the fetcher, because those are not the subject: the fetcher
+	// blocks until this test releases it, so the deadline still expires with the
+	// fetch in flight, which is the situation being asserted. A budget shorter
+	// than that latency instead expires before the fetch starts, and the test
+	// then waits for a signal that can never arrive - which is how 25 ms made
+	// this fail on a busy machine roughly every other run.
+	runner.liveInboxSyncTimeout = boundedTurnBudget
 	if !runner.StartAccountMailboxes(user.ID, account.ID, []string{mailbox.Name}) {
 		t.Fatal("Inbox sync did not start")
 	}
-	// Generous on purpose. What this test is about is the 25 ms bounded turn
-	// above releasing its reservation; how long the sync takes to reach the
-	// fetcher in the first place is not the subject, and it now includes a
-	// handful of database round trips.
+	// Generous on purpose. What this test is about is the bounded turn above
+	// releasing its reservation; how long the sync takes to reach the fetcher in
+	// the first place is not the subject, and it now includes a handful of
+	// database round trips.
 	select {
 	case <-fetcher.started:
-	case <-time.After(30 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("Inbox fetch did not start")
 	}
 
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for runner.IsAccountMailboxRunning(user.ID, account.ID, mailbox.Name) {
 		if time.Now().After(deadline) {
 			close(fetcher.release)
@@ -1935,7 +1942,9 @@ func TestGenerationRecoveryReplayKeepsTimedOutInboxPending(t *testing.T) {
 		release:         make(chan struct{}),
 	}
 	runner := NewRunnerWithContext(ctx, &Service{Store: db, Fetcher: fetcher})
-	runner.liveInboxSyncTimeout = 25 * time.Millisecond
+	// Same reasoning as the bounded turn above: the budget bounds the fetch, not
+	// the database work that precedes it.
+	runner.liveInboxSyncTimeout = boundedTurnBudget
 	runner.mu.Lock()
 	runner.generationRecoveryReplay[user.ID] = true
 	runner.mu.Unlock()
@@ -1949,15 +1958,17 @@ func TestGenerationRecoveryReplayKeepsTimedOutInboxPending(t *testing.T) {
 	}()
 	select {
 	case <-fetcher.started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("replayed Inbox fetch did not start")
 	}
+	// The replay returns when its bounded turn expires, so this wait has to
+	// outlast that budget rather than race it.
 	select {
 	case completed := <-result:
 		if completed {
 			t.Fatal("timed-out Inbox replay was treated as complete")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("timed-out Inbox replay did not return")
 	}
 	close(fetcher.release)
@@ -1986,12 +1997,12 @@ func TestGenerationRecoverySignalCancelsBroadMailboxTurn(t *testing.T) {
 	}
 	select {
 	case <-fetcher.started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("broad Inbox fetch did not start")
 	}
 
 	runner.SignalMailboxGenerationRecovery(user.ID)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for runner.IsMailboxRunning(user.ID, mailbox.Name) {
 		if time.Now().After(deadline) {
 			close(fetcher.release)
@@ -2058,7 +2069,7 @@ func TestMailboxMaintenanceWaitsForCanceledAttachmentWorker(t *testing.T) {
 	}()
 	select {
 	case <-attachmentCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox maintenance did not cancel attachment worker")
 	}
 	select {
@@ -2080,12 +2091,12 @@ func TestMailboxMaintenanceWaitsForCanceledAttachmentWorker(t *testing.T) {
 		if got.err != nil || !got.ok || got.run.ID == 0 {
 			t.Fatalf("mailbox maintenance result after attachment exit: %+v", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox maintenance did not start after attachment exit")
 	}
 	select {
 	case <-maintenanceCalled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox maintenance function did not run")
 	}
 	waitForRunnerUserIdle(t, r, user.ID)
@@ -2180,13 +2191,13 @@ func TestMailboxMaintenanceWithCommittedSetupFinishesAcrossGenerationRecovery(t 
 	}()
 	select {
 	case <-setupStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("maintenance setup did not start")
 	}
 	r.SignalMailboxGenerationRecovery(user.ID)
 	select {
 	case <-setupCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("generation recovery did not reach the pre-commit setup context")
 	}
 	close(releaseSetup)
@@ -2196,12 +2207,12 @@ func TestMailboxMaintenanceWithCommittedSetupFinishesAcrossGenerationRecovery(t 
 		if got.err != nil || !got.started || got.run.ID <= 0 {
 			t.Fatalf("setup handoff result=%+v", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("maintenance setup did not hand off")
 	}
 	select {
 	case <-maintenanceCalled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("committed setup did not finish its matching maintenance after recovery signal")
 	}
 	if saved := waitForRunnerSyncRun(t, ctx, db, user.ID, got.run.ID); saved.Status != "ok" {
@@ -2229,7 +2240,7 @@ func TestMailboxMaintenanceCancellationReleasesReservationWhileWaitingForAttachm
 	}()
 	select {
 	case <-attachmentCanceled:
-	case <-time.After(time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox maintenance did not cancel attachment worker")
 	}
 	cancel()
@@ -2238,7 +2249,7 @@ func TestMailboxMaintenanceCancellationReleasesReservationWhileWaitingForAttachm
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("maintenance cancellation error = %v, want context canceled", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("mailbox maintenance did not return on cancellation")
 	}
 	if r.IsAccountMailboxRunning(user.ID, mailbox.AccountID, mailbox.Name) {
@@ -2293,7 +2304,7 @@ func installBlockedAttachmentWorker(r *Runner, userID int64) (<-chan struct{}, f
 
 func waitForForegroundBarrier(t *testing.T, r *Runner, userID int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		r.mu.Lock()
 		held := r.foregroundRunning[userID] > 0
@@ -2310,7 +2321,7 @@ func waitForForegroundBarrier(t *testing.T, r *Runner, userID int64) {
 
 func waitForRunnerUserIdle(t *testing.T, r *Runner, userID int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for r.IsRunning(userID) {
 		if time.Now().After(deadline) {
 			t.Fatal("runner user work did not become idle")
@@ -2344,7 +2355,7 @@ func TestRunnerAttachmentIndexWaitsForMailboxReservation(t *testing.T) {
 	if !r.StartAttachmentIndex(user.ID) {
 		t.Fatal("attachment index did not start after mailbox release")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		r.mu.Lock()
 		running := r.mailboxRunning[mailboxKey(user.ID, "__attachments__")]
@@ -2482,7 +2493,7 @@ func awaitRunnerSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
@@ -2498,7 +2509,7 @@ func assertNoRunnerSignal(t *testing.T, signal <-chan struct{}, name string) {
 
 func waitForRunnerMaintenanceIdle(t *testing.T, r *Runner, userID int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		r.mu.Lock()
 		busy := r.attachmentDone[userID] != nil || r.senderStatsRunning[userID]
