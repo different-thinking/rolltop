@@ -613,7 +613,7 @@ func awaitAttachmentRetryCall(t *testing.T, calls <-chan time.Time, name string)
 	select {
 	case calledAt := <-calls:
 		return calledAt
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatalf("timed out waiting for %s", name)
 		return time.Time{}
 	}
@@ -621,7 +621,7 @@ func awaitAttachmentRetryCall(t *testing.T, calls <-chan time.Time, name string)
 
 func waitForAttachmentRetryTimer(t *testing.T, runner *Runner, userID int64, want bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		runner.mu.Lock()
 		present := runner.attachmentRetryTimers[userID] != nil
@@ -638,7 +638,7 @@ func waitForAttachmentRetryTimer(t *testing.T, runner *Runner, userID int64, wan
 
 func waitForAttachmentFetchCalls(t *testing.T, fetcher *attachmentIndexQueueFetcher, want int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		if got := fetcher.totalCallCount(); got >= want {
 			return
@@ -652,7 +652,7 @@ func waitForAttachmentFetchCalls(t *testing.T, fetcher *attachmentIndexQueueFetc
 
 func waitForAttachmentIndexed(t *testing.T, db *store.Store, userID, messageID int64) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(waitForEvent)
 	for {
 		message, err := db.GetMessageForUser(context.Background(), userID, messageID)
 		if err != nil {

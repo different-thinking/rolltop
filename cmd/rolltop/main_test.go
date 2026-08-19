@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -249,5 +252,105 @@ func TestHealthCheckStaysUnavailableAfterAFailedStartup(t *testing.T) {
 
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// The budgets used to be constants sized for a ten-second grace period. An
+// operator who gives the container more room, or a platform that gives it less,
+// now moves all of them at once - and the default still has to be what the
+// constants were.
+func TestShutdownBudgetSplitsTheStopGracePeriod(t *testing.T) {
+	budget := newShutdownBudget(10 * time.Second)
+	if budget.httpDrain != 3*time.Second {
+		t.Fatalf("http drain budget = %s, want 3s", budget.httpDrain)
+	}
+	if budget.interruptedRuns != 2*time.Second {
+		t.Fatalf("interrupted sync run budget = %s, want 2s", budget.interruptedRuns)
+	}
+	if budget.derivedClose != 3*time.Second {
+		t.Fatalf("derived close budget = %s, want 3s", budget.derivedClose)
+	}
+	// The remainder is what the database close runs in, and it may not be
+	// spent by the phases before it.
+	if spent := budget.httpDrain + budget.interruptedRuns + budget.derivedClose; spent >= budget.total {
+		t.Fatalf("phases claim %s of a %s budget, leaving nothing for the database close", spent, budget.total)
+	}
+
+	longer := newShutdownBudget(60 * time.Second)
+	if longer.httpDrain != 18*time.Second || longer.derivedClose != 18*time.Second {
+		t.Fatalf("a 60s budget produced %+v, want every phase scaled with it", longer)
+	}
+
+	// The paths that shut down before the configuration is read pass zero.
+	if unset := newShutdownBudget(0); unset != newShutdownBudget(defaultShutdownTimeout) {
+		t.Fatalf("unconfigured budget = %+v, want the default budget", unset)
+	}
+}
+
+// A close that is not part of a signalled shutdown still has to be bounded, so
+// a runtime without a tracker falls back to the default share rather than to no
+// deadline at all.
+func TestAppRuntimeCloseBudgetFollowsTheTracker(t *testing.T) {
+	app := &appRuntime{}
+	if got, want := app.derivedCloseBudget(), newShutdownBudget(0).derivedClose; got != want {
+		t.Fatalf("untracked close budget = %s, want %s", got, want)
+	}
+
+	app.shutdown = newShutdownTracker(nil, newShutdownBudget(60*time.Second))
+	if got, want := app.derivedCloseBudget(), 18*time.Second; got != want {
+		t.Fatalf("tracked close budget = %s, want %s", got, want)
+	}
+}
+
+func TestSignalNameSpellsThePlatformsWord(t *testing.T) {
+	cases := map[os.Signal]string{
+		syscall.SIGTERM: "SIGTERM",
+		os.Interrupt:    "SIGINT",
+		nil:             "no signal",
+	}
+	for sig, want := range cases {
+		if got := signalName(sig); got != want {
+			t.Fatalf("signalName(%v) = %q, want %q", sig, got, want)
+		}
+	}
+}
+
+// The signal is what separates "the platform stopped us" from "the kernel killed
+// us", so the watcher has to hold on to it rather than only cancelling.
+func TestNotifyStopSignalKeepsTheSignalThatStoppedTheProcess(t *testing.T) {
+	ctx, stopSignal, stop := notifyStopSignal(context.Background(), syscall.SIGUSR1)
+	defer stop()
+
+	if got := stopSignal(); got != nil {
+		t.Fatalf("signal reported before one arrived: %v", got)
+	}
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("context was not cancelled by the signal")
+	}
+	if got := stopSignal(); got != syscall.SIGUSR1 {
+		t.Fatalf("recorded signal = %v, want SIGUSR1", got)
+	}
+}
+
+// A stop signal during startup is the platform doing its job, not a failed
+// start. It must not be filed as a fatal error, and a genuine failure that
+// happens to coincide with one still must be.
+func TestStoppedDuringStartupOnlyCoversTheStopSignal(t *testing.T) {
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if !stoppedDuringStartup(stopped, fmt.Errorf("open search index: %w", context.Canceled)) {
+		t.Fatal("a cancelled startup after a stop signal was reported as a failure")
+	}
+	if stoppedDuringStartup(stopped, errors.New("ROLLTOP_MASTER_KEY is required")) {
+		t.Fatal("a real startup failure was hidden because a stop signal had arrived")
+	}
+	if stoppedDuringStartup(context.Background(), context.Canceled) {
+		t.Fatal("a cancellation with no stop signal was reported as an orderly stop")
 	}
 }

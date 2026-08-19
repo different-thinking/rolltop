@@ -126,7 +126,9 @@ func TestGenerationRebuildReschedulesRestoredPendingInboxArrival(t *testing.T) {
 	var restoredSchedule scheduledArrival
 	select {
 	case restoredSchedule = <-scheduled:
-	case <-time.After(5 * time.Second):
+	// Startup recovery replays a whole mailbox before it re-arms the arrival, so
+	// this waits on work whose duration is not the subject of the assertion.
+	case <-time.After(waitForRecoveryPass):
 		t.Fatal("startup recovery did not resume the marked mailbox and re-arm its arrival")
 	}
 	if restoredSchedule.userID != user.ID || restoredSchedule.accountID != accountRecord.ID ||

@@ -57,6 +57,16 @@ type runState struct {
 	PID           int    `json:"pid"`
 	CrashLogBytes int64  `json:"crash_log_bytes"`
 	CleanShutdown bool   `json:"clean_shutdown"`
+	// StopSignal names the signal that asked the run to stop, and the remaining
+	// fields how far the shutdown it started had got. They are what separates a
+	// process killed out of nowhere - a kernel OOM kill, a `docker kill` - from
+	// one that was shutting down as asked and ran out of grace period. Both
+	// leave CleanShutdown false and no crash report, so without them the next
+	// start can only name the first, which is the wrong thing to go and check.
+	StopSignal      string `json:"stop_signal,omitempty"`
+	StopSignalAt    string `json:"stop_signal_at,omitempty"`
+	ShutdownPhase   string `json:"shutdown_phase,omitempty"`
+	ShutdownPhaseAt string `json:"shutdown_phase_at,omitempty"`
 }
 
 // crashReporter persists crash evidence in the data directory. The crash log is
@@ -72,6 +82,21 @@ type crashReporter struct {
 	finished bool
 	// baseline is the crash log size once this run had announced itself.
 	baseline int64
+	// baselineTaken keeps every later state write from moving the baseline. A
+	// shutdown rewrites the state several times, and a crash dump landing
+	// between two of those writes would end up behind a baseline that had moved
+	// past it - unreported, which is the one outcome this file may not produce.
+	baselineTaken bool
+	// startedAt is when this run announced itself, carried across the rewrites
+	// so the field keeps meaning the start of the run rather than the last time
+	// anything about it was recorded.
+	startedAt string
+	// stopSignal and the fields below track the shutdown in progress, so the
+	// state file says how far it got if the process does not survive it.
+	stopSignal   string
+	stopSignalAt time.Time
+	phase        string
+	phaseAt      time.Time
 }
 
 // armCrashOutput routes runtime crash dumps into the crash log. It runs before
@@ -131,17 +156,78 @@ func (c *crashReporter) beginRun(version string) {
 		// has already recorded how it thought it was ending.
 		log.Printf("previous run ended with a crash or fatal error; the report is in %s, among the %d bytes searched past the previous start",
 			c.crashLogPath(), searched)
+	case hadPreviousRun && !previous.CleanShutdown && previous.StopSignal != "":
+		// It was stopping when it died, so the kernel log is the wrong place to
+		// look: the shutdown was simply given less time than it needed.
+		log.Printf("previous run was asked to stop with %s%s and was killed before its shutdown finished%s; "+
+			"the container's stop grace period is shorter than the shutdown needs - raise it "+
+			"(docker: stop_grace_period, Kubernetes: terminationGracePeriodSeconds), "+
+			"or lower ROLLTOP_SHUTDOWN_TIMEOUT so the shutdown fits inside the period it does get",
+			previous.StopSignal, atSuffix(previous.StopSignalAt), shutdownProgressDetail(previous))
 	case hadPreviousRun && !previous.CleanShutdown:
 		log.Printf("previous run was terminated without a clean shutdown and left no crash report; "+
-			"it was likely killed externally (kernel OOM kill or SIGKILL) or could not write %s - "+
-			"check the container exit code and the kernel log", c.crashLogPath())
+			"no stop signal was recorded, so it was likely killed externally (kernel OOM kill or SIGKILL) "+
+			"or could not write %s - check the container exit code and the kernel log", c.crashLogPath())
 	}
 	if size > crashLogMaxBytes {
 		c.rotate()
 	}
 	c.appendf(runStartMarkerFormat, version, time.Now().UTC().Format(time.RFC3339), os.Getpid())
 	c.owned = true
+	c.startedAt = time.Now().UTC().Format(time.RFC3339)
 	c.writeState(false)
+}
+
+// beginShutdown records that a stop signal arrived. It is written before any of
+// the shutdown work starts, because the point of the record is to survive a
+// process that does not reach the end of that work.
+func (c *crashReporter) beginShutdown(signal string) {
+	if c == nil {
+		return
+	}
+	c.stopSignal = signal
+	c.stopSignalAt = time.Now()
+	c.phase, c.phaseAt = "", time.Time{}
+	c.writeState(false)
+}
+
+// shutdownPhase records what the shutdown is doing now. Each phase is one small
+// state write, so the next start can name the step that did not finish - which
+// is the difference between an operator raising the grace period and one
+// searching the kernel log for an OOM kill that never happened.
+func (c *crashReporter) shutdownPhase(phase string) {
+	if c == nil || c.stopSignal == "" {
+		return
+	}
+	c.phase = phase
+	c.phaseAt = time.Now()
+	c.writeState(false)
+}
+
+// atSuffix renders a recorded timestamp for a log line, or nothing at all when
+// the state did not carry one.
+func atSuffix(stamp string) string {
+	if strings.TrimSpace(stamp) == "" {
+		return ""
+	}
+	return " at " + stamp
+}
+
+// shutdownProgressDetail says how far the previous run's shutdown got. The
+// elapsed time is only offered when both stamps parse: a phase name on its own
+// still names the step to look at, while a made-up duration would send an
+// operator after the wrong one.
+func shutdownProgressDetail(state runState) string {
+	if state.ShutdownPhase == "" {
+		return ""
+	}
+	signalAt, signalErr := time.Parse(time.RFC3339, state.StopSignalAt)
+	phaseAt, phaseErr := time.Parse(time.RFC3339, state.ShutdownPhaseAt)
+	if signalErr != nil || phaseErr != nil || phaseAt.Before(signalAt) {
+		return fmt.Sprintf(", while %s", state.ShutdownPhase)
+	}
+	return fmt.Sprintf(", while %s, reached %s after the signal",
+		state.ShutdownPhase, phaseAt.Sub(signalAt).Round(time.Second))
 }
 
 // finish records how this run ended. It must run while the instance lock is
@@ -314,14 +400,19 @@ func (c *crashReporter) writeState(cleanShutdown bool) {
 	if !c.owned {
 		return
 	}
-	if !cleanShutdown {
+	if !cleanShutdown && !c.baselineTaken {
 		c.baseline = c.crashLogSize()
+		c.baselineTaken = true
 	}
 	state, err := json.Marshal(runState{
-		StartedAt:     time.Now().UTC().Format(time.RFC3339),
-		PID:           os.Getpid(),
-		CrashLogBytes: c.baseline,
-		CleanShutdown: cleanShutdown,
+		StartedAt:       c.startedAt,
+		PID:             os.Getpid(),
+		CrashLogBytes:   c.baseline,
+		CleanShutdown:   cleanShutdown,
+		StopSignal:      c.stopSignal,
+		StopSignalAt:    stampOrEmpty(c.stopSignalAt),
+		ShutdownPhase:   c.phase,
+		ShutdownPhaseAt: stampOrEmpty(c.phaseAt),
 	})
 	if err != nil {
 		return
@@ -329,6 +420,15 @@ func (c *crashReporter) writeState(cleanShutdown bool) {
 	if err := os.WriteFile(c.statePath(), append(state, '\n'), 0o600); err != nil {
 		log.Printf("write crash state %s: %v", c.statePath(), err)
 	}
+}
+
+// stampOrEmpty formats a time for the state file, leaving the field out when
+// the event it records has not happened.
+func stampOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func (c *crashReporter) close() {

@@ -61,6 +61,13 @@ type Config struct {
 	// process to release the data directory before giving up. Rolling
 	// deployments overlap the two containers for exactly that long.
 	StartupLockWait time.Duration
+
+	// ShutdownTimeout is the container runtime's stop grace period as Rolltop
+	// understands it: how long the whole shutdown may take between the stop
+	// signal and the SIGKILL that follows it. The phases of the shutdown are
+	// derived from it, so an operator who gives the container more room says so
+	// once here rather than hoping the fixed budgets fit.
+	ShutdownTimeout time.Duration
 }
 
 const defaultDataDir = "/data"
@@ -143,6 +150,18 @@ func Load() (Config, error) {
 	if startupLockWait < 0 {
 		return Config{}, fmt.Errorf("ROLLTOP_STARTUP_LOCK_WAIT must not be negative, got %s", startupLockWait)
 	}
+	// Ten seconds is what `docker stop` gives by default, so the default here
+	// describes the least room a shutdown is likely to get rather than the most.
+	shutdownTimeout, err := parseDuration("ROLLTOP_SHUTDOWN_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	// Rejected rather than clamped: a shutdown has phases, and a budget too
+	// small to divide between them would silently skip the closes it exists to
+	// make room for. Anyone who wants the process to exit at once kills it.
+	if shutdownTimeout < time.Second {
+		return Config{}, fmt.Errorf("ROLLTOP_SHUTDOWN_TIMEOUT must be at least 1s, got %s", shutdownTimeout)
+	}
 	// The logging package owns what a level means, so an unknown value is
 	// rejected here by the same parser the logger applies.
 	logLevel, err := logging.ParseLevel(os.Getenv("ROLLTOP_LOG_LEVEL"))
@@ -178,6 +197,7 @@ func Load() (Config, error) {
 		Google:                 google,
 		MemoryLimit:            memoryLimit,
 		StartupLockWait:        startupLockWait,
+		ShutdownTimeout:        shutdownTimeout,
 	}, nil
 }
 

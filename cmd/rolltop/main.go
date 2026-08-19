@@ -268,6 +268,10 @@ type appRuntime struct {
 	// process then exits with a possibly half-written Bleve batch and nothing
 	// else would notice on the next start.
 	markSearchRecovery func()
+	// shutdown carries the operator's stop budget and records how far a close
+	// got. It is nil in tests and on the paths that close a runtime no signal
+	// asked to stop, where the default budget applies and nothing is recorded.
+	shutdown *shutdownTracker
 }
 
 // restartRequest is a controlled-restart request from a subsystem that cannot
@@ -280,21 +284,111 @@ type restartRequest struct {
 
 const searchWriterRestartShutdownTimeout = 15 * time.Second
 
-// The whole shutdown has to finish inside the container runtime's grace period
-// — ten seconds by default for "docker stop" — because the step that matters
-// most, closing SQLite so its WAL is checkpointed, comes last. These budgets
-// leave room for that close instead of letting a slow HTTP drain or a stuck
-// index writer consume the grace period and turn every restart into a SIGKILL.
-const (
-	httpDrainTimeout          = 3 * time.Second
-	interruptedSyncRunTimeout = 2 * time.Second
-	derivedCloseTimeout       = 3 * time.Second
-)
+// shutdownBudget divides the container runtime's stop grace period between the
+// steps of a shutdown. The whole shutdown has to finish inside that period —
+// ten seconds by default for "docker stop", and a platform that restarts a
+// container to apply an environment change gives no more than it is configured
+// to — because whatever has not finished when it runs out is SIGKILLed. Fixed
+// shares keep a slow HTTP drain or a stuck index writer from spending the whole
+// period, and leave the remainder for the database close, which is the last step
+// and the one that must still run.
+type shutdownBudget struct {
+	total           time.Duration
+	httpDrain       time.Duration
+	interruptedRuns time.Duration
+	derivedClose    time.Duration
+}
+
+// defaultShutdownTimeout matches config's default, so the paths that shut down
+// before the configuration is loaded use the same period as the ones after it.
+const defaultShutdownTimeout = 10 * time.Second
+
+// newShutdownBudget splits total the way the fixed budgets used to: three
+// tenths for the HTTP drain, a fifth for marking interrupted sync runs, three
+// tenths for the plugin host and search index, and the remaining fifth for the
+// database close. At the ten-second default that is the 3s/2s/3s this ran on
+// before the period became configurable.
+func newShutdownBudget(total time.Duration) shutdownBudget {
+	if total <= 0 {
+		total = defaultShutdownTimeout
+	}
+	return shutdownBudget{
+		total:           total,
+		httpDrain:       total * 3 / 10,
+		interruptedRuns: total / 5,
+		derivedClose:    total * 3 / 10,
+	}
+}
+
+// shutdownTracker narrates a shutdown. Every phase is logged and recorded in the
+// crash state, which is what lets the next start tell a process that was killed
+// mid-shutdown from one the kernel killed outright: the container log is
+// routinely gone after a restart, and the two look identical without it.
+type shutdownTracker struct {
+	budget  shutdownBudget
+	crash   *crashReporter
+	started time.Time
+}
+
+func newShutdownTracker(crash *crashReporter, budget shutdownBudget) *shutdownTracker {
+	return &shutdownTracker{budget: budget, crash: crash}
+}
+
+// begin records the signal that asked this process to stop. A nil signal is the
+// unreachable case - the context this process watches is cancelled by nothing
+// else - and is deliberately left out of the crash state rather than written
+// there as a stop nobody asked for.
+func (t *shutdownTracker) begin(sig os.Signal) {
+	if t == nil {
+		return
+	}
+	t.started = time.Now()
+	log.Printf("rolltop shutting down after %s, budget %s (ROLLTOP_SHUTDOWN_TIMEOUT)", signalName(sig), t.budget.total)
+	if sig == nil {
+		return
+	}
+	t.crash.beginShutdown(signalName(sig))
+}
+
+// phase names the step now running, with how much of the budget it has already
+// cost. A shutdown that gets killed leaves its last phase in the log and in the
+// crash state, which is the whole point of naming them.
+func (t *shutdownTracker) phase(name string) {
+	if t == nil {
+		return
+	}
+	if t.started.IsZero() {
+		log.Printf("rolltop shutdown: %s", name)
+	} else {
+		log.Printf("rolltop shutdown: %s (%s of %s spent)", name,
+			time.Since(t.started).Round(time.Millisecond), t.budget.total)
+	}
+	t.crash.shutdownPhase(name)
+}
+
+// done reports a shutdown that ran to the end. An operator comparing this line
+// against the platform's grace period can see how much room the next one has.
+func (t *shutdownTracker) done() {
+	if t == nil || t.started.IsZero() {
+		return
+	}
+	log.Printf("rolltop shutdown complete in %s of %s", time.Since(t.started).Round(time.Millisecond), t.budget.total)
+}
 
 var errSearchWriterRestartShutdownTimeout = errors.New("search writer restart cleanup timed out")
 
 func (a *appRuntime) close() {
-	a.closeWithin(derivedCloseTimeout)
+	a.closeWithin(a.derivedCloseBudget())
+}
+
+// derivedCloseBudget is the share of the operator's stop budget the plugin host
+// and the search index get between them, or the default share when this runtime
+// was closed outside a signalled shutdown.
+func (a *appRuntime) derivedCloseBudget() time.Duration {
+	if a == nil || a.shutdown == nil {
+		return newShutdownBudget(0).derivedClose
+	}
+	return a.shutdown.budget.derivedClose
 }
 
 // closeWithin releases the runtime in dependency order but gives the derived
@@ -308,9 +402,11 @@ func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 	}
 	deadline := time.Now().Add(derivedBudget)
 	if a.pluginHost != nil {
+		a.shutdown.phase("closing the plugin host")
 		closeWithBudget("plugin host", time.Until(deadline), a.pluginHost.Close)
 	}
 	if a.search != nil {
+		a.shutdown.phase("closing the search index")
 		if !closeWithBudget("search index", time.Until(deadline), a.search.Close) && a.markSearchRecovery != nil {
 			// Only the stall handler writes recovery markers otherwise, so
 			// without this an abandoned close leaves an index that fails to
@@ -319,12 +415,15 @@ func (a *appRuntime) closeWithin(derivedBudget time.Duration) {
 		}
 	}
 	if a.db != nil {
-		// Deliberately unbounded: this is the write that decides whether the
-		// next start opens a checkpointed database or replays a WAL.
+		// Deliberately unbounded: the phases before it are capped so that this
+		// one still runs, and a pool closed half-way is the state the earlier
+		// budgets exist to avoid handing the next start.
+		a.shutdown.phase("closing the database pool")
 		if err := a.db.Close(); err != nil {
 			log.Printf("close databases: %v", err)
 		}
 	}
+	a.shutdown.done()
 }
 
 // closeWithBudget reports whether the subsystem finished closing. A false
@@ -367,8 +466,9 @@ func runSearchWriterRestartShutdown(timeout time.Duration, shutdown func() error
 	}
 }
 
-func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan error) error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
+func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan error, budget shutdownBudget) error {
+	app.shutdown.phase("draining HTTP requests")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), budget.httpDrain)
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)
 	err := <-serverErr
@@ -376,7 +476,8 @@ func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan e
 	// listener is closed, and the write cannot eat the drain budget. Startup
 	// repeats this cleanup, so a shutdown too short to finish it loses nothing.
 	if app.db != nil {
-		markCtx, cancelMark := context.WithTimeout(context.Background(), interruptedSyncRunTimeout)
+		app.shutdown.phase("marking interrupted sync runs")
+		markCtx, cancelMark := context.WithTimeout(context.Background(), budget.interruptedRuns)
 		defer cancelMark()
 		if n, markErr := app.db.MarkRunningSyncRunsInterrupted(markCtx); markErr != nil {
 			log.Printf("mark interrupted sync runs during shutdown: %v", markErr)
@@ -391,7 +492,7 @@ func shutdownServingApp(app *appRuntime, server *http.Server, serverErr <-chan e
 // database migrations or index opens show progress in the browser rather than
 // making the app look down.
 func run() (runErr error) {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stopSignal, stop := notifyStopSignal(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Keep the newest log lines in memory from the first one onwards. A hosted
@@ -449,6 +550,11 @@ func run() (runErr error) {
 		return err
 	}
 	logging.SetLevel(cfg.LogLevel)
+	// Built before anything is opened, so every close from here on is narrated
+	// and recorded even when the shutdown is the first thing that happens after
+	// startup - a container restarted to apply a configuration change is exactly
+	// that case.
+	shutdown := newShutdownTracker(crash, newShutdownBudget(cfg.ShutdownTimeout))
 	// Install the heap ceiling before any service allocates. A first-time
 	// account sync is the heaviest thing this process does, and without a limit
 	// the collector lets the heap double past whatever the container allows,
@@ -507,6 +613,22 @@ func run() (runErr error) {
 	defer cancelApp()
 	app, err := startApp(appCtx, cfg, startup)
 	if err != nil {
+		// Being told to stop part-way through startup is not a failed start
+		// either. A platform that applies a configuration change by recreating
+		// the container can stop this one at any point, and filing that as a
+		// fatal error would have the next start report a crash that never
+		// happened - and hide the next real one behind the noise.
+		if stoppedDuringStartup(ctx, err) {
+			shutdown.begin(stopSignal())
+			shutdown.phase("abandoning startup")
+			log.Printf("stopped while starting: %v", err)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdown.budget.httpDrain)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+			<-serverErr
+			shutdown.done()
+			return nil
+		}
 		startup.fail(err)
 		log.Printf("rolltop startup failed: %v", err)
 		select {
@@ -519,6 +641,7 @@ func run() (runErr error) {
 		_ = server.Shutdown(shutdownCtx)
 		return err
 	}
+	app.shutdown = shutdown
 	restartShutdownOwnsClose := false
 	defer func() {
 		if !restartShutdownOwnsClose {
@@ -532,6 +655,7 @@ func run() (runErr error) {
 	restart := restartRequest{}
 	select {
 	case <-ctx.Done():
+		shutdown.begin(stopSignal())
 	case restart = <-app.restartRequired:
 		log.Printf("controlled restart requested user_id=%d reason=%q", restart.UserID, restart.Reason)
 		cancelApp()
@@ -549,7 +673,7 @@ func run() (runErr error) {
 		// crash report, because it is a planned restart.
 		restartErr := fmt.Errorf("%s; %w", restart.Reason, errRestartForRecovery)
 		cleanupErr := runSearchWriterRestartShutdown(searchWriterRestartShutdownTimeout, func() error {
-			shutdownErr := shutdownServingApp(app, server, serverErr)
+			shutdownErr := shutdownServingApp(app, server, serverErr, shutdown.budget)
 			app.close()
 			return shutdownErr
 		})
@@ -562,10 +686,73 @@ func run() (runErr error) {
 		}
 		return restartErr
 	}
-	if err := shutdownServingApp(app, server, serverErr); err != nil {
+	if err := shutdownServingApp(app, server, serverErr, shutdown.budget); err != nil {
 		return err
 	}
 	return nil
+}
+
+// notifyStopSignal is signal.NotifyContext with the signal kept rather than
+// discarded. Naming what asked the process to stop is what turns "the container
+// was killed" into "the platform stopped it and the shutdown did not fit", both
+// in the log and, through the crash state, on the next start.
+//
+// The returned accessor reports the signal that cancelled the context, or nil
+// while none has arrived.
+func notifyStopSignal(parent context.Context, signals ...os.Signal) (context.Context, func() os.Signal, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	received := make(chan os.Signal, 1)
+	signal.Notify(received, signals...)
+	var mu sync.Mutex
+	var got os.Signal
+	go func() {
+		select {
+		case sig := <-received:
+			mu.Lock()
+			got = sig
+			mu.Unlock()
+			// Logged here rather than where the shutdown is handled, so the
+			// signal is on the record even when it arrives during startup, a
+			// lock wait, or a phase that has no reason to look for it.
+			log.Printf("received %s", signalName(sig))
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	stop := func() {
+		signal.Stop(received)
+		cancel()
+	}
+	return ctx, func() os.Signal {
+		mu.Lock()
+		defer mu.Unlock()
+		return got
+	}, stop
+}
+
+// stoppedDuringStartup reports whether a startup error is the stop signal
+// arriving rather than a failure to start. Both conditions are required: a
+// cancelled context on its own can come from a subsystem giving up, and an
+// error that merely coincides with a signal is still a real startup failure
+// that has to be reported.
+func stoppedDuringStartup(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && errors.Is(err, context.Canceled)
+}
+
+// signalName spells a signal the way an operator's platform documentation does.
+// The standard library's own String is "terminated" for SIGTERM, which is not
+// the word anyone greps a container log or a grace-period setting for.
+func signalName(sig os.Signal) string {
+	switch sig {
+	case nil:
+		return "no signal"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case os.Interrupt:
+		return "SIGINT"
+	default:
+		return sig.String()
+	}
 }
 
 // startApp performs the blocking startup work in dependency order: schema,

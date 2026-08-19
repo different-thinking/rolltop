@@ -107,7 +107,7 @@ func waitForMoveRun(t *testing.T, fixture moveTestFixture, ids []int64) store.Sy
 	}
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(waitForEvent):
 		t.Fatal("background move did not finish")
 	}
 	finished, err := fixture.store.GetSyncRunForUser(context.Background(), fixture.userID, run.ID)

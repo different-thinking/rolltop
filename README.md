@@ -63,6 +63,7 @@ export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_MEMORY_LIMIT="80%"
 export ROLLTOP_STARTUP_LOCK_WAIT="2m"
+export ROLLTOP_SHUTDOWN_TIMEOUT="10s"
 export ROLLTOP_SQLITE_ACCESS="auto"
 ```
 
@@ -375,23 +376,64 @@ against.
 
 ### Shutdown And Restart
 
-Rolltop's shutdown closes the search index and the plugin host, then the
-database pool. Everything is bounded: the HTTP drain gets 3 seconds, the plugin
-host and search index together get 3 more, and whatever has not finished by then
-is abandoned. A committed transaction is already durable, so nothing has to be
-flushed on the way out — the grace period is about the index, not the database:
+`SIGTERM` and `SIGINT` start an orderly shutdown: the HTTP listener is drained,
+sync runs still marked running are stamped interrupted, then the plugin host and
+the search index are closed, and the database pool last. A committed transaction
+is already durable, so nothing has to be flushed on the way out — the budget is
+about the search index, which is the one thing here with a half-written state.
+
+The whole sequence is bounded by `ROLLTOP_SHUTDOWN_TIMEOUT` (default `10s`, the
+period `docker stop` gives), and the phases take fixed shares of it: three tenths
+for the HTTP drain, a fifth for marking interrupted sync runs, three tenths for
+the plugin host and search index together, and the remaining fifth for the
+database close. Whatever has not finished by then is abandoned so the steps after
+it still run. **Set it to the stop grace period the platform actually gives**,
+and give the platform enough of one:
 
 ```yaml
 services:
   rolltop:
-    stop_grace_period: 60s
+    stop_grace_period: 60s          # Kubernetes: terminationGracePeriodSeconds
     restart: unless-stopped
+    environment:
+      ROLLTOP_SHUTDOWN_TIMEOUT: 45s # inside the grace period, not equal to it
 ```
 
-Without it, `docker stop` sends SIGKILL after its default 10 seconds. That does
-not corrupt the database, but it leaves a hot WAL that the next start has to
-replay, and the next start then treats the run as unclean and verifies the
-tenant files before serving (see `ROLLTOP_STARTUP_INTEGRITY_CHECK`).
+Every step is logged, so an ordinary stop — a restart, a redeploy, an
+environment-variable change the platform applies by recreating the container —
+reads like this:
+
+```text
+received SIGTERM
+rolltop shutting down after SIGTERM, budget 45s (ROLLTOP_SHUTDOWN_TIMEOUT)
+rolltop shutdown: draining HTTP requests (0s of 45s spent)
+rolltop shutdown: closing the search index (1.2s of 45s spent)
+rolltop shutdown: closing the database pool (2.8s of 45s spent)
+rolltop shutdown complete in 2.9s of 45s
+```
+
+The same phases are recorded in `/data/crash-state.json` as they happen, because
+the container log is usually gone by the time anyone looks. A process killed
+before its shutdown finished is reported as exactly that on the next start,
+naming the step it did not get past:
+
+```text
+previous run was asked to stop with SIGTERM at 2026-08-19T17:29:12Z and was killed
+before its shutdown finished, while closing the search index, reached 4s after the
+signal; the container's stop grace period is shorter than the shutdown needs -
+raise it (docker: stop_grace_period, Kubernetes: terminationGracePeriodSeconds),
+or lower ROLLTOP_SHUTDOWN_TIMEOUT so the shutdown fits inside the period it does get
+```
+
+The older message, the one that names a kernel OOM kill or a `SIGKILL`, now only
+appears when **no** stop signal was recorded — a process that was killed outright
+rather than asked to stop. That is the case where the container exit code and the
+kernel log are the right things to check.
+
+An abandoned search index close is not silent either: a durable recovery marker
+records what the writer still had in flight — or schedules a full recovery when
+the close itself hung — so the next start repairs the index instead of opening an
+unfinished one.
 
 ### Health Checks
 
