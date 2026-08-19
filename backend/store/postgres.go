@@ -281,9 +281,18 @@ func (s *Store) withSchemaLock(ctx context.Context, fn func(context.Context) err
 // on the first refused connection turns that into a crash loop whose restarts
 // are themselves the slowest way to retry.
 //
-// Only the first error is worth reporting if the budget expires — later
-// attempts fail the same way — so the loop keeps it and returns it rather than
-// a timeout with no cause in it.
+// The failure that starts the wait is logged immediately, and the one that ends
+// it is carried into the returned error. Neither is optional: a start that is
+// killed before the budget runs out — an orchestrator restarting a container it
+// considers unhealthy, which is the normal state of a deployment whose database
+// is misconfigured — would otherwise report only "context canceled" and never
+// say what was wrong. Where the database is unreachable *and* the process is
+// killed after a second, that silence is permanent: every restart repeats it,
+// and the reason is never printed at all.
+//
+// Both errors reach the log through postgresError, which redacts. pgx quotes
+// the whole connection string in its parse and dial failures, so printing one
+// of these raw would put the password in the container log.
 func waitForPostgres(ctx context.Context, db *sql.DB, budget time.Duration) error {
 	const retryEvery = time.Second
 	attemptCtx, cancel := context.WithTimeout(ctx, postgresPingTimeout)
@@ -296,12 +305,18 @@ func waitForPostgres(ctx context.Context, db *sql.DB, budget time.Duration) erro
 		return postgresError("connect", err)
 	}
 	first := err
+	last := err
 	deadline := time.Now().Add(budget)
-	log.Printf("waiting up to %s for the database to accept connections", budget.Round(time.Second))
+	log.Printf("waiting up to %s for the database to accept connections: %v",
+		budget.Round(time.Second), postgresError("connect", first))
 	for {
 		select {
 		case <-ctx.Done():
-			return postgresError("connect", ctx.Err())
+			// The cancellation says the wait was cut short; the attempt error
+			// says what it was waiting for. Reporting only the first loses the
+			// diagnosis, and only the second hides that this was a shutdown.
+			// ctx.Err() stays wrapped so errors.Is keeps working.
+			return postgresError("connect", fmt.Errorf("%w (last connection attempt: %v)", ctx.Err(), last))
 		case <-time.After(retryEvery):
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, postgresPingTimeout)
@@ -310,7 +325,11 @@ func waitForPostgres(ctx context.Context, db *sql.DB, budget time.Duration) erro
 		if err == nil {
 			return nil
 		}
+		last = err
 		if time.Now().After(deadline) {
+			// The first error rather than the last: a database that never came
+			// up fails the same way throughout, and the first one is the one
+			// whose timing matches the start of the wait.
 			return postgresError("connect", first)
 		}
 	}
@@ -448,32 +467,42 @@ const maxListedBlockingObjects = 10
 // postgresBlockingObjects lists the objects that stop this database from being
 // created into, schema-qualified and name-sorted.
 //
-// Three catalogs are searched, because a database is not empty in three
-// different ways and each was found to slip through in turn:
+// Only the schema the baseline writes into is searched. That schema is the only
+// place an existing object can collide with what the apply is about to create,
+// and it is the whole question this check has to answer.
 //
-//   - Relations, in every non-system schema and every user kind. Counting only
-//     base tables in `public` let an application that keeps its tables in
-//     another schema, or a public schema holding only views or sequences, read
-//     as empty and receive the baseline on top.
+// It used to search every non-system schema, on the theory that an application
+// keeping its tables elsewhere would otherwise read as empty and receive the
+// baseline alongside its data. That reasoning does not survive contact with a
+// managed provider: the operators that run hosted PostgreSQL put their own
+// management objects in dedicated schemas of *every* database they hand out —
+// `metric_helpers` and `user_management` under the Zalando operator, others
+// elsewhere — so the broad search refused to start against a database that had
+// just been created for Rolltop and was empty in every sense that matters.
+// Hardcoding those names would only move the problem to the next provider.
+//
+// What the narrow search gives up is small: an application with its tables in
+// its own schema is not harmed by Rolltop creating its own in public, and the
+// recorded baseline row still tells the two apart on every later start.
+//
+// Three catalogs are searched, because a schema is not empty in three different
+// ways and each was found to slip through in turn:
+//
+//   - Relations of every user kind. Counting only base tables let a schema
+//     holding only views or sequences read as empty.
 //   - Functions and procedures. The baseline creates one of its own, so a
-//     foreign function is both a sign the database is somebody else's and a
-//     potential name collision during the apply.
+//     foreign function is a name collision waiting to happen during the apply.
 //   - Domains, enums, and standalone composite types. Row types of tables are
 //     excluded, since the table already accounts for them. Undefined types are
 //     included whatever their kind: `CREATE TYPE name;` declares a shell, which
 //     the catalog records as a pseudo-type with typisdefined false, so matching
-//     on kind alone let a database holding one read as empty.
+//     on kind alone let a schema holding one read as empty.
 //
 // Objects belonging to an extension are excluded throughout, because the
 // preflight installs pg_trgm, citext and unaccent into a database that is
 // otherwise still untouched. The dependency lookup is qualified by catalog:
 // object ids are only unique per catalog, so an unqualified match could exempt
 // a table because some function shares its id.
-//
-// Empty schemas are deliberately *not* blocking. PostgreSQL's default search
-// path names a schema after the connecting role, and managed providers create
-// it; refusing that would refuse the very shape pinPostgresSearchPath exists to
-// support.
 //
 // The names matter as much as the count. A database that is not empty cannot be
 // created into, and the console cannot decide on the operator's behalf whether
@@ -484,9 +513,7 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND n.nspname NOT LIKE 'pg_toast%'
-		  AND n.nspname NOT LIKE 'pg_temp%'
+		WHERE n.nspname = $1
 		  AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_depend d
@@ -496,9 +523,7 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		SELECT quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '()'
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND n.nspname NOT LIKE 'pg_toast%'
-		  AND n.nspname NOT LIKE 'pg_temp%'
+		WHERE n.nspname = $1
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_depend d
 		      WHERE d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
@@ -507,9 +532,7 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		SELECT quote_ident(n.nspname) || '.' || quote_ident(t.typname)
 		FROM pg_type t
 		JOIN pg_namespace n ON n.oid = t.typnamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND n.nspname NOT LIKE 'pg_toast%'
-		  AND n.nspname NOT LIKE 'pg_temp%'
+		WHERE n.nspname = $1
 		  AND (
 		      NOT t.typisdefined
 		      OR (
@@ -524,7 +547,7 @@ func postgresBlockingObjects(ctx context.Context, conn *sql.Conn) ([]string, err
 		      SELECT 1 FROM pg_depend d
 		      WHERE d.objid = t.oid AND d.classid = 'pg_type'::regclass AND d.deptype = 'e'
 		  )
-		ORDER BY 1`)
+		ORDER BY 1`, pgschema.Schema)
 	if err != nil {
 		return nil, postgresError("list the existing objects", err)
 	}

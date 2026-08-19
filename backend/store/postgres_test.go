@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"rolltop/backend/store/pgschema"
 	"rolltop/backend/store/pgtestdb"
 )
 
@@ -188,16 +189,17 @@ func TestOpenPostgresRejectsForeignDatabase(t *testing.T) {
 	}
 }
 
-// TestOpenPostgresRejectsDatabasesWithoutBaseTables covers the shapes a foreign
-// database takes that a public-BASE-TABLE count reads as empty. Each of these
+// TestOpenPostgresRejectsDatabasesWithoutBaseTables covers the shapes an
+// occupied schema takes that a BASE-TABLE count reads as empty. Each of these
 // received the baseline on top of somebody else's objects before the check
-// counted all user relations in every non-system schema.
+// counted all user relations, functions and types.
 func TestOpenPostgresRejectsDatabasesWithoutBaseTables(t *testing.T) {
 	occupants := map[string]string{
-		"table in another schema": `CREATE SCHEMA app; CREATE TABLE app.things (id int)`,
-		"view in public":          `CREATE VIEW v AS SELECT 1 AS x`,
-		"sequence in public":      `CREATE SEQUENCE counter`,
-		"materialized view":       `CREATE MATERIALIZED VIEW m AS SELECT 1 AS x`,
+		"view in public":     `CREATE VIEW v AS SELECT 1 AS x`,
+		"sequence in public": `CREATE SEQUENCE counter`,
+		"materialized view":  `CREATE MATERIALIZED VIEW m AS SELECT 1 AS x`,
+		"function in public": `CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'`,
+		"enum in public":     `CREATE TYPE mood AS ENUM ('ok')`,
 	}
 	for name, ddl := range occupants {
 		t.Run(name, func(t *testing.T) {
@@ -409,4 +411,88 @@ func TestPostgresErrorKeepsTheChain(t *testing.T) {
 	if pgErr.Op == "" {
 		t.Error("PostgresError carries no operation name")
 	}
+}
+
+// TestOpenPostgresStartsBesideAManagedProvidersSchemas is the case that stopped
+// a hosted deployment dead. The operators that run managed PostgreSQL create
+// their own management schemas in every database they hand out — these names
+// are the Zalando operator's — so a database freshly provisioned for Rolltop
+// arrives already holding tables and functions outside public.
+//
+// Counting those as "the database is not empty" refused the very databases this
+// application is meant to run on, and the message told the operator to point the
+// server at an empty database when it already was one.
+func TestOpenPostgresStartsBesideAManagedProvidersSchemas(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dsn := pgtestdb.New(t)
+
+	seed, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.ExecContext(ctx, `
+		CREATE SCHEMA metric_helpers;
+		CREATE TABLE metric_helpers.index_bloat (id int);
+		CREATE VIEW metric_helpers.table_bloat AS SELECT 1 AS x;
+		CREATE FUNCTION metric_helpers.get_btree_bloat_approx() RETURNS int LANGUAGE sql AS 'SELECT 1';
+		CREATE SCHEMA user_management;
+		CREATE FUNCTION user_management.create_application_user() RETURNS int LANGUAGE sql AS 'SELECT 1';
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("a database carrying only its provider's management schemas was refused: %v", err)
+	}
+	defer s.Close()
+
+	// And the baseline landed in public, not beside the provider's objects.
+	var tables int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = 'users'`, pgschema.Schema).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 1 {
+		t.Errorf("the baseline did not create its tables in %s", pgschema.Schema)
+	}
+}
+
+// TestOpenPostgresIgnoresAnotherApplicationsSchema pins the protection that was
+// deliberately given up with the narrow search. An application keeping its
+// tables in its own schema is not harmed by Rolltop creating its own in public,
+// and the recorded baseline row still tells the two apart on every later start.
+func TestOpenPostgresIgnoresAnotherApplicationsSchema(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dsn := pgtestdb.New(t)
+
+	seed, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.ExecContext(ctx, `CREATE SCHEMA app; CREATE TABLE app.things (id int)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("a database whose other application keeps its own schema was refused: %v", err)
+	}
+	_ = s.Close()
+
+	// Reopening recognises it as Rolltop's, so the baseline row is what
+	// distinguishes the two rather than the emptiness check.
+	again, err := OpenPostgres(ctx, dsn, PostgresOptions{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	_ = again.Close()
 }
