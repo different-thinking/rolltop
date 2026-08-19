@@ -240,22 +240,30 @@ SQLite-dialect DDL against PostgreSQL.
 chain to be executable, and the chain cannot survive the conversion: the
 plugin migrations it applies are PostgreSQL DDL now, and the `After` steps it
 runs are app code whose SQL is PostgreSQL's. The chain, its upgrade tests, and
-the derivation test were deleted once `baseline.sql` was final;
-`pgschema/translate.go` stays as the record of how the translation was done.
-`baseline.sql` is the schema's source of truth from here, and a schema change
-is a **new PostgreSQL migration layered on it** — editing the baseline changes
-the checksum every existing database recorded and makes them all refuse to
-start.
+the derivation test were deleted once `baseline.sql` was final. The translator
+itself was deleted with them: ~600 lines whose only caller was the deleted
+test, kept alive by its own unit test, describing a mechanism a reader could
+no longer run. The rules it encoded are the table below, and the output it
+produced is `baseline.sql`, which now carries them in its own header.
 
-How it worked while it ran:
-`TestBaselineMatchesSQLiteSchema` opens a fully migrated combined SQLite
-store, translates its `sqlite_master` contents, and fails when the committed
-`baseline.sql` differs — so a SQLite migration landing during the transition
-cannot silently leave the two schemas apart (`-update` regenerates).
-`TestBaselineAppliesToPostgres` then applies it to a real server and asserts
-the properties the migration depends on: every text column C-collated, the
-foreign keys present, identity sequences accepting `setval`, and the
-translated trigger behaving like the SQLite original.
+`baseline.sql` is the schema's source of truth from here, and it is
+**hand-owned**: edit it directly. That reaches only a database that does not
+exist yet, because the edit changes the checksum recorded in
+`schema_migrations` and a server whose database carries the older one refuses
+to start. Changing the schema of a database already in service needs a
+migration layered on the baseline — see §11, which is where that mechanism
+still has to be built.
+
+How the derivation worked while it ran: `TestBaselineMatchesSQLiteSchema`
+opened a fully migrated combined SQLite store, translated its `sqlite_master`
+contents, and failed when the committed `baseline.sql` differed, so a SQLite
+migration landing during the transition could not silently leave the two
+schemas apart. What survives it is `TestBaselineAppliesToPostgres`, which
+applies the baseline to a real server and asserts the properties the schema
+depends on: every text column C-collated, the foreign keys present, identity
+sequences accepting `setval`, and the trigger behaving as intended.
+`TestBaselineDeclaresEveryObject` holds the file to its `-- <kind> <name>`
+header convention, which the admin console's drop step reads.
 
 Two things the derivation surfaced that hand-writing would likely have
 missed:
@@ -268,10 +276,10 @@ missed:
 - The final schema has 75 tables (55 core plus 20 from plugins), not the 87
   the inventory above counts; that number counts `CREATE TABLE` statements
   across migrations, several of which recreate the same table.
-- The plugin migrations carry SQLite-only constructs the core schema does
+- The plugin migrations carried SQLite-only constructs the core schema does
   not: `WITHOUT ROWID` (dropped — PostgreSQL has no equivalent storage form)
   and one `NOT GLOB` check, translated deliberately to a regex match. The
-  translator fails closed on any other SQLite-only construct rather than
+  translator failed closed on any other SQLite-only construct rather than
   passing it through, because a silently dropped CHECK is a constraint the
   database stops enforcing.
 
@@ -423,16 +431,25 @@ mailbox is connected.
 settled before the fresh production database is created.** `OpenPostgres`
 records the baseline as one `schema_migrations` row and refuses to start when
 the recorded checksum differs from the running binary's. That is right while
-every Postgres database is a throwaway test one, but the baseline is
-*designed to be regenerated in place*, so the same signal will mean two
-different things once a real database exists: "the schema was tampered with"
-and "this binary is newer than the database". The second needs an upgrade
-path, not a refusal. Whatever WP3 does to the schema — the `lower()`
-expression index is already queued — regenerates the baseline, so this has to
-be decided in the same phase that creates the first database worth keeping.
-The likely shape is incremental Postgres migrations layered on the baseline,
-with the baseline row pinned to the version it was created at rather than to
-the current file.
+every PostgreSQL database is a throwaway test one, and it is exactly wrong the
+day after the first durable one exists: the checksum then means two different
+things — "the schema was tampered with" and "this binary is newer than the
+database" — and only the first deserves a refusal. Any edit to `baseline.sql`
+produces the second, and `baseline.sql` is now the hand-owned place schema
+changes are made, so *every* schema change from here produces it.
+
+Nothing in the tree answers this yet. `backend/store/migrations.go` holds the
+checksum and the progress type and no runner at all — the SQLite runner that
+used to sit there was dead code and was deleted rather than left as a
+misleading answer. The shape this needs is incremental PostgreSQL migrations
+layered on the baseline, with the baseline row pinned to the version it was
+created at rather than to the current file, and a startup path that applies
+the outstanding ones instead of refusing. Plugin migrations already work that
+way (`plugin_migrations`, one row per migration, checksummed, applied under
+the schema lock only when something is outstanding) and are the model to copy.
+
+Until it exists, the operating rule is the honest one: editing `baseline.sql`
+only reaches a database that does not exist yet.
 
 ### WP3 query obligations from the baseline
 
@@ -700,6 +717,20 @@ afterwards:
    restore the `/data` snapshot, start the previous image. Everything set
    up in the Postgres interim is lost; mail itself re-mirrors from IMAP
    either way.
+
+**Settle the baseline upgrade path before step 3.** The database created there
+is the first one worth keeping, and from that moment `baseline.sql` can no
+longer be edited: the next edit changes the checksum and the server refuses to
+start against the database it just created. See the end of §WP7 for what has
+to exist instead. Doing it before the switch costs a day; doing it after means
+doing it on a database that is already carrying somebody's mail.
+
+**One server per database.** The new stack must not be scaled past one app
+container, and a second deployment must not be pointed at the same DSN.
+`OpenPostgres` now takes a session-scoped advisory lock for the process
+lifetime and refuses to start when another server holds it, waiting out a
+rolling deploy on `ROLLTOP_STARTUP_LOCK_WAIT` first. Before that guard existed
+both servers started and each stamped the other's live sync runs interrupted.
 
 ## 12. Open questions
 

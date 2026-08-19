@@ -85,7 +85,11 @@ func (c wrappedConnector) Driver() driver.Driver { return c.driver }
 type wrappedConn struct{ base driver.Conn }
 
 func (c wrappedConn) Prepare(query string) (driver.Stmt, error) {
-	return c.base.Prepare(Rebind(query))
+	bound, err := Rebind(query)
+	if err != nil {
+		return nil, err
+	}
+	return c.base.Prepare(bound)
 }
 
 func (c wrappedConn) Close() error { return c.base.Close() }
@@ -93,11 +97,15 @@ func (c wrappedConn) Close() error { return c.base.Close() }
 func (c wrappedConn) Begin() (driver.Tx, error) { return c.base.Begin() }
 
 func (c wrappedConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	bound, err := Rebind(query)
+	if err != nil {
+		return nil, err
+	}
 	p, ok := c.base.(driver.ConnPrepareContext)
 	if !ok {
-		return c.base.Prepare(Rebind(query))
+		return c.base.Prepare(bound)
 	}
-	return p.PrepareContext(ctx, Rebind(query))
+	return p.PrepareContext(ctx, bound)
 }
 
 func (c wrappedConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
@@ -113,7 +121,11 @@ func (c wrappedConn) ExecContext(ctx context.Context, query string, args []drive
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	return e.ExecContext(ctx, Rebind(query), args)
+	bound, err := Rebind(query)
+	if err != nil {
+		return nil, err
+	}
+	return e.ExecContext(ctx, bound, args)
 }
 
 func (c wrappedConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
@@ -121,7 +133,11 @@ func (c wrappedConn) QueryContext(ctx context.Context, query string, args []driv
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	return q.QueryContext(ctx, Rebind(query), args)
+	bound, err := Rebind(query)
+	if err != nil {
+		return nil, err
+	}
+	return q.QueryContext(ctx, bound, args)
 }
 
 func (c wrappedConn) Ping(ctx context.Context) error {

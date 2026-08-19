@@ -975,12 +975,6 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 
 	server := &Server{dataDir: dir, indexPath: filepath.Join(dir, "bleve")}
 	stats := server.cachedStorageStats(1)
-	// The relational data moved to PostgreSQL, which reports one size for the
-	// whole database rather than a share per tenant, so the per-user figure is
-	// no longer answerable from the volume.
-	if stats.DatabaseBytes != 0 {
-		t.Fatalf("database bytes = %d, want 0 now that the data is not on this volume", stats.DatabaseBytes)
-	}
 	if stats.IndexBytes != 27 {
 		t.Fatalf("index bytes = %d", stats.IndexBytes)
 	}
@@ -1004,12 +998,12 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 	if stats.TotalBytes != 35 {
 		t.Fatalf("total bytes = %d", stats.TotalBytes)
 	}
-	if strings.Contains(stats.DatabasePath, "users/2") || strings.Contains(stats.IndexPath, "users/2") || strings.Contains(stats.BlobPath, "users/2") {
+	if strings.Contains(stats.IndexPath, "users/2") || strings.Contains(stats.BlobPath, "users/2") {
 		t.Fatalf("storage paths include another user: %+v", stats)
 	}
 
 	other := server.cachedStorageStats(2)
-	if other.DatabaseBytes == stats.DatabaseBytes && other.IndexBytes == stats.IndexBytes && other.BlobBytes == stats.BlobBytes {
+	if other.IndexBytes == stats.IndexBytes && other.BlobBytes == stats.BlobBytes {
 		t.Fatalf("per-user storage cache returned same stats for different users: user1=%+v user2=%+v", stats, other)
 	}
 }

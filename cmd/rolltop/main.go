@@ -595,6 +595,13 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		Progress:       reporter,
 		DataDir:        cfg.DataDir,
 		ConnectTimeout: cfg.DatabaseConnectTimeout,
+		// One server per database. The data-directory lock above only catches
+		// two containers sharing a volume; this catches two deployments with
+		// their own volumes pointed at one DSN, which nothing else would.
+		// It waits out a rolling deploy on the same budget the directory lock
+		// uses, so an overlapping restart is not a failure.
+		ExclusiveInstance: true,
+		InstanceLockWait:  cfg.StartupLockWait,
 	})
 	if err != nil {
 		return nil, err
@@ -694,7 +701,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		MasterKey:        cfg.MasterKey,
 		DataDir:          cfg.DataDir,
 		DatabaseTarget:   pgdsn.Describe(cfg.DatabaseURL),
-		DatabaseMaxConns: cfg.DatabaseMaxConns,
+		DatabaseMaxConns: db.MaxConns(),
 		IndexPath:        cfg.IndexPath,
 		PluginDir:        cfg.PluginDir,
 		SessionTTL:       cfg.SessionTTL,
@@ -704,7 +711,6 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		GoogleAuth:       googleAuth,
 		GoogleContacts:   googleContacts,
 		GoogleCalendar:   googleCalendar,
-		RequestRestart:   requestRestart,
 	})
 	if err != nil {
 		return nil, err

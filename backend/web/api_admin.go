@@ -126,6 +126,15 @@ func (s *Server) apiAdminUserPath(w http.ResponseWriter, r *http.Request, rest s
 			writeAPIError(w, http.StatusBadRequest, "You cannot delete the account you are currently using.")
 			return
 		}
+		// Close the tenant's search index before the store removes the
+		// directory it lives in; an open Bleve handle would go on writing
+		// segments into a path that no longer belongs to anyone.
+		if s.search != nil {
+			if err := s.search.DropUser(r.Context(), id); err != nil {
+				s.serverError(w, r, err)
+				return
+			}
+		}
 		if err := s.store.DeleteUser(r.Context(), id); err != nil {
 			if store.IsNotFound(err) {
 				http.NotFound(w, r)

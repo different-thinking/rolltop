@@ -16,9 +16,16 @@ package web
 
 import (
 	"context"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"rolltop/backend/search"
 )
 
 // databaseStatus is the connection and size card for the one database.
@@ -51,6 +58,15 @@ type volumeStatus struct {
 	TotalBytes int64  `json:"total_bytes"`
 	BlobBytes  int64  `json:"blob_bytes"`
 	IndexBytes int64  `json:"index_bytes"`
+	// OtherBytes is what is on the volume under users/ but is neither a blob
+	// nor an index — a quarantined index waiting to be deleted, most often.
+	// Without it the two figures silently fail to add up to the used space.
+	OtherBytes int64 `json:"other_bytes"`
+	// MeasuredAtUnix is when the walk behind the three figures above ran, or 0
+	// if none has finished yet. Measuring means one stat per stored file, so it
+	// happens on a timer rather than per request and the page says how old the
+	// answer is.
+	MeasuredAtUnix int64 `json:"measured_at_unix"`
 }
 
 // databaseOverview is the whole admin page payload.
@@ -70,9 +86,16 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 		},
 		Volume: volumeStatus{DataDir: s.dataDir},
 	}
+	// Free and total come from one statfs, which is cheap enough to do per
+	// request. The per-directory split does not: it walks every stored file.
 	overview.Volume.FreeBytes, overview.Volume.TotalBytes = filesystemCapacityBytes(s.dataDir)
-	overview.Volume.BlobBytes, _ = pathSizeIfPresent(s.dataDir, "users")
-	overview.Volume.IndexBytes, _ = pathSizeIfPresent(s.indexPath, "")
+	usage := s.cachedVolumeUsage()
+	overview.Volume.BlobBytes = usage.BlobBytes
+	overview.Volume.IndexBytes = usage.IndexBytes
+	overview.Volume.OtherBytes = usage.OtherBytes
+	if !usage.MeasuredAt.IsZero() {
+		overview.Volume.MeasuredAtUnix = usage.MeasuredAt.Unix()
+	}
 
 	status, err := s.store.DatabaseStatus(ctx)
 	if err != nil {
@@ -88,22 +111,148 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 	return overview, nil
 }
 
-// pathSizeIfPresent measures a directory, treating a missing one as zero. The
-// blob store and the index directory are both created lazily, so an
-// installation that has not synced yet has neither.
-func pathSizeIfPresent(root, sub string) (int64, error) {
-	path := root
-	if sub != "" {
-		path = root + "/" + sub
+// volumeUsage is what the data volume is spent on, split the way the layout
+// actually is: <dataDir>/users/<id>/blobs holds raw .eml, <id>/bleve holds that
+// tenant's search index, and anything else under the tenant's directory is
+// neither.
+type volumeUsage struct {
+	BlobBytes  int64
+	IndexBytes int64
+	OtherBytes int64
+	MeasuredAt time.Time
+}
+
+// volumeUsageTTL is how long a measurement is served before another is started.
+// The admin page polls every 15 seconds and the walk costs one stat per stored
+// file, so a poll must never be what triggers it.
+const volumeUsageTTL = 5 * time.Minute
+
+// cachedVolumeUsage returns the last completed measurement and starts a new one
+// in the background when it has gone stale.
+//
+// It never blocks and never fails: an admin page that had to wait for a walk of
+// a few hundred thousand blobs would spend its whole request budget there and
+// then report a healthy database as unreachable, which is what it used to do.
+// The first call after start returns a zero measurement, which the page renders
+// as "measuring".
+func (s *Server) cachedVolumeUsage() volumeUsage {
+	s.volumeUsageMu.Lock()
+	usage := s.volumeUsageCached
+	stale := usage.MeasuredAt.IsZero() || time.Since(usage.MeasuredAt) >= volumeUsageTTL
+	start := stale && !s.volumeUsageMeasuring
+	if start {
+		s.volumeUsageMeasuring = true
 	}
-	if strings.TrimSpace(root) == "" {
-		return 0, nil
+	s.volumeUsageMu.Unlock()
+
+	if start {
+		go s.measureVolumeUsage()
 	}
-	size, err := pathSize(path)
+	return usage
+}
+
+func (s *Server) measureVolumeUsage() {
+	measured, err := measureVolumeUsage(s.dataDir)
 	if err != nil {
-		return 0, nil
+		log.Printf("measure data volume %s: %v", s.dataDir, err)
 	}
-	return size, nil
+	s.volumeUsageMu.Lock()
+	// A partial walk is still worth more than nothing — an unreadable tenant
+	// directory should not blank the card — so the result is kept either way,
+	// and the timestamp keeps the next attempt a TTL out rather than immediate.
+	s.volumeUsageCached = measured
+	s.volumeUsageMeasuring = false
+	s.volumeUsageMu.Unlock()
+}
+
+// measureVolumeUsage walks <dataDir>/users once and attributes every file to a
+// tenant subdirectory. One walk rather than three keeps the directory entries
+// warm in the page cache for the whole measurement.
+func measureVolumeUsage(dataDir string) (volumeUsage, error) {
+	usage := volumeUsage{MeasuredAt: time.Now()}
+	if strings.TrimSpace(dataDir) == "" {
+		return usage, nil
+	}
+	root := filepath.Join(dataDir, "users")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		// Nothing has synced yet, which is a legitimate zero rather than a
+		// failure to measure.
+		return usage, nil
+	}
+	if err != nil {
+		return usage, err
+	}
+	var firstErr error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Only numeric names are tenants. Anything else under users/ is not
+		// this layout and is left out rather than guessed at.
+		if _, convErr := strconv.ParseInt(entry.Name(), 10, 64); convErr != nil {
+			continue
+		}
+		userDir := filepath.Join(root, entry.Name())
+		subEntries, subErr := os.ReadDir(userDir)
+		if subErr != nil {
+			if firstErr == nil {
+				firstErr = subErr
+			}
+			continue
+		}
+		for _, sub := range subEntries {
+			size, sizeErr := treeSize(filepath.Join(userDir, sub.Name()), sub)
+			if sizeErr != nil && firstErr == nil {
+				firstErr = sizeErr
+			}
+			// A quarantined index is "bleve.quarantine-<stamp>" and lands in
+			// OtherBytes on purpose: it is space an operator can reclaim.
+			switch sub.Name() {
+			case "blobs":
+				usage.BlobBytes += size
+			case search.LiveIndexDirName:
+				usage.IndexBytes += size
+			default:
+				usage.OtherBytes += size
+			}
+		}
+	}
+	return usage, firstErr
+}
+
+// treeSize measures one entry, recursing only when it is a directory. Errors
+// are returned with whatever was counted, so one unreadable directory costs its
+// own bytes rather than the whole measurement.
+func treeSize(path string, entry fs.DirEntry) (int64, error) {
+	if !entry.IsDir() {
+		info, err := entry.Info()
+		if err != nil {
+			return 0, err
+		}
+		return info.Size(), nil
+	}
+	var total int64
+	err := filepath.WalkDir(path, func(_ string, walked fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if walked.IsDir() {
+			return nil
+		}
+		info, err := walked.Info()
+		if err != nil {
+			// A file removed mid-walk is normal here: retention and quarantine
+			// cleanup both run while the page is open.
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
 }
 
 // filesystemCapacityBytes reports free and total bytes on the data volume.

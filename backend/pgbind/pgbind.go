@@ -11,9 +11,12 @@
 // numbered is exactly the string the server will parse.
 //
 // It composes with converting the SQL text instead of competing with it.
-// Already-numbered statements pass through untouched (see Rebind's fast path),
-// so a file may be converted to `$n` at any time without a flag day, and this
-// layer can be removed once none are left.
+// Already-numbered statements pass through untouched, so a file may be
+// converted to `$n` at any time without a flag day, and this layer can be
+// removed once none are left. What it will not do is let one statement use both
+// styles at once: numbering `?` from $1 in a statement that already says `$1`
+// binds two different arguments to the same slot, so that combination is a
+// refusal rather than a rewrite (see MixedPlaceholderError).
 //
 // The scanner is deliberately literal-aware. A `?` inside a string literal, a
 // quoted identifier, a comment, or a dollar-quoted body is data, not a
@@ -24,81 +27,63 @@
 package pgbind
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// MixedPlaceholderError reports a statement that uses both `?` and `$n`.
+//
+// This is a programming error in the assembling code, not a runtime condition:
+// the fragment that was converted to `$n` and the fragment that was not have
+// been concatenated, and there is no numbering that satisfies both. Refusing is
+// the only safe answer, because the plausible-looking one — numbering the `?`
+// from $1 — silently binds a caller's second argument to the slot the first
+// fragment meant, which returns wrong rows rather than failing.
+type MixedPlaceholderError struct {
+	// Query is the finished statement, as assembled. It carries no user data:
+	// values travel as parameters, which is what the placeholders are for.
+	Query string
+	// NumberedAt and PlaceholderAt are byte offsets into Query of the first
+	// `$n` reference and the first `?` placeholder, so the fragment boundary
+	// that produced the mix can be found.
+	NumberedAt    int
+	PlaceholderAt int
+}
+
+func (e *MixedPlaceholderError) Error() string {
+	return fmt.Sprintf("pgbind: statement mixes $n (offset %d) and ? (offset %d) placeholders, which cannot be numbered consistently: %s",
+		e.NumberedAt, e.PlaceholderAt, e.Query)
+}
 
 // Rebind rewrites `?` placeholders as `$1..$n`.
 //
-// A statement that contains no `?` outside of quoted text is returned
-// unchanged, without allocating, which is both the fast path for converted SQL
-// and what makes mixing the two styles safe.
-func Rebind(query string) string {
-	if !needsRebind(query) {
-		return query
+// A statement that carries no `?` outside quoted text is returned unchanged and
+// without allocating, which is both the fast path for converted SQL and what
+// makes the two styles coexist across statements. Mixing them within one
+// statement returns a *MixedPlaceholderError.
+func Rebind(query string) (string, error) {
+	if cached, ok := loadRebound(query); ok {
+		return cached.sql, cached.err
 	}
-	var b strings.Builder
-	b.Grow(len(query) + 8)
-	n := 0
-	for i := 0; i < len(query); {
-		switch c := query[i]; c {
-		case '\'', '"':
-			end := skipQuoted(query, i, c)
-			b.WriteString(query[i:end])
-			i = end
-		case '-':
-			if end, ok := skipLineComment(query, i); ok {
-				b.WriteString(query[i:end])
-				i = end
-				continue
-			}
-			b.WriteByte(c)
-			i++
-		case '/':
-			if end, ok := skipBlockComment(query, i); ok {
-				b.WriteString(query[i:end])
-				i = end
-				continue
-			}
-			b.WriteByte(c)
-			i++
-		case '$':
-			if end, ok := skipDollarQuoted(query, i); ok {
-				b.WriteString(query[i:end])
-				i = end
-				continue
-			}
-			b.WriteByte(c)
-			i++
-		case '?':
-			// PostgreSQL's jsonb and geometric types spell operators with a
-			// question mark: `?`, `?|`, `?&`, and `??` as the escaped form.
-			// Only a lone `?` is a placeholder.
-			if run := questionRun(query, i); run > 1 || isOperatorQuestion(query, i) {
-				b.WriteString(query[i : i+run])
-				i += run
-				continue
-			}
-			n++
-			b.WriteByte('$')
-			b.WriteString(strconv.Itoa(n))
-			i++
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	return b.String()
+	sql, err := rebind(query)
+	storeRebound(query, sql, err)
+	return sql, err
 }
 
-// needsRebind reports whether the statement carries a placeholder `?` outside
-// quoted text. It is the same scan as Rebind without the writing, so the common
-// case of an already-numbered or parameterless statement costs one pass and no
-// allocation.
-func needsRebind(query string) bool {
-	if !strings.ContainsRune(query, '?') {
-		return false
-	}
+// rebind is the scanner. It walks the statement once, copying nothing until it
+// meets a placeholder that actually has to be rewritten; from there it appends
+// each stretch of untouched text as it goes.
+func rebind(query string) (string, error) {
+	var b strings.Builder
+	// copied marks how much of query has been written to b. It is meaningless
+	// until n > 0, which is what keeps the untouched case allocation-free.
+	copied := 0
+	n := 0
+	numberedAt := -1
+	placeholderAt := -1
+
 	for i := 0; i < len(query); {
 		switch c := query[i]; c {
 		case '\'', '"':
@@ -120,18 +105,81 @@ func needsRebind(query string) bool {
 				i = end
 				continue
 			}
+			// Not a quote opener, so `$` followed by a digit is a parameter
+			// reference: the statement is already numbered, at least in part.
+			if numberedAt < 0 && i+1 < len(query) && isDigit(query[i+1]) {
+				numberedAt = i
+			}
 			i++
 		case '?':
+			// PostgreSQL's jsonb and geometric types spell operators with a
+			// question mark: `?`, `?|`, `?&`, and `??` as the escaped form.
+			// Only a lone `?` is a placeholder.
 			if run := questionRun(query, i); run > 1 || isOperatorQuestion(query, i) {
 				i += run
 				continue
 			}
-			return true
+			if n == 0 {
+				placeholderAt = i
+				b.Grow(len(query) + 8)
+			}
+			n++
+			b.WriteString(query[copied:i])
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+			i++
+			copied = i
 		default:
 			i++
 		}
 	}
-	return false
+
+	if n == 0 {
+		return query, nil
+	}
+	if numberedAt >= 0 {
+		return "", &MixedPlaceholderError{Query: query, NumberedAt: numberedAt, PlaceholderAt: placeholderAt}
+	}
+	b.WriteString(query[copied:])
+	return b.String(), nil
+}
+
+// The application's statements are a fixed set of strings, and the assembled
+// ones repeat too — an `IN (…)` list of a given length spells the same text
+// every time. Scanning each one once per Exec is pure repetition, so results
+// are memoised on the statement text.
+//
+// The cache is capped because the assembled statements are not a closed set: a
+// deployment that queries unusual list lengths would otherwise grow it without
+// bound. Passing the cap clears the whole map rather than evicting cleverly —
+// the entries are cheap to recompute, and the hit rate recovers within a few
+// statements.
+const reboundCacheMax = 2048
+
+type reboundResult struct {
+	sql string
+	err error
+}
+
+var reboundCache = struct {
+	sync.RWMutex
+	m map[string]reboundResult
+}{m: make(map[string]reboundResult)}
+
+func loadRebound(query string) (reboundResult, bool) {
+	reboundCache.RLock()
+	defer reboundCache.RUnlock()
+	r, ok := reboundCache.m[query]
+	return r, ok
+}
+
+func storeRebound(query, sql string, err error) {
+	reboundCache.Lock()
+	defer reboundCache.Unlock()
+	if len(reboundCache.m) >= reboundCacheMax {
+		reboundCache.m = make(map[string]reboundResult, reboundCacheMax)
+	}
+	reboundCache.m[query] = reboundResult{sql: sql, err: err}
 }
 
 // skipQuoted returns the index just past a single-quoted string or a

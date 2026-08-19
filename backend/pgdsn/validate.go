@@ -19,14 +19,20 @@ import (
 // of a second, subtly different grammar that would reject working DSNs.
 //
 // Two things are checked beyond parsing, because pgconn accepts both and they
-// are the two ways a DSN silently connects somewhere else:
+// are ways a DSN silently connects somewhere else:
 //
 //   - An empty database name. libpq then falls back to the operating-system
 //     user name, so `postgres://user:pw@host:5432` connects to a database
 //     called after the role, which on a managed server usually does not exist
 //     and on a local one is somebody's scratch database.
-//   - No host at all. libpq falls back to a local unix socket, so a DSN whose
-//     host was lost to a formatting mistake quietly targets localhost.
+//   - No host at all. This is a backstop rather than a live check: pgconn
+//     resolves a missing host to the local unix socket directory, so a DSN
+//     whose host was lost to a formatting mistake parses with a host of
+//     `/var/run/postgresql` and reaches here looking valid. What catches that
+//     one is the `role@host/database` line Describe writes at startup, which
+//     shows the socket path instead of the server that was meant. The check
+//     stays because an empty host is not something to pass to the driver if a
+//     future pgconn ever produces one.
 //
 // The error never contains the DSN. pgconn's parse errors quote it in full,
 // which is the whole reason Redact exists, so the driver's message is redacted

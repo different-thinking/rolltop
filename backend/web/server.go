@@ -79,10 +79,6 @@ type Options struct {
 	GoogleContacts *googlepeople.Syncer
 	// GoogleCalendar syncs Google calendars, wired the same way.
 	GoogleCalendar *googlecalendar.Syncer
-	// RequestRestart asks the process supervisor for a controlled restart. The
-	// admin database repair needs one, because a tenant database can only be
-	// replaced while nothing holds a handle on it. Nil disables the action.
-	RequestRestart func(userID int64, reason string)
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -116,7 +112,6 @@ type Server struct {
 	googleAuth                *googleauth.Manager
 	googleContacts            *googlepeople.Syncer
 	googleCalendar            *googlecalendar.Syncer
-	requestRestart            func(userID int64, reason string)
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -125,6 +120,9 @@ type Server struct {
 	deletingIMAPAccounts      map[int64]map[int64]bool
 	storageMu                 sync.Mutex
 	storageCached             map[int64]storageStatsCacheEntry
+	volumeUsageMu             sync.Mutex
+	volumeUsageCached         volumeUsage
+	volumeUsageMeasuring      bool
 	mailWarmMu                sync.Mutex
 	mailWarmRunning           map[int64]bool
 	mailListCache             *mailListCache
@@ -379,7 +377,6 @@ func New(opts Options) (*Server, error) {
 		googleAuth:            opts.GoogleAuth,
 		googleContacts:        opts.GoogleContacts,
 		googleCalendar:        opts.GoogleCalendar,
-		requestRestart:        opts.RequestRestart,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},

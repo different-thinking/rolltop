@@ -30,8 +30,11 @@ type Config struct {
 	// fallback to fall back to, and a default would only turn a missing
 	// configuration into a connection error against somebody's localhost.
 	DatabaseURL string
-	// DatabaseMaxConns caps the connection pool. The hosted role allows 20
-	// connections, so the default leaves room for a pg_dump and a psql session.
+	// DatabaseMaxConns caps the connection pool, or is 0 when ROLLTOP_DB_MAX_CONNS
+	// was not set and the store's own default applies. The number is not
+	// restated here: the store owns pool sizing, and a copy of the default in
+	// this package would silently win over a retuned one there. Ask the opened
+	// store what it resolved to when the effective number is what you want.
 	DatabaseMaxConns int
 	// DatabaseConnectTimeout is how long startup waits for a database that is
 	// not up yet, since the app container and the database start independently.
@@ -62,11 +65,6 @@ type Config struct {
 
 const defaultDataDir = "/data"
 
-// defaultDatabaseMaxConns matches the store's own default. It is restated here
-// so the configuration reports the number it will actually use rather than a
-// zero that means "ask the store".
-const defaultDatabaseMaxConns = 10
-
 // DataDirFromEnv resolves the data directory on its own, without loading or
 // validating the rest of the configuration. Startup paths that must run before
 // Load - crash reporting arms itself before anything can fail - use it to reach
@@ -87,12 +85,16 @@ func Load() (Config, error) {
 	if err := pgdsn.Validate(databaseURL); err != nil {
 		return Config{}, fmt.Errorf("ROLLTOP_DATABASE_URL: %w", err)
 	}
-	databaseMaxConns, err := parseInt("ROLLTOP_DB_MAX_CONNS", defaultDatabaseMaxConns)
+	// 0 means unset, which the store reads as "use your default".
+	databaseMaxConns, err := parseInt("ROLLTOP_DB_MAX_CONNS", 0)
 	if err != nil {
 		return Config{}, err
 	}
-	if databaseMaxConns < 1 {
+	if databaseMaxConns < 0 {
 		return Config{}, fmt.Errorf("ROLLTOP_DB_MAX_CONNS must be at least 1, got %d", databaseMaxConns)
+	}
+	if os.Getenv("ROLLTOP_DB_MAX_CONNS") != "" && databaseMaxConns == 0 {
+		return Config{}, errors.New("ROLLTOP_DB_MAX_CONNS must be at least 1, got 0")
 	}
 	databaseConnectTimeout, err := parseDuration("ROLLTOP_DB_CONNECT_TIMEOUT", 2*time.Minute)
 	if err != nil {

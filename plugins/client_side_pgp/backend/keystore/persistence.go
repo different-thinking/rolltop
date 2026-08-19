@@ -75,18 +75,22 @@ func UpsertIdentityPrivateKey(ctx context.Context, db *store.Store, key store.Id
 	if err != nil {
 		return store.IdentityPGPPrivateKey{}, err
 	}
-	rollback := func() (store.IdentityPGPPrivateKey, error) {
+	// rollback takes the failure explicitly rather than closing over the
+	// enclosing err: the branches below declare their own, and a closure that
+	// read the outer one returned a nil error for a failed insert — a key the
+	// caller was told had been saved.
+	rollback := func(err error) (store.IdentityPGPPrivateKey, error) {
 		_ = tx.Rollback()
 		return store.IdentityPGPPrivateKey{}, err
 	}
 	if key.IsActiveSigning {
-		if _, err = tx.ExecContext(ctx, `UPDATE identity_pgp_private_keys SET is_active_signing = 0, updated_at = ? WHERE user_id = ? AND identity_id = ?`, ts, key.UserID, key.IdentityID); err != nil {
-			return rollback()
+		if _, err := tx.ExecContext(ctx, `UPDATE identity_pgp_private_keys SET is_active_signing = 0, updated_at = ? WHERE user_id = ? AND identity_id = ?`, ts, key.UserID, key.IdentityID); err != nil {
+			return rollback(err)
 		}
 	}
 	if key.IsActiveEncryption {
-		if _, err = tx.ExecContext(ctx, `UPDATE identity_pgp_private_keys SET is_active_encryption = 0, updated_at = ? WHERE user_id = ? AND identity_id = ?`, ts, key.UserID, key.IdentityID); err != nil {
-			return rollback()
+		if _, err := tx.ExecContext(ctx, `UPDATE identity_pgp_private_keys SET is_active_encryption = 0, updated_at = ? WHERE user_id = ? AND identity_id = ?`, ts, key.UserID, key.IdentityID); err != nil {
+			return rollback(err)
 		}
 	}
 	if key.ID == 0 {
@@ -95,22 +99,21 @@ func UpsertIdentityPrivateKey(ctx context.Context, db *store.Store, key store.Id
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id`,
 			key.UserID, key.IdentityID, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.EncryptedPrivateKey, key.PrivateKeyStorage, key.RevocationCertificate, boolInt(key.IsActiveSigning), boolInt(key.IsActiveEncryption), boolInt(key.IsDecryptOnly), ts, ts).Scan(&key.ID); err != nil {
-			return rollback()
+			return rollback(err)
 		}
 	} else {
 		res, err := tx.ExecContext(ctx, `UPDATE identity_pgp_private_keys SET label = ?, fingerprint = ?, key_id = ?, user_ids = ?, public_key_armored = ?, encrypted_private_key = ?, private_key_storage = ?, revocation_certificate = ?, is_active_signing = ?, is_active_encryption = ?, is_decrypt_only = ?, updated_at = ?
 			WHERE user_id = ? AND identity_id = ? AND id = ?`,
 			key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.EncryptedPrivateKey, key.PrivateKeyStorage, key.RevocationCertificate, boolInt(key.IsActiveSigning), boolInt(key.IsActiveEncryption), boolInt(key.IsDecryptOnly), ts, key.UserID, key.IdentityID, key.ID)
 		if err != nil {
-			return rollback()
+			return rollback(err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return rollback()
+			return rollback(err)
 		}
 		if n == 0 {
-			err = store.ErrNotFound
-			return rollback()
+			return rollback(store.ErrNotFound)
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -245,13 +248,14 @@ func UpsertContactPublicKey(ctx context.Context, db *store.Store, key store.Cont
 	if err != nil {
 		return store.ContactPGPPublicKey{}, err
 	}
-	rollback := func() (store.ContactPGPPublicKey, error) {
+	// rollback takes the failure explicitly; see UpsertIdentityPrivateKey.
+	rollback := func(err error) (store.ContactPGPPublicKey, error) {
 		_ = tx.Rollback()
 		return store.ContactPGPPublicKey{}, err
 	}
 	if key.IsPreferred {
-		if _, err = tx.ExecContext(ctx, `UPDATE contact_pgp_public_keys SET is_preferred = 0, updated_at = ? WHERE user_id = ? AND normalized_email = ?`, ts, key.UserID, key.NormalizedEmail); err != nil {
-			return rollback()
+		if _, err := tx.ExecContext(ctx, `UPDATE contact_pgp_public_keys SET is_preferred = 0, updated_at = ? WHERE user_id = ? AND normalized_email = ?`, ts, key.UserID, key.NormalizedEmail); err != nil {
+			return rollback(err)
 		}
 	}
 	if key.ID == 0 {
@@ -260,22 +264,21 @@ func UpsertContactPublicKey(ctx context.Context, db *store.Store, key store.Cont
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id`,
 			key.UserID, key.ContactID, key.Email, key.NormalizedEmail, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.SourceKind, key.SourceDetail, boolInt(key.IsPreferred), ts, ts).Scan(&key.ID); err != nil {
-			return rollback()
+			return rollback(err)
 		}
 	} else {
 		res, err := tx.ExecContext(ctx, `UPDATE contact_pgp_public_keys SET email = ?, normalized_email = ?, label = ?, fingerprint = ?, key_id = ?, user_ids = ?, public_key_armored = ?, source_kind = ?, source_detail = ?, is_preferred = ?, updated_at = ?
 			WHERE user_id = ? AND contact_id = ? AND id = ?`,
 			key.Email, key.NormalizedEmail, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.SourceKind, key.SourceDetail, boolInt(key.IsPreferred), ts, key.UserID, key.ContactID, key.ID)
 		if err != nil {
-			return rollback()
+			return rollback(err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return rollback()
+			return rollback(err)
 		}
 		if n == 0 {
-			err = store.ErrNotFound
-			return rollback()
+			return rollback(store.ErrNotFound)
 		}
 	}
 	if err = tx.Commit(); err != nil {

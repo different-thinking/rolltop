@@ -98,6 +98,16 @@ type PostgresOptions struct {
 	// failed first connection is a normal event rather than a broken
 	// deployment. Zero disables the wait: one attempt, then the error.
 	ConnectTimeout time.Duration
+	// ExclusiveInstance refuses to open a database another rolltop server is
+	// already serving. The running server sets it; tests do not, because they
+	// legitimately open several stores against one database at once.
+	//
+	// See instance_lock.go for why the guard exists and what it does not cover.
+	ExclusiveInstance bool
+	// InstanceLockWait is how long ExclusiveInstance waits for the previous
+	// process to let go. A rolling deployment overlaps the two containers, so
+	// zero here would make every deploy a crash loop.
+	InstanceLockWait time.Duration
 }
 
 // OpenPostgres connects to a PostgreSQL database and makes sure it carries the
@@ -149,12 +159,25 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 		s0.release()
 		return nil, err
 	}
+	// Before the schema, so a second server pointed at this database says so
+	// rather than joining in and writing over the first one's sync runs.
+	var instance *instanceLock
+	if opts.ExclusiveInstance {
+		instance, err = acquireInstanceLock(ctx, registered, opts.InstanceLockWait)
+		if err != nil {
+			_ = db.Close()
+			s0.release()
+			return nil, postgresError("claim this database", err)
+		}
+	}
 	catalog := pluginCatalogFromManifests(opts.Manifests)
 	// Every tenant lives in this one database, scoped by user_id (decision 3.1),
 	// so dataDB resolves to this pool for every user.
 	s := &Store{
 		db:                db,
 		registered:        s0,
+		instance:          instance,
+		maxConns:          maxConns,
 		dataDir:           opts.DataDir,
 		pluginDefinitions: append([]plugins.Definition(nil), catalog.definitions...),
 		pluginMigrations:  append([]plugins.Migration(nil), catalog.migrations...),
@@ -170,11 +193,23 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 	// is the only thing that stops the *next* plugin migration from being
 	// replayed against tables that already have it.
 	//
-	// Under the schema lock, because idempotent statements are not the same as
-	// concurrency-safe ones: two servers starting together both read the
-	// migration as unapplied and both insert its bookkeeping row, and the loser
-	// fails on the primary key.
+	// Under the schema lock when there is anything to do, because idempotent
+	// statements are not the same as concurrency-safe ones: two servers starting
+	// together both read the migration as unapplied and both insert its
+	// bookkeeping row, and the loser fails on the primary key. The check that
+	// decides whether there is anything to do needs no lock, so the ordinary
+	// start takes none.
 	if opts.baselineOnly {
+		return s, nil
+	}
+	// Read first, without the lock: on every start after the first there is
+	// nothing to apply, and that answer is one query.
+	upToDate, err := s.pluginMigrationsUpToDate(ctx)
+	if err != nil {
+		_ = s.Close()
+		return nil, postgresError("check plugin migrations", err)
+	}
+	if upToDate {
 		return s, nil
 	}
 	if err := s.withSchemaLock(ctx, func(ctx context.Context) error {
@@ -191,22 +226,49 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 	return s, nil
 }
 
-// withSchemaLock runs fn while holding the advisory lock that serializes schema
-// changes across processes.
+// lockPostgresSchema takes the advisory lock that serializes schema changes
+// across every process pointed at this database: a starting server applying the
+// baseline, another applying plugin migrations, the admin console creating or
+// dropping the schema.
+//
+// The returned function releases the lock. Closing the connection would release
+// it too — it is a session lock — but unlocking explicitly returns the
+// connection to the pool usable rather than holding a server-wide lock for as
+// long as the pool keeps that connection idle. The release runs on its own
+// short-lived context so a caller whose context has already been cancelled
+// still gives the lock back.
+//
+// This is the only place that spells this out. Every caller in this package
+// goes through it, because a copy that forgot the explicit unlock, or gave the
+// release no timeout of its own, would be invisible until a deploy hung.
+func lockPostgresSchema(ctx context.Context, conn *sql.Conn) (func(), error) {
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaAdvisoryLock); err != nil {
+		return nil, postgresError("take the schema lock", err)
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), schemaUnlockTimeout)
+		defer cancel()
+		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, schemaAdvisoryLock)
+	}, nil
+}
+
+// schemaUnlockTimeout bounds giving the lock back. It is generous because
+// failing to unlock leaves the lock held until the connection dies, and short
+// because a hung unlock must not delay shutdown indefinitely.
+const schemaUnlockTimeout = 10 * time.Second
+
+// withSchemaLock runs fn on a pooled connection while holding the schema lock.
 func (s *Store) withSchemaLock(ctx context.Context, fn func(context.Context) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaAdvisoryLock); err != nil {
+	unlock, err := lockPostgresSchema(ctx, conn)
+	if err != nil {
 		return err
 	}
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, schemaAdvisoryLock)
-	}()
+	defer unlock()
 	return fn(ctx)
 }
 
@@ -286,17 +348,11 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 		return nil
 	}
 
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaAdvisoryLock); err != nil {
-		return postgresError("take the schema lock", err)
+	unlock, err := lockPostgresSchema(ctx, conn)
+	if err != nil {
+		return err
 	}
-	// Closing the connection releases a session lock too, but unlocking
-	// explicitly returns it to the pool usable instead of holding the lock for
-	// as long as the pool keeps the connection idle.
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, schemaAdvisoryLock)
-	}()
+	defer unlock()
 
 	// Another process may have created the schema while this one waited.
 	present, err = verifyPostgresBaseline(ctx, conn, checksum)
@@ -541,14 +597,11 @@ func quoteSQLLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-// baselineChecksum reuses the SQLite runner's checksum function so every row in
-// schema_migrations is checksummed the same way, whichever runner wrote it.
+// baselineChecksum fingerprints the baseline as schema_migrations records it.
+// A mismatch at open means baseline.sql was edited after a database was built
+// from it, which is the one thing the row exists to catch.
 func baselineChecksum() string {
-	return migrationChecksum(migrationSet{
-		Scope:      postgresSchemaScope,
-		Version:    postgresSchemaVersion,
-		Statements: []string{pgschema.Baseline},
-	})
+	return schemaChecksum(postgresSchemaScope, postgresSchemaVersion, pgschema.Baseline)
 }
 
 // pinPostgresSearchPath makes unqualified names resolve to the schema the

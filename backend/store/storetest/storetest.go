@@ -14,20 +14,12 @@ package storetest
 
 import (
 	"context"
-	"sync"
 	"testing"
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
 	"rolltop/backend/store/pgtestdb"
 )
-
-// testStoreDSNs remembers which database a test was given, so a test that
-// closes its store and opens another one — the way the persistence tests check
-// that state survived a restart — reaches the same database rather than a fresh
-// clone of the template. Under SQLite that property came free from reopening
-// the same file.
-var testStoreDSNs sync.Map
 
 // Open returns a store over an empty database carrying the current schema. The
 // database is dropped when the test ends, and the store is closed with it.
@@ -67,13 +59,7 @@ func OpenWithManifests(t *testing.T, manifests []plugins.Manifest) (*store.Store
 // than the handle.
 func DSN(t *testing.T) string {
 	t.Helper()
-	dsn, reused := testStoreDSNs.Load(t.Name())
-	if !reused {
-		dsn = pgtestdb.NewFromTemplate(t, store.SchemaTag(), buildTemplate)
-		testStoreDSNs.Store(t.Name(), dsn)
-		t.Cleanup(func() { testStoreDSNs.Delete(t.Name()) })
-	}
-	return dsn.(string)
+	return pgtestdb.NewFromTemplate(t, store.SchemaTag(), buildTemplate)
 }
 
 // buildTemplate puts the schema into the template database, through the same

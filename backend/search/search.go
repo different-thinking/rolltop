@@ -902,7 +902,7 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	}
 	s.mu.Unlock()
 
-	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), liveIndexDirName))
+	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName))
 	if err != nil {
 		s.reportBleveError(bleveErrorContext{Operation: "open-index", UserID: userID}, err)
 		return nil, err
@@ -925,6 +925,41 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	s.indexes[userID] = index
 	s.mu.Unlock()
 	return index, nil
+}
+
+// DropUser closes and forgets a tenant's index handle.
+//
+// It is what makes deleting a user safe: the service caches one open Bleve
+// index per tenant, and removing the directory under a still-open handle leaves
+// a writer appending segments to files nobody will ever read again. Callers
+// remove the directory *after* this returns.
+func (s *Service) DropUser(ctx context.Context, userID int64) error {
+	if !s.perUser || userID == 0 {
+		return nil
+	}
+	// The writer gate serialises this against an in-flight batch commit for the
+	// same tenant, which is the one thing that would still be holding the index.
+	// Acquired through the context-aware path, so a stalled writer fails the
+	// caller's request rather than hanging it: this runs on an admin HTTP
+	// handler, and a two-minute Bleve stall is a condition that happens.
+	writer := s.writerForUser(userID)
+	if err := s.lockWriter(ctx, writer, bleveErrorContext{Operation: "drop-user", UserID: userID}); err != nil {
+		return err
+	}
+	defer writer.Unlock()
+
+	s.mu.Lock()
+	index := s.indexes[userID]
+	delete(s.indexes, userID)
+	s.mu.Unlock()
+	if index == nil {
+		return nil
+	}
+	if err := index.Close(); err != nil {
+		s.reportBleveError(bleveErrorContext{Operation: "drop-user-index", UserID: userID}, err)
+		return err
+	}
+	return nil
 }
 
 // IndexMessage turns a stored message into a Bleve document. SQLite keeps the full

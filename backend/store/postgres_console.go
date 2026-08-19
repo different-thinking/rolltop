@@ -187,22 +187,6 @@ func withPostgresConsoleConn(ctx context.Context, dsn string, run func(context.C
 	return run(ctx, conn)
 }
 
-// lockPostgresSchema serializes the create and drop steps against everything
-// else that changes this schema, including a starting server. The returned
-// function releases the lock; closing the connection would too, but returning it
-// unlocked keeps the lock's lifetime tied to the operation rather than to the
-// pool.
-func lockPostgresSchema(ctx context.Context, conn *sql.Conn) (func(), error) {
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaAdvisoryLock); err != nil {
-		return nil, postgresError("take the schema lock", err)
-	}
-	return func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, schemaAdvisoryLock)
-	}, nil
-}
-
 // blockingObjectsError names what is in the way. A refusal that only says "not
 // ours" leaves the operator with nothing to act on; naming the objects turns it
 // into a list they can clear.

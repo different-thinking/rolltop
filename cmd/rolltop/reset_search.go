@@ -82,6 +82,13 @@ func runResetSearch(ctx context.Context, args []string, stdout, stderr io.Writer
 		Manifests:      manifests,
 		DataDir:        cfg.DataDir,
 		ConnectTimeout: cfg.DatabaseConnectTimeout,
+		// This command marks message rows pending and moves an index directory
+		// under the server's feet, so it may only run while no server serves
+		// this database. The directory lock above catches one sharing this
+		// volume; this catches one on its own volume. No wait: --confirm-offline
+		// already says the operator believes nothing is running, and the point
+		// is to contradict them immediately when something is.
+		ExclusiveInstance: true,
 	})
 	if err != nil {
 		return err

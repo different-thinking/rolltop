@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"rolltop/backend/plugins"
 )
 
@@ -322,6 +324,58 @@ func (s *Store) applyPluginMigrationsForScope(ctx context.Context, scope string)
 	return nil
 }
 
+// undefinedTable is PostgreSQL's SQLSTATE for a missing relation.
+const undefinedTable = "42P01"
+
+// pluginMigrationsUpToDate reports whether every compiled plugin migration is
+// already recorded, in one query and without taking the schema lock.
+//
+// This is the ordinary case on every start after the first, and it is worth a
+// fast path of its own: the alternative serialises each starting process behind
+// the server-wide schema lock for a pass that changes nothing, which during a
+// rolling deploy means the incoming process waiting on the outgoing one.
+//
+// A checksum that disagrees is reported here rather than deferred to the locked
+// pass: it is a refusal, not work to be done, and taking a global lock to
+// produce it helps nobody.
+func (s *Store) pluginMigrationsUpToDate(ctx context.Context) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT plugin_id, migration_id, checksum FROM plugin_migrations`)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
+			// No bookkeeping table yet, so nothing can be recorded.
+			return false, nil
+		}
+		return false, err
+	}
+	defer rows.Close()
+	type migrationKey struct{ pluginID, migrationID string }
+	applied := make(map[migrationKey]string)
+	for rows.Next() {
+		var key migrationKey
+		var checksum string
+		if err := rows.Scan(&key.pluginID, &key.migrationID, &checksum); err != nil {
+			return false, err
+		}
+		applied[key] = checksum
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, scope := range s.pluginMigrationScopes() {
+		for _, migration := range s.pluginMigrationsForScope(scope) {
+			existing, ok := applied[migrationKey{pluginID: migration.PluginID, migrationID: migration.ID}]
+			if !ok {
+				return false, nil
+			}
+			if existing != pluginMigrationChecksum(migration) {
+				return false, fmt.Errorf("plugin migration checksum mismatch for %s/%s", migration.PluginID, migration.ID)
+			}
+		}
+	}
+	return true, nil
+}
+
 // pluginColumnExists answers whether a plugin's table already carries a column.
 //
 // It exists because SQLite had no ADD COLUMN IF NOT EXISTS, and it survives the
@@ -370,7 +424,24 @@ func (s *Store) pluginDefinitionByID(id string) (plugins.Definition, bool) {
 	return plugins.Definition{}, false
 }
 
+// ensurePluginMigrationTable creates the bookkeeping table if it is missing.
+//
+// The baseline already contains it, so this is a fallback for a store opened
+// against a database built some other way. It runs at most once per store:
+// CREATE TABLE IF NOT EXISTS takes catalog locks even when it does nothing, and
+// this used to run once per migration on every open.
 func (s *Store) ensurePluginMigrationTable(ctx context.Context) error {
+	if s.pluginMigrationTableReady.Load() {
+		return nil
+	}
+	if err := s.createPluginMigrationTable(ctx); err != nil {
+		return err
+	}
+	s.pluginMigrationTableReady.Store(true)
+	return nil
+}
+
+func (s *Store) createPluginMigrationTable(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS plugin_migrations (
 		plugin_id TEXT NOT NULL,
 		migration_id TEXT NOT NULL,

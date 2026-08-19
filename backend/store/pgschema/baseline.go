@@ -1,3 +1,11 @@
+// File overview: The schema this application creates, and what can be read off
+// it without opening a database.
+//
+// baseline.sql was generated once, by translating the fully migrated SQLite
+// schema, and is now the authoritative hand-owned definition: the translator
+// and the SQLite schema it read are both gone. Changing the schema means
+// editing that file — see its header for what that costs.
+
 package pgschema
 
 import (
@@ -6,10 +14,24 @@ import (
 	"sync"
 )
 
-// Baseline is the generated PostgreSQL schema, embedded so the server can
-// create an empty database without shipping the .sql file next to the binary.
-// TestBaselineMatchesSQLiteSchema regenerates the file this embeds from the
-// migrated SQLite schema, so what runs in production is what that test checked.
+// Kinds an Object can carry. ForeignKeysKind is one section rather than one
+// object: the references are declared together, after every table exists.
+const (
+	TableKind       = "table"
+	IndexKind       = "index"
+	ForeignKeysKind = "foreign keys"
+	TriggerKind     = "trigger"
+)
+
+// Object is one schema object the baseline declares.
+type Object struct {
+	Kind string
+	Name string
+	SQL  string
+}
+
+// Baseline is the PostgreSQL schema, embedded so the server can create an empty
+// database without shipping the .sql file next to the binary.
 //
 //go:embed baseline.sql
 var Baseline string
@@ -26,7 +48,7 @@ var declaredOnce struct {
 }
 
 // Declared lists what the baseline creates, parsed from the "-- <kind> <name>"
-// headers Render writes.
+// headers baseline.sql carries above each object.
 //
 // It exists so callers can act on the baseline's objects by name rather than by
 // enumerating whatever happens to be in the database. Dropping "every table in
@@ -55,7 +77,8 @@ func DeclaredNames(kind string) []string {
 
 // parseDeclared reads the object headers. Only a header at the start of a line
 // counts, so a "-- table x" inside a trigger body or a column comment is not
-// mistaken for a declaration.
+// mistaken for a declaration. TestBaselineDeclaresEveryObject holds the file to
+// the convention.
 func parseDeclared(baseline string) []Object {
 	kinds := []string{ForeignKeysKind, TableKind, IndexKind, TriggerKind}
 	var objects []Object

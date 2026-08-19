@@ -30,16 +30,23 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
 }
 
-// IsClosed reports that a query failed because its database is gone: the store
-// was closed while a background worker was still running. Such a worker has
-// nothing left to read, nothing to retry, and nothing an operator could act on,
-// so callers treat this as "stop quietly" rather than as a failure.
+// IsClosed reports that a query failed because its database handle is gone: the
+// store was closed while a background worker was still running. Such a worker
+// has nothing left to read, nothing to retry, and nothing an operator could act
+// on, so callers treat this as "stop quietly" rather than as a failure.
+//
+// It deliberately means only that. Every caller of this uses it to leave a loop
+// for the rest of the process lifetime — the snooze scheduler, the two web push
+// delivery paths, the rebuild recovery loop — so a condition that resolves
+// itself must not reach it. driver.ErrBadConn and sql.ErrConnDone are exactly
+// such conditions here: PostgreSQL restarting or failing over surfaces them
+// through a statement in flight, and IsUnavailable classifies them as the
+// transient failures they are. Under SQLite a bad connection did mean the file
+// was gone; treating the two the same on PostgreSQL stops reminders and push
+// delivery for good, seconds before the database comes back.
 func IsClosed(err error) bool {
 	if err == nil {
 		return false
-	}
-	if errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) {
-		return true
 	}
 	// database/sql keeps its closed-database error unexported, so the text is
 	// the only handle on it.
@@ -73,27 +80,6 @@ func IsUniqueConstraint(err error) bool {
 	}
 	return false
 }
-
-// IsUniqueConstraintOn reports a duplicate-key failure against one named
-// constraint, for callers that recover from exactly one collision and must not
-// swallow another.
-//
-// The name is the constraint's, as PostgreSQL generates it from the table and
-// its columns: a `UNIQUE(user_id, account_id, mailbox_id, uid)` on `messages`
-// becomes `messages_user_id_account_id_mailbox_id_uid_key`. Matching on it is
-// what keeps "this UID is already mirrored, adopt the existing row" from also
-// catching, say, a duplicate message-id hash and adopting the wrong message.
-func IsUniqueConstraintOn(err error, constraint string) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return false
-	}
-	return pgErr.Code == uniqueViolation && pgErr.ConstraintName == constraint
-}
-
-// MessagesUIDConstraint names the uniqueness of one mailbox UID per tenant
-// account. Reaching for it means "this message is already mirrored".
-const MessagesUIDConstraint = "messages_user_id_account_id_mailbox_id_uid_key"
 
 // IsUnavailable reports that the database could not be reached — it is down,
 // failing over, or the network to it is broken — as opposed to having answered

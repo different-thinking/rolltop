@@ -112,7 +112,8 @@ start: rolltop creates its own schema, records the schema version, and refuses
 to start against a database holding tables it did not create, which is what
 stops it from being pointed at somebody else's data.
 
-`ROLLTOP_DB_MAX_CONNS` sizes the connection pool (default `10`). Size it below
+`ROLLTOP_DB_MAX_CONNS` sizes the connection pool (default `10`, and the admin
+Database page shows the number in force). Size it below
 the connection limit your database role has, leaving room for a scheduled
 `pg_dump` and a `psql` session; two rolltop processes overlap during a rolling
 deploy, so the practical peak is twice this number for a few seconds.
@@ -237,11 +238,20 @@ keeps working until they do.
 
 ## Run Locally
 
+A PostgreSQL server has to be running first — `compose.dev.yml` starts a
+throwaway one that keeps nothing on disk. The test suite and the app want
+separate databases on it: the suite creates and drops one per test, so pointing
+it at the database you are developing against would drop it.
+
 ```sh
 npm install
 npm run build
 npm run build:plugins
-go test ./...
+
+docker compose -f compose.dev.yml up -d db
+TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' go test -p 2 ./...
+
+createdb -h 127.0.0.1 -U postgres rolltop
 test -f .env.rolltop || (
   umask 077
   printf 'ROLLTOP_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" > .env.rolltop
@@ -249,28 +259,65 @@ test -f .env.rolltop || (
 set -a
 . ./.env.rolltop
 set +a
-ROLLTOP_DATA_DIR="./data" go run ./cmd/rolltop
+ROLLTOP_DATA_DIR="./data" \
+ROLLTOP_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/rolltop?sslmode=disable' \
+  go run ./cmd/rolltop
 ```
 
 Open `http://localhost:8080`. If no users exist, `/setup` creates the first admin.
 
+`-p 2` bounds how many test packages run at once. The suite is I/O-heavy
+against one server, and the default lets enough packages compete that
+timing-sensitive tests fail on scheduling rather than on behaviour.
+
 ## Docker
 
-```sh
-docker pull ghcr.io/grahamsz/rolltop:latest
+Rolltop needs a PostgreSQL database beside it, so the deployment is two
+containers. `compose.yml` in this repository runs both; take it and the two
+environment files below, and nothing else is needed:
 
+```sh
+curl -O https://raw.githubusercontent.com/grahamsz/rolltop/main/compose.yml
+
+# POSTGRES_PASSWORD is read by Compose itself, which only ever looks in your
+# shell environment and in a file named exactly `.env`. The alphabet is
+# restricted on purpose: this password is substituted into the database
+# connection string, and a quote or a backslash there would break it.
+test -f .env || (
+  umask 077
+  printf 'POSTGRES_PASSWORD=%s\n' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)" > .env
+)
+
+# .env.rolltop is the app's own configuration, handed to the rolltop container.
 test -f .env.rolltop || (
   umask 077
   printf 'ROLLTOP_MASTER_KEY=%s\nROLLTOP_COOKIE_SECURE=false\n' "$(openssl rand -base64 32)" > .env.rolltop
 )
 
+docker compose up -d
+```
+
+Keep both files with the same care as the Docker volumes. Changing or losing
+`ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable; losing
+`POSTGRES_PASSWORD` while the database volume survives locks you out of your
+own data.
+
+Running the image on its own still works, but it has to be told where its
+database is — `ROLLTOP_DATABASE_URL` is required and the container exits at
+once without it, which `--restart unless-stopped` turns into a crash loop:
+
+```sh
 docker run -d --name rolltop --restart unless-stopped -p 8080:8080 \
   --env-file .env.rolltop \
+  -e ROLLTOP_DATABASE_URL='postgres://rolltop:PASSWORD@db.example:5432/rolltop?sslmode=require' \
   -v rolltop-data:/data \
   ghcr.io/grahamsz/rolltop:latest
 ```
 
-Keep `.env.rolltop` with the same care as the Docker volume. Changing or losing `ROLLTOP_MASTER_KEY` makes stored IMAP passwords undecryptable.
+In the URL form above a password containing `@`, `/`, `?`, or `#` must be
+percent-encoded, or the DSN parses as pointing somewhere else entirely. The
+keyword form `host=db.example port=5432 user=rolltop password='…'
+dbname=rolltop sslmode=require` is accepted too and needs no encoding.
 
 ### Logs and crash reports
 
@@ -529,18 +576,24 @@ Stop every Rolltop process that mounts the data volume, then run:
 docker stop <rolltop-container>
 docker run --rm \
   --env-file .env.rolltop \
+  -e ROLLTOP_DATABASE_URL="$ROLLTOP_DATABASE_URL" \
   -v rolltop-data:/data \
   ghcr.io/grahamsz/rolltop:latest \
   reset-search --user-id 1 --confirm-offline
 ```
 
-For Docker Compose, use your actual service name; the one-off command inherits
-that service's image, environment, and volumes:
+The command marks message rows pending before it quarantines the index, so it
+needs the database and refuses to start without `ROLLTOP_DATABASE_URL`.
+
+With the bundled `compose.yml` the one-off run inherits the image, environment,
+and volumes of the `rolltop` service, including that variable, so nothing has
+to be repeated. `--no-deps` keeps it from starting the database container, which
+means the database has to be reachable already — with the bundled file it is,
+because only the app is stopped:
 
 ```sh
-ROLLTOP_SERVICE=<your-service-name>
-docker compose stop "$ROLLTOP_SERVICE"
-docker compose run --rm --no-deps "$ROLLTOP_SERVICE" \
+docker compose stop rolltop
+docker compose run --rm --no-deps rolltop \
   reset-search --user-id 1 --confirm-offline
 ```
 

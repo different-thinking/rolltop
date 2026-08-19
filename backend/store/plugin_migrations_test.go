@@ -100,3 +100,82 @@ func assertPluginMigrationCount(t *testing.T, ctx context.Context, db *sql.DB, p
 		t.Fatalf("plugin_migrations count for %s = %d, want %d", pluginID, count, want)
 	}
 }
+
+// TestPluginMigrationsFastPathSkipsTheSchemaLock pins the check that keeps an
+// ordinary start off the server-wide schema lock. The pass it guards changes
+// nothing on every start after the first, and taking a global lock for it
+// serialises the incoming process of a rolling deploy behind the outgoing one.
+func TestPluginMigrationsFastPathSkipsTheSchemaLock(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+
+	upToDate, err := db.pluginMigrationsUpToDate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !upToDate {
+		t.Fatal("a freshly opened store still reports plugin migrations outstanding")
+	}
+
+	// A recorded checksum that disagrees with the compiled migration is a
+	// refusal, and it has to come out of the unlocked check rather than being
+	// deferred to the locked pass.
+	var migrations []plugins.Migration
+	for _, scope := range db.pluginMigrationScopes() {
+		migrations = append(migrations, db.pluginMigrationsForScope(scope)...)
+	}
+	if len(migrations) == 0 {
+		t.Skip("no plugin migrations are compiled in")
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE plugin_migrations SET checksum = ? WHERE plugin_id = ? AND migration_id = ?`,
+		"not-the-checksum", migrations[0].PluginID, migrations[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pluginMigrationsUpToDate(ctx); err == nil {
+		t.Fatal("a checksum mismatch was not reported")
+	}
+
+	// A migration that has no row at all is work, not a refusal.
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM plugin_migrations WHERE plugin_id = ? AND migration_id = ?`,
+		migrations[0].PluginID, migrations[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	upToDate, err = db.pluginMigrationsUpToDate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upToDate {
+		t.Fatal("a missing migration row was reported as up to date")
+	}
+}
+
+// TestPluginMigrationTableIsEnsuredOnce pins that the fallback DDL does not run
+// per migration. CREATE TABLE IF NOT EXISTS takes catalog locks even when it
+// changes nothing.
+func TestPluginMigrationTableIsEnsuredOnce(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	if !db.pluginMigrationTableReady.Load() {
+		// Nothing has needed the table yet in this store; the first call marks it.
+		if err := db.ensurePluginMigrationTable(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !db.pluginMigrationTableReady.Load() {
+		t.Fatal("the table was not recorded as ready")
+	}
+	// Dropping it and asking again must be a no-op: the store already knows.
+	if _, err := db.db.ExecContext(ctx, `DROP TABLE plugin_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ensurePluginMigrationTable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := db.db.QueryRowContext(ctx, `SELECT to_regclass('plugin_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("ensurePluginMigrationTable re-created the table, so it runs its DDL every call")
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 
 	"rolltop/backend/plugins"
 	_ "rolltop/plugins/catalog"
@@ -33,21 +34,40 @@ type Store struct {
 	dataDir string
 	// registered owns the driver registration the pool was opened through, so
 	// closing the store releases it.
-	registered        *registeredDSN
+	registered *registeredDSN
+	// instance holds the single-server lock when the caller asked for one. Nil
+	// in tests, which open several stores against one database on purpose.
+	instance *instanceLock
+	// maxConns is the pool cap this store resolved, whether from the caller or
+	// from its own default. Kept so callers report the number in force rather
+	// than restating the default and drifting from it.
+	maxConns          int
 	pluginDefinitions []plugins.Definition
 	pluginMigrations  []plugins.Migration
+	// pluginMigrationTableReady records that the bookkeeping table was created
+	// or found, so the fallback CREATE TABLE IF NOT EXISTS runs once per store
+	// rather than once per migration.
+	pluginMigrationTableReady atomic.Bool
 }
+
+// MaxConns is the pool cap in force, for the admin page and anything else that
+// has to show what this process will actually open.
+func (s *Store) MaxConns() int { return s.maxConns }
 
 // DataDir returns the filesystem directory holding blobs and search indexes.
 // The relational data no longer lives there; blobs and Bleve still do.
 func (s *Store) DataDir() string { return s.dataDir }
 
-// Close shuts down the connection pool and releases its driver registration.
+// Close shuts down the connection pool, gives up the single-server lock, and
+// releases the driver registration.
 func (s *Store) Close() error {
 	if s.db == nil {
 		return nil
 	}
 	err := s.db.Close()
+	// After the pool, so nothing is still running against the database when the
+	// next process is let in.
+	s.instance.release()
 	s.registered.release()
 	return err
 }

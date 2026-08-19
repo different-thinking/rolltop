@@ -15,7 +15,7 @@ import { api } from "../../../api";
 import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
 import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
-import type { DatePrefs, Toast } from "../../../appTypes";
+import type { DatePrefs } from "../../../appTypes";
 import type {
   DatabaseOverview,
   DatabaseStatus,
@@ -27,14 +27,6 @@ import type {
 } from "../../../types";
 
 const IDLE_POLL_MS = 15000;
-
-// Go zero times arrive as year 1; they mean "never happened", not a date.
-function formatTimestamp(value: string | undefined, datePrefs?: DatePrefs): string {
-  if (!value) return "";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime()) || parsed.getFullYear() < 1980) return "";
-  return displayDateTime(value, datePrefs);
-}
 
 // databaseLabel and databaseTone follow the same convention as preflightState
 // and stageState below: status in, a label and a tone out, rendered through the
@@ -283,15 +275,7 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
  * AdminDatabaseView polls the maintenance overview. Polling is fast while a job
  * runs so its log streams, and slow otherwise so an idle admin tab is cheap.
  */
-export function AdminDatabaseView({
-  csrf,
-  datePrefs,
-  addToast: _addToast
-}: {
-  csrf: string;
-  datePrefs?: DatePrefs;
-  addToast: (message: string, kind?: Toast["kind"]) => number;
-}) {
+export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs?: DatePrefs }) {
   const [overview, setOverview] = useState<DatabaseOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -420,7 +404,16 @@ export function AdminDatabaseView({
                 : "Free space unavailable"}
             </span>
             <span className="database-disk">
-              {formatBytes(volume.blob_bytes)} message blobs · {formatBytes(volume.index_bytes)} search index
+              {volume.measured_at_unix > 0 ? (
+                <>
+                  {formatBytes(volume.blob_bytes)} message blobs · {formatBytes(volume.index_bytes)} search index
+                  {volume.other_bytes > 0 ? ` · ${formatBytes(volume.other_bytes)} other` : ""}
+                  {" · measured "}
+                  {displayDateTime(new Date(volume.measured_at_unix * 1000).toISOString(), datePrefs)}
+                </>
+              ) : (
+                "Measuring what the volume holds…"
+              )}
             </span>
           </div>
           {lowDisk ? (

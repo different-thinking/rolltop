@@ -150,17 +150,36 @@ site and in review.
   (`ROLLTOP_STARTUP_LOCK_WAIT`) because deployments overlap the old and new
   container; `reset-search` keeps failing immediately instead. Do not move any
   open ahead of the lock, and do not make `reset-search` wait.
+- One **database** also belongs to one process, enforced separately: the
+  directory lock is per volume and misses two deployments with their own volumes
+  pointed at one DSN. `PostgresOptions.ExclusiveInstance` holds a session-scoped
+  advisory lock for the store's lifetime (`backend/store/instance_lock.go`), on
+  the same wait budget, and `reset-search` takes it without waiting. Without it
+  both servers start, each start's `MarkRunningSyncRunsInterrupted` stamps the
+  other's live sync runs interrupted, and every mailbox is fetched twice. Tests
+  leave it off on purpose: they open several stores against one database.
 - The schema is `backend/store/pgschema/baseline.sql`, applied to an empty
-  database and recorded as one row in `schema_migrations`. It is frozen: it was
-  derived from the SQLite schema that preceded it, and that derivation is over.
-  A schema change is a **new PostgreSQL migration layered on the baseline**,
-  never an edit to `baseline.sql` — editing it changes the recorded checksum and
-  makes every existing database refuse to start.
+  database and recorded as one row in `schema_migrations` under a checksum over
+  its text. It was derived once from the SQLite schema that preceded it; that
+  derivation and its translator are gone, so the file is now **hand-owned and
+  authoritative — edit it directly**, keeping the conventions its header lists.
+  What that reaches is only a database that does not exist yet: editing it
+  changes the recorded checksum, and a server whose database was built from an
+  older version refuses to start rather than run against a schema it does not
+  recognise. Changing the schema of a database already in service needs a
+  migration layered on the baseline, and **that mechanism does not exist yet** —
+  building it is the open item before the first durable database (§11 of
+  `docs/postgres-migration-plan.md`). There is no migration runner in
+  `backend/store/migrations.go` to revive; only the checksum and the progress
+  type live there.
 - SQL is written with `?` placeholders and translated to `$1..$n` in the driver
   (`backend/pgbind`). That is deliberate: many statements are assembled at run
   time from fragments, and numbering them in the source would mean every
   fragment knowing how many parameters the fragments before it contributed.
-  Write `?`; do not mix the two styles inside one statement.
+  Write `?`. Mixing the two styles inside one statement is refused rather than
+  guessed at — `Rebind` returns a `*pgbind.MixedPlaceholderError`, because
+  numbering `?` from `$1` in a statement that already says `$1` binds two
+  arguments to one slot and returns another tenant's rows without failing.
 - Four PostgreSQL rules the SQLite schema let us ignore, each of which produced
   a real failure during the move:
   - In `INSERT ... SELECT`, a bare parameter in the SELECT list is typed

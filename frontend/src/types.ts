@@ -746,16 +746,6 @@ export type MailIdentity = {
   is_primary: boolean;
 };
 
-/** DatabaseSalvageTable is one table's outcome in a repair report. */
-export type DatabaseSalvageTable = {
-  table: string;
-  copied: number;
-  skipped: number;
-  dropped: number;
-  gaps: number;
-  failure?: string;
-};
-
 /** DatabaseStatus is the connection and size card for the one database. */
 export type DatabaseStatus = {
   /** role@host/database — never the password. */
@@ -778,6 +768,13 @@ export type VolumeStatus = {
   total_bytes: number;
   blob_bytes: number;
   index_bytes: number;
+  /** Under users/ but neither a blob nor a live index — a quarantined index,
+   * most often. Without it the figures fail to add up to the used space. */
+  other_bytes: number;
+  /** When the walk behind the three figures above ran, or 0 if none has
+   * finished yet: measuring costs one stat per stored file, so it runs on a
+   * timer rather than per request. */
+  measured_at_unix: number;
 };
 
 /** DatabaseOverview is the admin database page payload. */

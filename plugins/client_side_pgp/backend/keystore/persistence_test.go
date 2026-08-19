@@ -119,3 +119,61 @@ func TestNormalizeContactPublicKeyKeepsSourceMetadata(t *testing.T) {
 		t.Fatalf("source metadata = %q %q", key.SourceKind, key.SourceDetail)
 	}
 }
+
+// TestUpsertReportsFailureInsteadOfSucceedingSilently pins the rollback path.
+// Both upserts used to hand their failure to a closure that read a different
+// `err` — the enclosing one, still nil — so a row that was never written came
+// back as a saved key with ID 0 and no error, and the UI reported the key as
+// stored.
+func TestUpsertReportsFailureInsteadOfSucceedingSilently(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "pgp-rollback@example.test", "PGP Rollback", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := db.CreateMailIdentityForUser(ctx, user.ID, store.MailIdentity{Email: user.Email, DisplayName: "PGP Rollback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An ID that matches no row: the UPDATE affects nothing, which is the
+	// branch that used to report success.
+	saved, err := UpsertIdentityPrivateKey(ctx, db, store.IdentityPGPPrivateKey{
+		ID:                999_999,
+		UserID:            user.ID,
+		IdentityID:        identity.ID,
+		Label:             user.Email,
+		Fingerprint:       "def456",
+		KeyID:             "def456",
+		PublicKeyArmored:  "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nx\n-----END PGP PUBLIC KEY BLOCK-----",
+		PrivateKeyStorage: "browser",
+	})
+	if err == nil {
+		t.Fatalf("updating a missing identity key reported success: %#v", saved)
+	}
+
+	contact, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Peer",
+		Emails:      []store.ContactEmail{{Email: "peer@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedContact, err := UpsertContactPublicKey(ctx, db, store.ContactPGPPublicKey{
+		ID:               999_999,
+		UserID:           user.ID,
+		ContactID:        contact.ID,
+		Email:            "peer@example.test",
+		Fingerprint:      "def456",
+		KeyID:            "def456",
+		PublicKeyArmored: "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nx\n-----END PGP PUBLIC KEY BLOCK-----",
+	})
+	if err == nil {
+		t.Fatalf("updating a missing contact key reported success: %#v", savedContact)
+	}
+}

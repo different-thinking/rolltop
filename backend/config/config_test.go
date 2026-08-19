@@ -26,8 +26,10 @@ func TestLoadUsesRolltopDefaults(t *testing.T) {
 	if cfg.DatabaseURL != testDatabaseURL {
 		t.Fatalf("database url = %q", cfg.DatabaseURL)
 	}
-	if cfg.DatabaseMaxConns != defaultDatabaseMaxConns {
-		t.Fatalf("database max conns = %d", cfg.DatabaseMaxConns)
+	// 0 is "unset": the store owns the default, and restating it here is what
+	// let the two drift apart.
+	if cfg.DatabaseMaxConns != 0 {
+		t.Fatalf("database max conns = %d, want 0", cfg.DatabaseMaxConns)
 	}
 	if cfg.DataDir != "/data" {
 		t.Fatalf("data dir = %q", cfg.DataDir)
@@ -294,5 +296,16 @@ func TestLoadReadsDatabasePoolSettings(t *testing.T) {
 	t.Setenv("ROLLTOP_DB_MAX_CONNS", "0")
 	if _, err := Load(); err == nil {
 		t.Error("a pool of zero connections was accepted")
+	}
+
+	// Unset means "the store's default", reported as 0 rather than as a copy of
+	// that default kept in this package.
+	t.Setenv("ROLLTOP_DB_MAX_CONNS", "")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxConns != 0 {
+		t.Errorf("max conns with the variable unset = %d, want 0 (defer to the store)", cfg.DatabaseMaxConns)
 	}
 }

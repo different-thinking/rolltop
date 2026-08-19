@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
@@ -71,6 +72,17 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	// The row cascade takes the database side; the tenant's own directory —
+	// raw .eml blobs and the Bleve index over their text — is not in the
+	// database and has to be removed here. Leaving it behind keeps mail the
+	// admin believes destroyed readable to anyone with volume access, and
+	// nothing else in the tree ever revisits it: the retention loops iterate
+	// ServiceableUsers, which no longer lists this user.
+	if dir := s.UserDataDir(userID); dir != "" {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
 	}
 	return nil
 }

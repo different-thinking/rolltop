@@ -45,7 +45,7 @@ func MeasureIndexFootprint(root string) (IndexFootprint, error) {
 		if _, ok := parseUserDirectoryName(entry.Name()); !ok {
 			continue
 		}
-		indexPath := filepath.Join(root, entry.Name(), liveIndexDirName)
+		indexPath := filepath.Join(root, entry.Name(), LiveIndexDirName)
 		info, err := os.Stat(indexPath)
 		if err != nil || !info.IsDir() {
 			continue

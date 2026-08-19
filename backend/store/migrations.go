@@ -2,30 +2,29 @@
 // through: one row per applied migration in schema_migrations, protected by a
 // checksum so a migration cannot silently change after it has been used.
 //
-// The SQLite migration chain this used to drive is gone. PostgreSQL gets the
-// squashed baseline (backend/store/pgschema) recorded as a single row here, and
-// future schema work is a PostgreSQL migration layered on top of it — never a
-// new entry in a chain, because there is no longer a database anywhere that has
-// to be walked forward from an older schema.
+// There is no migration *runner* here any more, and that is the point. The
+// SQLite chain this file used to drive is gone; PostgreSQL gets the squashed
+// baseline (backend/store/pgschema) applied in one shot by ensurePostgresSchema
+// and recorded as a single row. Plugin migrations keep their own bookkeeping in
+// plugin_migrations. What is left is the two pieces both of those share: the
+// checksum, and the progress type the startup page renders.
 //
-// What still runs through the flow below is plugin migrations, which are
-// applied when a plugin is enabled rather than at open.
+// The first core schema change after the cutover needs a mechanism this does
+// not yet have — a migration layered on top of the baseline, for databases that
+// already carry it (§11 of docs/postgres-migration-plan.md). Until then,
+// changing the schema means changing baseline.sql, which only a database that
+// does not exist yet can pick up.
 
 package store
 
 import (
-	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"strings"
 )
 
-// MigrationProgress is emitted while Store.OpenServerWithProgress and
-// PrepareUserStores apply schema work. cmd/rolltop turns these fields into
-// the startup page and /api/startup response.
+// MigrationProgress is emitted while the schema is applied at open. cmd/rolltop
+// turns these fields into the startup page and /api/startup response.
 type MigrationProgress struct {
 	Scope     string `json:"scope"`
 	Migration string `json:"migration"`
@@ -38,147 +37,21 @@ type MigrationProgress struct {
 // secrets or message contents because startup status is exposed over HTTP.
 type MigrationReporter func(MigrationProgress)
 
-// migrationSet is deliberately coarse-grained for this pre-deployment app:
-// one checksum-protected migration owns the system DB schema, and one owns the
-// per-user DB schema. Future migrations should append new versions here rather
-// than reviving ad hoc open-time schema fixes in Store.Open.
-type migrationSet struct {
-	Scope      string
-	Version    string
-	Label      string
-	Statements []string
-	After      []migrationStep
-}
-
-type migrationStep struct {
-	Label string
-	Run   func(context.Context, *Store) error
-}
-
-// applyMigrationSet runs DDL inside a transaction, records the checksum, then
-// performs idempotent seed/backfill steps outside the transaction so startup
-// progress can show both structural work and data preparation.
-func (s *Store) applyMigrationSet(ctx context.Context, set migrationSet, progress MigrationReporter) error {
-	if err := s.ensureSchemaMigrationTable(ctx); err != nil {
-		return err
-	}
-	checksum := migrationChecksum(set)
-	applied, err := s.migrationApplied(ctx, set.Scope, set.Version, checksum)
-	if err != nil {
-		return err
-	}
-	total := len(set.Statements) + len(set.After)
-	if total == 0 {
-		total = 1
-	}
-	if applied {
-		reportMigration(progress, MigrationProgress{Scope: set.Scope, Migration: set.Label, Step: "already applied", Done: total, Total: total})
-	} else {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		for i, stmt := range set.Statements {
-			step := migrationStatementLabel(stmt)
-			reportMigration(progress, MigrationProgress{Scope: set.Scope, Migration: set.Label, Step: step, Done: i, Total: total})
-			if strings.TrimSpace(stmt) == "" {
-				continue
-			}
-			if _, err := tx.ExecContext(ctx, stmt); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("apply %s migration %s: %w", set.Scope, step, err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (scope, version, applied_at, checksum) VALUES (?, ?, ?, ?)`, set.Scope, set.Version, nowUnix(), checksum); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	baseDone := len(set.Statements)
-	for i, step := range set.After {
-		reportMigration(progress, MigrationProgress{Scope: set.Scope, Migration: set.Label, Step: step.Label, Done: baseDone + i, Total: total})
-		if err := step.Run(ctx, s); err != nil {
-			return fmt.Errorf("run %s post migration step %s: %w", set.Scope, step.Label, err)
-		}
-	}
-	reportMigration(progress, MigrationProgress{Scope: set.Scope, Migration: set.Label, Step: "complete", Done: total, Total: total})
-	return nil
-}
-
-func (s *Store) ensureSchemaMigrationTable(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		scope TEXT NOT NULL,
-		version TEXT NOT NULL,
-		applied_at INTEGER NOT NULL,
-		checksum TEXT NOT NULL,
-		PRIMARY KEY(scope, version)
-	)`)
-	return err
-}
-
-func (s *Store) migrationApplied(ctx context.Context, scope, version, checksum string) (bool, error) {
-	var existing string
-	err := s.db.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE scope = ? AND version = ?`, scope, version).Scan(&existing)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if existing != checksum {
-		return false, fmt.Errorf("%s schema migration %s checksum mismatch", scope, version)
-	}
-	return true, nil
-}
-
-func migrationChecksum(set migrationSet) string {
+// schemaChecksum fingerprints what a schema_migrations row stands for, so an
+// edit to already-applied SQL is refused at open rather than half-applied.
+//
+// The statements are joined with a separator byte rather than concatenated,
+// which keeps two different splits of the same text from hashing alike.
+func schemaChecksum(scope, version string, statements ...string) string {
 	h := sha256.New()
-	_, _ = h.Write([]byte(set.Scope))
+	_, _ = h.Write([]byte(scope))
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(set.Version))
-	for _, stmt := range set.Statements {
+	_, _ = h.Write([]byte(version))
+	for _, stmt := range statements {
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(strings.TrimSpace(stmt)))
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-func migrationStatementLabel(stmt string) string {
-	fields := strings.Fields(strings.ReplaceAll(stmt, "\n", " "))
-	if len(fields) == 0 {
-		return "statement"
-	}
-	if len(fields) >= 3 && strings.EqualFold(fields[0], "CREATE") {
-		if strings.EqualFold(fields[1], "TABLE") {
-			return "create table " + createObjectName(fields, 2)
-		}
-		if strings.EqualFold(fields[1], "INDEX") || (len(fields) >= 4 && strings.EqualFold(fields[1], "UNIQUE") && strings.EqualFold(fields[2], "INDEX")) {
-			start := 2
-			if strings.EqualFold(fields[1], "UNIQUE") {
-				start = 3
-			}
-			return "create index " + createObjectName(fields, start)
-		}
-	}
-	if len(fields) > 5 {
-		return strings.Join(fields[:5], " ")
-	}
-	return strings.Join(fields, " ")
-}
-
-func createObjectName(fields []string, start int) string {
-	for i := start; i < len(fields); i++ {
-		word := strings.Trim(fields[i], "`(),")
-		lower := strings.ToLower(word)
-		if word == "" || lower == "if" || lower == "not" || lower == "exists" {
-			continue
-		}
-		return word
-	}
-	return "object"
 }
 
 func reportMigration(progress MigrationReporter, p MigrationProgress) {

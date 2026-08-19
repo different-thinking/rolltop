@@ -7,6 +7,9 @@ procedure. What is left is the part that never depended on the database — the
 per-tenant Bleve search indexes on `/data`, which are still single-process,
 still memory-mapped, and still the reason the instance lock exists.
 
+The database still appears below, because search recovery reads and writes it.
+Where it does, it is PostgreSQL: no WAL, no checkpoints, no file-level locking.
+
 Before making a one-time local change to stored data:
 
 1. Stop the app.
@@ -37,8 +40,13 @@ be hands-off.
 During startup, under the normal data-directory lock and before opening the
 marked index, Rolltop performs these steps in order:
 
-1. Mark the tenant's search-visible SQLite message rows pending using a
-   `synchronous=FULL` transaction and full WAL checkpoint.
+1. Mark the tenant's search-visible message rows pending — one committed
+   PostgreSQL `UPDATE`. The ordering matters and the durability does not have
+   to be arranged: the rows must be pending *before* the index is quarantined,
+   or a crash in between leaves messages in neither the index nor the rebuild
+   queue, and a committed transaction is already durable. Under SQLite this
+   step needed its own connection, `synchronous=FULL`, and a full WAL
+   checkpoint to establish the same barrier.
 2. Rename only `data/users/<user-id>/bleve` to a timestamped quarantine path
    and persist that directory rename.
 3. Clear the recovery marker and open a fresh derived index.
@@ -46,9 +54,10 @@ marked index, Rolltop performs these steps in order:
    in `manual` and `never` sync folders.
 
 This does not delete or alter message rows, IMAP state, or blobs. The rebuild
-uses SQLite and retained local `.eml` blobs; when raw data has expired, normal
-index hydration may contact IMAP. Startup leaves the marker in place if the
-pending-row write or durable quarantine cannot complete safely. If persisting
+reads the message rows from PostgreSQL and the retained local `.eml` blobs; when
+raw data has expired, normal index hydration may contact IMAP. Startup leaves
+the marker in place if the pending-row write or durable quarantine cannot
+complete safely. If persisting
 marker removal fails after quarantine, startup restores the marker when it can
 and fails; the already-pending rows and durable quarantine keep either crash
 outcome safe for the next start.
@@ -74,8 +83,8 @@ verified. The command prints both paths; before restarting Rolltop, the old
 index can be restored by renaming the quarantine path back to `bleve`.
 
 This command repairs only derived search state. It cannot restore a message
-whose SQLite row is missing. Deploy mailbox recovery and let the local row count
-reach the remote mailbox count first; use `reset-search` only if Bleve repair is
+whose database row is missing. Deploy mailbox recovery and let the local row
+count reach the remote mailbox count first; use `reset-search` only if Bleve repair is
 still stalled. After restart, indexing may retrieve raw messages from IMAP when
 the local `.eml` retention window has already expired.
 
