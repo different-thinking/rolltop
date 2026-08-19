@@ -48,3 +48,23 @@ Kontext: `POST /api/account/sync` landet in `apiAccountSync`
 „Sync is already running for this account." — der 409 ist also der geplante
 Weg, einen zweiten parallelen Sync abzulehnen. Offen bleibt für später, ob
 die Oberfläche das als Fehler zeigt oder ruhig behandelt.
+
+## 2026-08-19 — Nachricht geöffnet, Inline-Anhang 404
+
+```
+about:srcdoc:1 Blocked script execution in 'about:srcdoc' because the document's
+frame is sandboxed and the 'allow-scripts' permission is not set.
+about:srcdoc:117  GET https://3703c955.eu-center.hostim.dev/attachments/19026/inline 404 (Not Found)
+```
+
+Die erste Zeile ist die schon oben gesammelte Sandbox-Meldung. Neu ist die
+zweite: Der Mail-Body im iframe lädt ein eingebettetes Bild, und der Server
+antwortet mit 404.
+
+Kontext: `email_document.go:126` ersetzt `cid:`-Verweise im Nachrichten-HTML
+durch `/attachments/<id>/inline`. Der Handler ist `handleAttachment`
+(`backend/web/server.go:464`, Pfadauswertung ab Zeile 640). Er antwortet an
+mehreren Stellen mit 404: Anhang nicht für den Benutzer gefunden, Blob-Datei
+nicht zu öffnen, oder der Anhang lässt sich in der geparsten Rohnachricht
+nicht wiederfinden. Welche der drei es hier war, ist aus der Konsole allein
+nicht zu sehen — dafür bräuchte es das Serverlog zur Anhang-ID 19026.
