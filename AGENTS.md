@@ -53,7 +53,11 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   data (`onMessagesMoved`) rather than leaving that to the reload - and only
   what proves it may: a queued move has been accepted, not performed, so
   reporting its rows moved takes them out of the list the dismissal is measured
-  against, and the next reload hands them back with nothing hiding them.
+  against, and the next reload hands them back with nothing hiding them. Read
+  outcomes per message and per run, never per batch: a move that relocated part
+  of a thread restores exactly what stayed, and a set of runs that did not all
+  end the same way settles each run's own messages, or a dismissal that outlives
+  its mutation hides mail that never went anywhere.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
