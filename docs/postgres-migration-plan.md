@@ -587,16 +587,20 @@ sender names, message-ids, and header fragments with broken encodings exist
 in real mailboxes and are almost certainly sitting in the current data.
 
 The mandatory countermeasure: **write-path sanitization** at the parse
-boundary (`backend/mailparse`): `strings.ToValidUTF8(s, "�")` + strip `\x00`
-for every header-derived string before it reaches the store. Today only
-scattered sites do this (`api_message.go:228`, `compose.go:415`); it must
-become systematic, or the syncer will hit insert errors on the first
-malformed message. The fresh start (no data migration, WP7) removes the
-second half of this problem — there are no legacy rows to carry over — but
-not this half: reconnecting a mailbox mirrors its history from the IMAP
-server, so every broken encoding that accumulated over the years still
-reaches the parse path, account by account. This must be in place before
-the first mailbox is connected.
+boundary (`backend/mailparse`). This is now `mailparse.SanitizeText`, applied by
+`Parse`, `ParseDisplayBody` and `DecodeTextBytes` to everything they return, and
+repeated by callers that build message text outside the parser. It goes one step
+further than `strings.ToValidUTF8(s, "�")`: a byte that starts no valid UTF-8
+sequence is read as Windows-1252, so the raw ISO-8859-1 subject that produced
+`invalid byte sequence for encoding "UTF8": 0xe4 0x6e 0x64` is stored as
+"Änderung" rather than as replacement characters, while valid UTF-8 next to it
+keeps its own decoding. NUL bytes are dropped.
+
+The fresh start (no data migration, WP7) removes the second half of this
+problem — there are no legacy rows to carry over — but not this half:
+reconnecting a mailbox mirrors its history from the IMAP server, so every
+broken encoding that accumulated over the years still reaches the parse path,
+account by account.
 
 Columns that must stay byte-faithful (none known — hashes are hex, tokens are
 base64) would need `BYTEA`; audit during WP2 confirms.
