@@ -113,9 +113,15 @@ function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
     <div className="database-log">
       <h2>Search index</h2>
       <p className="settings-hint">
+        {/* Only the two names this server can report are named. Anything else —
+            an overview that has not arrived, a build that reports nothing —
+            says so, because claiming the wrong one points an operator at the
+            wrong storage. */}
         {backend === "postgres"
           ? "Each user's search index is a set of rows in PostgreSQL, sized here by measuring them. "
-          : "Each user has their own search index on the data volume. "}
+          : backend === "bleve"
+            ? "Each user has their own search index on the data volume. "
+            : "Where the search index is kept is not known yet. "}
         It is built from mail that is already stored, so rebuilding one loses nothing — search is incomplete for
         that user until the reindex finishes, and nothing else is affected. Rebuilding queues one run per mail
         server, the same work the folder settings offer per account. Rebuild when search is missing mail you know
@@ -280,6 +286,10 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
 
   const database = overview?.database || null;
   const volume = overview?.volume || null;
+  // Only the Bleve backend keeps the search index on this volume. On the other
+  // one those bytes are the directories the migration deliberately left behind
+  // as the rollback: real disk, but not the index anything is searching.
+  const searchOnVolume = overview?.search_backend === "bleve";
   const freePercent =
     volume && volume.total_bytes > 0 ? Math.round((volume.free_bytes / volume.total_bytes) * 100) : null;
   const lowDisk = freePercent !== null && freePercent < 10;
@@ -290,7 +300,12 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
         <h1>Database</h1>
         <p>
           Where the mirror is stored and how it is doing. The mail metadata lives in PostgreSQL; the message
-          blobs and the search indexes are still on this server&rsquo;s data volume.
+          blobs are on this server&rsquo;s data volume.
+          {searchOnVolume
+            ? " The search indexes are there too, one per user."
+            : overview?.search_backend === "postgres"
+              ? " The search index is rows in PostgreSQL, not files on the volume."
+              : ""}
         </p>
       </header>
 
@@ -340,7 +355,12 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
             <span className="database-disk">
               {volume.measured_at_unix > 0 ? (
                 <>
-                  {formatBytes(volume.blob_bytes)} message blobs · {formatBytes(volume.index_bytes)} search index
+                  {formatBytes(volume.blob_bytes)} message blobs
+                  {searchOnVolume
+                    ? ` · ${formatBytes(volume.index_bytes)} search index`
+                    : volume.index_bytes > 0
+                      ? ` · ${formatBytes(volume.index_bytes)} Bleve index, not in use`
+                      : ""}
                   {volume.other_bytes > 0 ? ` · ${formatBytes(volume.other_bytes)} other` : ""}
                   {" · measured "}
                   {displayDateTime(new Date(volume.measured_at_unix * 1000).toISOString(), datePrefs)}
@@ -352,8 +372,9 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
           </div>
           {lowDisk ? (
             <p className="settings-error">
-              The data volume is nearly full. Message blobs and the search index are written to it, and both stop
-              when it fills.
+              The data volume is nearly full. Message blobs
+              {searchOnVolume ? " and the search index are" : " are"} written to it, and
+              {searchOnVolume ? " both stop" : " that stops"} when it fills.
             </p>
           ) : null}
           <p className="settings-hint">

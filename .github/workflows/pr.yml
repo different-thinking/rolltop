@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       go: ${{ steps.filter.outputs.go }}
+      preflight_sql: ${{ steps.filter.outputs.preflight_sql }}
       plugin_backends: ${{ steps.filter.outputs.plugin_backends }}
       spam_model: ${{ steps.filter.outputs.spam_model }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -44,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          keys='go plugin_backends spam_model frontend plugin_frontend android docker'
+          keys='go preflight_sql plugin_backends spam_model frontend plugin_frontend android docker'
 
           run_everything() {
             for key in $keys; do
@@ -96,10 +97,12 @@ jobs:
           # Non-.go paths the Go tests read, and which therefore must run
           # them: backend/store/pgschema/ holds the PostgreSQL baseline whose
           # only guards are Go tests, and plugins/*/migrations/ feeds the schema
-          # that baseline was derived from. scripts/ was here for the SQL twin
-          # of backend/pgpreflight; that package is gone, and no Go test reads
-          # scripts/ any more.
+          # that baseline was derived from. scripts/ used to be here for the SQL
+          # twin of backend/pgpreflight; that package is gone, so the script is
+          # checked by running it (below) rather than by a Go suite that never
+          # reads it.
           emit go '\.go$|^go\.mod$|^go\.sum$|^backend/store/pgschema/|^plugins/[^/]+/migrations/'
+          emit preflight_sql '^scripts/pg-preflight\.sql$'
           emit plugin_backends '^plugins/[^/]+/backend/|^go\.mod$|^go\.sum$'
           emit spam_model '^plugins/experimental_spam_filter/(model|training)/'
           emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^plugins/[^/]+/(frontend|themes)/'
@@ -112,6 +115,7 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.go == 'true' ||
+      needs.changes.outputs.preflight_sql == 'true' ||
       needs.changes.outputs.plugin_backends == 'true' ||
       needs.changes.outputs.spam_model == 'true'
     runs-on: ubuntu-latest
@@ -220,6 +224,17 @@ jobs:
 
       # `go test` compiles every package, but not with `-buildmode=plugin`.
       # Only re-link the shared objects when plugin backends actually change.
+      # The preflight script lost its Go twin with backend/pgpreflight, and an
+      # operator tool that nothing runs is one that quietly stops working. It
+      # aborts on the first failed check (ON_ERROR_STOP plus its own RAISE), so
+      # running it against the service container above is the whole check. It
+      # only touches a scratch schema it drops again.
+      - name: Run PostgreSQL Preflight Script
+        if: needs.changes.outputs.preflight_sql == 'true'
+        env:
+          PGPASSWORD: rolltop
+        run: psql -v ON_ERROR_STOP=1 -h localhost -U rolltop -d rolltop_test -f scripts/pg-preflight.sql
+
       - name: Build Plugin Backends
         if: needs.changes.outputs.plugin_backends == 'true'
         run: |
