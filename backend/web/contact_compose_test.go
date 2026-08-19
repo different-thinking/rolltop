@@ -137,6 +137,9 @@ func TestSendComposeRequiresSentRoleBeforeSMTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "me@example.test"); err != nil {
+		t.Fatal(err)
+	}
 	sender := &captureSender{}
 	server := &Server{store: db, blobs: blob.New(dir), sender: sender, syncer: &syncer.Service{Fetcher: &captureAppendFetcher{}}}
 	_, err = server.sendCompose(ctx, currentUser{User: user}, composeForm{
@@ -390,6 +393,9 @@ func TestSaveComposeDraftAppendsToDraftsMailbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "me@example.test"); err != nil {
+		t.Fatal(err)
+	}
 	fetcher := &captureAppendFetcher{nextUID: 73, uidValidity: draftsUIDValidity}
 	blobStore := blob.New(dir)
 	service := &syncer.Service{Store: db, Blobs: blobStore, Fetcher: fetcher}
@@ -602,6 +608,12 @@ func TestSendComposeRejectsOtherUserFromIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "alias@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, other.ID, "other-alias@example.test"); err != nil {
+		t.Fatal(err)
+	}
 	sender := &captureSender{}
 	server := &Server{store: db, blobs: blob.New(dir), sender: sender, syncer: &syncer.Service{Fetcher: &captureAppendFetcher{}}}
 	cu := currentUser{User: user}
@@ -675,6 +687,11 @@ func TestReplyComposeSelectsIdentityMatchingRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, address := range []string{"primary@example.test", "alias@example.test"} {
+		if err := db.EnsureMailIdentityForEmail(ctx, user.ID, address); err != nil {
+			t.Fatal(err)
+		}
+	}
 	msg, err := db.CreateMessage(ctx, store.CreateMessage{
 		UserID:          user.ID,
 		AccountID:       account.ID,
@@ -742,6 +759,9 @@ func setupAutocryptComposeTest(t *testing.T, ctx context.Context, enablePGPPlugi
 		Emails:      []store.ContactEmail{{Email: "me@example.test", IsPrimary: true}},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, "me@example.test"); err != nil {
 		t.Fatal(err)
 	}
 	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)

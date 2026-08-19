@@ -258,6 +258,12 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	// The sign-up address is the one identity a fresh install starts with, so
+	// compose has a From address before any mailbox is configured.
+	if err := s.store.EnsureMailIdentityForEmail(r.Context(), user.ID, user.Email); err != nil && !store.IsNotFound(err) {
+		s.serverError(w, r, err)
+		return
+	}
 	if err := s.loginUser(w, r, user.ID); err != nil {
 		s.serverError(w, r, err)
 		return

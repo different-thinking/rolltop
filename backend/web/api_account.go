@@ -214,7 +214,7 @@ func (s *Server) apiIMAPAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "Could not save IMAP account.")
 		return
 	}
-	if err := s.ensureMailAccountOnboarding(r.Context(), cu.User, account); err != nil {
+	if err := s.ensureMailAccountOnboarding(r.Context(), cu.User, account, in.ID == 0); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
@@ -748,7 +748,12 @@ func (s *Server) saveMailAccountFromInput(ctx context.Context, userID int64, in 
 // ensureMailAccountOnboarding fills in the expected single-address startup graph:
 // a matching SMTP server when none exists, a Me contact for the account email, and
 // downstream identity rows through store-level sync helpers.
-func (s *Server) ensureMailAccountOnboarding(ctx context.Context, user store.User, account store.MailAccount) error {
+//
+// created says whether this save added the mailbox rather than edited one that
+// existed. Only a new mailbox gets an identity: running that part on every edit
+// would hand back an identity the user removed the next time they changed the
+// account's password or sync interval.
+func (s *Server) ensureMailAccountOnboarding(ctx context.Context, user store.User, account store.MailAccount, created bool) error {
 	smtpAccounts, err := s.store.ListSMTPAccountsForUser(ctx, user.ID)
 	if err != nil {
 		return err
@@ -771,19 +776,28 @@ func (s *Server) ensureMailAccountOnboarding(ctx context.Context, user store.Use
 			outgoing.EncryptedPassword = firstNonEmpty(
 				strings.TrimSpace(account.EncryptedSMTPPassword), strings.TrimSpace(account.EncryptedPassword))
 			if outgoing.EncryptedPassword == "" {
-				return s.finishMailAccountOnboarding(ctx, user, account)
+				return s.finishMailAccountOnboarding(ctx, user, account, created)
 			}
 		}
 		if _, err := s.store.CreateSMTPAccount(ctx, outgoing); err != nil {
 			return err
 		}
 	}
-	return s.finishMailAccountOnboarding(ctx, user, account)
+	return s.finishMailAccountOnboarding(ctx, user, account, created)
 }
 
-func (s *Server) finishMailAccountOnboarding(ctx context.Context, user store.User, account store.MailAccount) error {
+func (s *Server) finishMailAccountOnboarding(ctx context.Context, user store.User, account store.MailAccount, created bool) error {
 	if _, err := s.store.EnsureMeContactForEmail(ctx, user.ID, account.Email, firstNonEmpty(user.Name, account.Label, account.Email)); err != nil && !store.IsNotFound(err) {
 		return err
+	}
+	// A mailbox the user just added is one they mean to send from, so this is
+	// the one place besides the identity editor that adds an identity. Every
+	// other address on their own contact card stays out of the From menu, and
+	// an edit of an existing mailbox adds nothing at all.
+	if created {
+		if err := s.store.EnsureMailIdentityForEmail(ctx, user.ID, account.Email); err != nil && !store.IsNotFound(err) {
+			return err
+		}
 	}
 	return s.store.EnsureMailIdentityMailboxDefaults(ctx, user.ID)
 }
@@ -1006,6 +1020,49 @@ func (s *Server) apiMailIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "identity": apiMailIdentityFromStore(identity), "identities": apiMailIdentitiesFromStore(identities)})
+}
+
+// apiMailIdentityPath handles the per-identity routes. Deleting one is how a
+// user gets rid of a From address they never asked for -- an identity older
+// versions derived from an address on their own contact card.
+func (s *Server) apiMailIdentityPath(w http.ResponseWriter, r *http.Request, path string) {
+	id, err := strconv.ParseInt(strings.Trim(path, "/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	cu, ok := s.requireAPIAuth(w, r)
+	if !ok {
+		return
+	}
+	if !s.verifyCSRF(w, r) {
+		return
+	}
+	if err := s.store.DeleteMailIdentityForUser(r.Context(), cu.User.ID, id); err != nil {
+		if store.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, r, err)
+		return
+	}
+	s.clearComposeIdentityCache(cu.User.ID)
+	// The deleted identity carried an Archive folder the Inbox list hides, so
+	// the cached pages have to be rebuilt the same way saving one does.
+	s.noteMailListChanged(cu.User.ID)
+	if s.events != nil {
+		s.events.Notify(cu.User.ID)
+	}
+	identities, err := s.store.ListMailIdentitiesForUser(r.Context(), cu.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "identities": apiMailIdentitiesFromStore(identities)})
 }
 
 func (s *Server) apiAccountSync(w http.ResponseWriter, r *http.Request) {

@@ -92,7 +92,7 @@ func TestOnboardingGivesAGoogleAccountAnOAuthOutgoingServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save: %v (%s)", err, message)
 	}
-	if err := env.server.ensureMailAccountOnboarding(ctx, env.owner, account); err != nil {
+	if err := env.server.ensureMailAccountOnboarding(ctx, env.owner, account, true); err != nil {
 		t.Fatalf("onboarding: %v", err)
 	}
 	outgoing, err := env.db.ListSMTPAccountsForUser(ctx, env.owner.ID)

@@ -154,8 +154,127 @@ func scanSMTPAccount(row rowScanner) (SMTPAccount, error) {
 	return a, err
 }
 
-// SyncMailIdentitiesForMeContacts keeps outgoing identity rows aligned with the user's Me contact emails.
+// SyncMailIdentitiesForMeContacts keeps the outgoing identity rows a user
+// already has aligned with the Me contact email each one sends from.
+//
+// It deliberately creates nothing. An identity used to be derived from every
+// address on every Me contact, which meant the address book decided what the
+// From menu offered: a second address on the reader's own card -- one Google
+// put there, one a vCard import brought in -- became a sending identity nobody
+// asked for. Identities are added by hand now (the identity editor) or by
+// configuring the mailbox they belong to, so the count stays the count the user
+// chose.
+//
+// It deliberately deletes nothing either. Removing an identity is the user's
+// decision, and the one removal that is not theirs already happens without
+// help: mail_identities cascades on its contact_emails row, so deleting the
+// address an identity sends from takes the identity with it. Deleting the rows
+// this pass could not match instead made clearing `is_me` on a contact -- an
+// edit about the address book -- silently destroy every identity behind it,
+// signature and server choices included.
+//
+// The re-binding is what a stable id costs. An identity points at a
+// contact_emails row; those rows survive an edit now, but one still ends up on
+// a contact that is no longer the reader's own, and matching the address the
+// identity stores puts it back on the card that has it. That only applies to an
+// identity no Me address claims by id: doing it for any unclaimed address would
+// let a second Me card carrying the same address take the first card's identity
+// over, and deleting that card would then cascade the identity away.
 func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int64) error {
+	contacts, err := s.ListMeContactsForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	identities, err := s.listMailIdentitiesForUserNoSync(ctx, userID)
+	if err != nil {
+		return err
+	}
+	// Which contact_emails rows sit on a Me contact decides whether an identity
+	// counts as unclaimed. Without it the by-address fallback would fire for any
+	// Me address that simply has no identity of its own.
+	liveEmailIDs := map[int64]bool{}
+	for _, contact := range contacts {
+		for _, email := range contact.Emails {
+			if email.ID != 0 {
+				liveEmailIDs[email.ID] = true
+			}
+		}
+	}
+	byEmailID := map[int64]MailIdentity{}
+	orphanByAddress := map[string]MailIdentity{}
+	for _, identity := range identities {
+		byEmailID[identity.ContactEmailID] = identity
+		if liveEmailIDs[identity.ContactEmailID] {
+			continue
+		}
+		if key := NormalizeContactEmail(identity.Email); key != "" {
+			if _, seen := orphanByAddress[key]; !seen {
+				orphanByAddress[key] = identity
+			}
+		}
+	}
+	defaultSMTPID := s.firstSMTPAccountID(ctx, userID)
+	ts := nowUnix()
+	kept := map[int64]bool{}
+	for _, contact := range contacts {
+		display := contactIdentityName(contact)
+		for _, email := range contact.Emails {
+			address := strings.TrimSpace(email.Email)
+			if address == "" || email.ID == 0 {
+				continue
+			}
+			identity, ok := byEmailID[email.ID]
+			if !ok {
+				identity, ok = orphanByAddress[NormalizeContactEmail(address)]
+			}
+			if !ok || kept[identity.ID] {
+				continue
+			}
+			kept[identity.ID] = true
+			primary := contact.IsPrimary && email.IsPrimary
+			if _, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE mail_identities
+				SET contact_id = ?, contact_email_id = ?, email = ?, display_name = ?, is_primary = ?,
+					smtp_account_id = CASE WHEN smtp_account_id = 0 THEN ? ELSE smtp_account_id END,
+					updated_at = ?
+				WHERE user_id = ? AND id = ?`,
+				contact.ID, email.ID, address, display, boolInt(primary), defaultSMTPID, ts, userID, identity.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.ensurePrimaryMailIdentity(ctx, userID); err != nil {
+		return err
+	}
+	return s.EnsureMailIdentityMailboxDefaults(ctx, userID)
+}
+
+// EnsureMailIdentityForEmail adds the outgoing identity row for one address the
+// user asked to send from, and leaves an address that already has one alone.
+// The address must already sit on a Me contact; EnsureMeContactForEmail is what
+// puts it there.
+//
+// This is the only way an identity comes into existence besides the identity
+// editor, so every caller is a place where the user named the address
+// themselves -- signing up, or configuring the mailbox it belongs to.
+func (s *Store) EnsureMailIdentityForEmail(ctx context.Context, userID int64, email string) error {
+	key := NormalizeContactEmail(email)
+	if key == "" {
+		return ErrNotFound
+	}
+	// Reconcile first: an address whose identity is only waiting to be re-bound
+	// to a rewritten contact_emails row must not get a second one here.
+	if err := s.SyncMailIdentitiesForMeContacts(ctx, userID); err != nil {
+		return err
+	}
+	existing, err := s.listMailIdentitiesForUserNoSync(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for _, identity := range existing {
+		if NormalizeContactEmail(identity.Email) == key {
+			return nil
+		}
+	}
 	contacts, err := s.ListMeContactsForUser(ctx, userID)
 	if err != nil {
 		return err
@@ -164,42 +283,46 @@ func (s *Store) SyncMailIdentitiesForMeContacts(ctx context.Context, userID int6
 	ts := nowUnix()
 	for _, contact := range contacts {
 		display := contactIdentityName(contact)
-		for _, email := range contact.Emails {
-			address := strings.TrimSpace(email.Email)
-			if address == "" || email.ID == 0 {
+		for _, entry := range contact.Emails {
+			address := strings.TrimSpace(entry.Email)
+			if entry.ID == 0 || NormalizeContactEmail(address) != key {
 				continue
 			}
-			primary := contact.IsPrimary && email.IsPrimary
+			primary := contact.IsPrimary && entry.IsPrimary
 			defaults := s.identityMailboxDefaults(ctx, userID, address, defaultSMTPID, 0)
 			if _, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO mail_identities
 					(user_id, contact_id, contact_email_id, smtp_account_id, imap_account_id, sent_mailbox_id, drafts_mailbox_id, email, display_name, signature, autocrypt_enabled, is_primary, created_at, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?, ?)
-				ON CONFLICT(user_id, contact_email_id) DO UPDATE SET
-					contact_id = excluded.contact_id,
-					smtp_account_id = CASE WHEN mail_identities.smtp_account_id = 0 THEN excluded.smtp_account_id ELSE mail_identities.smtp_account_id END,
-					imap_account_id = CASE WHEN mail_identities.imap_account_id = 0 THEN excluded.imap_account_id ELSE mail_identities.imap_account_id END,
-					sent_mailbox_id = CASE WHEN mail_identities.sent_mailbox_id = 0 AND mail_identities.imap_account_id = 0 THEN excluded.sent_mailbox_id ELSE mail_identities.sent_mailbox_id END,
-					drafts_mailbox_id = CASE WHEN mail_identities.drafts_mailbox_id = 0 AND mail_identities.imap_account_id = 0 THEN excluded.drafts_mailbox_id ELSE mail_identities.drafts_mailbox_id END,
-					email = excluded.email,
-					display_name = excluded.display_name,
-					is_primary = excluded.is_primary,
-					updated_at = excluded.updated_at`, userID, contact.ID, email.ID, defaultSMTPID, defaults.IMAPAccountID, defaults.SentMailboxID, defaults.DraftsMailboxID, address, display, boolInt(primary), ts, ts); err != nil {
+				ON CONFLICT(user_id, contact_email_id) DO NOTHING`,
+				userID, contact.ID, entry.ID, defaultSMTPID, defaults.IMAPAccountID, defaults.SentMailboxID, defaults.DraftsMailboxID,
+				address, display, boolInt(primary), ts, ts); err != nil {
 				return err
 			}
+			return s.SyncMailIdentitiesForMeContacts(ctx, userID)
 		}
 	}
-	if _, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `DELETE FROM mail_identities
-		WHERE user_id = ? AND NOT EXISTS (
-			SELECT 1 FROM contacts c
-			JOIN contact_emails e ON e.user_id = c.user_id AND e.contact_id = c.id
-			WHERE c.user_id = mail_identities.user_id AND c.is_me = 1 AND e.id = mail_identities.contact_email_id
-		)`, userID); err != nil {
+	return ErrNotFound
+}
+
+// DeleteMailIdentityForUser removes one outgoing identity. The Me contact email
+// behind it stays: it is still an address mail arrives at and replies are
+// matched against, it just stops being offered as a From address.
+func (s *Store) DeleteMailIdentityForUser(ctx context.Context, userID, id int64) error {
+	if id <= 0 {
+		return ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `DELETE FROM mail_identities WHERE user_id = ? AND id = ?`, userID, id)
+	if err != nil {
 		return err
 	}
-	if err := s.ensurePrimaryMailIdentity(ctx, userID); err != nil {
+	n, err := res.RowsAffected()
+	if err != nil {
 		return err
 	}
-	return s.EnsureMailIdentityMailboxDefaults(ctx, userID)
+	if n == 0 {
+		return ErrNotFound
+	}
+	return s.ensurePrimaryMailIdentity(ctx, userID)
 }
 
 // ListMailIdentitiesForUser returns identity rows joined with Me contact emails for settings and compose.
@@ -243,6 +366,12 @@ func (s *Store) CreateMailIdentityForUser(ctx context.Context, userID int64, in 
 		display = email
 	}
 	if _, err := s.EnsureMeContactForEmail(ctx, userID, email, display); err != nil {
+		return MailIdentity{}, err
+	}
+	// The Me contact carries the address now, but nothing derives an identity
+	// from it any more, so the row this call is about to configure has to be
+	// asked for explicitly.
+	if err := s.EnsureMailIdentityForEmail(ctx, userID, email); err != nil {
 		return MailIdentity{}, err
 	}
 	identities, err := s.ListMailIdentitiesForUser(ctx, userID)

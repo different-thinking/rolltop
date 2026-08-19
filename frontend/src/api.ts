@@ -610,6 +610,8 @@ export const api = {
     deleteJSON<{ ok: boolean }>(`/api/account/smtp/${id}`, csrf),
   saveMailIdentity: (csrf: string, identity: Record<string, unknown>) =>
     postJSON<{ ok: boolean; identity: MailIdentity; identities: MailIdentity[] }>("/api/account/identities", csrf, identity),
+  deleteMailIdentity: (csrf: string, id: number) =>
+    deleteJSON<{ ok: boolean; identities: MailIdentity[] }>(`/api/account/identities/${id}`, csrf),
   syncAccount: (csrf: string) => postJSON<{ ok: boolean }>("/api/account/sync", csrf),
   rebuildIMAPAccountSearchIndex: (csrf: string, id: number) =>
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/imap/${id}/rebuild-search-index`, csrf),

@@ -950,6 +950,85 @@ func (s *Store) loadContactDetails(ctx context.Context, userID int64, c *Contact
 	return nil
 }
 
+// replaceContactEmails writes a contact's addresses without giving them new ids.
+//
+// Addresses are the one detail list something else points at: an outgoing
+// identity references a contact_emails row and cascades on its deletion. The
+// delete-then-insert the other lists use therefore destroyed the identity for
+// an address the edit never touched -- with its signature, its SMTP server and
+// its folder choices -- and only looked harmless while identities were derived
+// from the address book and silently rebuilt. Rows are matched by normalized
+// address and updated in place, so an id outlives every edit that keeps the
+// address, and only an address the user really removed takes its identity with
+// it.
+//
+// Keeping the rows means their ids no longer follow the submitted order, so the
+// order is written to `sort_order` instead. Reordering a contact's addresses used
+// to work by accident, through the re-insert this replaces.
+func replaceContactEmails(ctx context.Context, tx *sql.Tx, userID, contactID int64, emails []ContactEmail, ts int64) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, normalized_email FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY id`, userID, contactID)
+	if err != nil {
+		return err
+	}
+	stored := map[string]int64{}
+	var storedIDs []int64
+	for rows.Next() {
+		var id int64
+		var normalized string
+		if err := rows.Scan(&id, &normalized); err != nil {
+			rows.Close()
+			return err
+		}
+		storedIDs = append(storedIDs, id)
+		if normalized != "" {
+			if _, seen := stored[normalized]; !seen {
+				stored[normalized] = id
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	needsPrimary := !anyPrimary(emails, func(item ContactEmail) bool { return item.IsPrimary })
+	kept := map[int64]bool{}
+	sortOrder := 0
+	for _, email := range emails {
+		email.Email = strings.TrimSpace(email.Email)
+		email.NormalizedEmail = NormalizeContactEmail(email.Email)
+		if email.Email == "" || email.NormalizedEmail == "" {
+			continue
+		}
+		primary := boolInt(email.IsPrimary || needsPrimary)
+		needsPrimary = false
+		label := strings.TrimSpace(email.Label)
+		sortOrder++
+		if id, ok := stored[email.NormalizedEmail]; ok && !kept[id] {
+			if _, err := tx.ExecContext(ctx, `UPDATE contact_emails SET label = ?, email = ?, normalized_email = ?, is_primary = ?, sort_order = ?, updated_at = ?
+				WHERE user_id = ? AND id = ?`, label, email.Email, email.NormalizedEmail, primary, sortOrder, ts, userID, id); err != nil {
+				return err
+			}
+			kept[id] = true
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_emails (user_id, contact_id, label, email, normalized_email, is_primary, sort_order, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, label, email.Email, email.NormalizedEmail, primary, sortOrder, ts, ts); err != nil {
+			return err
+		}
+	}
+	for _, id := range storedIDs {
+		if kept[id] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM contact_emails WHERE user_id = ? AND id = ?`, userID, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // replaceContactChildren rewrites a contact's detail rows.
 //
 // The primary flag is stored as given, with one exception: a list where nothing
@@ -957,23 +1036,13 @@ func (s *Store) loadContactDetails(ctx context.Context, userID int64, c *Contact
 // index instead would mark row zero even when a later row is the marked one,
 // which is how a merged contact ended up with two primary emails.
 func replaceContactChildren(ctx context.Context, tx *sql.Tx, userID, contactID int64, c Contact, ts int64) error {
-	for _, table := range []string{"contact_emails", "contact_phones", "contact_addresses", "contact_urls"} {
+	if err := replaceContactEmails(ctx, tx, userID, contactID, c.Emails, ts); err != nil {
+		return err
+	}
+	for _, table := range []string{"contact_phones", "contact_addresses", "contact_urls"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE user_id = ? AND contact_id = ?`, userID, contactID); err != nil {
 			return err
 		}
-	}
-	emailNeedsPrimary := !anyPrimary(c.Emails, func(item ContactEmail) bool { return item.IsPrimary })
-	for _, email := range c.Emails {
-		email.Email = strings.TrimSpace(email.Email)
-		email.NormalizedEmail = NormalizeContactEmail(email.Email)
-		if email.Email == "" || email.NormalizedEmail == "" {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO contact_emails (user_id, contact_id, label, email, normalized_email, is_primary, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, userID, contactID, strings.TrimSpace(email.Label), email.Email, email.NormalizedEmail, boolInt(email.IsPrimary || emailNeedsPrimary), ts, ts); err != nil {
-			return err
-		}
-		emailNeedsPrimary = false
 	}
 	phoneNeedsPrimary := !anyPrimary(c.Phones, func(item ContactPhone) bool { return item.IsPrimary })
 	for _, phone := range c.Phones {
@@ -1025,7 +1094,7 @@ func anyPrimary[T any](items []T, primary func(T) bool) bool {
 
 func (s *Store) listContactEmails(ctx context.Context, userID, contactID int64) ([]ContactEmail, error) {
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT id, user_id, contact_id, label, email, normalized_email, is_primary, created_at, updated_at
-		FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY is_primary DESC, id`, userID, contactID)
+		FROM contact_emails WHERE user_id = ? AND contact_id = ? ORDER BY is_primary DESC, sort_order, id`, userID, contactID)
 	if err != nil {
 		return nil, err
 	}
@@ -1145,9 +1214,10 @@ func normalizeContactForSave(userID int64, c Contact) Contact {
 	// primary. Two primaries is a state nothing downstream is prepared for.
 	// The unique index user-037 dropped was also the only thing stopping one
 	// contact from carrying an address twice -- two labels, two spellings of the
-	// same address. A Me contact that does grows one outgoing identity per row,
-	// so the same address appears twice in the From menu, each half with its own
-	// signature. Google is allowed to hold the pair; Rolltop stores it once.
+	// same address. Everything that resolves an address to a row -- the identity
+	// it sends from, the reply target, the picture beside a sender -- then has
+	// two answers where the question has one. Google is allowed to hold the
+	// pair; Rolltop stores it once.
 	c.Emails = dedupeContactEmails(c.Emails)
 	keepSinglePrimary(c.Emails, func(item *ContactEmail) *bool { return &item.IsPrimary })
 	keepSinglePrimary(c.Phones, func(item *ContactPhone) *bool { return &item.IsPrimary })

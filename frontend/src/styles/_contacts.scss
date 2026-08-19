@@ -22,16 +22,22 @@
   background: var(--surface);
 }
 
+// A column rather than a two-row grid: the search box is always here, the
+// source filter only once a Google account is connected, and the loading line
+// only while a query is in flight. Fixed rows gave the scrolling list an
+// auto-sized track whenever one of those appeared, so it grew to its full
+// content height and the contacts spilled over the filter above them.
 .contacts-list {
   position: sticky;
   top: 82px;
   max-height: calc(100vh - 104px);
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   padding: 10px;
 }
 
 .contacts-search {
+  flex: 0 0 auto;
   position: relative;
   margin-bottom: 10px;
 
@@ -48,6 +54,7 @@
 }
 
 .contacts-list-items {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: grid;
@@ -113,6 +120,7 @@
 // The source filter only appears once a Google account can actually hold
 // contacts, so it is laid out beside the search rather than always reserved.
 .contacts-source-filter {
+  flex: 0 0 auto;
   display: grid;
   gap: 4px;
   margin-bottom: 10px;

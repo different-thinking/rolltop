@@ -824,6 +824,9 @@ func TestDeleteSMTPAccountEndpointUnlinksIdentities(t *testing.T) {
 	if _, err := db.CreateContact(ctx, user.ID, store.Contact{DisplayName: "SMTP API", IsMe: true, IsPrimary: true, Emails: []store.ContactEmail{{Email: user.Email, IsPrimary: true}}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.EnsureMailIdentityForEmail(ctx, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
 	if identities, err := db.ListMailIdentitiesForUser(ctx, user.ID); err != nil || len(identities) != 1 || identities[0].SMTPAccountID != smtp.ID {
 		t.Fatalf("identities before delete = %+v err=%v", identities, err)
 	}
