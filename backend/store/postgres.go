@@ -44,7 +44,7 @@ const (
 
 	// defaultPostgresMaxConns sizes the pool when the caller sets none. The
 	// hosted target allows 20 connections per role, so half of that leaves room
-	// for the migration tool, a scheduled pg_dump, and a manual psql session.
+	// for a scheduled pg_dump and a manual psql session.
 	defaultPostgresMaxConns = 10
 
 	// postgresConnMaxLifetime bounds how long a pooled connection is reused.

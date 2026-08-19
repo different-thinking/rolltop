@@ -1,9 +1,17 @@
 # PostgreSQL Migration Plan
 
-Status: proposal, not started. This document describes how to move Rolltop's
-relational storage from per-tenant SQLite files to a single PostgreSQL
-database, what has to change in the code, where the risks are, and what the
-migration deliberately does not cover.
+Status: in progress (phases 0–1 shipped). This document describes how to move
+Rolltop's relational storage from per-tenant SQLite files to a single
+PostgreSQL database, what has to change in the code, where the risks are, and
+what the switch deliberately does not cover.
+
+**Decision (2026-08-19): no data migration.** The switch is a fresh setup:
+the app starts against an empty PostgreSQL database and the existing local
+data is abandoned — mail re-mirrors from IMAP once accounts are re-created,
+everything else (users, settings, contacts, snoozes, plugin data) is set up
+again by hand. WP7's one-shot migration tool is dropped; §11 describes the
+fresh-setup cutover. Everything about *code and schema* in this plan is
+unaffected by that decision — only the sections that moved data are.
 
 ## 1. Why
 
@@ -79,8 +87,9 @@ latch) instead of porting it.
 Per `docs/local-sqlite-maintenance.md`, this deployment is currently the only
 running instance. Maintaining two SQL dialects behind an abstraction layer is
 the single most expensive way to do this migration and benefits nobody.
-The SQLite driver survives only inside the one-shot data migration command
-(§7), then gets removed from the server path.
+With no data migration (WP7 dropped), nothing needs the SQLite driver after
+the cutover — `mattn/go-sqlite3` leaves the module entirely once WP3–WP6
+land.
 
 Consequence to accept explicitly: Rolltop stops being a single-container app.
 The README's deployment story changes to "app container + Postgres" (compose
@@ -93,8 +102,8 @@ file provided) or "app container + managed Postgres DSN".
 - Keeps the compiled-plugin ABI unchanged: plugin hooks receive `*sql.DB`
   (`backend/plugins/compiled_hooks.go`) and keep working as long as their SQL
   is ported.
-- Native pgx (batching, `CopyFrom`) is used only inside the data migration
-  tool where it pays off.
+- Native pgx (batching, `CopyFrom`) stays available for hot spots that
+  measurement identifies later (§8.2); nothing needs it up front.
 
 ### 3.4 Database collation: `C` — recommended
 
@@ -182,7 +191,7 @@ migration will actually meet:
 | Drop schema | removes Rolltop's tables and trigger function, keeps extensions | yes |
 
 The point is rehearsal rather than one attempt: create, look, drop, repeat,
-long before any data moves and long before the server is pointed at it. Two
+long before the server is pointed at it. Two
 safety rules are enforced server-side rather than in the UI, so a mislabelled
 button cannot become a dropped database — a database holding anything that is
 not Rolltop's is refused for both create and drop, and the create step refuses
@@ -349,45 +358,42 @@ every plugin, `.github/workflows/ci.yml:101`, so drift is caught). CGO stays
 required by `-buildmode=plugin` regardless of dropping `mattn/go-sqlite3`, so
 the Dockerfile build stages are unchanged in shape.
 
-### WP7 — One-shot data migration tool
+### WP7 — Dropped: fresh setup instead of a data migration
 
-**Open obligation, to be settled before the first durable Postgres database
-exists.** `OpenPostgres` records the baseline as one `schema_migrations` row and
-refuses to start when the recorded checksum differs from the running binary's.
-That is right while every Postgres database is a throwaway test one, but the
-baseline is *designed to be regenerated in place*, so the same signal will mean
-two different things once a real database exists: "the schema was tampered with"
-and "this binary is newer than the database". The second needs an upgrade path,
-not a refusal. Whatever WP3 does to the schema — the `lower()` expression index
-is already queued — regenerates the baseline, so this has to be decided in the
-same phase that creates the first database worth keeping. The likely shape is
-incremental Postgres migrations layered on the baseline, with the baseline row
-pinned to the version it was created at rather than to the current file.
+Decision (2026-08-19): the existing data is **not** migrated. The planned
+`rolltop migrate-to-postgres` subcommand — read-only SQLite opens, `CopyFrom`
+streaming in FK order, sequence `setval` resets, row-count/checksum
+verification, migration-side text sanitization — is not built. The cutover
+(§11) starts the app against the empty, hoster-created database instead;
+`OpenPostgres` applies the WP2 baseline on first start (WP1), and nothing
+else is needed.
 
-New subcommand `rolltop migrate-to-postgres`:
+What the fresh setup abandons, explicitly: all locally stored state — user
+accounts, mail-account/IMAP configuration, contacts, snoozes, tags,
+settings, plugin data. Mail itself re-mirrors from IMAP once accounts are
+re-created. Blobs and Bleve indexes on `/data` reference database ids that
+the fresh database does not share, so `/data` is cleared during cutover
+(§11) and both rebuild from the initial sync.
 
-1. Takes the instance lock (server must be stopped) and opens the system
-   SQLite file plus every `data/users/<id>/rolltop.db` **read-only** with the
-   existing driver.
-2. Requires an **empty** target database; runs the WP2 baseline.
-3. Streams tables in FK order via pgx `CopyFrom` (system tables, then per
-   user). Sizing input (2026-08): the deployment holds 200k+ messages and
-   growing — with the 4 KB preview compaction that is roughly 1–2M rows and
-   a low single-digit GB, which `CopyFrom` moves in minutes. The cutover
-   window is therefore dominated by verification, not transfer, and dry
-   runs against a production copy are cheap to repeat.
-4. **Sanitizes text on the way over** — see §8.1, this is the step most
-   likely to surface dirty data. Every sanitized value is logged with table,
-   rowid, and column.
-5. Resets identity sequences (`setval`) to `max(id)+1` per table.
-6. Verifies: row counts per table per user, plus spot checksums (e.g.
-   sum of `size`, count by `mailbox_id`) — printed as a report.
-7. All-or-nothing: any failure ⇒ drop and re-run. No partial resume.
+One consequence for §8.1: there are no legacy rows to sanitize, but the
+initial full sync re-parses the entire historical corpus through the write
+path on day one — so the parse-boundary sanitization must land *before*
+cutover, not after.
 
-The SQLite files are left untouched and serve as the rollback (§11).
-Skipped-as-corrupt tenant databases (the health latch case) must be repaired
-with today's tooling *before* migrating — the tool refuses to silently skip a
-tenant.
+**What survives from this work package — the baseline upgrade path, to be
+settled before the fresh production database is created.** `OpenPostgres`
+records the baseline as one `schema_migrations` row and refuses to start when
+the recorded checksum differs from the running binary's. That is right while
+every Postgres database is a throwaway test one, but the baseline is
+*designed to be regenerated in place*, so the same signal will mean two
+different things once a real database exists: "the schema was tampered with"
+and "this binary is newer than the database". The second needs an upgrade
+path, not a refusal. Whatever WP3 does to the schema — the `lower()`
+expression index is already queued — regenerates the baseline, so this has to
+be decided in the same phase that creates the first database worth keeping.
+The likely shape is incremental Postgres migrations layered on the baseline,
+with the baseline row pinned to the version it was created at rather than to
+the current file.
 
 ### WP3 query obligations from the baseline
 
@@ -399,8 +405,11 @@ are easy to regress by porting a query mechanically:
   `ORDER BY display_name` cannot use it; it has to say `lower(display_name)`.
   The store's contact queries already do, but a new one would not by default.
 - **Identity columns are `GENERATED BY DEFAULT`**, not `GENERATED ALWAYS`, so
-  an explicit id on insert is accepted. That is what lets WP7 copy ids
-  verbatim; do not "tighten" it to ALWAYS.
+  an explicit id on insert is accepted. The original reason — WP7 copying ids
+  verbatim — is gone with the data migration, but BY DEFAULT stays: it is
+  harmless in normal operation (the sequence still assigns ids when none is
+  given), and tightening it would change the baseline generator for no
+  operational gain.
 
 ### WP8 — Tests and CI
 
@@ -450,14 +459,15 @@ all call `store.Open(tempfile)`.
 | 2 | WP1's connection/schema layer (**done**: `OpenPostgres`, `pgtestdb`), then WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
 | 3 | WP6 plugins | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
-| 5 | WP7 migration tool + dry run against a copy of production data | 2 |
-| 6 | Cutover (§11) | 3–5 |
+| 5 | WP7 residue: settle the baseline upgrade path, rehearse create/drop against the provisioned target via the migration console | 2 |
+| 6 | Cutover as fresh setup (§11) | 3–5 |
 | 7 | Bleve → Postgres FTS (§10, separate plan) | 6 |
 
 Phases 2–4 are parallelizable per package. Realistic effort: phase 1 ~2–4
 days, phase 2 the bulk (1–2 weeks of focused work given test conversion),
-phases 3–5 ~1 week combined, plus a dry-run/cutover day. The corruption
-machinery deletion (§6) lands as its own satisfying PR.
+phases 3–5 ~1 week combined, plus a cutover day — the cutover window is
+dominated by the initial IMAP resync (§11), not by any data transfer. The
+corruption machinery deletion (§6) lands as its own satisfying PR.
 
 ## 6. Code that gets deleted
 
@@ -496,16 +506,17 @@ and NUL bytes (`0x00`) in `TEXT` outright.** Mail is hostile input: subjects,
 sender names, message-ids, and header fragments with broken encodings exist
 in real mailboxes and are almost certainly sitting in the current data.
 
-Two mandatory countermeasures:
-
-1. **Write-path sanitization** at the parse boundary (`backend/mailparse`):
-   `strings.ToValidUTF8(s, "�")` + strip `\x00` for every header-derived
-   string before it reaches the store. Today only scattered sites do this
-   (`api_message.go:228`, `compose.go:415`); it must become systematic, or
-   the syncer will hit insert errors on the first malformed message after
-   cutover.
-2. **Migration-tool sanitization** (WP7) with logging, since existing rows
-   contain whatever SQLite accepted over the years.
+The mandatory countermeasure: **write-path sanitization** at the parse
+boundary (`backend/mailparse`): `strings.ToValidUTF8(s, "�")` + strip `\x00`
+for every header-derived string before it reaches the store. Today only
+scattered sites do this (`api_message.go:228`, `compose.go:415`); it must
+become systematic, or the syncer will hit insert errors on the first
+malformed message after cutover. The fresh setup (no data migration, WP7)
+removes the second half of this problem — there are no legacy rows to carry
+over — but raises the stakes on this half: the initial full sync pushes the
+*entire* historical corpus through the parse path at once, so every broken
+encoding that accumulated over the years arrives on day one. This must be in
+place before cutover.
 
 Columns that must stay byte-faithful (none known — hashes are hex, tokens are
 base64) would need `BYTEA`; audit during WP2 confirms.
@@ -515,12 +526,13 @@ base64) would need `BYTEA`; audit during WP2 confirms.
 A per-user SQLite file made every query ~µs and made N+1 loops invisible.
 Postgres adds a network round trip per statement. The web request paths are
 fine (few queries per request), but syncer inner loops (per-message location
-upserts, fingerprint checks) deserve measurement in the phase-5 dry run.
-Note the shape of the risk with the current 200k+ message corpus:
-incremental sync touches deltas only, so steady-state cost barely changes —
-the paths that walk the whole corpus are the rebuild flows (mailbox
-generation rebuild, index hydration), and those are what the dry run must
-time at full production scale.
+upserts, fingerprint checks) deserve measurement. Note the shape of the risk
+with the current 200k+ message corpus: incremental sync touches deltas only,
+so steady-state cost barely changes — the paths that walk the whole corpus
+are the initial full sync (which the fresh-setup cutover runs at full
+production scale on day one, §11) and the rebuild flows (mailbox generation
+rebuild, index hydration). The first sync after cutover doubles as the
+full-scale measurement run; watch its timing logs.
 Mitigations if needed: `= ANY($1)` batching (already introduced by WP3),
 multi-row `INSERT ... VALUES (...),(...)`, pgx batch API in hot spots.
 Do not pre-optimize; measure.
@@ -599,22 +611,31 @@ complete, since Bleve's mmap'd segments are the remaining risk on `/data`:
 - Requires `pg_trgm` (and possibly `unaccent`) — confirm the hoster allows
   extensions before committing to this phase.
 
-## 11. Cutover and rollback
+## 11. Cutover and rollback (fresh setup)
+
+No data moves. The cutover replaces the old instance with a fresh one:
 
 1. Freeze: stop the container (instance lock released), take a final Ceph
-   snapshot of `/data`.
-2. `rolltop migrate-to-postgres` against the empty target; review the
-   verification report and the sanitization log.
-3. Start the new image with `ROLLTOP_DATABASE_URL`. Bleve indexes on `/data`
-   remain valid — they reference message ids, which the migration preserves
-   (identity values are copied verbatim, sequences bumped past them).
-4. Watch the syncer complete one full cycle per account; compare message
-   counts per mailbox against the report.
-5. Rollback path (until the old image is retired): stop, restart the
-   previous image — the SQLite files were never written after the freeze.
-   Mail changes made in the Postgres interim would be lost locally but
-   re-mirrored from IMAP; locally-created state (snoozes, contacts edits) in
-   the interim would not survive a rollback. Keep the rollback window short.
+   snapshot of `/data`. The snapshot is the only remaining copy of
+   local-only state (snoozes, contacts edits, settings) — it is an archive
+   and the rollback point, not an input to the new instance.
+2. Clear `/data`: SQLite files (system + `users/`), blob store, Bleve
+   indexes. The fresh database assigns new ids that share nothing with the
+   old files, so stale blobs and indexes must not survive into the new
+   instance. Keep the crash-log location.
+3. Verify the hoster-created, empty database with the preflight (§3.4) if
+   not already done, then start the new image with `ROLLTOP_DATABASE_URL` —
+   `OpenPostgres` applies the WP2 baseline to the empty database.
+4. Re-create users and mail accounts by hand; reconnect IMAP. The initial
+   sync re-mirrors the full corpus (200k+ messages) — expect it to take a
+   while, and use it as the full-scale measurement run: watch for UTF-8
+   sanitization hits (§8.1) and per-row latency hot spots (§8.2).
+5. Compare per-mailbox message counts against the IMAP server once the
+   first full cycle per account completes.
+6. Rollback path (until the old image is retired): stop the new stack,
+   restore the `/data` snapshot, start the previous image. Anything created
+   in the Postgres interim is lost; mail state re-mirrors from IMAP either
+   way. Keep the rollback window short.
 
 ## 12. Open questions
 
@@ -625,9 +646,8 @@ Hoster answers received 2026-08-18:
    database user may `CREATE EXTENSION` them directly. Phase 7 (search) is
    therefore unblocked in principle.
 2. ~~Connection limits?~~ **20 connections per database user.** App pool
-   default `ROLLTOP_DB_MAX_CONNS=10` (WP1) leaves headroom for the
-   migration tool, scheduled `pg_dump`, and manual `psql` without ever
-   tripping the limit.
+   default `ROLLTOP_DB_MAX_CONNS=10` (WP1) leaves headroom for a scheduled
+   `pg_dump` and manual `psql` without ever tripping the limit.
 3. ~~Backup story?~~ Hoster-side: continuous WAL archiving + hourly base
    backups, 7-day retention — **disaster recovery only, not self-service.**
    Our own backups: scheduled `pg_dump` via SSH bastion (or in-platform),
@@ -674,16 +694,17 @@ as designed: equality needs nothing, ordering needs the column collation.
 network hop, and web request paths (a handful of queries each) will not
 notice. The number to watch is the full-corpus walk: with 200k+ messages, a
 per-row loop costs about two minutes of pure round trips. That is the
-concrete threshold for the phase-5 dry run in §8.2 — measure the mailbox
-generation rebuild and index hydration, and batch with `= ANY($1)` or
-multi-row inserts wherever they exceed it.
+concrete threshold for the initial full sync after cutover (§8.2, §11) —
+watch the initial sync, mailbox generation build and index hydration, and
+batch with `= ANY($1)` or multi-row inserts wherever they exceed it.
 
-**`CREATEDB=false` constrains two work packages.** The application role
+**`CREATEDB=false` constrains the cutover and WP8.** The application role
 cannot create databases, so:
 
-- WP7's migration tool cannot provision its own target. The hoster must
-  create the (empty) destination database before the cutover, and the tool
-  should verify emptiness rather than attempt creation.
+- The app cannot provision its own database. The hoster must create the
+  (empty) production database before the cutover; `OpenPostgres` then
+  verifies it is empty and applies the baseline (WP1 behaviour) rather than
+  attempting creation.
 - WP8's test strategy — `CREATE DATABASE ... TEMPLATE rolltop_test_tmpl` per
   test — cannot run against this instance. That is fine as designed, because
   tests run against a CI-local Postgres container with full privileges, but
@@ -692,5 +713,5 @@ cannot create databases, so:
   database.
 
 The per-role limit of 20 confirms the hoster's figure and leaves the planned
-pool of 10 room for the migration tool, a scheduled `pg_dump`, and a manual
-`psql` session at the same time.
+pool of 10 room for a scheduled `pg_dump` and a manual `psql` session at the
+same time.
