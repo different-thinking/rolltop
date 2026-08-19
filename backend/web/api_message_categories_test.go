@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
@@ -14,6 +13,7 @@ import (
 
 	"rolltop/backend/mailparse"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func createCategoryTestMessage(t *testing.T, ctx context.Context, db *store.Store, tenant scopeTestTenant,
@@ -50,7 +50,7 @@ func TestMailViewNamesResolveOnlyToListsThisServerRenders(t *testing.T) {
 
 func TestCategoryScopeCoversOnlyItsOwnUnarchivedMail(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestCategoryScopeCoversOnlyItsOwnUnarchivedMail(t *testing.T) {
 
 func TestCategoryChromeCountsWhatTheListShows(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func categoryRequest(t *testing.T, server *Server, user store.User, body string)
 // senders the tenant has never received mail from.
 func TestCategoryCorrectionOnlyFilesSendersTheCallerCanSee(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func itoa(v int64) string {
 // about their senders, so every distinct sender behind the drop is filed once.
 func TestCategoryDropFilesEverySenderBehindTheSelection(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

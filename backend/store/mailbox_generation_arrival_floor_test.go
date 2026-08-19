@@ -3,13 +3,12 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 )
 
 func TestMailboxGenerationResetPersistsArrivalUIDFloorAndNeverMovesItForward(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +31,7 @@ func TestMailboxGenerationResetPersistsArrivalUIDFloorAndNeverMovesItForward(t *
 
 func TestMailboxGenerationResetRejectsZeroArrivalUIDFloorWithoutMutation(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +60,7 @@ func TestMailboxGenerationResetRejectsZeroArrivalUIDFloorWithoutMutation(t *test
 
 func TestMailboxGenerationArrivalUIDFloorInitializesLegacyMarkerWithinTenant(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +92,7 @@ func TestMailboxGenerationArrivalUIDFloorInitializesLegacyMarkerWithinTenant(t *
 
 func TestMailboxGenerationArrivalCandidatesRequireExactTenantAndGeneration(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

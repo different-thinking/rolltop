@@ -13,13 +13,14 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
 func TestRepairMailboxSearchIndexRetainsHydratedRawInsideConfiguredWindow(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestRepairMailboxSearchIndexRetainsHydratedRawInsideConfiguredWindow(t *tes
 func TestRepairMailboxSearchIndexRemovesSavedRawWhenRetentionAttachFails(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,10 +245,15 @@ func TestRepairMailboxSearchIndexRemovesSavedRawWhenRetentionAttachFails(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := userDB.ExecContext(ctx, `CREATE FUNCTION fail_reindex_retention_attach() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'forced retained blob attach failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := userDB.ExecContext(ctx, `CREATE TRIGGER fail_reindex_retention_attach
 		BEFORE UPDATE OF blob_path ON messages
-		WHEN NEW.user_id = `+strconv.FormatInt(user.ID, 10)+` AND NEW.id = `+strconv.FormatInt(message.ID, 10)+`
-		BEGIN SELECT RAISE(FAIL, 'forced retained blob attach failure'); END`); err != nil {
+		FOR EACH ROW WHEN (NEW.user_id = `+strconv.FormatInt(user.ID, 10)+` AND NEW.id = `+strconv.FormatInt(message.ID, 10)+`)
+		EXECUTE FUNCTION fail_reindex_retention_attach()`); err != nil {
 		t.Fatal(err)
 	}
 	service := &syncer.Service{

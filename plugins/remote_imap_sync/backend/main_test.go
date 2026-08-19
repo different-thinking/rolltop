@@ -21,6 +21,7 @@ import (
 	"rolltop/backend/imapclient"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -85,7 +86,7 @@ type backendFixture struct {
 func newBackendFixture(t *testing.T) backendFixture {
 	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	st, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

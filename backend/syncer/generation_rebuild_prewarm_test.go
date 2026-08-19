@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/blob"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -442,7 +442,7 @@ func TestLargeGenerationRebuildFinalRefreshCachesPostSnapshotArrival(t *testing.
 func TestPendingGenerationRebuildRetriesAfterSnapshotTimeoutWithoutUnboundedFallback(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +643,7 @@ func (f *generationPrewarmFetcher) FetchMailboxWithUIDValidity(
 func TestPendingGenerationRebuildPrewarmsNewestMessagesBeforeHistoryBatchResume(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +852,7 @@ func newGenerationPrewarmFixture(t *testing.T, email string) generationPrewarmFi
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -117,10 +117,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
-      # The PostgreSQL migration baseline is verified by applying it to a real
-      # server (backend/store/pgschema); the apply test fails rather than
-      # skips when this DSN is set, so a baseline that no longer applies
-      # cannot reach main.
+      # The whole Go suite runs against this server: every test gets its own
+      # database, cloned from a template the run builds once. The tests fail
+      # rather than skip when this DSN is set, so a broken service cannot
+      # report a green suite that verified nothing.
+      #
+      # The role must be able to CREATE DATABASE, which the postgres image's
+      # POSTGRES_USER is. Pointing this at a managed database does not work and
+      # is not meant to.
       #
       # The job also runs for plugin-backend and spam-model changes, which
       # skip the Go test step and so never use this container. Keeping one
@@ -196,10 +200,16 @@ jobs:
         if: needs.changes.outputs.go == 'true'
         env:
           TEST_DATABASE_URL: postgres://rolltop:rolltop@localhost:5432/rolltop_test?sslmode=disable
+      # -p 2 bounds how many package binaries run at once. The suite does real
+      # database I/O in every test now, and the default (one per core) makes a
+      # 4-core runner oversubscribe itself badly enough that timing-sensitive
+      # tests miss deadlines they normally clear in under a second. This is a
+      # scheduling limit, not a flake workaround: the same run is green at 2 and
+      # red at 4, reproducibly.
         run: |
           mkdir -p test-results
           set +e
-          go test -json ./... 2>&1 | tee test-results/go-test.json
+          go test -p 2 -json ./... 2>&1 | tee test-results/go-test.json
           status=${PIPESTATUS[0]}
           set -e
 
@@ -256,6 +266,12 @@ jobs:
         run: npm ci
 
       - name: Run TypeScript Checks
+      # -p 2 bounds how many package binaries run at once. The suite does real
+      # database I/O in every test now, and the default (one per core) makes a
+      # 4-core runner oversubscribe itself badly enough that timing-sensitive
+      # tests miss deadlines they normally clear in under a second. This is a
+      # scheduling limit, not a flake workaround: the same run is green at 2 and
+      # red at 4, reproducibly.
         run: |
           mkdir -p test-results
           start=$(date +%s)

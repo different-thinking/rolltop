@@ -5,16 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestAPIAccountGETUsesCachedIdentitiesWithoutReconciliation(t *testing.T) {
 	ctx := context.Background()
-	dataDir := filepath.Join(t.TempDir(), "data")
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

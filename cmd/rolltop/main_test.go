@@ -6,12 +6,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestListenStartupHTTPReturnsBindFailureImmediately(t *testing.T) {
@@ -147,7 +147,7 @@ func (c *blockingRuntimeTestCloser) Close() error {
 
 func TestInboxAutoTargetsIncludesEveryAccountInbox(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

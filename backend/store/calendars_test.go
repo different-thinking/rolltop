@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -13,7 +12,7 @@ import (
 func openCalendarStore(t *testing.T) (*Store, context.Context) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

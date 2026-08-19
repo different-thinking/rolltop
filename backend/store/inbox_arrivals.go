@@ -6,11 +6,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sort"
 	"strings"
 	"time"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -204,7 +203,7 @@ func (s *Store) HoldOrClassifyInboxArrival(ctx context.Context, userID, syncRunI
 func (s *Store) FinalizeDueInboxArrivals(ctx context.Context, userID, accountID int64, now time.Time) (int, error) {
 	for attempt := 0; ; attempt++ {
 		created, err := s.finalizeDueInboxArrivalsOnce(ctx, userID, accountID, now)
-		if err == nil || attempt >= 4 || !isSQLiteBusyError(err) {
+		if err == nil || attempt >= 4 || !isRetryableContention(err) {
 			return created, err
 		}
 		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
@@ -313,9 +312,25 @@ func (s *Store) finalizeDueInboxArrivalsOnce(ctx context.Context, userID, accoun
 	return createdCount, nil
 }
 
-func isSQLiteBusyError(err error) bool {
-	var sqliteErr sqlite3.Error
-	return errors.As(err, &sqliteErr) && (sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked)
+// isRetryableContention reports a failure caused by two workers reaching the
+// same rows at once, rather than by anything wrong with the request.
+//
+// SQLite's version of this was a busy writer lock, which PostgreSQL does not
+// have. What it has instead is deadlock detection and serialization failures:
+// two syncers finalizing arrivals for one account can take the same rows in
+// different orders, and the server aborts one of them so the other proceeds.
+// Both are worth the same short retry the busy lock got.
+func isRetryableContention(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "40P01", // deadlock_detected
+		"40001": // serialization_failure
+		return true
+	}
+	return false
 }
 
 // ListDueInboxArrivals returns a bounded batch so the syncer can perform
@@ -353,34 +368,6 @@ func (s *Store) ListDueInboxArrivals(ctx context.Context, userID, accountID int6
 
 // ListPendingInboxArrivalSchedules supports startup recovery in combined and split stores.
 func (s *Store) ListPendingInboxArrivalSchedules(ctx context.Context) ([]PendingInboxArrivalSchedule, error) {
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var out []PendingInboxArrivalSchedule
-		for _, user := range users {
-			userStore, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
-			}
-			items, err := userStore.ListPendingInboxArrivalSchedules(ctx)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, items...)
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if out[i].DueAt.Equal(out[j].DueAt) {
-				if out[i].UserID == out[j].UserID {
-					return out[i].AccountID < out[j].AccountID
-				}
-				return out[i].UserID < out[j].UserID
-			}
-			return out[i].DueAt.Before(out[j].DueAt)
-		})
-		return out, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT arrival.user_id, arrival.account_id, MIN(arrival.available_at)
 		FROM pending_inbox_arrivals arrival WHERE arrival.classification = 'pending'`+
 		pendingInboxArrivalRebuildEligibility+`
@@ -489,10 +476,16 @@ func (s *Store) ListPotentialMoveSources(ctx context.Context, userID, arrivalMes
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT source.id, source.uid_validity,
+	// The ranking CASE lives in a subquery rather than in the outer ORDER BY.
+	// PostgreSQL accepts an output column name in ORDER BY only as a bare name,
+	// not inside an expression, so `ORDER BY CASE match_strength …` — which
+	// SQLite allowed — cannot see the alias at all.
+	rows, err := db.QueryContext(ctx, `SELECT id, uid_validity, match_strength FROM (
+		SELECT source.id AS id, source.uid_validity AS uid_validity,
+			source.internal_date_unix AS internal_date_unix,
 		CASE
-			WHEN arrival_blob.sha256 <> '' AND source_blob.sha256 = arrival_blob.sha256 COLLATE BINARY THEN 'exact'
-			WHEN arrival.canonical_sha256 <> '' AND source.canonical_sha256 = arrival.canonical_sha256 COLLATE BINARY THEN 'canonical'
+			WHEN arrival_blob.sha256 <> '' AND source_blob.sha256 = arrival_blob.sha256 THEN 'exact'
+			WHEN arrival.canonical_sha256 <> '' AND source.canonical_sha256 = arrival.canonical_sha256 THEN 'canonical'
 			ELSE 'message_id'
 		END AS match_strength
 		FROM messages arrival
@@ -507,13 +500,14 @@ func (s *Store) ListPotentialMoveSources(ctx context.Context, userID, arrivalMes
 		AND lower(trim(source_mailbox.name)) <> 'inbox'
 		AND lower(trim(source_mailbox.name)) NOT IN ('all mail', '[gmail]/all mail', 'allmail')
 		AND (
-			(arrival_blob.sha256 <> '' AND source_blob.sha256 = arrival_blob.sha256 COLLATE BINARY)
-			OR (arrival.canonical_sha256 <> '' AND source.canonical_sha256 = arrival.canonical_sha256 COLLATE BINARY)
-			OR (arrival.message_id_hash <> '' AND source.message_id_hash = arrival.message_id_hash COLLATE BINARY
+			(arrival_blob.sha256 <> '' AND source_blob.sha256 = arrival_blob.sha256)
+			OR (arrival.canonical_sha256 <> '' AND source.canonical_sha256 = arrival.canonical_sha256)
+			OR (arrival.message_id_hash <> '' AND source.message_id_hash = arrival.message_id_hash
 				AND source.internal_date_unix = arrival.internal_date_unix AND source.size = arrival.size)
 		)
+	) ranked
 		ORDER BY CASE match_strength WHEN 'exact' THEN 1 WHEN 'canonical' THEN 2 ELSE 3 END,
-			source.internal_date_unix DESC, source.id DESC LIMIT ?`, userID, arrivalMessageID, queryLimit)
+			internal_date_unix DESC, id DESC LIMIT ?`, userID, arrivalMessageID, queryLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -731,9 +725,9 @@ func consumePendingMoveForExpungeTx(ctx context.Context, tx *sql.Tx, arrival inb
 		WHERE transfer.user_id = ? AND transfer.destination_account_id = ?
 			AND transfer.destination_mailbox_id = ? AND transfer.operation_kind = 'move'
 			AND transfer.state = 'pending' AND transfer.dispatched_at > 0
-			AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = ? COLLATE BINARY)
-				OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = ? COLLATE BINARY)
-				OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = ? COLLATE BINARY
+			AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = ?)
+				OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = ?)
+				OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = ?
 					AND transfer.internal_date_unix = ? AND transfer.message_size = ?))
 		ORDER BY transfer.id LIMIT 1`, expungedID, arrival.Message.UserID,
 		arrival.Message.AccountID, arrival.Message.MailboxID,
@@ -778,9 +772,9 @@ func matchMessageTransferTx(ctx context.Context, tx *sql.Tx, arrival inboxArriva
 			WHEN destination_uid > 0 AND destination_uid = ? AND destination_uid_validity > 0
 				AND ? > 0 AND destination_uid_validity = ? THEN 0
 			WHEN (destination_uid = 0 OR destination_uid_validity = 0)
-				AND raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY THEN 1
+				AND raw_sha256 <> '' AND raw_sha256 = ? THEN 1
 			WHEN (destination_uid = 0 OR destination_uid_validity = 0)
-				AND canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY THEN 2
+				AND canonical_sha256 <> '' AND canonical_sha256 = ? THEN 2
 			ELSE 3
 		END AS strength
 		FROM message_transfers
@@ -790,9 +784,9 @@ func matchMessageTransferTx(ctx context.Context, tx *sql.Tx, arrival inboxArriva
 			(destination_uid > 0 AND destination_uid = ? AND destination_uid_validity > 0
 				AND ? > 0 AND destination_uid_validity = ?)
 			OR ((destination_uid = 0 OR destination_uid_validity = 0) AND (
-				(raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY)
-				OR (canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY)
-				OR (message_id_hash <> '' AND message_id_hash = ? COLLATE BINARY
+				(raw_sha256 <> '' AND raw_sha256 = ?)
+				OR (canonical_sha256 <> '' AND canonical_sha256 = ?)
+				OR (message_id_hash <> '' AND message_id_hash = ?
 					AND internal_date_unix = ? AND message_size = ?)))
 		)
 		ORDER BY strength, id LIMIT 2`,
@@ -852,9 +846,9 @@ func consumeTransferSourceExpungeTx(ctx context.Context, tx *sql.Tx, arrival inb
 	}
 	matchClause := `user_id = ? AND account_id = ? AND source_mailbox_id = ?
 		AND source_uid = ? AND source_uid_validity = ? AND consumed_at = 0 AND expires_at > ?
-		AND ((raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY)
-			OR (canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY)
-			OR (message_id_hash <> '' AND message_id_hash = ? COLLATE BINARY
+		AND ((raw_sha256 <> '' AND raw_sha256 = ?)
+			OR (canonical_sha256 <> '' AND canonical_sha256 = ?)
+			OR (message_id_hash <> '' AND message_id_hash = ?
 				AND internal_date_unix = ? AND message_size = ?))`
 	args := []any{arrival.Message.UserID, arrival.Message.AccountID, transfer.sourceMailboxID,
 		transfer.sourceUID, transfer.sourceUIDValidity, now, arrival.Fingerprint.RawSHA256,
@@ -887,8 +881,8 @@ func consumeTransferSourceExpungeTx(ctx context.Context, tx *sql.Tx, arrival inb
 func matchExpungedFingerprintTx(ctx context.Context, tx *sql.Tx, arrival inboxArrivalMessage, now int64) (int64, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT fingerprint.id,
 		CASE
-			WHEN raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY THEN 1
-			WHEN canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY THEN 2
+			WHEN raw_sha256 <> '' AND raw_sha256 = ? THEN 1
+			WHEN canonical_sha256 <> '' AND canonical_sha256 = ? THEN 2
 			ELSE 3
 		END AS strength
 		FROM expunged_message_fingerprints fingerprint
@@ -908,9 +902,9 @@ func matchExpungedFingerprintTx(ctx context.Context, tx *sql.Tx, arrival inboxAr
 				AND transfer.destination_account_id = ? AND transfer.destination_mailbox_id = ?
 				AND transfer.operation_kind = 'move' AND transfer.state = 'pending'
 				AND transfer.dispatched_at > 0
-				AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = fingerprint.raw_sha256 COLLATE BINARY)
-					OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = fingerprint.canonical_sha256 COLLATE BINARY)
-					OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = fingerprint.message_id_hash COLLATE BINARY
+				AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = fingerprint.raw_sha256)
+					OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = fingerprint.canonical_sha256)
+					OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = fingerprint.message_id_hash
 						AND transfer.internal_date_unix = fingerprint.internal_date_unix
 						AND transfer.message_size = fingerprint.message_size))
 		) OR EXISTS (
@@ -920,16 +914,16 @@ func matchExpungedFingerprintTx(ctx context.Context, tx *sql.Tx, arrival inboxAr
 				AND pending.mailbox_id <> fingerprint.source_mailbox_id
 				AND pending.message_id = ? AND pending.classification = 'pending'
 				AND ABS(pending.created_at - fingerprint.created_at) <= ?
-				AND ((pending.raw_sha256 <> '' AND pending.raw_sha256 = fingerprint.raw_sha256 COLLATE BINARY)
-					OR (pending.canonical_sha256 <> '' AND pending.canonical_sha256 = fingerprint.canonical_sha256 COLLATE BINARY)
-					OR (pending.message_id_hash <> '' AND pending.message_id_hash = fingerprint.message_id_hash COLLATE BINARY
+				AND ((pending.raw_sha256 <> '' AND pending.raw_sha256 = fingerprint.raw_sha256)
+					OR (pending.canonical_sha256 <> '' AND pending.canonical_sha256 = fingerprint.canonical_sha256)
+					OR (pending.message_id_hash <> '' AND pending.message_id_hash = fingerprint.message_id_hash
 						AND pending.internal_date_unix = fingerprint.internal_date_unix
 						AND pending.message_size = fingerprint.message_size))
 		))
 		AND (
-			(raw_sha256 <> '' AND raw_sha256 = ? COLLATE BINARY)
-			OR (canonical_sha256 <> '' AND canonical_sha256 = ? COLLATE BINARY)
-			OR (message_id_hash <> '' AND message_id_hash = ? COLLATE BINARY
+			(raw_sha256 <> '' AND raw_sha256 = ?)
+			OR (canonical_sha256 <> '' AND canonical_sha256 = ?)
+			OR (message_id_hash <> '' AND message_id_hash = ?
 				AND internal_date_unix = ? AND message_size = ?)
 		)
 		ORDER BY strength, fingerprint.id LIMIT 2`, arrival.Fingerprint.RawSHA256,
@@ -992,8 +986,9 @@ func insertNewMailEventTx(ctx context.Context, tx *sql.Tx, userID int64, msg Mes
 	if duplicate {
 		return NewMailEvent{}, false, nil
 	}
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO new_mail_events
-		(user_id, message_id, from_addr, subject, created_at) VALUES (?, ?, ?, ?, ?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO new_mail_events
+		(user_id, message_id, from_addr, subject, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		userID, msg.ID, msg.FromAddr, msg.Subject, now)
 	if err != nil {
 		return NewMailEvent{}, false, err
@@ -1023,7 +1018,7 @@ func newMailEventForMessageTx(ctx context.Context, tx *sql.Tx, userID, messageID
 func incrementSyncRunForArrivalTx(ctx context.Context, tx *sql.Tx, userID, accountID, syncRunID int64, message MessageRecord, now int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE sync_runs
 		SET new_messages = new_messages + 1, latest_new_from = ?, latest_new_subject = ?,
-			latest_new_message_id = ?, updated_at = MAX(updated_at, ?)
+			latest_new_message_id = ?, updated_at = GREATEST(updated_at, ?)
 		WHERE user_id = ? AND account_id = ? AND id = ?`, message.FromAddr,
 		message.Subject, message.ID, now, userID, accountID, syncRunID)
 	return err
@@ -1044,9 +1039,9 @@ func pruneArrivalCorrelationRows(ctx context.Context, tx *sql.Tx, userID, now in
 				AND transfer.source_uid_validity = expunged_message_fingerprints.source_uid_validity
 				AND transfer.operation_kind = 'move' AND transfer.state = 'pending'
 				AND transfer.dispatched_at > 0
-				AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = expunged_message_fingerprints.raw_sha256 COLLATE BINARY)
-					OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = expunged_message_fingerprints.canonical_sha256 COLLATE BINARY)
-					OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = expunged_message_fingerprints.message_id_hash COLLATE BINARY
+				AND ((transfer.raw_sha256 <> '' AND transfer.raw_sha256 = expunged_message_fingerprints.raw_sha256)
+					OR (transfer.canonical_sha256 <> '' AND transfer.canonical_sha256 = expunged_message_fingerprints.canonical_sha256)
+					OR (transfer.message_id_hash <> '' AND transfer.message_id_hash = expunged_message_fingerprints.message_id_hash
 						AND transfer.internal_date_unix = expunged_message_fingerprints.internal_date_unix
 						AND transfer.message_size = expunged_message_fingerprints.message_size))
 		) AND NOT EXISTS (
@@ -1056,9 +1051,9 @@ func pruneArrivalCorrelationRows(ctx context.Context, tx *sql.Tx, userID, now in
 				AND pending.mailbox_id <> expunged_message_fingerprints.source_mailbox_id
 				AND pending.classification = 'pending'
 				AND ABS(pending.created_at - expunged_message_fingerprints.created_at) <= ?
-				AND ((pending.raw_sha256 <> '' AND pending.raw_sha256 = expunged_message_fingerprints.raw_sha256 COLLATE BINARY)
-					OR (pending.canonical_sha256 <> '' AND pending.canonical_sha256 = expunged_message_fingerprints.canonical_sha256 COLLATE BINARY)
-					OR (pending.message_id_hash <> '' AND pending.message_id_hash = expunged_message_fingerprints.message_id_hash COLLATE BINARY
+				AND ((pending.raw_sha256 <> '' AND pending.raw_sha256 = expunged_message_fingerprints.raw_sha256)
+					OR (pending.canonical_sha256 <> '' AND pending.canonical_sha256 = expunged_message_fingerprints.canonical_sha256)
+					OR (pending.message_id_hash <> '' AND pending.message_id_hash = expunged_message_fingerprints.message_id_hash
 						AND pending.internal_date_unix = expunged_message_fingerprints.internal_date_unix
 						AND pending.message_size = expunged_message_fingerprints.message_size))
 		)`, userID, now, int64(expungedFingerprintTTL/time.Second))

@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestOlderThanClauseStripsAgeOperator(t *testing.T) {
@@ -23,61 +23,37 @@ func TestOlderThanClauseStripsAgeOperator(t *testing.T) {
 }
 
 func TestEvaluationListsSeparateManagementFromMessageAudit(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
+	st, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE plugin_mail_filter_rules (
-		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		name TEXT NOT NULL,
-		query TEXT NOT NULL,
-		enabled INTEGER NOT NULL,
-		scope_mode TEXT NOT NULL,
-		actions_json TEXT NOT NULL,
-		position INTEGER NOT NULL,
-		created_at INTEGER NOT NULL,
-		updated_at INTEGER NOT NULL
-	);
-	CREATE TABLE messages (
-		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		subject TEXT NOT NULL,
-		from_addr TEXT NOT NULL
-	);
-	CREATE TABLE plugin_mail_filter_evaluations (
-		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		rule_id INTEGER NOT NULL,
-		message_id INTEGER NOT NULL,
-		account_id INTEGER NOT NULL,
-		mailbox_id INTEGER NOT NULL,
-		phase TEXT NOT NULL,
-		status TEXT NOT NULL,
-		matched INTEGER NOT NULL,
-		due_at INTEGER NOT NULL,
-		evaluated_at INTEGER NOT NULL,
-		terms_json TEXT NOT NULL,
-		fields_json TEXT NOT NULL,
-		actions_json TEXT NOT NULL,
-		error TEXT NOT NULL,
-		created_at INTEGER NOT NULL
-	);`); err != nil {
-		t.Fatal(err)
-	}
+	db := st.DB()
+	// The tables are part of the baseline the test database carries; only the
+	// rows this test reasons about are set up here.
+	user, account, mailbox := mailFilterFixture(t, st, "filters@example.test")
 	now := time.Now().UTC().Unix()
-	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at) VALUES (10, 1, 'Yoga cleanup', 'older_than:7d yoga', 1, 'all_accounts', '{}', 0, ?, ?)`, now, now); err != nil {
+	blob, err := st.CreateBlob(context.Background(), store.BlobRecord{
+		UserID: user.ID, Kind: "message", Path: "users/x/message.eml", SHA256: "sha", Size: 10,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO messages (id, user_id, subject, from_addr) VALUES (100, 1, 'Yoga booking', 'studio@example.test')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at) VALUES (10, ?, 'Yoga cleanup', 'older_than:7d yoga', 1, 'all_accounts', '{}', 0, ?, ?)`, user.ID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages (id, user_id, account_id, mailbox_id, blob_id, blob_path,
+		message_id_header, in_reply_to, references_header, thread_key, subject, from_addr, to_addr, cc_addr,
+		body_text, body_html, date_unix, internal_date_unix, uid, size, created_at, updated_at)
+		VALUES (100, ?, ?, ?, ?, '', '', '', '', '', 'Yoga booking', 'studio@example.test', '', '',
+		'', '', ?, ?, 1, 10, ?, ?)`, user.ID, account.ID, mailbox.ID, blob.ID, now, now, now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_evaluations
 		(id, user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
 		VALUES
-		(1, 1, 10, 100, 2, 3, 'backfill', 'not_matched', 0, 0, ?, '[]', '[]', '{}', '', ?),
-		(2, 1, 10, 100, 2, 3, 'backfill', 'matched', 1, 0, ?, '[]', '[]', '{"move":"ok"}', '', ?)`, now-1, now-1, now, now); err != nil {
+		(1, ?, 10, 100, ?, ?, 'backfill', 'not_matched', 0, 0, ?, '[]', '[]', '{}', '', ?),
+		(2, ?, 10, 100, ?, ?, 'backfill', 'matched', 1, 0, ?, '[]', '[]', '{"move":"ok"}', '', ?)`,
+		user.ID, account.ID, mailbox.ID, now-1, now-1, user.ID, account.ID, mailbox.ID, now, now); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -98,26 +74,19 @@ func TestEvaluationListsSeparateManagementFromMessageAudit(t *testing.T) {
 }
 
 func TestEnsureForwarderIDIsStableAndOpaque(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
+	st, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := st.DB()
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE plugin_mail_filter_forwarders (
-		user_id INTEGER NOT NULL,
-		account_id INTEGER NOT NULL,
-		forwarder_id TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		PRIMARY KEY(user_id, account_id)
-	)`); err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
-	first, err := ensureForwarderID(ctx, db, 1, 2)
+	user, account, _ := mailFilterFixture(t, st, "forwarder@example.test")
+	first, err := ensureForwarderID(ctx, db, user.ID, account.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ensureForwarderID(ctx, db, 1, 2)
+	second, err := ensureForwarderID(ctx, db, user.ID, account.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,4 +96,28 @@ func TestEnsureForwarderIDIsStableAndOpaque(t *testing.T) {
 	if len(first) != len("rtf-")+32 {
 		t.Fatalf("forwarder id = %q", first)
 	}
+}
+
+// mailFilterFixture creates the tenant rows the plugin's foreign keys require.
+// The schema these tests run against is the production one now, so a rule or an
+// evaluation cannot reference an account and a mailbox that do not exist.
+func mailFilterFixture(t *testing.T, st *store.Store, email string) (store.User, store.MailAccount, store.Mailbox) {
+	t.Helper()
+	ctx := context.Background()
+	user, err := st.CreateUser(ctx, email, "Filters", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := st.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Email: email, Host: "imap.example.test", Port: 993,
+		Username: email, EncryptedPassword: "secret", UseTLS: true, Mailbox: "*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := st.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return user, account, mailbox
 }

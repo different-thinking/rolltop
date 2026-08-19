@@ -10,13 +10,13 @@ import (
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestGenericBlobCleanupFilesystemFailureSurvivesRestartAndRunnerRecovery(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	dbPath := filepath.Join(root, "rolltop.db")
-	db, err := store.Open(dbPath)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestGenericBlobCleanupFilesystemFailureSurvivesRestartAndRunnerRecovery(t *
 		t.Fatal(err)
 	}
 
-	db, err = store.Open(dbPath)
+	db, err = storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestGenericBlobCleanupFilesystemFailureSurvivesRestartAndRunnerRecovery(t *
 func TestGenericBlobCleanupDeletesFileAndMetadataNormally(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := store.Open(filepath.Join(root, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestGenericBlobCleanupDeletesFileAndMetadataNormally(t *testing.T) {
 
 func TestGenericBlobCleanupWithoutBlobStoreDefersSafely(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestGenericBlobCleanupWithoutBlobStoreDefersSafely(t *testing.T) {
 func TestGenericBlobCleanupRemovesVirtualRemoteMetadataWithoutDeletingPath(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := store.Open(filepath.Join(root, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestGenericBlobCleanupRejectsUnownedOrMalformedVirtualRemotePaths(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
-			db, err := store.Open(filepath.Join(root, "rolltop.db"))
+			db, err := storetest.Open(t)
 			if err != nil {
 				t.Fatal(err)
 			}

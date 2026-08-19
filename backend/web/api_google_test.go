@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 
 	"rolltop/backend/googleauth"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 var googleTestMasterKey = bytes.Repeat([]byte{7}, 32)
@@ -62,7 +62,7 @@ type googleTestEnv struct {
 func newGoogleTestEnv(t *testing.T) *googleTestEnv {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

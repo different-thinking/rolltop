@@ -2,15 +2,15 @@ package keystore
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestIdentityPrivateKeyCanUseBrowserStorageMetadata(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestIdentityPrivateKeyCanUseBrowserStorageMetadata(t *testing.T) {
 
 func TestContactPublicKeysMustMatchContactEmail(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

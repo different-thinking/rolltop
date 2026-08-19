@@ -159,13 +159,14 @@ func setRoutineEnabled(ctx context.Context, db *sql.DB, userID, routineID int64,
 
 func createRun(ctx context.Context, db *sql.DB, userID, routineID int64, trigger string) (int64, error) {
 	now := time.Now().UTC().Unix()
-	res, err := db.ExecContext(ctx, `INSERT INTO plugin_remote_imap_sync_runs
+	var id int64
+	if err := db.QueryRowContext(ctx, `INSERT INTO plugin_remote_imap_sync_runs
 		(user_id, routine_id, trigger, status, started_at, created_at)
-		VALUES (?, ?, ?, 'running', ?, ?)`, userID, routineID, trigger, now, now)
-	if err != nil {
+		VALUES (?, ?, ?, 'running', ?, ?)
+		RETURNING id`, userID, routineID, trigger, now, now).Scan(&id); err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func updateRunProgress(ctx context.Context, db *sql.DB, userID, runID int64, scanned, transferred, skipped int64, currentUID uint32) error {
@@ -255,7 +256,8 @@ func recentRuns(ctx context.Context, db *sql.DB, userID, routineID int64, limit 
 }
 
 func messageAlreadyHandled(ctx context.Context, db *sql.DB, userID, routineID int64, uidValidity, uid uint32, fingerprint string) (bool, error) {
-	var exact, currentOccurrences, priorMaxOccurrences int
+	var exact bool
+	var currentOccurrences, priorMaxOccurrences int
 	err := db.QueryRowContext(ctx, `WITH matches AS (
 			SELECT source_uidvalidity, source_uid
 			FROM plugin_remote_imap_sync_messages
@@ -274,7 +276,7 @@ func messageAlreadyHandled(ctx context.Context, db *sql.DB, userID, routineID in
 	if err != nil {
 		return false, err
 	}
-	return exact != 0 || currentOccurrences < priorMaxOccurrences, nil
+	return exact || currentOccurrences < priorMaxOccurrences, nil
 }
 
 func recordHandledMessage(ctx context.Context, db *sql.DB, item routine, uidValidity, uid uint32, fingerprint, marker string, destinationUID uint32, status string) error {

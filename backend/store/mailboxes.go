@@ -82,17 +82,15 @@ func (s *Store) CreateMailAccount(ctx context.Context, a MailAccount) (MailAccou
 		return MailAccount{}, err
 	}
 	ts := nowUnix()
-	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO mail_accounts
+	var id int64
+	err = s.mustDataDB(ctx, a.UserID).QueryRowContext(ctx, `INSERT INTO mail_accounts
 			(user_id, email, label, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_username, encrypted_smtp_password, smtp_use_tls, mailbox, sync_interval_minutes, auth_type, google_connection_id, sync_start_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		a.UserID, a.Email, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword,
 		boolInt(a.UseTLS), a.SMTPHost, a.SMTPPort, a.SMTPUsername, a.EncryptedSMTPPassword,
 		boolInt(a.SMTPUseTLS), a.Mailbox, a.SyncIntervalMinutes,
-		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), ts, ts)
-	if err != nil {
-		return MailAccount{}, err
-	}
-	id, err := res.LastInsertId()
+		a.AuthType, a.GoogleConnectionID, timeUnix(a.SyncStartAt), ts, ts).Scan(&id)
 	if err != nil {
 		return MailAccount{}, err
 	}
@@ -158,21 +156,6 @@ func (s *Store) ListMailAccountsForUser(ctx context.Context, userID int64) ([]Ma
 
 // ListAccounts returns all IMAP accounts across users for startup/background scheduling only.
 func (s *Store) ListAccounts(ctx context.Context) ([]MailAccount, error) {
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := []MailAccount{}
-		for _, user := range users {
-			accounts, err := s.ListMailAccountsForUser(ctx, user.ID)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, accounts...)
-		}
-		return out, nil
-	}
 	rows, err := s.db.QueryContext(ctx, mailAccountSelectSQL()+` ORDER BY user_id, id`)
 	if err != nil {
 		return nil, err
@@ -395,7 +378,11 @@ func (s *Store) ListMailboxesForUser(ctx context.Context, userID int64) ([]Mailb
 				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
 				AND sn.snoozed_until > ?
 			WHERE mb.user_id = ?
-			GROUP BY mb.id
+			-- ma.id joins the grouping so the account columns above are
+			-- functionally dependent on it. PostgreSQL derives that dependency
+			-- only from a grouped primary key, and only per table: grouping by
+			-- mb.id alone covers every mb column and none of ma's.
+			GROUP BY mb.id, ma.id
 			ORDER BY CASE WHEN mb.role = 'inbox' OR lower(mb.name) = 'inbox' THEN 0 ELSE 1 END, ma.email, lower(mb.name)`, nowUnix(), userID)
 	if err != nil {
 		return nil, err

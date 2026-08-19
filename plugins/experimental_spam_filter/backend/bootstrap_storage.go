@@ -115,12 +115,15 @@ func savePendingMoveLabel(ctx context.Context, db *sql.DB, userID, accountID int
 		now.Unix(), now.Add(7*24*time.Hour).Unix()); err != nil {
 		return err
 	}
+	// Trimmed by the table's own key rather than by rowid, which PostgreSQL
+	// does not have. `LIMIT -1 OFFSET n` — SQLite's spelling of "everything past
+	// the first n" — becomes `OFFSET n` with no limit.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM plugin_experimental_spam_pending_move_labels
-		WHERE user_id = ? AND rowid IN (
-			SELECT rowid FROM plugin_experimental_spam_pending_move_labels
+		WHERE user_id = ? AND (account_id, identity_key) IN (
+			SELECT account_id, identity_key FROM plugin_experimental_spam_pending_move_labels
 			WHERE user_id = ?
 			ORDER BY created_at DESC, account_id DESC, identity_key DESC
-			LIMIT -1 OFFSET ?
+			OFFSET ?
 		)`, userID, userID, pendingMoveMaximumPerUser); err != nil {
 		return err
 	}

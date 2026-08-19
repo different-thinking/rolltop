@@ -5,14 +5,13 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
 
 func TestSwipePreferencesDefaultsAndRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +98,7 @@ func TestSwipePreferencesDefaultsAndRoundTrip(t *testing.T) {
 
 func TestSaveSwipePreferencesRejectsInvalidValues(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +162,7 @@ func TestSaveSwipePreferencesRejectsInvalidValues(t *testing.T) {
 
 func TestSaveSwipePreferencesRejectsForeignAndCrossAccountMailboxes(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

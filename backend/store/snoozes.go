@@ -364,9 +364,10 @@ func (s *Store) RecordDueSnoozeReminderEvents(ctx context.Context, userID int64,
 	createdAt := now.UTC().Unix()
 	events := make([]SnoozeReminderEvent, 0, len(due))
 	for _, item := range due {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO snooze_reminder_events
+		if _, err := tx.ExecContext(ctx, `INSERT INTO snooze_reminder_events
 			(user_id, message_id, snooze_generation, from_addr, subject, due_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`,
 			userID, item.MessageID, item.Generation, item.FromAddr, item.Subject, item.Until, createdAt); err != nil {
 			return nil, err
 		}

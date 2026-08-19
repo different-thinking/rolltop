@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,12 +9,12 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestPGPPublicKeyAttachmentCandidateRequiresPluginSmallASC(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +56,7 @@ func TestPGPPublicKeyAttachmentCandidateRequiresPluginSmallASC(t *testing.T) {
 func TestThreadMessageHydratesMissingAttachmentMetadataFromRawBlob(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +152,7 @@ func TestThreadMessageHydratesMissingAttachmentMetadataFromRawBlob(t *testing.T)
 func TestThreadMessageRepairsLargeMissingAttachmentMetadataAsync(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +250,7 @@ func TestThreadMessageRepairsLargeMissingAttachmentMetadataAsync(t *testing.T) {
 func TestThreadMessageRepairsInlinePGPSignedStateFromRawBlob(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

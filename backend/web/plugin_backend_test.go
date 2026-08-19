@@ -15,6 +15,7 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -112,7 +113,7 @@ func TestClientSidePGPBackendTestPluginLoads(t *testing.T) {
 func TestBackendPluginRegistersAndUnregistersProtectedAPIRoutes(t *testing.T) {
 	ctx := context.Background()
 	manifests, manager := testClientSidePGPBackendPlugins(t)
-	db, err := store.OpenServerWithPluginManifests(filepath.Join(t.TempDir(), "rolltop.db"), t.TempDir(), manifests, nil)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,11 +204,14 @@ func TestEnabledBackendPluginsSkipsLoadFailuresAndReportsAdminError(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.OpenServerWithPluginManifests(filepath.Join(t.TempDir(), "rolltop.db"), t.TempDir(), manifests, nil)
+	db, err := storetest.OpenWithManifests(t, manifests)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if err := db.SyncPluginDefinitions(ctx, plugins.DefinitionsFromManifests(manifests)); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetPluginEnabled(ctx, pluginID, true); err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +247,7 @@ func TestEnabledBackendPluginsSkipsLoadFailuresAndReportsAdminError(t *testing.T
 
 func TestQueueAccountMailboxSyncRequiresOwnedConfiguredDestination(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +301,7 @@ func TestQueueAccountMailboxSyncRequiresOwnedConfiguredDestination(t *testing.T)
 func TestFetchRawMessageIsTenantScopedAndDoesNotCacheRemoteBytes(t *testing.T) {
 	const uidValidity = 444
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +377,7 @@ func TestFetchRawMessageIsTenantScopedAndDoesNotCacheRemoteBytes(t *testing.T) {
 
 func TestServerCloseStopsBackendPluginsBeforeStoreClose(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

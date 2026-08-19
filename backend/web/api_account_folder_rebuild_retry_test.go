@@ -16,12 +16,13 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
 func TestAPIAccountFolderSearchIndexRebuildRequiresBleve(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestAPIAccountFolderSearchIndexRebuildRequiresBleve(t *testing.T) {
 func TestAPIAccountSearchIndexRebuildCoversOnlyOwnedSearchableFolders(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestAPIAccountSearchIndexRebuildCoversOnlyOwnedSearchableFolders(t *testing
 func TestAPIAccountFolderSearchIndexRebuildFinishesAcrossGenerationRecovery(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,6 +16,7 @@ import (
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -45,7 +46,7 @@ func newDuplicateWebFixture(t *testing.T) duplicateWebFixture {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

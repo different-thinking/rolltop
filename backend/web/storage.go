@@ -79,10 +79,10 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 	}
 	var errs []string
 	var err error
-	stats.DatabaseBytes, err = sqliteFileSetSize(databasePath)
-	if err != nil {
-		errs = append(errs, fmt.Sprintf("message headers: %v", err))
-	}
+	// DatabaseBytes stays zero: the relational data is in PostgreSQL, which
+	// reports one size for the whole database rather than a share per tenant.
+	// The admin Database page shows that figure; this per-user view cannot
+	// answer it and says nothing rather than guessing.
 	if s.store != nil {
 		stats.MessageHeaderCount, err = s.store.CountMessagesForUser(context.Background(), userID)
 		if err != nil {
@@ -127,14 +127,14 @@ func (s *Server) userStoragePaths(userID int64) (databasePath, indexPath, blobPa
 	id := strconv.FormatInt(userID, 10)
 	if strings.TrimSpace(s.dataDir) != "" {
 		userDir := filepath.Join(s.dataDir, "users", id)
-		return filepath.Join(userDir, "rolltop.db"),
-			filepath.Join(userDir, "bleve"),
-			filepath.Join(userDir, "blobs")
+		// The relational data is in PostgreSQL and has no per-user path any
+		// more; only the index and the blobs are still on this volume.
+		return "", filepath.Join(userDir, "bleve"), filepath.Join(userDir, "blobs")
 	}
 	if s.blobs != nil && strings.TrimSpace(s.blobs.Root) != "" {
 		blobPath = filepath.Join(s.blobs.Root, "users", id, "blobs")
 	}
-	return s.databasePath, s.indexPath, blobPath
+	return "", s.indexPath, blobPath
 }
 
 func joinedStoragePaths(paths ...string) string {
@@ -210,21 +210,6 @@ func relativeStoragePath(root, path string) string {
 		return filepath.Base(path)
 	}
 	return filepath.ToSlash(rel)
-}
-
-func sqliteFileSetSize(path string) (int64, error) {
-	if strings.TrimSpace(path) == "" {
-		return 0, nil
-	}
-	var total int64
-	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		n, err := pathSize(p)
-		if err != nil {
-			return total, err
-		}
-		total += n
-	}
-	return total, nil
 }
 
 func pathSize(path string) (int64, error) {

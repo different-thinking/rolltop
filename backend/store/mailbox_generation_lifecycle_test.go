@@ -4,15 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestMailboxGenerationUpgradeLifecycleSurvivesRestartWithoutMessageState(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +33,7 @@ func TestMailboxGenerationUpgradeLifecycleSurvivesRestartWithoutMessageState(t *
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +47,7 @@ func TestMailboxGenerationUpgradeLifecycleSurvivesRestartWithoutMessageState(t *
 
 func TestMailboxGenerationBlobCleanupRetriesFilesystemFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +96,7 @@ func TestMailboxGenerationBlobCleanupRetriesFilesystemFailure(t *testing.T) {
 
 func TestMailboxGenerationBlobCleanupProtectsReusedBlob(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +142,7 @@ func TestMailboxGenerationBlobCleanupProtectsReusedBlob(t *testing.T) {
 
 func TestMailboxGenerationBlobCleanupFinishesAfterMetadataLoss(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

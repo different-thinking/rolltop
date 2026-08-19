@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -24,7 +23,7 @@ func testGoogleUpsert(email string) GoogleConnectionUpsert {
 
 func TestGoogleConnectionsAreScopedByUser(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +80,7 @@ func TestGoogleConnectionsAreScopedByUser(t *testing.T) {
 
 func TestUpsertGoogleConnectionReusesRowAndClearsReauth(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +136,7 @@ func TestUpsertGoogleConnectionReusesRowAndClearsReauth(t *testing.T) {
 
 func TestUpsertGoogleConnectionNormalizesScopesAndEmail(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +165,7 @@ func TestUpsertGoogleConnectionNormalizesScopesAndEmail(t *testing.T) {
 
 func TestUpsertGoogleConnectionRejectsMissingRefreshToken(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +193,7 @@ func TestUpsertGoogleConnectionRejectsMissingRefreshToken(t *testing.T) {
 
 func TestUpdateGoogleAccessTokenKeepsRefreshTokenWhenNotRotated(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +236,7 @@ func TestUpdateGoogleAccessTokenKeepsRefreshTokenWhenNotRotated(t *testing.T) {
 
 func TestUpdateGoogleAccessTokenClearsReauthState(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,6 +16,7 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	spammodel "rolltop/plugins/experimental_spam_filter/model"
 )
 
@@ -528,7 +529,7 @@ func TestBackfillPrioritizesMissingAndStaleClassifications(t *testing.T) {
 
 func newSpamTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	st, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,9 +51,7 @@ func TestBundledPluginMigrationsRespectDatabaseScope(t *testing.T) {
 	} else if !ok {
 		t.Fatal("remote image blocklist backend plugin was not discovered")
 	}
-	root := t.TempDir()
-	dataDir := filepath.Join(root, "data")
-	db, err := OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,18 +66,22 @@ func TestBundledPluginMigrationsRespectDatabaseScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// One database holds both scopes now, so a plugin's system and user tables
+	// land in the same place. What is still worth asserting is that every
+	// plugin's migrations ran and are recorded exactly once — the scope split
+	// used to be the thing that could silently drop half of them.
 	assertTableExists(t, ctx, db.DB(), "plugin_remote_image_blocklist_rules", true)
-	assertTableExists(t, ctx, db.DB(), "identity_pgp_private_keys", false)
+	assertTableExists(t, ctx, db.DB(), "identity_pgp_private_keys", true)
 	assertTableExists(t, ctx, userDB, "identity_pgp_private_keys", true)
 	assertPluginMigrationCount(t, ctx, db.DB(), plugins.RemoteImageBlocklist, 1)
-	assertPluginMigrationCount(t, ctx, db.DB(), plugins.ClientSidePGP, 0)
-	assertPluginMigrationCount(t, ctx, userDB, plugins.ClientSidePGP, 5)
+	assertPluginMigrationCount(t, ctx, db.DB(), plugins.ClientSidePGP, 5)
 }
 
 func assertTableExists(t *testing.T, ctx context.Context, db *sql.DB, table string, want bool) {
 	t.Helper()
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name = ?`, table).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	got := count != 0

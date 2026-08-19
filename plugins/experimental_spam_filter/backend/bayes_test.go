@@ -16,6 +16,7 @@ import (
 
 	"rolltop/backend/plugins"
 	rollstore "rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	spammodel "rolltop/plugins/experimental_spam_filter/model"
 )
 
@@ -345,12 +346,12 @@ func TestPersonalBayesScoreReadinessCapAndPrivateEvidence(t *testing.T) {
 	}
 	var hashType string
 	var hashLength int
-	if err := st.DB().QueryRowContext(ctx, `SELECT typeof(token_hash), length(token_hash)
+	if err := st.DB().QueryRowContext(ctx, `SELECT pg_typeof(token_hash)::text, length(token_hash)
 		FROM plugin_experimental_spam_bayes_tokens WHERE user_id = ? LIMIT 1`, stored.UserID).Scan(&hashType, &hashLength); err != nil {
 		t.Fatal(err)
 	}
-	if hashType != "blob" || hashLength != 32 {
-		t.Fatalf("stored token type=%q length=%d, want 32-byte blob", hashType, hashLength)
+	if hashType != "bytea" || hashLength != 32 {
+		t.Fatalf("stored token type=%q length=%d, want a 32-byte bytea", hashType, hashLength)
 	}
 }
 
@@ -374,13 +375,10 @@ func TestPersonalBayesMigrationLoadsThroughManifestParser(t *testing.T) {
 	if len(selected) != 1 {
 		t.Fatalf("experimental spam-filter manifests = %d, want 1", len(selected))
 	}
-	root := t.TempDir()
-	dataDir := filepath.Join(root, "data")
-	st, err := rollstore.OpenServerWithPluginManifests(filepath.Join(dataDir, "rolltop.db"), dataDir, selected, nil)
+	st, err := storetest.OpenWithManifests(t, selected)
 	if err != nil {
 		t.Fatalf("open store through parsed manifest migrations: %v", err)
 	}
-	defer st.Close()
 	user, err := st.CreateUser(ctx, "loader@example.test", "Loader", "hash", false)
 	if err != nil {
 		t.Fatal(err)
@@ -400,8 +398,8 @@ func TestPersonalBayesMigrationLoadsThroughManifestParser(t *testing.T) {
 		"plugin_experimental_spam_pending_move_labels",
 	} {
 		var count int
-		if err := userDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master
-			WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+		if err := userDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables
+			WHERE table_schema = current_schema() AND table_name = ?`, table).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {
@@ -424,7 +422,7 @@ func TestPersonalBayesMigrationLoadsThroughManifestParser(t *testing.T) {
 
 func TestPersonalBayesV3MigrationPreservesV2LearnsAndAppliesPrecedence(t *testing.T) {
 	ctx := context.Background()
-	st, err := rollstore.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	st, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

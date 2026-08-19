@@ -37,12 +37,10 @@ func (s *Store) CreateSMTPAccount(ctx context.Context, a SMTPAccount) (SMTPAccou
 		return SMTPAccount{}, err
 	}
 	ts := nowUnix()
-	res, err := s.mustDataDB(ctx, a.UserID).ExecContext(ctx, `INSERT INTO smtp_accounts (user_id, label, host, port, username, encrypted_password, use_tls, auth_type, google_connection_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, a.UserID, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.AuthType, a.GoogleConnectionID, ts, ts)
-	if err != nil {
-		return SMTPAccount{}, err
-	}
-	id, err := res.LastInsertId()
+	var id int64
+	err = s.mustDataDB(ctx, a.UserID).QueryRowContext(ctx, `INSERT INTO smtp_accounts (user_id, label, host, port, username, encrypted_password, use_tls, auth_type, google_connection_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`, a.UserID, a.Label, a.Host, a.Port, a.Username, a.EncryptedPassword, boolInt(a.UseTLS), a.AuthType, a.GoogleConnectionID, ts, ts).Scan(&id)
 	if err != nil {
 		return SMTPAccount{}, err
 	}
@@ -462,7 +460,7 @@ func (s *Store) UpdateMailIdentityForUser(ctx context.Context, userID int64, in 
 			return rollback()
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE contacts SET display_name = ?, is_me = 1, is_primary = CASE WHEN ? THEN 1 ELSE is_primary END, updated_at = ? WHERE user_id = ? AND id = ?`, display, boolInt(in.IsPrimary), nowUnix(), userID, current.ContactID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE contacts SET display_name = ?, is_me = 1, is_primary = CASE WHEN ? <> 0 THEN 1 ELSE is_primary END, updated_at = ? WHERE user_id = ? AND id = ?`, display, boolInt(in.IsPrimary), nowUnix(), userID, current.ContactID); err != nil {
 		return rollback()
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE mail_identities SET smtp_account_id = ?, imap_account_id = ?, sent_mailbox_id = ?, drafts_mailbox_id = ?, archive_mailbox_id = ?, display_name = ?, signature = ?, autocrypt_enabled = ?, is_primary = ?, updated_at = ? WHERE user_id = ? AND id = ?`,

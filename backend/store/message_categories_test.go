@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,7 +24,7 @@ type categoryFixture struct {
 func newCategoryFixture(t *testing.T) categoryFixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

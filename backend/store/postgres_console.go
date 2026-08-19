@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/pgbind"
 	"rolltop/backend/sqlident"
 	"rolltop/backend/store/pgschema"
 )
@@ -165,7 +166,8 @@ func withPostgresConsoleConn(ctx context.Context, dsn string, run func(context.C
 	ctx, cancel := context.WithTimeout(ctx, postgresConsoleTimeout)
 	defer cancel()
 
-	db, err := sql.Open("pgx", dsn)
+	pgbind.Register()
+	db, err := sql.Open(pgbind.DriverName, dsn)
 	if err != nil {
 		return PostgresState{}, postgresError("open", err)
 	}

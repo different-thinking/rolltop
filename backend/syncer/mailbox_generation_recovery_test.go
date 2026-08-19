@@ -3,7 +3,6 @@ package syncer
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type recoveryHealthyAccountFetcher struct {
@@ -77,7 +77,7 @@ func (f *recoveryHealthyAccountFetcher) FetchUIDsWithUIDValidity(context.Context
 
 func TestRequestedNeverMailboxBypassRequiresExactRebuildMarker(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestRequestedNeverMailboxBypassRequiresExactRebuildMarker(t *testing.T) {
 func TestMailboxGenerationRecoveryRetriesUntilMarkerClears(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestMailboxGenerationRecoveryRetriesUntilMarkerClears(t *testing.T) {
 func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 
 func TestMailboxStatusFailureEndsSyncWithOriginalError(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestMailboxStatusFailureEndsSyncWithOriginalError(t *testing.T) {
 func TestMailboxGenerationRecoveryDeadlineReleasesReservationAndKeepsMarker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestMailboxGenerationRecoveryDeadlineReleasesReservationAndKeepsMarker(t *t
 
 func TestMailboxGenerationRecoveryQueuesOneInboxFirstPerUser(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestMailboxGenerationRecoveryQueuesOneInboxFirstPerUser(t *testing.T) {
 func TestMailboxGenerationRecoveryRotatesFailingAccountAndReopensRecoveredAccount(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestMailboxGenerationRecoveryAllowsOnlyHealthyInboxWriter(t *testing.T) {
 
 func TestMailboxGenerationRecoveryPollingDoesNotQueueBehindActiveMailbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestMailboxGenerationRecoveryPollingDoesNotQueueBehindActiveMailbox(t *test
 
 func TestMailboxGenerationRecoveryGateDefersTenantWorkUntilFinalMarker(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +745,7 @@ func TestMailboxGenerationRecoveryGateDefersTenantWorkUntilFinalMarker(t *testin
 
 func TestMailboxGenerationRecoveryRefreshCannotClearAnotherTenantGate(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -787,7 +787,7 @@ func TestMailboxGenerationRecoveryRefreshCannotClearAnotherTenantGate(t *testing
 func TestMailboxGenerationRecoverySignalWakesAndStopsEmptyLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -818,7 +818,7 @@ func TestMailboxGenerationRecoverySignalWakesAndStopsEmptyLoop(t *testing.T) {
 func TestMailboxGenerationRecoverySignalDuringLoopStopIsNotLost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +890,7 @@ func TestMailboxGenerationRecoverySignalDuringLoopStopIsNotLost(t *testing.T) {
 func TestMailboxGenerationRecoveryWaitsForCanceledAttachmentWorkerExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -962,7 +962,7 @@ func TestMailboxGenerationRecoveryWaitsForCanceledAttachmentWorkerExit(t *testin
 
 func TestMailboxGenerationRecoveryStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

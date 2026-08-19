@@ -6,15 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestSwipePreferencesAPIIsUserScopedAndValidatesArchiveFolders(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func authenticatedSwipePreferencesRequest(t *testing.T, server *Server, user sto
 // activity happens to bump the generation.
 func TestSavingSwipePreferencesRetiresCachedMailLists(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

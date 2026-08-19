@@ -11,13 +11,12 @@ import (
 	"testing"
 
 	"rolltop/backend/plugins"
-	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestAvailableThemesIncludesEnabledPluginThemes(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,8 +55,7 @@ func TestAvailableThemesIncludesEnabledPluginThemes(t *testing.T) {
 
 func TestPluginAssetRouteServesEnabledThemeAsset(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,8 +96,7 @@ func TestPluginAssetRouteServesEnabledThemeAsset(t *testing.T) {
 
 func TestPluginAssetRouteServesEnabledFrontendPluginAssets(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +18,7 @@ import (
 
 	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // fakePeople serves the two endpoints the sync uses. Pages and sync tokens are
@@ -171,7 +171,7 @@ func newSyncFixture(t *testing.T, fake *fakePeople) (*Syncer, *store.Store, stor
 	server := httptest.NewServer(fake.handler())
 	t.Cleanup(server.Close)
 
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

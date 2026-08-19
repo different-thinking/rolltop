@@ -4,7 +4,6 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +20,7 @@ func sessionLastSeen(t *testing.T, db *Store, tokenHash string) int64 {
 
 func TestGetSessionUserWritesLastSeenOnlyWhenStale(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +66,7 @@ func TestGetSessionUserWritesLastSeenOnlyWhenStale(t *testing.T) {
 // throttle still holds once the burst is over.
 func TestConcurrentSessionLookupsKeepLastSeenConsistent(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

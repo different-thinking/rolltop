@@ -2,18 +2,18 @@ package web
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
 func TestServerStartupRecoversOverdueInboxArrival(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

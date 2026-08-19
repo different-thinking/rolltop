@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/theme"
 )
 
@@ -162,7 +163,7 @@ func TestFrontendShellRequestsTheManifestWithCredentials(t *testing.T) {
 
 func TestHandleWebManifestServesEachReaderTheirOwnThemeAndNeverCachesIt(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

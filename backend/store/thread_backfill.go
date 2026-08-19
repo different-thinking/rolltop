@@ -17,30 +17,6 @@ func (s *Store) BackfillThreadKeys(ctx context.Context, limit int) (int, error) 
 	if limit <= 0 || limit > 10000 {
 		limit = 10000
 	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
-		total := 0
-		remaining := limit
-		for _, user := range users {
-			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
-			}
-			n, err := us.BackfillThreadKeys(ctx, remaining)
-			if err != nil {
-				return total, err
-			}
-			total += n
-			remaining -= n
-		}
-		return total, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, message_id_header, in_reply_to, references_header, subject
 		FROM messages WHERE thread_key = '' ORDER BY id LIMIT ?`, limit)
 	if err != nil {
@@ -81,31 +57,6 @@ func (s *Store) BackfillThreadKeys(ctx context.Context, limit int) (int, error) 
 func (s *Store) BackfillThreadHeadersFromBlobs(ctx context.Context, dataDir string, limit int) (int, int, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
-	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, 0, err
-		}
-		totalChecked, totalUpdated := 0, 0
-		remaining := limit
-		for _, user := range users {
-			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return totalChecked, totalUpdated, err
-			}
-			checked, updated, err := us.BackfillThreadHeadersFromBlobs(ctx, dataDir, remaining)
-			if err != nil {
-				return totalChecked, totalUpdated, err
-			}
-			totalChecked += checked
-			totalUpdated += updated
-			remaining -= checked
-		}
-		return totalChecked, totalUpdated, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, blob_path, message_id_header, in_reply_to, references_header, subject, thread_key
 		FROM messages WHERE thread_headers_checked_at = 0 AND blob_path != '' ORDER BY id LIMIT ?`, limit)

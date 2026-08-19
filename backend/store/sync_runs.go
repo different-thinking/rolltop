@@ -14,11 +14,9 @@ import (
 // CreateSyncRun starts a sync progress row for one user/account.
 func (s *Store) CreateSyncRun(ctx context.Context, userID, accountID int64) (SyncRun, error) {
 	started := nowUnix()
-	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO sync_runs (user_id, account_id, status, started_at, updated_at) VALUES (?, ?, 'running', ?, ?)`, userID, accountID, started, started)
-	if err != nil {
-		return SyncRun{}, err
-	}
-	id, err := res.LastInsertId()
+	var id int64
+	err := s.mustDataDB(ctx, userID).QueryRowContext(ctx, `INSERT INTO sync_runs (user_id, account_id, status, started_at, updated_at) VALUES (?, ?, 'running', ?, ?)
+		RETURNING id`, userID, accountID, started, started).Scan(&id)
 	if err != nil {
 		return SyncRun{}, err
 	}
@@ -31,25 +29,6 @@ func (s *Store) CreateSyncRun(ctx context.Context, userID, accountID int64) (Syn
 func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration) (int64, error) {
 	if maxAge <= 0 {
 		return 0, fmt.Errorf("stale sync run age must be positive")
-	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
-		var total int64
-		for _, user := range users {
-			userStore, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
-			}
-			n, err := userStore.InterruptStaleSyncRuns(ctx, maxAge)
-			if err != nil {
-				return total, err
-			}
-			total += n
-		}
-		return total, nil
 	}
 	now := nowUnix()
 	cutoff := time.Now().Add(-maxAge).Unix()
@@ -65,25 +44,6 @@ func (s *Store) InterruptStaleSyncRuns(ctx context.Context, maxAge time.Duration
 
 // MarkRunningSyncRunsInterrupted marks stale running jobs interrupted during startup recovery.
 func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context) (int64, error) {
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
-		var total int64
-		for _, user := range users {
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
-			}
-			n, err := us.MarkRunningSyncRunsInterrupted(ctx)
-			if err != nil {
-				return total, err
-			}
-			total += n
-		}
-		return total, nil
-	}
 	now := nowUnix()
 	res, err := s.db.ExecContext(ctx, `UPDATE sync_runs
 		SET status = 'interrupted', finished_at = ?, updated_at = ?, error = CASE WHEN error = '' THEN 'Server restarted before this sync finished.' ELSE error END
@@ -117,7 +77,7 @@ func (s *Store) UpdateSyncRunProgress(ctx context.Context, userID, id int64, p S
 			latest_new_from = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_from END,
 			latest_new_subject = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_subject END,
 			latest_new_message_id = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_message_id END,
-			new_messages = MAX(new_messages, ?), messages_total = ?, mailboxes_done = ?, mailboxes_total = ?, current_mailbox = ?, current_uid = ?
+			new_messages = GREATEST(new_messages, ?), messages_total = ?, mailboxes_done = ?, mailboxes_total = ?, current_mailbox = ?, current_uid = ?
 		WHERE user_id = ? AND id = ?`,
 		nowUnix(), p.MessagesSeen, p.MessagesStored, p.MessagesSkipped,
 		p.NewMessages, p.LatestNewFrom, p.NewMessages, p.LatestNewSubject,
@@ -137,7 +97,7 @@ func (s *Store) FinishSyncRun(ctx context.Context, userID, id int64, status stri
 			latest_new_from = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_from END,
 			latest_new_subject = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_subject END,
 			latest_new_message_id = CASE WHEN ? >= new_messages THEN ? ELSE latest_new_message_id END,
-			new_messages = MAX(new_messages, ?), messages_total = ?,
+			new_messages = GREATEST(new_messages, ?), messages_total = ?,
 			mailboxes_done = ?, mailboxes_total = ?, current_mailbox = ?, current_uid = ?, error = ?
 		WHERE user_id = ? AND id = ? AND NOT (status = 'interrupted' AND finished_at != 0)`,
 		status, now, now, p.MessagesSeen, p.MessagesStored, p.MessagesSkipped,
@@ -319,23 +279,6 @@ func syncRunNoopFolderKey(run SyncRun) string {
 
 // ListUserIDsWithAccounts returns user IDs that have IMAP accounts for background scheduling.
 func (s *Store) ListUserIDsWithAccounts(ctx context.Context) ([]int64, error) {
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var ids []int64
-		for _, user := range users {
-			var count int
-			if err := s.mustDataDB(ctx, user.ID).QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_accounts WHERE user_id = ?`, user.ID).Scan(&count); err != nil {
-				return nil, err
-			}
-			if count > 0 {
-				ids = append(ids, user.ID)
-			}
-		}
-		return ids, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT user_id FROM mail_accounts ORDER BY user_id`)
 	if err != nil {
 		return nil, err

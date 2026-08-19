@@ -4,13 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 )
 
 func TestBlobCleanupQueueCompletesNormalDeletion(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +64,7 @@ func TestBlobCleanupQueueCompletesNormalDeletion(t *testing.T) {
 
 func TestBlobCleanupQueueFailureAndCrashSurviveReopen(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +81,7 @@ func TestBlobCleanupQueueFailureAndCrashSurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +100,7 @@ func TestBlobCleanupQueueFailureAndCrashSurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +119,7 @@ func TestBlobCleanupQueueFailureAndCrashSurviveReopen(t *testing.T) {
 
 func TestBlobCleanupQueueProtectsBlobAndPathReuse(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +184,7 @@ func TestBlobCleanupQueueProtectsBlobAndPathReuse(t *testing.T) {
 
 func TestBlobCleanupQueueIsTenantIsolatedAndTransactionFailureRetainsState(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +216,17 @@ func TestBlobCleanupQueueIsTenantIsolatedAndTransactionFailureRetainsState(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The injected failure is a trigger that refuses the delete, so the
+	// transaction fails after the filesystem callback has already run — which is
+	// the ordering the retry behaviour below depends on.
+	if _, err := userDB.ExecContext(ctx, `CREATE FUNCTION fail_blob_cleanup_queue_delete() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected cleanup transaction failure'; END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := userDB.ExecContext(ctx, `CREATE TRIGGER fail_blob_cleanup_queue_delete
 		BEFORE DELETE ON blob_cleanup_queue
-		BEGIN SELECT RAISE(ABORT, 'injected cleanup transaction failure'); END`); err != nil {
+		FOR EACH ROW EXECUTE FUNCTION fail_blob_cleanup_queue_delete()`); err != nil {
 		t.Fatal(err)
 	}
 	callbackCalls := 0
@@ -241,7 +247,7 @@ func TestBlobCleanupQueueIsTenantIsolatedAndTransactionFailureRetainsState(t *te
 	if err != nil || len(ownerEntries) != 1 {
 		t.Fatalf("transaction failure queue=%+v err=%v", ownerEntries, err)
 	}
-	if _, err := userDB.ExecContext(ctx, `DROP TRIGGER fail_blob_cleanup_queue_delete`); err != nil {
+	if _, err := userDB.ExecContext(ctx, `DROP TRIGGER fail_blob_cleanup_queue_delete ON blob_cleanup_queue`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CompleteBlobCleanup(ctx, owner.ID, entry.ID, func(string) error {

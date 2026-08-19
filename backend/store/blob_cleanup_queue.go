@@ -42,7 +42,7 @@ func (s *Store) QueueBlobCleanupIfUnreferenced(ctx context.Context, userID, blob
 	now := nowUnix()
 	result, err := tx.ExecContext(ctx, `INSERT INTO blob_cleanup_queue
 		(user_id, blob_id, blob_path, blob_sha256, blob_size, blob_created_at, created_at, updated_at)
-		SELECT blob.user_id, blob.id, blob.path, blob.sha256, blob.size, blob.created_at, ?, ?
+		SELECT blob.user_id, blob.id, blob.path, blob.sha256, blob.size, blob.created_at, CAST(? AS BIGINT), CAST(? AS BIGINT)
 		FROM blobs blob
 		WHERE blob.user_id = ? AND blob.id = ?
 		AND NOT EXISTS (SELECT 1 FROM messages
@@ -229,14 +229,14 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 }
 
 func blobReferencedTx(ctx context.Context, tx *sql.Tx, userID, blobID int64) (bool, error) {
-	var referenced int
+	var referenced bool
 	err := tx.QueryRowContext(ctx, `SELECT
 		EXISTS (SELECT 1 FROM messages WHERE user_id = ? AND blob_id = ?)
 		OR EXISTS (SELECT 1 FROM attachments WHERE user_id = ? AND blob_id = ?)
 		OR EXISTS (SELECT 1 FROM contact_icons WHERE user_id = ? AND blob_id = ?)
 		OR EXISTS (SELECT 1 FROM remote_image_cache WHERE user_id = ? AND blob_id = ?)`,
 		userID, blobID, userID, blobID, userID, blobID, userID, blobID).Scan(&referenced)
-	return referenced != 0, err
+	return referenced, err
 }
 
 func finishBlobCleanupTx(ctx context.Context, tx *sql.Tx, userID, cleanupID int64) error {

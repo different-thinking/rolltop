@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -23,8 +22,7 @@ type journaledSnoozeFixture struct {
 
 func TestNewMailArrivalCancelsJournaledSnoozeAcrossMailboxAndRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "rolltop.db")
-	db, err := Open(path)
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +77,7 @@ func TestNewMailArrivalCancelsJournaledSnoozeAcrossMailboxAndRestart(t *testing.
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = Open(path)
+	db, err = openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

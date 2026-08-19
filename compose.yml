@@ -1,0 +1,53 @@
+# Rolltop and the PostgreSQL database it needs.
+#
+# The database volume belongs on a local disk or a block device, never on a
+# network filesystem — that is the storage class the whole migration to
+# PostgreSQL was about, and putting the server's data directory back on CephFS,
+# NFS, or a Docker Desktop share reintroduces it one layer down.
+#
+# `/data` still holds the message blobs and the Bleve search indexes, and is
+# still one-process-only: the app takes an exclusive lock on it at startup.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rolltop
+      POSTGRES_DB: rolltop
+      # Set POSTGRES_PASSWORD in .env.rolltop and keep it with the same care as
+      # ROLLTOP_MASTER_KEY.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.rolltop}
+    volumes:
+      - rolltop-db:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits for the database itself (ROLLTOP_DB_CONNECT_TIMEOUT), so
+      # this is for `docker compose ps` and for ordering, not a correctness
+      # requirement.
+      test: ["CMD-SHELL", "pg_isready -U rolltop -d rolltop"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  rolltop:
+    image: ghcr.io/grahamsz/rolltop:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.rolltop
+    environment:
+      ROLLTOP_DATABASE_URL: postgres://rolltop:${POSTGRES_PASSWORD}@db:5432/rolltop?sslmode=disable
+    volumes:
+      - rolltop-data:/data
+    # One data directory belongs to one process, so the replacement container
+    # has to wait for this one to let go of it. The grace period covers draining
+    # HTTP and closing the search index; the database needs nothing flushed.
+    stop_grace_period: 30s
+
+volumes:
+  rolltop-db:
+  rolltop-data:

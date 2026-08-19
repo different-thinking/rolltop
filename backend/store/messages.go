@@ -92,7 +92,8 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 	if !mailparse.ValidCategory(category) {
 		category = ""
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO messages
+	var id int64
+	err = tx.QueryRowContext(ctx, `INSERT INTO messages
 			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, import_completed_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			-- A correction the user made for this sender outranks what the
@@ -102,11 +103,17 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 			-- before any category, corrected or not, can apply to it.
 			COALESCE((SELECT o.category FROM category_sender_overrides o
 				WHERE o.user_id = ? AND o.sender = ? AND ? <> ''), ?),
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		-- The conflict is handled rather than raised. Recovering from the error
+		-- would mean continuing inside a transaction PostgreSQL has already
+		-- aborted, so the "this UID is already mirrored" path below is reached
+		-- through an empty RETURNING instead.
+		ON CONFLICT (user_id, account_id, mailbox_id, uid) DO NOTHING
+		RETURNING id`,
 		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, m.UserID, senderAddress, category, category, m.ToAddr, m.CCAddr,
-		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), importCompletedAt, ts, ts)
+		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), importCompletedAt, ts, ts).Scan(&id)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed: messages.user_id, messages.account_id, messages.mailbox_id, messages.uid") {
+		if errors.Is(err, sql.ErrNoRows) {
 			var existingID int64
 			if m.UIDValidity > 0 {
 				var storedUIDValidity int64
@@ -145,10 +152,6 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 			}
 			return s.GetMessageByUID(ctx, m.UserID, m.AccountID, m.MailboxID, m.UID)
 		}
-		return MessageRecord{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
 		return MessageRecord{}, err
 	}
 	if err := restoreMailboxGenerationStateTx(ctx, tx, id, m); err != nil {
@@ -246,7 +249,8 @@ func (s *Store) CreateLocation(ctx context.Context, userID, messageID, mailboxID
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT OR IGNORE INTO locations (user_id, message_id, mailbox_id, uid, created_at) VALUES (?, ?, ?, ?, ?)`,
+	_, err = db.ExecContext(ctx, `INSERT INTO locations (user_id, message_id, mailbox_id, uid, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		userID, messageID, mailboxID, uid, nowUnix())
 	return err
 }

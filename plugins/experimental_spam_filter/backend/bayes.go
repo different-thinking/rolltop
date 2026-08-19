@@ -994,7 +994,7 @@ func personalBayesLabelDeltas(label string, direction int64) (int64, int64) {
 }
 
 func requirePersonalBayesMessageOwner(ctx context.Context, tx *sql.Tx, userID, messageID int64) error {
-	var exists int
+	var exists bool
 	err := tx.QueryRowContext(ctx, `SELECT 1 FROM messages WHERE user_id = ? AND id = ?`, userID, messageID).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPersonalBayesMessageNotOwned
@@ -1559,7 +1559,7 @@ func changePersonalBayesTokens(ctx context.Context, tx *sql.Tx, userID int64, to
 	update, err := tx.PrepareContext(ctx, `UPDATE plugin_experimental_spam_bayes_tokens
 		SET spam_messages = spam_messages + ?,
 		    ham_messages = ham_messages + ?,
-		    last_seen = MAX(last_seen, ?)
+		    last_seen = GREATEST(last_seen, ?)
 		WHERE user_id = ? AND token_hash = ?`)
 	if err != nil {
 		return err

@@ -2,14 +2,13 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +121,7 @@ func TestSnoozeLifecycleVisibilityReminderAndTenantIsolation(t *testing.T) {
 
 func TestSnoozeEmptyStoredThreadKeyMatchesListQueries(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +149,7 @@ func TestSnoozeEmptyStoredThreadKeyMatchesListQueries(t *testing.T) {
 
 func TestResnoozeWithNewThreadAnchorRemovesObsoleteReminderEvent(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +185,7 @@ func TestResnoozeWithNewThreadAnchorRemovesObsoleteReminderEvent(t *testing.T) {
 
 func TestNewMailEventAtomicallyCancelsOnlyCurrentActiveConversationSnooze(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +243,7 @@ func TestNewMailEventAtomicallyCancelsOnlyCurrentActiveConversationSnooze(t *tes
 
 func TestSnoozeReminderWebPushCursorIsIndependentAndUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

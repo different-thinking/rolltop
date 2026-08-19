@@ -122,10 +122,6 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiAdminPostgresSchema(w, r)
 	case path == "admin/database":
 		s.apiAdminDatabase(w, r)
-	case path == "admin/database/job":
-		s.apiAdminDatabaseJob(w, r)
-	case strings.HasPrefix(path, "admin/database/"):
-		s.apiAdminDatabaseAction(w, r, strings.TrimPrefix(path, "admin/database/"))
 	case path == "admin/log":
 		s.apiAdminLog(w, r)
 	case path == "admin/remote-image-blocklist":

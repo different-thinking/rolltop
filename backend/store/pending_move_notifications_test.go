@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +12,7 @@ import (
 
 func TestPendingMoveNotificationIsScopedByTenantAccountMailboxAndRawHash(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +70,7 @@ func TestPendingMoveNotificationIsScopedByTenantAccountMailboxAndRawHash(t *test
 
 func TestPendingMoveNotificationCardinalityAndRetryIdempotency(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +117,7 @@ func TestPendingMoveNotificationCardinalityAndRetryIdempotency(t *testing.T) {
 
 func TestPendingMoveNotificationCanBeRemovedAndExpires(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +164,7 @@ func TestPendingMoveNotificationCanBeRemovedAndExpires(t *testing.T) {
 
 func TestPendingMoveNotificationConsumptionAndEventDecisionAreAtomic(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

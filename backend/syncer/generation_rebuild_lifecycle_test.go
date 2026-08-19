@@ -11,6 +11,7 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -37,9 +38,8 @@ func (f *interruptingGenerationFetcher) FetchMailboxWithUIDValidity(ctx context.
 func TestGenerationRebuildResumesWithoutRepairNotificationOrSnoozeCancellation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "rolltop.db")
 	searchPath := filepath.Join(dir, "bleve")
-	db, err := store.Open(dbPath)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestGenerationRebuildResumesWithoutRepairNotificationOrSnoozeCancellation(t
 		t.Fatal(err)
 	}
 
-	db, err = store.Open(dbPath)
+	db, err = storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

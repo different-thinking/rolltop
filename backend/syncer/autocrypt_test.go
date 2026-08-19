@@ -11,6 +11,7 @@ import (
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/plugins/client_side_pgp/backend/keystore"
 )
 
@@ -154,7 +155,7 @@ func autocryptTestStore(t *testing.T) *store.Store {
 	} else if !ok {
 		t.Fatal("client_side_pgp backend plugin was not discovered")
 	}
-	db, err := store.OpenServerWithPluginManifests(filepath.Join(t.TempDir(), "rolltop.db"), t.TempDir(), manifests, nil)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

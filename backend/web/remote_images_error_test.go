@@ -7,10 +7,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
-	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/internal/testlog"
 )
 
@@ -19,7 +18,7 @@ import (
 // from being answered as an ordinary cache miss.
 func TestRemoteImageLookupFailureIsAServerError(t *testing.T) {
 	logs := testlog.Capture(t)
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

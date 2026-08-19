@@ -9,13 +9,14 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestPurgeMailboxSearchIndexReportsIncrementalProgressAt251Documents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestPurgeMailboxSearchIndexReportsIncrementalProgressAt251Documents(t *test
 func TestPurgeMailboxSearchIndexHidesProgressWithoutRequeueingAttachments(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

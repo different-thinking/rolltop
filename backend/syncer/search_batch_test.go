@@ -12,12 +12,13 @@ import (
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestFetchedSearchBatchRemovesMessageDeletedBeforeMetadataCommit(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestFetchedSearchBatchRemovesMessageDeletedBeforeMetadataCommit(t *testing.
 func TestFetchedSearchBatchFlushesOnRetainedPayloadBudget(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +176,7 @@ func TestFetchedSearchBatchFlushesOnRetainedPayloadBudget(t *testing.T) {
 // message would pay a Bleve commit for every mail in a first sync.
 func TestFetchedSearchBatchKeepsCountCadenceForOrdinaryMail(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

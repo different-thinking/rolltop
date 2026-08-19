@@ -79,30 +79,6 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return 0, err
-		}
-		total := 0
-		remaining := limit
-		for _, user := range users {
-			if remaining <= 0 {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return total, err
-			}
-			n, err := us.CompactMessageBodiesBefore(ctx, cutoff, previewLimit, remaining)
-			if err != nil {
-				return total, err
-			}
-			total += n
-			remaining -= n
-		}
-		return total, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, body_text FROM messages
 		WHERE date_unix < ? AND (body_html != '' OR length(body_text) > ?)
 		ORDER BY date_unix, id LIMIT ?`, cutoff.UTC().Unix(), previewLimit, limit)
@@ -163,28 +139,6 @@ func (s *Store) ListMessagesWithPrunableBlobs(ctx context.Context, cutoff time.T
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]MessageRecord, 0, limit)
-		for _, user := range users {
-			if len(out) >= limit {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
-			}
-			items, err := us.ListMessagesWithPrunableBlobs(ctx, cutoff, limit-len(out))
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, items...)
-		}
-		return out, nil
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
 			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at, category
 		FROM messages WHERE blob_path != '' AND date_unix < ? ORDER BY date_unix, id LIMIT ?`, cutoff.UTC().Unix(), limit)
@@ -199,28 +153,6 @@ func (s *Store) ListMessagesWithPrunableBlobs(ctx context.Context, cutoff time.T
 func (s *Store) ListMessagesWithExpiredCachedBlobs(ctx context.Context, cutoff time.Time, limit int) ([]MessageRecord, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 500
-	}
-	if s.split {
-		users, err := s.ServiceableUsers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]MessageRecord, 0, limit)
-		for _, user := range users {
-			if len(out) >= limit {
-				break
-			}
-			us, err := s.UserStore(ctx, user.ID)
-			if err != nil {
-				return nil, err
-			}
-			items, err := us.ListMessagesWithExpiredCachedBlobs(ctx, cutoff, limit-len(out))
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, items...)
-		}
-		return out, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.blob_id, m.message_id_header, m.in_reply_to, m.references_header, m.thread_key, m.subject, m.language_code, m.from_addr, m.to_addr, m.cc_addr,
 			m.date_unix, m.internal_date_unix, m.uid, m.size, m.blob_path, m.body_text, m.body_html, m.is_read, m.read_sync_pending, m.is_starred, m.star_sync_pending, m.has_attachments, m.is_encrypted, m.is_signed, m.attachment_indexed_at, m.created_at, m.updated_at, m.category

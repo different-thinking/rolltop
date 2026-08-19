@@ -202,15 +202,11 @@ func (s *Store) ApplyPluginMigrations(ctx context.Context, pluginID string) erro
 	return nil
 }
 
+// pluginMigrationScopes returns both scopes. The split between a system and a
+// per-tenant database is what made this a choice; one database holds both, so a
+// plugin's system and user migrations apply to the same place.
 func (s *Store) pluginMigrationScopes() []string {
-	switch s.schema {
-	case schemaSystem:
-		return []string{plugins.ScopeSystem}
-	case schemaUser:
-		return []string{plugins.ScopeUser}
-	default:
-		return []string{plugins.ScopeSystem, plugins.ScopeUser}
-	}
+	return []string{plugins.ScopeSystem, plugins.ScopeUser}
 }
 
 func (s *Store) pluginDefinition(ctx context.Context, id string) (plugins.Definition, bool, bool, error) {
@@ -326,26 +322,28 @@ func (s *Store) applyPluginMigrationsForScope(ctx context.Context, scope string)
 	return nil
 }
 
+// pluginColumnExists answers whether a plugin's table already carries a column.
+//
+// It exists because SQLite had no ADD COLUMN IF NOT EXISTS, and it survives the
+// move because the interface plugins are written against does — EnsureColumns
+// still takes a column list and adds what is missing.
+//
+// to_regclass resolves the table through search_path, which is deliberately the
+// same resolution the ALTER TABLE that follows will use. Looking the column up
+// in current_schema() instead asks about a different table whenever the two
+// disagree — which they do on a server that has a schema named after the
+// connecting role, where current_schema() is that schema while an unqualified
+// table name still falls through to public.
 func pluginColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	var exists bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_attribute
+			WHERE attrelid = to_regclass(?) AND attname = ? AND attnum > 0 AND NOT attisdropped
+		)`, table, column).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
+	return exists, nil
 }
 
 func (s *Store) pluginMigrationsForScope(scope string) []plugins.Migration {

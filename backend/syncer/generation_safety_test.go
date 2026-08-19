@@ -3,13 +3,13 @@ package syncer
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type generationRecoveryBatchFetcher struct {
@@ -391,7 +391,7 @@ func TestRunnerServiceYieldsDiscoveredGenerationToSerializedRecovery(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

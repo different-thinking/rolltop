@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +14,7 @@ import (
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // backfillFetcher mirrors a folder that holds more history than one bounded turn
@@ -176,7 +176,7 @@ func latestSyncRun(t *testing.T, ctx context.Context, db *store.Store, userID in
 
 func TestBoundedTurnPausesIncrementalFetchWithoutFailingTheRun(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestBoundedTurnPausesIncrementalFetchWithoutFailingTheRun(t *testing.T) {
 
 func TestBoundedTurnPausesFolderRepairAndKeepsMirroredMessages(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestBoundedTurnPausesFolderRepairAndKeepsMirroredMessages(t *testing.T) {
 func TestPausedInboxTurnResumesWithoutWaitingForTheNextPoll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func deadlineTurnContext(t *testing.T, parent context.Context) context.Context {
 
 func TestTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
 
 func TestRepairTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestRepairTurnCutOffInsideItsFetchStillKeepsWhatItMirrored(t *testing.T) {
 
 func TestBoundedTurnThatMirrorsNothingStillReportsFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestSharedMailboxJobLeavesEarnedTurnBudgetsAlone(t *testing.T) {
 func TestTurnThatNeverRanReturnsTheFolderToItsFreshnessBudget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestTurnThatNeverRanReturnsTheFolderToItsFreshnessBudget(t *testing.T) {
 func TestBackfillTurnsGrowUntilTheFolderIsMirrored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

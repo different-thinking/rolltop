@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"rolltop/backend/store/storetest"
 )
 
 func TestDomainFromAddress(t *testing.T) {
@@ -49,19 +49,21 @@ func TestPublicIPRejectsPrivateAddresses(t *testing.T) {
 
 func TestGetIconMetaReturnsScopedMetadata(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite3", ":memory:")
+	store, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	for _, stmt := range Migrations()[0].Statements {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			t.Fatal(err)
-		}
+	db := store.DB()
+	// The plugin's tables are part of the baseline the test database carries, so
+	// its migrations are not re-run here. What the fixture still needs is the
+	// user its rows reference.
+	user, err := store.CreateUser(ctx, "plugin@example.test", "Plugin", "hash", false)
+	if err != nil {
+		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	if err := UpsertIcon(ctx, db, Icon{
-		UserID:    7,
+		UserID:    user.ID,
 		Domain:    "example.com",
 		LogoURL:   "https://example.com/logo.svg",
 		SVG:       `<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>`,
@@ -72,14 +74,14 @@ func TestGetIconMetaReturnsScopedMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	meta, err := GetIconMeta(ctx, db, 7, "EXAMPLE.com")
+	meta, err := GetIconMeta(ctx, db, user.ID, "EXAMPLE.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if meta.Domain != "example.com" || meta.Status != "ok" || !meta.HasSVG {
 		t.Fatalf("meta = %+v", meta)
 	}
-	if _, err := GetIconMeta(ctx, db, 8, "example.com"); err != sql.ErrNoRows {
+	if _, err := GetIconMeta(ctx, db, user.ID+1, "example.com"); err != sql.ErrNoRows {
 		t.Fatalf("other user err = %v, want %v", err, sql.ErrNoRows)
 	}
 }

@@ -1,9 +1,13 @@
-// File overview: Admin database maintenance page. It surfaces the SQLite files
-// behind the mirror with their integrity state, and runs the three maintenance
-// operations that previously needed a shell: verify, back up, and repair.
-// Verify and back up run in the background on the live server; repair is
-// scheduled and runs during the restart it triggers, because a tenant database
-// can only be replaced while nothing holds a handle on it.
+// File overview: Admin database page. It reports where the mirror is stored and
+// how that storage is doing — the PostgreSQL connection and its size, and the
+// data volume that still holds the blobs and the search index.
+//
+// It runs nothing. The three operations it used to offer (verify, back up,
+// repair) were all SQLite maintenance and went with it: integrity is the
+// database server's problem now, and backups are `pg_dump` on a schedule rather
+// than a button that writes into the volume it is protecting against. The one
+// place that still acts is the PostgreSQL migration console below, which is
+// deliberately its own card.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -22,7 +26,6 @@ import type {
   ServerLogLine
 } from "../../../types";
 
-const JOB_POLL_MS = 1500;
 const IDLE_POLL_MS = 15000;
 
 // Go zero times arrive as year 1; they mean "never happened", not a date.
@@ -33,21 +36,21 @@ function formatTimestamp(value: string | undefined, datePrefs?: DatePrefs): stri
   return displayDateTime(value, datePrefs);
 }
 
+// databaseLabel and databaseTone follow the same convention as preflightState
+// and stageState below: status in, a label and a tone out, rendered through the
+// shared `database-state is-${tone}` badge.
 function databaseLabel(database: DatabaseStatus): string {
-  if (database.scope === "system") return "Installation database";
-  return database.email ? `User ${database.user_id} — ${database.email}` : `User ${database.user_id}`;
+  if (!database.reachable) return "Unreachable";
+  if (database.in_recovery) return "Read-only replica";
+  return "Connected";
 }
 
-function databaseState(database: DatabaseStatus): { label: string; tone: "ok" | "warn" | "bad" } {
-  if (database.missing) return { label: "Missing", tone: "warn" };
-  if (database.corrupt) return { label: "Damaged", tone: "bad" };
-  if (database.repair_scheduled) return { label: "Repair scheduled", tone: "warn" };
-  return { label: "No problems reported", tone: "ok" };
+function databaseTone(database: DatabaseStatus): "ok" | "warn" | "bad" {
+  if (!database.reachable) return "bad";
+  if (database.in_recovery) return "warn";
+  return "ok";
 }
 
-// Mirrors databaseState above so the shared .database-state badge keeps one
-// mapping convention: status in, {label, tone} out, rendered through the same
-// `database-state is-${tone}` template.
 function preflightState(status: PostgresPreflightCheck["status"]): { label: string; tone: "ok" | "warn" | "bad" } {
   if (status === "pass") return { label: "Pass", tone: "ok" };
   if (status === "fail") return { label: "Fail", tone: "bad" };
@@ -283,7 +286,7 @@ function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: 
 export function AdminDatabaseView({
   csrf,
   datePrefs,
-  addToast
+  addToast: _addToast
 }: {
   csrf: string;
   datePrefs?: DatePrefs;
@@ -292,13 +295,10 @@ export function AdminDatabaseView({
   const [overview, setOverview] = useState<DatabaseOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [confirmRepair, setConfirmRepair] = useState<DatabaseStatus | null>(null);
   const [logLines, setLogLines] = useState<ServerLogLine[] | null>(null);
   const [logError, setLogError] = useState("");
   const [logBusy, setLogBusy] = useState(false);
   const mounted = useRef(true);
-  const cancelRef = useRef<HTMLButtonElement>(null);
   const logListRef = useRef<HTMLOListElement>(null);
 
   const load = useCallback(async () => {
@@ -342,114 +342,28 @@ export function AdminDatabaseView({
     list.scrollTop = list.scrollHeight;
   }, [logLines]);
 
+  // There is no job to follow any more, so this is a plain refresh. The status
+  // query is one round trip against the database, which is also the number the
+  // card reports.
   useEffect(() => {
     mounted.current = true;
     let timer: number | undefined;
-    // A running job only changes its own log, so the fast poll asks for the job
-    // alone; the full overview walks every backup directory and reads a marker
-    // per tenant and stays on the slow cadence.
-    const tick = async (jobOnly: boolean) => {
-      let running = false;
-      if (jobOnly) {
-        try {
-          const { job: current } = await api.databaseJob();
-          if (!mounted.current) return;
-          running = Boolean(current?.running);
-          setOverview((previous) => (previous ? { ...previous, job: current } : previous));
-        } catch {
-          running = false;
-        }
-        if (!running) await load();
-      } else {
-        const data = await load();
-        running = Boolean(data?.job?.running);
-      }
+    const tick = async () => {
+      await load();
       if (!mounted.current) return;
-      timer = window.setTimeout(() => void tick(running), running ? JOB_POLL_MS : IDLE_POLL_MS);
+      timer = window.setTimeout(() => void tick(), IDLE_POLL_MS);
     };
-    void tick(false);
+    void tick();
     return () => {
       mounted.current = false;
       if (timer) window.clearTimeout(timer);
     };
   }, [load]);
 
-  // aria-modal tells assistive technology the page behind the overlay is
-  // inert, so focus has to move into the dialog and Escape has to leave it.
-  useEffect(() => {
-    if (!confirmRepair) return;
-    cancelRef.current?.focus();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) setConfirmRepair(null);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirmRepair, busy]);
-
-  async function runCheck(scope: string, userID: number) {
-    setBusy(true);
-    try {
-      await api.checkDatabases(csrf, scope, userID);
-      addToast(scope ? "Checking this database." : "Checking all databases.");
-      await load();
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runBackup() {
-    setBusy(true);
-    try {
-      await api.backupDatabases(csrf);
-      addToast("Backup started.");
-      await load();
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function scheduleRepair(database: DatabaseStatus) {
-    setBusy(true);
-    try {
-      const result = await api.scheduleDatabaseRepair(csrf, database.user_id);
-      setConfirmRepair(null);
-      addToast(
-        result.restarting
-          ? "Repair scheduled. Rolltop is restarting to run it."
-          : "Repair scheduled. It runs the next time Rolltop starts."
-      );
-      // The server is already going down; a reload here would only surface a
-      // fetch error right after the success toast.
-      if (!result.restarting) await load();
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function cancelRepair(database: DatabaseStatus) {
-    setBusy(true);
-    try {
-      await api.cancelDatabaseRepair(csrf, database.user_id);
-      addToast("Scheduled repair cancelled.");
-      await load();
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const job = overview?.job || null;
-  const jobRunning = Boolean(job?.running);
-  const backups = overview?.backups || [];
+  const database = overview?.database || null;
+  const volume = overview?.volume || null;
   const freePercent =
-    overview && overview.total_bytes > 0 ? Math.round((overview.free_bytes / overview.total_bytes) * 100) : null;
+    volume && volume.total_bytes > 0 ? Math.round((volume.free_bytes / volume.total_bytes) * 100) : null;
   const lowDisk = freePercent !== null && freePercent < 10;
 
   return (
@@ -457,153 +371,73 @@ export function AdminDatabaseView({
       <header className="settings-page-header">
         <h1>Database</h1>
         <p>
-          Verify, back up, and repair the SQLite files behind the local mirror. Verifying and backing up run while
-          Rolltop keeps serving. A repair replaces the file, so it is scheduled and runs during a restart.
+          Where the mirror is stored and how it is doing. The mail metadata lives in PostgreSQL; the message
+          blobs and the search indexes are still on this server&rsquo;s data volume.
         </p>
       </header>
 
       {error ? <p className="settings-error">{error}</p> : null}
       {loading && !overview ? <p className="settings-hint">Loading database status…</p> : null}
 
-      {overview ? (
+      {database ? (
+        <table className="database-table">
+          <tbody>
+            <tr>
+              <td>
+                <strong>PostgreSQL</strong>
+                <small className="database-path">{database.target}</small>
+              </td>
+              <td>
+                {database.reachable ? formatBytes(database.bytes) : "—"}
+                {database.reachable ? (
+                  <small>{database.latency_millis.toFixed(2)} ms round trip</small>
+                ) : null}
+              </td>
+              <td>
+                <span className={`database-state is-${databaseTone(database)}`}>{databaseLabel(database)}</span>
+                {database.error ? <small className="database-detail">{database.error}</small> : null}
+                {database.reachable ? (
+                  <small className="database-detail">
+                    {database.server_version}
+                    {" · "}
+                    {database.connections} of {database.pool_max_conns} pooled connections in use
+                  </small>
+                ) : null}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      ) : null}
+
+      {volume ? (
         <>
           <div className="database-toolbar">
-            <button type="button" className="secondary" disabled={busy || jobRunning} onClick={() => void runCheck("", 0)}>
-              <Icon name="search" />
-              Check all databases
-            </button>
-            <button type="button" className="secondary" disabled={busy || jobRunning} onClick={() => void runBackup()}>
-              <Icon name="archive" />
-              Create backup
-            </button>
             <span className={`database-disk${lowDisk ? " is-low" : ""}`}>
-              {overview.total_bytes > 0
-                ? `${formatBytes(overview.free_bytes)} free of ${formatBytes(overview.total_bytes)}${
+              {volume.total_bytes > 0
+                ? `${formatBytes(volume.free_bytes)} free of ${formatBytes(volume.total_bytes)}${
                     freePercent !== null ? ` (${freePercent}%)` : ""
                   }`
                 : "Free space unavailable"}
             </span>
+            <span className="database-disk">
+              {formatBytes(volume.blob_bytes)} message blobs · {formatBytes(volume.index_bytes)} search index
+            </span>
           </div>
           {lowDisk ? (
             <p className="settings-error">
-              The data volume is nearly full. Running out of space while SQLite writes is one of the few conditions
-              that can actually damage these files.
+              The data volume is nearly full. Message blobs and the search index are written to it, and both stop
+              when it fills.
             </p>
           ) : null}
-
-          <table className="database-table">
-            <thead>
-              <tr>
-                <th>Database</th>
-                <th>Size</th>
-                <th>Status</th>
-                <th aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {overview.databases.map((database) => {
-                const state = databaseState(database);
-                return (
-                  <tr key={`${database.scope}-${database.user_id}`}>
-                    <td>
-                      <strong>{databaseLabel(database)}</strong>
-                      <small className="database-path">{database.path}</small>
-                    </td>
-                    <td>
-                      {formatBytes(database.bytes)}
-                      {database.wal_bytes > 0 ? <small>WAL {formatBytes(database.wal_bytes)}</small> : null}
-                    </td>
-                    <td>
-                      <span className={`database-state is-${state.tone}`}>{state.label}</span>
-                      {database.corrupt_detail ? <small className="database-detail">{database.corrupt_detail}</small> : null}
-                      {database.repair_scheduled ? (
-                        <small className="database-detail">
-                          Requested {formatTimestamp(database.repair_requested_at, datePrefs) || "recently"}; runs at the next start.
-                        </small>
-                      ) : null}
-                      {database.last_repair ? (
-                        <small className="database-detail">
-                          {database.last_repair.succeeded
-                            ? `Last repair ${formatTimestamp(database.last_repair.finished_at, datePrefs) || "recently"}: ${database.last_repair.report.rows_copied} rows recovered, ${database.last_repair.report.rows_skipped} unreadable, ${database.last_repair.report.gaps} damaged range(s).`
-                            : `Last repair failed: ${database.last_repair.error || "unknown error"}`}
-                        </small>
-                      ) : null}
-                    </td>
-                    <td className="database-actions">
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={busy || jobRunning || database.missing}
-                        onClick={() => void runCheck(database.scope, database.user_id)}
-                      >
-                        Check
-                      </button>
-                      {database.scope === "user" && database.repair_scheduled ? (
-                        <button type="button" className="secondary" disabled={busy} onClick={() => void cancelRepair(database)}>
-                          Cancel repair
-                        </button>
-                      ) : null}
-                      {database.scope === "user" && !database.repair_scheduled ? (
-                        <button
-                          type="button"
-                          className="secondary danger"
-                          disabled={busy || jobRunning || database.missing}
-                          onClick={() => setConfirmRepair(database)}
-                        >
-                          Repair…
-                        </button>
-                      ) : null}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          {job ? (
-            <div className={`database-job${job.running ? " is-running" : ""}`}>
-              <h2>
-                {job.kind === "check" ? "Integrity check" : "Backup"} — {job.running ? "running" : "finished"}
-              </h2>
-              <p className="database-job-detail">{job.detail}</p>
-              {job.error ? <p className="settings-error">{job.error}</p> : null}
-              {!job.running && job.kind === "check" ? (
-                <p className={job.problems > 0 ? "settings-error" : "settings-hint"}>
-                  {job.problems > 0
-                    ? `${job.problems} problem(s) found. Schedule a repair for each damaged user database.`
-                    : "No problems found."}
-                </p>
-              ) : null}
-              {job.log.length ? (
-                <pre className="database-job-log">{job.log.join("\n")}</pre>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="database-backups">
-            <h2>Backups</h2>
-            <p className="settings-hint">
-              Written to {overview.backup_dir}. Copies are consistent snapshots of the databases only — message
-              blobs and the search index are not included. Move them off this volume to survive losing it.
-            </p>
-            {backups.length ? (
-              <ul>
-                {backups.map((backup) => (
-                  <li key={backup.name}>
-                    <strong>{backup.name}</strong>
-                    <span>{formatBytes(backup.bytes)}</span>
-                    <small>{formatTimestamp(backup.created_at, datePrefs)}</small>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="settings-hint">No backups yet.</p>
-            )}
-          </div>
+          <p className="settings-hint">
+            Backups are taken with <code>pg_dump</code> against the connection string above, on whatever schedule
+            you run it — see the README. There is no backup button here on purpose: writing a copy into the same
+            volume it is meant to protect against is not a backup.
+          </p>
         </>
       ) : null}
 
-      <PostgresMigrationCard csrf={csrf} datePrefs={datePrefs} />
+            <PostgresMigrationCard csrf={csrf} datePrefs={datePrefs} />
 
       {/* Outside the overview guard on purpose. When the overview itself fails
           — a system database that cannot even list its users — the tail is the
@@ -635,32 +469,6 @@ export function AdminDatabaseView({
         ) : null}
       </div>
 
-      {confirmRepair ? (
-        <div className="database-confirm" role="dialog" aria-modal="true" aria-label="Confirm database repair">
-          <div className="database-confirm-panel">
-            <h2>Repair {databaseLabel(confirmRepair)}?</h2>
-            <p>
-              Rolltop copies every readable row into a new database and moves the damaged file aside. Rows on
-              damaged pages cannot be recovered: mail is re-downloaded from IMAP on the next sync, but locally
-              created state on those pages — contacts, snoozes, identities, pending flag changes — is lost.
-            </p>
-            <p>
-              {overview?.restart_supported
-                ? "Rolltop restarts immediately to run the repair. It is unavailable for the length of the restart."
-                : "The repair runs the next time Rolltop starts."}
-            </p>
-            <p className="settings-hint">Create a backup first if you have not already.</p>
-            <div className="database-confirm-actions">
-              <button ref={cancelRef} type="button" className="secondary" disabled={busy} onClick={() => setConfirmRepair(null)}>
-                Cancel
-              </button>
-              <button type="button" className="secondary danger" disabled={busy} onClick={() => void scheduleRepair(confirmRepair)}>
-                Schedule repair and restart
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </section>
   );
 }

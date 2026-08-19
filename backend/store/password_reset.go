@@ -4,7 +4,6 @@ package store
 
 import (
 	"context"
-	"os"
 	"time"
 )
 
@@ -72,18 +71,6 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	}
 	if n == 0 {
 		return ErrNotFound
-	}
-	if s.split {
-		s.mu.Lock()
-		us := s.userStores[userID]
-		delete(s.userStores, userID)
-		s.mu.Unlock()
-		if us != nil {
-			_ = us.Close()
-		}
-		if dir := s.UserDataDir(userID); dir != "" {
-			_ = os.RemoveAll(dir)
-		}
 	}
 	return nil
 }

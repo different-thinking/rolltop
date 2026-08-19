@@ -13,6 +13,7 @@ import (
 	"rolltop/backend/blob"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type ordinaryRecoveryBypassFetcher struct {
@@ -189,7 +190,7 @@ func TestStoreFetchedMessageDefersAttachmentSearchExtraction(t *testing.T) {
 
 func TestOrdinaryInboxDefersBulkMaintenanceWhenRecoveryAppearsMidSync(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ func TestOrdinaryInboxDefersBulkMaintenanceWhenRecoveryAppearsMidSync(t *testing
 
 func TestIncrementalSyncRetriesMessageWhoseDerivedImportDidNotComplete(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

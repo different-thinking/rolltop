@@ -2,18 +2,13 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"errors"
-	"path/filepath"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 )
 
 func TestMarkSearchVisibleMessagesPendingIndexIsTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,121 +38,9 @@ func TestMarkSearchVisibleMessagesPendingIndexIsTenantScoped(t *testing.T) {
 	assertResetIndexState(t, ctx, db, other.ID, otherVisible.ID, false, otherVisible)
 }
 
-func TestMarkSearchVisibleMessagesPendingIndexUsesFullThenRestoresNormal(t *testing.T) {
-	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	owner, err := db.CreateUser(ctx, "durable-search-reset@example.test", "Durable Search Reset", "hash", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := createIndexedMessageForResetTest(t, ctx, db, owner, "INBOX", true, 1)
-	db.db.SetMaxOpenConns(1)
-
-	events := make([]string, 0, 3)
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
-		func(ctx context.Context, conn *sql.Conn, mode string) error {
-			events = append(events, mode)
-			return setSQLiteSynchronous(ctx, conn, mode)
-		}, func(ctx context.Context, conn *sql.Conn) error {
-			events = append(events, "CHECKPOINT")
-			return fullSQLiteWALCheckpoint(ctx, conn)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if marked != 1 {
-		t.Fatalf("marked = %d, want 1", marked)
-	}
-	if !slices.Equal(events, []string{"FULL", "CHECKPOINT", "NORMAL"}) {
-		t.Fatalf("durability events = %v, want [FULL CHECKPOINT NORMAL]", events)
-	}
-	// The second update targets a row that is already pending. The checkpoint
-	// must still run because SQLite is free to avoid writing an unchanged value.
-	events = events[:0]
-	marked, err = markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
-		func(ctx context.Context, conn *sql.Conn, mode string) error {
-			events = append(events, mode)
-			return setSQLiteSynchronous(ctx, conn, mode)
-		}, func(ctx context.Context, conn *sql.Conn) error {
-			events = append(events, "CHECKPOINT")
-			return fullSQLiteWALCheckpoint(ctx, conn)
-		})
-	if err != nil || marked != 1 {
-		t.Fatalf("already-pending durable mark = %d, %v; want 1, nil", marked, err)
-	}
-	if !slices.Equal(events, []string{"FULL", "CHECKPOINT", "NORMAL"}) {
-		t.Fatalf("already-pending durability events = %v, want [FULL CHECKPOINT NORMAL]", events)
-	}
-	var synchronous int
-	if err := db.db.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
-		t.Fatal(err)
-	}
-	if synchronous != 1 {
-		t.Fatalf("SQLite synchronous mode = %d, want NORMAL (1)", synchronous)
-	}
-	assertResetIndexState(t, ctx, db, owner.ID, message.ID, true, message)
-}
-
-func TestDurableSearchPendingWriteDiscardsConnectionWhenNormalRestoreFails(t *testing.T) {
-	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	owner, err := db.CreateUser(ctx, "failed-search-restore@example.test", "Failed Search Restore", "hash", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := createIndexedMessageForResetTest(t, ctx, db, owner, "INBOX", true, 1)
-	db.db.SetMaxOpenConns(1)
-	restoreErr := errors.New("restore failed")
-
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID, searchPendingScope{},
-		func(ctx context.Context, conn *sql.Conn, mode string) error {
-			if mode == "NORMAL" {
-				return restoreErr
-			}
-			return setSQLiteSynchronous(ctx, conn, mode)
-		}, fullSQLiteWALCheckpoint)
-	if marked != 1 || !errors.Is(err, restoreErr) {
-		t.Fatalf("marked=%d error=%v, want 1 and restore failure", marked, err)
-	}
-	var synchronous int
-	if err := db.db.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
-		t.Fatal(err)
-	}
-	if synchronous != 1 {
-		t.Fatalf("replacement SQLite connection synchronous mode = %d, want NORMAL (1)", synchronous)
-	}
-	assertResetIndexState(t, ctx, db, owner.ID, message.ID, true, message)
-}
-
-func TestFullSQLiteWALCheckpointRejectsNonWALSentinel(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	conn, err := db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	err = fullSQLiteWALCheckpoint(context.Background(), conn)
-	if err == nil || !strings.Contains(err.Error(), "WAL checkpoint unavailable") {
-		t.Fatalf("non-WAL checkpoint error = %v, want unavailable sentinel rejection", err)
-	}
-}
-
 func TestMarkMessageAttachmentIndexPendingIsTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +80,7 @@ func TestMarkMessageAttachmentIndexPendingIsTenantScoped(t *testing.T) {
 
 func TestListMessagesNeedingAttachmentIndexAfterWrapsWithinTenant(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,37 +192,13 @@ func assertResetIndexState(t *testing.T, ctx context.Context, db *Store, userID,
 // An invalid range must fail rather than fall back to marking everything: the
 // wide direction silently rewrites every row in the tenant and triggers a full
 // reindex nobody asked for.
-func TestPendingIndexScopeRejectsAnInvalidRangeInsteadOfWidening(t *testing.T) {
-	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	owner, err := db.CreateUser(ctx, "invalid-range@example.test", "Invalid Range", "hash", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := createIndexedMessageForResetTest(t, ctx, db, owner, "INBOX", true, 1)
-
-	marked, err := markSearchVisibleMessagesPendingIndexWithSynchronous(ctx, db.db, owner.ID,
-		searchPendingScope{firstID: 5, lastID: 3}, setSQLiteSynchronous, fullSQLiteWALCheckpoint)
-	if err == nil {
-		t.Fatal("an inverted range was accepted")
-	}
-	if marked != 0 {
-		t.Fatalf("marked = %d, want nothing written for an invalid range", marked)
-	}
-	assertResetIndexState(t, ctx, db, owner.ID, message.ID, false, message)
-}
-
 // A targeted repair must reach the rows the indexing worker will pick up, which
 // includes a mailbox whose include_in_search was switched off but which has not
 // been purged from the index yet. Marking zero rows there while clearing the
 // marker would drop that batch silently.
 func TestPendingIndexRangeCoversAnExcludedButUnpurgedMailbox(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

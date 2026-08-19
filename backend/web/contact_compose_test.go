@@ -16,6 +16,7 @@ import (
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 	"rolltop/plugins/client_side_pgp/backend/keystore"
 )
@@ -104,7 +105,7 @@ func (f *captureAppendFetcher) AppendMessageWithFlags(_ context.Context, _ store
 func TestSendComposeRequiresSentRoleBeforeSMTP(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestSendComposeDoesNotSendWhenForegroundReservationIsCanceled(t *testing.T)
 func TestSaveComposeDraftAppendsToDraftsMailbox(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +551,7 @@ func TestSendComposeSecurityMIMESignedForm(t *testing.T) {
 func TestSendComposeRejectsOtherUserFromIdentity(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,8 +641,7 @@ func TestSendComposeRejectsOtherUserFromIdentity(t *testing.T) {
 
 func TestReplyComposeSelectsIdentityMatchingRecipient(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestReplyComposeSelectsIdentityMatchingRecipient(t *testing.T) {
 func setupAutocryptComposeTest(t *testing.T, ctx context.Context, enablePGPPlugin bool) (*Server, store.User, int64, *captureSender, store.MailIdentity) {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

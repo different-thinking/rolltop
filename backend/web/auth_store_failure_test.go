@@ -12,19 +12,19 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/auth"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func newStoreFailureTestServer(t *testing.T) (*store.Store, *Server, http.Handler, *http.Cookie) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

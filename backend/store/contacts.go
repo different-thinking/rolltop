@@ -39,15 +39,12 @@ func (s *Store) CreateContact(ctx context.Context, userID int64, c Contact) (Con
 	if err != nil {
 		return Contact{}, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO contacts
+	var id int64
+	err = tx.QueryRowContext(ctx, `INSERT INTO contacts
 			(user_id, name_prefix, given_name, additional_name, family_name, name_suffix, display_name, nickname, organization, department, job_title, birthday, notes, categories, is_me, is_primary, source, google_connection_id, external_id, etag, remote_updated_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, c.NamePrefix, c.GivenName, c.AdditionalName, c.FamilyName, c.NameSuffix, c.DisplayName, c.Nickname, c.Organization, c.Department, c.JobTitle, c.Birthday, c.Notes, c.Categories, boolInt(c.IsMe), boolInt(c.IsPrimary), c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag, timeUnix(c.RemoteUpdatedAt), ts, ts)
-	if err != nil {
-		_ = tx.Rollback()
-		return Contact{}, err
-	}
-	id, err := res.LastInsertId()
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`,
+		userID, c.NamePrefix, c.GivenName, c.AdditionalName, c.FamilyName, c.NameSuffix, c.DisplayName, c.Nickname, c.Organization, c.Department, c.JobTitle, c.Birthday, c.Notes, c.Categories, boolInt(c.IsMe), boolInt(c.IsPrimary), c.Source, c.GoogleConnectionID, c.ExternalID, c.ETag, timeUnix(c.RemoteUpdatedAt), ts, ts).Scan(&id)
 	if err != nil {
 		_ = tx.Rollback()
 		return Contact{}, err

@@ -17,16 +17,27 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
 	"rolltop/backend/memlimit"
-	"rolltop/backend/store"
+	"rolltop/backend/pgdsn"
 )
 
 // Config is the validated runtime configuration assembled from environment variables.
 type Config struct {
-	Addr         string
-	DataDir      string
-	DatabasePath string
-	IndexPath    string
-	PluginDir    string
+	Addr string
+	// DataDir holds the blob store and the Bleve indexes. The relational data
+	// lives in PostgreSQL and no longer touches this directory.
+	DataDir string
+	// DatabaseURL is the PostgreSQL DSN. It is required: there is no local
+	// fallback to fall back to, and a default would only turn a missing
+	// configuration into a connection error against somebody's localhost.
+	DatabaseURL string
+	// DatabaseMaxConns caps the connection pool. The hosted role allows 20
+	// connections, so the default leaves room for a pg_dump and a psql session.
+	DatabaseMaxConns int
+	// DatabaseConnectTimeout is how long startup waits for a database that is
+	// not up yet, since the app container and the database start independently.
+	DatabaseConnectTimeout time.Duration
+	IndexPath              string
+	PluginDir              string
 
 	MasterKey []byte
 
@@ -47,25 +58,14 @@ type Config struct {
 	// process to release the data directory before giving up. Rolling
 	// deployments overlap the two containers for exactly that long.
 	StartupLockWait time.Duration
-
-	// SQLiteAccess selects how SQLite coordinates access to its files. The
-	// default reads the filesystem under the data directory, because WAL's
-	// shared-memory index is unusable on a network or FUSE volume.
-	SQLiteAccess store.AccessMode
-
-	// StartupIntegrityCheck selects when SQLite files are verified during
-	// startup: after an unclean shutdown, on every start, or never.
-	StartupIntegrityCheck string
 }
 
-// Values accepted by ROLLTOP_STARTUP_INTEGRITY_CHECK.
-const (
-	IntegrityCheckAuto   = "auto"
-	IntegrityCheckAlways = "always"
-	IntegrityCheckNever  = "never"
-)
-
 const defaultDataDir = "/data"
+
+// defaultDatabaseMaxConns matches the store's own default. It is restated here
+// so the configuration reports the number it will actually use rather than a
+// zero that means "ask the store".
+const defaultDatabaseMaxConns = 10
 
 // DataDirFromEnv resolves the data directory on its own, without loading or
 // validating the rest of the configuration. Startup paths that must run before
@@ -78,7 +78,29 @@ func DataDirFromEnv() string {
 // Load reads environment configuration, applies defaults, and validates values needed before services start.
 func Load() (Config, error) {
 	dataDir := DataDirFromEnv()
-	dbPath := env("ROLLTOP_DB_PATH", filepath.Join(dataDir, "rolltop.db"))
+	databaseURL := strings.TrimSpace(os.Getenv("ROLLTOP_DATABASE_URL"))
+	if databaseURL == "" {
+		return Config{}, errors.New("ROLLTOP_DATABASE_URL is required (a PostgreSQL connection string, e.g. postgres://user:password@host:5432/rolltop?sslmode=require)")
+	}
+	// Parsed here so a malformed DSN fails at startup with the variable named,
+	// rather than inside the driver with the password quoted back.
+	if err := pgdsn.Validate(databaseURL); err != nil {
+		return Config{}, fmt.Errorf("ROLLTOP_DATABASE_URL: %w", err)
+	}
+	databaseMaxConns, err := parseInt("ROLLTOP_DB_MAX_CONNS", defaultDatabaseMaxConns)
+	if err != nil {
+		return Config{}, err
+	}
+	if databaseMaxConns < 1 {
+		return Config{}, fmt.Errorf("ROLLTOP_DB_MAX_CONNS must be at least 1, got %d", databaseMaxConns)
+	}
+	databaseConnectTimeout, err := parseDuration("ROLLTOP_DB_CONNECT_TIMEOUT", 2*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	if databaseConnectTimeout < 0 {
+		return Config{}, fmt.Errorf("ROLLTOP_DB_CONNECT_TIMEOUT must not be negative, got %s", databaseConnectTimeout)
+	}
 	indexPath := env("ROLLTOP_INDEX_PATH", filepath.Join(dataDir, "bleve"))
 	pluginDir := env("ROLLTOP_PLUGIN_DIR", "plugins")
 	if abs, err := filepath.Abs(pluginDir); err == nil {
@@ -111,7 +133,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	// Two minutes covers a previous process draining HTTP, closing its plugins
-	// and index, and checkpointing SQLite, with room for a slow volume.
+	// and index, with room for a slow volume.
 	startupLockWait, err := parseDuration("ROLLTOP_STARTUP_LOCK_WAIT", 2*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -135,42 +157,25 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("ROLLTOP_MEMORY_LIMIT: %w", err)
 	}
-	// The store owns what an access mode means, so an unusable value is
-	// rejected here by the same parser the databases are opened with.
-	sqliteAccess, err := store.ParseAccessMode(os.Getenv("ROLLTOP_SQLITE_ACCESS"))
-	if err != nil {
-		return Config{}, fmt.Errorf("ROLLTOP_SQLITE_ACCESS: %w", err)
-	}
-	// quick_check reads every page, so the default only pays that cost when the
-	// previous run did not shut down cleanly and the files may be damaged.
-	integrityCheck := strings.ToLower(env("ROLLTOP_STARTUP_INTEGRITY_CHECK", IntegrityCheckAuto))
-	switch integrityCheck {
-	case IntegrityCheckAuto, IntegrityCheckAlways, IntegrityCheckNever:
-	default:
-		return Config{}, fmt.Errorf("ROLLTOP_STARTUP_INTEGRITY_CHECK must be %q, %q, or %q, got %q",
-			IntegrityCheckAuto, IntegrityCheckAlways, IntegrityCheckNever, integrityCheck)
-	}
-
 	return Config{
-		Addr:              env("ROLLTOP_ADDR", ":8080"),
-		DataDir:           dataDir,
-		DatabasePath:      dbPath,
-		IndexPath:         indexPath,
-		PluginDir:         pluginDir,
-		MasterKey:         key,
-		SessionTTL:        sessionTTL,
-		CookieSecure:      cookieSecure,
-		SyncInterval:      syncInterval,
-		InboxPollInterval: inboxPollInterval,
-		BlobRetention:     blobRetention,
-		WebhookToken:      os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
-		LogLevel:          logLevel,
-		Google:            google,
-		MemoryLimit:       memoryLimit,
-		StartupLockWait:   startupLockWait,
-		SQLiteAccess:      sqliteAccess,
-
-		StartupIntegrityCheck: integrityCheck,
+		Addr:                   env("ROLLTOP_ADDR", ":8080"),
+		DataDir:                dataDir,
+		DatabaseURL:            databaseURL,
+		DatabaseMaxConns:       databaseMaxConns,
+		DatabaseConnectTimeout: databaseConnectTimeout,
+		IndexPath:              indexPath,
+		PluginDir:              pluginDir,
+		MasterKey:              key,
+		SessionTTL:             sessionTTL,
+		CookieSecure:           cookieSecure,
+		SyncInterval:           syncInterval,
+		InboxPollInterval:      inboxPollInterval,
+		BlobRetention:          blobRetention,
+		WebhookToken:           os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
+		LogLevel:               logLevel,
+		Google:                 google,
+		MemoryLimit:            memoryLimit,
+		StartupLockWait:        startupLockWait,
 	}, nil
 }
 
@@ -282,6 +287,18 @@ func parseDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return d, nil
+}
+
+func parseInt(key string, fallback int) (int, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return n, nil
 }
 
 func parseBool(key string, fallback bool) (bool, error) {

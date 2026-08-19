@@ -10,6 +10,7 @@ import (
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -37,7 +38,7 @@ func TestSyncResetsMailboxGenerationAndRefetchesReusedUID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
-			db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+			db, err := storetest.Open(t)
 			if err != nil {
 				t.Fatal(err)
 			}

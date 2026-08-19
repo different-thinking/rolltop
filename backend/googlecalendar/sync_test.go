@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +17,7 @@ import (
 
 	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 // fakeCalendar serves the endpoints the sync and the write-back use. Pages are
@@ -201,7 +201,7 @@ func newSyncFixture(t *testing.T, fake *fakeCalendar) (*Syncer, *store.Store, st
 	server := httptest.NewServer(fake.handler())
 	t.Cleanup(server.Close)
 
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

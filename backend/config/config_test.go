@@ -2,24 +2,32 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"rolltop/backend/memlimit"
-	"rolltop/backend/store"
 )
 
 const testMasterKey = "12345678901234567890123456789012"
 
+// testDatabaseURL is a syntactically valid DSN. Nothing here connects; Load
+// only parses it.
+const testDatabaseURL = "postgres://rolltop:secret@db.example.test:5432/rolltop?sslmode=require"
+
 func TestLoadUsesRolltopDefaults(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DatabasePath != filepath.Join("/data", "rolltop.db") {
-		t.Fatalf("database path = %q", cfg.DatabasePath)
+	if cfg.DatabaseURL != testDatabaseURL {
+		t.Fatalf("database url = %q", cfg.DatabaseURL)
+	}
+	if cfg.DatabaseMaxConns != defaultDatabaseMaxConns {
+		t.Fatalf("database max conns = %d", cfg.DatabaseMaxConns)
 	}
 	if cfg.DataDir != "/data" {
 		t.Fatalf("data dir = %q", cfg.DataDir)
@@ -33,21 +41,9 @@ func TestLoadUsesRolltopDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadUsesRolltopDatabasePath(t *testing.T) {
-	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
-	t.Setenv("ROLLTOP_DB_PATH", "/rolltop-data/custom.db")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.DatabasePath != "/rolltop-data/custom.db" {
-		t.Fatalf("database path = %q", cfg.DatabasePath)
-	}
-}
-
 func TestLoadUsesRolltopPluginDir(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_PLUGIN_DIR", "/rolltop-plugins")
 
 	cfg, err := Load()
@@ -61,6 +57,7 @@ func TestLoadUsesRolltopPluginDir(t *testing.T) {
 
 func TestLoadValidatesLogLevel(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_LOG_LEVEL", "")
 
 	cfg, err := Load()
@@ -103,6 +100,7 @@ func clearGoogleEnv(t *testing.T) {
 func TestLoadReadsGoogleSettings(t *testing.T) {
 	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", " client-id ")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
 	t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS",
@@ -124,6 +122,7 @@ func TestLoadRejectsHalfAGoogleCredential(t *testing.T) {
 	// clicks Connect and gets a 503.
 	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "")
 	if _, err := Load(); err == nil {
@@ -134,6 +133,7 @@ func TestLoadRejectsHalfAGoogleCredential(t *testing.T) {
 func TestLoadRequiresRedirectURLsWhenGoogleIsConfigured(t *testing.T) {
 	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
 	t.Setenv("ROLLTOP_GOOGLE_REDIRECT_URLS", "")
@@ -145,6 +145,7 @@ func TestLoadRequiresRedirectURLsWhenGoogleIsConfigured(t *testing.T) {
 func TestLoadRejectsUnusableRedirectURLs(t *testing.T) {
 	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_ID", "client-id")
 	t.Setenv("ROLLTOP_GOOGLE_CLIENT_SECRET", "client-secret")
 	for _, value := range []string{
@@ -165,6 +166,7 @@ func TestLoadRejectsUnusableRedirectURLs(t *testing.T) {
 func TestLoadLeavesGoogleUnconfiguredByDefault(t *testing.T) {
 	clearGoogleEnv(t)
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -174,35 +176,9 @@ func TestLoadLeavesGoogleUnconfiguredByDefault(t *testing.T) {
 	}
 }
 
-func TestLoadValidatesStartupIntegrityCheck(t *testing.T) {
-	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
-	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.StartupIntegrityCheck != IntegrityCheckAuto {
-		t.Fatalf("default startup integrity check = %q", cfg.StartupIntegrityCheck)
-	}
-
-	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "Always")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.StartupIntegrityCheck != IntegrityCheckAlways {
-		t.Fatalf("startup integrity check = %q", cfg.StartupIntegrityCheck)
-	}
-
-	t.Setenv("ROLLTOP_STARTUP_INTEGRITY_CHECK", "sometimes")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected error for unknown startup integrity check mode")
-	}
-}
-
 func TestLoadReadsMemoryLimit(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 
 	cfg, err := Load()
 	if err != nil {
@@ -239,6 +215,7 @@ func TestLoadReadsMemoryLimit(t *testing.T) {
 
 func TestLoadReadsStartupLockWait(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
 
 	cfg, err := Load()
 	if err != nil {
@@ -273,30 +250,49 @@ func TestLoadReadsStartupLockWait(t *testing.T) {
 	}
 }
 
-func TestLoadReadsSQLiteAccessMode(t *testing.T) {
+// TestLoadRequiresADatabaseURL pins that there is no fallback. A default would
+// only turn a missing configuration into a connection error against whatever
+// happens to listen on localhost.
+func TestLoadRequiresADatabaseURL(t *testing.T) {
 	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("a missing ROLLTOP_DATABASE_URL was accepted")
+	}
+}
 
+// TestLoadRejectsADatabaseURLWithoutADatabase covers the DSN that connects
+// somewhere else instead of failing: libpq falls back to the role name when the
+// database is missing from the connection string.
+func TestLoadRejectsADatabaseURLWithoutADatabase(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", "postgres://rolltop:secret@db.example.test:5432")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("a DSN naming no database was accepted")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Errorf("the error carries the password: %v", err)
+	}
+}
+
+func TestLoadReadsDatabasePoolSettings(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
+	t.Setenv("ROLLTOP_DB_MAX_CONNS", "6")
+	t.Setenv("ROLLTOP_DB_CONNECT_TIMEOUT", "45s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SQLiteAccess != store.AccessAuto {
-		t.Fatalf("default sqlite access = %v, want auto", cfg.SQLiteAccess)
+	if cfg.DatabaseMaxConns != 6 {
+		t.Errorf("max conns = %d, want 6", cfg.DatabaseMaxConns)
 	}
-
-	t.Setenv("ROLLTOP_SQLITE_ACCESS", "exclusive")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatal(err)
+	if cfg.DatabaseConnectTimeout != 45*time.Second {
+		t.Errorf("connect timeout = %s, want 45s", cfg.DatabaseConnectTimeout)
 	}
-	if cfg.SQLiteAccess != store.AccessExclusive {
-		t.Fatalf("configured sqlite access = %v, want exclusive", cfg.SQLiteAccess)
-	}
-
-	// A typo must not silently leave the databases on a mode the storage
-	// cannot support.
-	t.Setenv("ROLLTOP_SQLITE_ACCESS", "wal")
+	t.Setenv("ROLLTOP_DB_MAX_CONNS", "0")
 	if _, err := Load(); err == nil {
-		t.Fatal("an unknown sqlite access mode was accepted")
+		t.Error("a pool of zero connections was accepted")
 	}
 }

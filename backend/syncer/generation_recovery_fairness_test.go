@@ -3,13 +3,13 @@ package syncer
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type boundedRecoveryFairnessFetcher struct {
@@ -127,7 +127,7 @@ func TestBoundedGenerationRecoveryDoesNotLetDeferredInboxStarveNextBatch(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,13 +2,13 @@ package syncer_test
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rolltop/backend/blob"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -29,7 +29,7 @@ func (f *resetDuringMailboxStatusFetcher) MailboxStatus(ctx context.Context, acc
 func TestPassiveStatusCannotReplaceActiveRebuildGeneration(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestPassiveStatusCannotReplaceActiveRebuildGeneration(t *testing.T) {
 func TestPassiveStatusCannotRegressConcurrentGenerationReset(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

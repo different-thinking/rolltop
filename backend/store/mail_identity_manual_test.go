@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ import (
 // import, a manual edit -- must not turn into a sending identity.
 func TestExtraMeContactAddressDoesNotBecomeAnIdentity(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +49,7 @@ func TestExtraMeContactAddressDoesNotBecomeAnIdentity(t *testing.T) {
 // must survive with the signature and server choices the user configured.
 func TestEditingTheMeContactKeepsItsIdentity(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +101,7 @@ func TestEditingTheMeContactKeepsItsIdentity(t *testing.T) {
 // stays on their contact card so incoming mail is still recognised as theirs.
 func TestDeleteMailIdentityLeavesTheMeAddress(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +153,7 @@ func TestDeleteMailIdentityLeavesTheMeAddress(t *testing.T) {
 // deleting that card would then cascade the identity away with it.
 func TestSharedMeAddressKeepsItsOwnIdentity(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +209,7 @@ func TestSharedMeAddressKeepsItsOwnIdentity(t *testing.T) {
 // carries it instead.
 func TestContactEmailOrderSurvivesASave(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +281,7 @@ func assertContactEmailOrder(t *testing.T, contact Contact, want ...string) {
 // only deleting the address itself may take it away.
 func TestClearingIsMeKeepsTheIdentity(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := openTestStore(t)
 	if err != nil {
 		t.Fatal(err)
 	}

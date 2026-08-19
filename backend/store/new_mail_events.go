@@ -51,8 +51,9 @@ func (s *Store) RecordNewMailEvent(ctx context.Context, userID int64, msg Messag
 		}
 		return NewMailEvent{}, false, nil
 	}
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO new_mail_events
-		(user_id, message_id, from_addr, subject, created_at) VALUES (?, ?, ?, ?, ?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO new_mail_events
+		(user_id, message_id, from_addr, subject, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		userID, msg.ID, msg.FromAddr, msg.Subject, now)
 	if err != nil {
 		return NewMailEvent{}, false, err

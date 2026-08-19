@@ -8,17 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestNewMailWebPushUsesPerSubscriptionEventDeltaAndTenant(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestNewMailWebPushUsesPerSubscriptionEventDeltaAndTenant(t *testing.T) {
 
 func TestNewMailWebPushRetriesAfterInFlightKeyRotation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestNewMailWebPushRetriesAfterInFlightKeyRotation(t *testing.T) {
 
 func TestNewMailWebPushStaleResponseDoesNotDeleteRotatedSubscription(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestNewMailWebPushDeletesStaleSubscription(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			ctx := context.Background()
-			db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+			db, err := storetest.Open(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -282,7 +282,7 @@ func TestNewMailWebPushDeletesStaleSubscription(t *testing.T) {
 
 func TestNewMailWebPushAsyncCoalescesDirtyUserWithoutLosingEvent(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestNewMailWebPushAsyncCoalescesDirtyUserWithoutLosingEvent(t *testing.T) {
 
 func TestNewMailWebPushAsyncRetriesTransientFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

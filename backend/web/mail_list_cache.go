@@ -213,26 +213,14 @@ func (s *Server) warmAllMailFirstPages(ctx context.Context) {
 		return
 	}
 	for _, user := range users {
-		// A tenant whose database is already known to be corrupt cannot be
-		// warmed, and repeating that failure every cycle only buries the one
-		// log line that tells the operator how to repair it.
-		if s.store.DatabaseCorrupt(user.ID) {
-			continue
-		}
 		if err := s.warmAllMailFirstPage(ctx, user.ID); err != nil {
-			log.Printf("warm all-mail first page user_id=%d: %v", user.ID, s.store.NoteError(user.ID, err))
+			log.Printf("warm all-mail first page user_id=%d: %v", user.ID, err)
 		}
 	}
 }
 
 func (s *Server) warmAllMailFirstPageAsync(userID int64) {
 	if s == nil || s.store == nil || s.mailListCache == nil || userID <= 0 {
-		return
-	}
-	// This runs on every mail-list generation change, so without the same guard
-	// the synchronous warmer has, a latched tenant re-logs its corruption line
-	// on every change and buries the one that carries the repair command.
-	if s.store.DatabaseCorrupt(userID) {
 		return
 	}
 	s.mailWarmMu.Lock()
@@ -254,7 +242,7 @@ func (s *Server) warmAllMailFirstPageAsync(userID int64) {
 		for {
 			before := s.mailListGeneration(userID)
 			if err := s.warmAllMailFirstPage(context.Background(), userID); err != nil {
-				log.Printf("warm all-mail first page user_id=%d: %v", userID, s.store.NoteError(userID, err))
+				log.Printf("warm all-mail first page user_id=%d: %v", userID, err)
 				return
 			}
 			if before == s.mailListGeneration(userID) {

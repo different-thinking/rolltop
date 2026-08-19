@@ -6,15 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"rolltop/backend/store/storetest"
 	"testing"
-
-	"rolltop/backend/store"
 )
 
 func TestBulkReadMessagesIsUserScoped(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

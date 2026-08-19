@@ -122,10 +122,11 @@ func recordExpungedMessageFingerprintTx(ctx context.Context, tx *sql.Tx, userID,
 		WHERE user_id = ? AND id = ?`, canonicalSHA, messageIDHash, userID, messageID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO expunged_message_fingerprints
+	_, err = tx.ExecContext(ctx, `INSERT INTO expunged_message_fingerprints
 		(user_id, account_id, source_mailbox_id, source_uid, source_uid_validity, raw_sha256, canonical_sha256,
 		 message_id_hash, internal_date_unix, message_size, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, accountID, mailboxID, sourceUID, sourceUIDValidity,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`, userID, accountID, mailboxID, sourceUID, sourceUIDValidity,
 		rawSHA, canonicalSHA, messageIDHash, internalDate, size, now,
 		now+int64(expungedFingerprintTTL/time.Second))
 	return err

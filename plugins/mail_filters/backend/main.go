@@ -441,13 +441,9 @@ func saveRule(ctx context.Context, db *sql.DB, userID int64, in Rule) (Rule, err
 			return Rule{}, store.ErrNotFound
 		}
 	} else {
-		res, err := tx.ExecContext(ctx, `INSERT INTO plugin_mail_filter_rules (user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, userID, in.Name, in.Query, boolInt(in.Enabled), in.ScopeMode, string(actionsJSON), in.Position, now, now)
-		if err != nil {
-			return Rule{}, err
-		}
-		in.ID, err = res.LastInsertId()
-		if err != nil {
+		if err := tx.QueryRowContext(ctx, `INSERT INTO plugin_mail_filter_rules (user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			RETURNING id`, userID, in.Name, in.Query, boolInt(in.Enabled), in.ScopeMode, string(actionsJSON), in.Position, now, now).Scan(&in.ID); err != nil {
 			return Rule{}, err
 		}
 	}

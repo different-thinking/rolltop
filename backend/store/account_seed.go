@@ -15,7 +15,7 @@ func (s *Store) seedSMTPAccountsFromMailAccounts(ctx context.Context) error {
 			CASE WHEN trim(ma.smtp_username) <> '' THEN trim(ma.smtp_username) ELSE trim(ma.username) END,
 			CASE WHEN trim(ma.encrypted_smtp_password) <> '' THEN ma.encrypted_smtp_password ELSE ma.encrypted_password END,
 			ma.smtp_use_tls,
-			?, ?
+			CAST(? AS BIGINT), CAST(? AS BIGINT)
 		FROM mail_accounts ma
 		WHERE NOT EXISTS (
 			SELECT 1 FROM smtp_accounts sa

@@ -7,12 +7,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/backend/syncer"
 )
 
@@ -75,7 +75,7 @@ func (f *folderViewSyncFetcher) MoveMessage(context.Context, store.MailAccount, 
 
 func TestAPIAccountFolderSyncQueuesManualAndRejectsNeverAcrossTenants(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

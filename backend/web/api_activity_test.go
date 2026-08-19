@@ -10,11 +10,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 type activityFixture struct {
@@ -30,7 +30,7 @@ type activityFixture struct {
 func newActivityFixture(t *testing.T) activityFixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,9 +1,15 @@
-// File overview: SQLite migration runner shared by system and user stores.
-// The concrete 001 schemas live in migration_system_001.go and
-// migration_user_001.go. This file owns the flow around those schemas: choose
-// which schema family applies to the opened SQLite handle, report progress to
-// startup callers, record applied schema versions in schema_migrations, and
-// reject checksum drift so a migration cannot silently change after use.
+// File overview: The schema-version bookkeeping every schema change is recorded
+// through: one row per applied migration in schema_migrations, protected by a
+// checksum so a migration cannot silently change after it has been used.
+//
+// The SQLite migration chain this used to drive is gone. PostgreSQL gets the
+// squashed baseline (backend/store/pgschema) recorded as a single row here, and
+// future schema work is a PostgreSQL migration layered on top of it — never a
+// new entry in a chain, because there is no longer a database anywhere that has
+// to be walked forward from an older schema.
+//
+// What still runs through the flow below is plugin migrations, which are
+// applied when a plugin is enabled rather than at open.
 
 package store
 
@@ -15,53 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"rolltop/backend/plugins"
-)
-
-const (
-	SystemSchemaVersion    = "system-001"
-	SystemSchemaVersion002 = "system-002"
-	SystemSchemaVersion003 = "system-003"
-	SystemSchemaVersion004 = "system-004"
-	UserSchemaVersion      = "user-001"
-	UserSchemaVersion002   = "user-002"
-	UserSchemaVersion003   = "user-003"
-	UserSchemaVersion004   = "user-004"
-	UserSchemaVersion005   = "user-005"
-	UserSchemaVersion006   = "user-006"
-	UserSchemaVersion007   = "user-007"
-	UserSchemaVersion008   = "user-008"
-	UserSchemaVersion009   = "user-009"
-	UserSchemaVersion010   = "user-010"
-	UserSchemaVersion011   = "user-011"
-	UserSchemaVersion012   = "user-012"
-	UserSchemaVersion013   = "user-013"
-	UserSchemaVersion014   = "user-014"
-	UserSchemaVersion015   = "user-015"
-	UserSchemaVersion016   = "user-016"
-	UserSchemaVersion017   = "user-017"
-	UserSchemaVersion018   = "user-018"
-	UserSchemaVersion019   = "user-019"
-	UserSchemaVersion020   = "user-020"
-	UserSchemaVersion021   = "user-021"
-	UserSchemaVersion022   = "user-022"
-	UserSchemaVersion023   = "user-023"
-	UserSchemaVersion024   = "user-024"
-	UserSchemaVersion025   = "user-025"
-	UserSchemaVersion026   = "user-026"
-	UserSchemaVersion027   = "user-027"
-	UserSchemaVersion028   = "user-028"
-	UserSchemaVersion029   = "user-029"
-	UserSchemaVersion030   = "user-030"
-	UserSchemaVersion031   = "user-031"
-	UserSchemaVersion032   = "user-032"
-	UserSchemaVersion033   = "user-033"
-	UserSchemaVersion034   = "user-034"
-	UserSchemaVersion035   = "user-035"
-	UserSchemaVersion036   = "user-036"
-	UserSchemaVersion037   = "user-037"
-	UserSchemaVersion038   = "user-038"
 )
 
 // MigrationProgress is emitted while Store.OpenServerWithProgress and
@@ -78,14 +37,6 @@ type MigrationProgress struct {
 // MigrationReporter receives best-effort migration progress. It must not log
 // secrets or message contents because startup status is exposed over HTTP.
 type MigrationReporter func(MigrationProgress)
-
-type schemaKind int
-
-const (
-	schemaCombined schemaKind = iota
-	schemaSystem
-	schemaUser
-)
 
 // migrationSet is deliberately coarse-grained for this pre-deployment app:
 // one checksum-protected migration owns the system DB schema, and one owns the
@@ -104,95 +55,10 @@ type migrationStep struct {
 	Run   func(context.Context, *Store) error
 }
 
-// userMigrationSets is the single registration list for the per-user schema.
-// The upgrade test asserts against this same slice, so a migration added here
-// cannot quietly escape the checks that cover the upgrade path.
-func userMigrationSets() []migrationSet {
-	return []migrationSet{
-		userMigrationSet(),
-		userBackupEmailMigrationSet(),
-		userSearchPreferencesMigrationSet(),
-		userSearchRankingMigrationSet(),
-		userSenderStatsMigrationSet(),
-		userSenderStatsTableMigrationSet(),
-		userIdentityMailboxMigrationSet(),
-		userIdentityIMAPMigrationSet(),
-		userMessageListIndexMigrationSet(),
-		userRemoteImageCacheMigrationSet(),
-		userWebPushSubscriptionMigrationSet(),
-		userSyncRunLatestMessageMigrationSet(),
-		userNewMailEventMigrationSet(),
-		userWebPushDeliveryCursorMigrationSet(),
-		userSnoozeMigrationSet(),
-		userSwipePreferencesMigrationSet(),
-		userJunkMailboxRoleMigrationSet(),
-		userPendingMoveNotificationMigrationSet(),
-		userInboxArrivalClassificationMigrationSet(),
-		userMailboxGenerationArrivalJournalMigrationSet(),
-		userTransferDispatchRecoveryMigrationSet(),
-		userBlobCleanupQueueMigrationSet(),
-		userMailboxGenerationArrivalFloorMigrationSet(),
-		userMessageImportCompletionMigrationSet(),
-		userSearchProgressIndexMigrationSet(),
-		userGoogleConnectionMigrationSet(),
-		userGoogleMailAccountMigrationSet(),
-		userIdentityArchiveMailboxMigrationSet(),
-		userGoogleContactMigrationSet(),
-		userDuplicateCopyMigrationSet(),
-		userGoogleCalendarMigrationSet(),
-		userMessageCategoryMigrationSet(),
-		userSentMailboxAllMailMigrationSet(),
-		userSharedContactEmailMigrationSet(),
-		userContactEmailPositionMigrationSet(),
-	}
-}
-
-// migrate chooses the schema family for this SQLite handle. Split server
-// stores run only system migrations; user stores run only user migrations; unit
-// tests using Open run both against a single database for convenience.
-func (s *Store) migrate(ctx context.Context, kind schemaKind, progress MigrationReporter) error {
-	sets := make([]migrationSet, 0, 2)
-	systemSets := []migrationSet{
-		systemMigrationSet(),
-		systemUserSearchPreferencesMigrationSet(),
-		systemUserSearchRankingMigrationSet(),
-		systemPasswordResetMigrationSet(),
-	}
-	userSets := userMigrationSets()
-	switch kind {
-	case schemaSystem:
-		sets = append(sets, systemSets...)
-	case schemaUser:
-		sets = append(sets, userSets...)
-	default:
-		sets = append(sets, systemSets...)
-		sets = append(sets, userSets...)
-	}
-	for _, set := range sets {
-		if err := s.applyMigrationSet(ctx, set, progress); err != nil {
-			return err
-		}
-	}
-	switch kind {
-	case schemaSystem:
-		return s.applyPluginMigrationsForScope(ctx, plugins.ScopeSystem)
-	case schemaUser:
-		return s.applyPluginMigrationsForScope(ctx, plugins.ScopeUser)
-	default:
-		if err := s.applyPluginMigrationsForScope(ctx, plugins.ScopeSystem); err != nil {
-			return err
-		}
-		return s.applyPluginMigrationsForScope(ctx, plugins.ScopeUser)
-	}
-}
-
 // applyMigrationSet runs DDL inside a transaction, records the checksum, then
 // performs idempotent seed/backfill steps outside the transaction so startup
 // progress can show both structural work and data preparation.
 func (s *Store) applyMigrationSet(ctx context.Context, set migrationSet, progress MigrationReporter) error {
-	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
-		return err
-	}
 	if err := s.ensureSchemaMigrationTable(ctx); err != nil {
 		return err
 	}

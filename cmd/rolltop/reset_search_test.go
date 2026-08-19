@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 )
 
 func TestInstanceLockRefusesSecondProcessForDataDirectory(t *testing.T) {
@@ -50,7 +51,7 @@ func TestResetSearchQuarantinesTargetIndexAndMarksVisibleMessages(t *testing.T) 
 	t.Setenv("ROLLTOP_PLUGIN_DIR", pluginDir)
 	t.Setenv("ROLLTOP_MASTER_KEY", "01234567890123456789012345678901")
 
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +83,7 @@ func TestResetSearchQuarantinesTargetIndexAndMarksVisibleMessages(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	t.Setenv("ROLLTOP_DATABASE_URL", storetest.DSN(t))
 	var stdout bytes.Buffer
 	if err := runCommand(ctx, []string{"reset-search", "--user-id", strconv.FormatInt(user.ID, 10), "--confirm-offline"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
@@ -100,7 +102,7 @@ func TestResetSearchQuarantinesTargetIndexAndMarksVisibleMessages(t *testing.T) 
 		t.Fatalf("other tenant index changed: %v", err)
 	}
 
-	db, err = store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err = storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +138,7 @@ func TestResetSearchRejectsSymlinkedTenantBeforeOpeningUserDatabase(t *testing.T
 	t.Setenv("ROLLTOP_PLUGIN_DIR", pluginDir)
 	t.Setenv("ROLLTOP_MASTER_KEY", "01234567890123456789012345678901")
 
-	db, err := store.OpenServer(filepath.Join(dataDir, "rolltop.db"), dataDir)
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,13 +161,14 @@ func TestResetSearchRejectsSymlinkedTenantBeforeOpeningUserDatabase(t *testing.T
 		t.Fatal(err)
 	}
 
+	t.Setenv("ROLLTOP_DATABASE_URL", storetest.DSN(t))
 	err = runCommand(ctx, []string{"reset-search", "--user-id", strconv.FormatInt(user.ID, 10), "--confirm-offline"},
 		&bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "not a regular directory") {
 		t.Fatalf("symlinked tenant reset error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "rolltop.db")); !os.IsNotExist(err) {
-		t.Fatalf("reset opened or created an external tenant database: %v", err)
+	if _, err := os.Stat(filepath.Join(outside, "bleve")); !os.IsNotExist(err) {
+		t.Fatalf("reset touched an external tenant directory: %v", err)
 	}
 }
 

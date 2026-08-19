@@ -13,11 +13,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"rolltop/backend/store"
+	"rolltop/backend/store/storetest"
 	"rolltop/internal/testlog"
 )
 
@@ -32,7 +32,7 @@ func newPushSubscriptionRequest(t *testing.T, server *Server, user store.User, b
 
 func newPushTestServer(t *testing.T) (*Server, store.User) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rolltop.db"))
+	db, err := storetest.Open(t)
 	if err != nil {
 		t.Fatal(err)
 	}

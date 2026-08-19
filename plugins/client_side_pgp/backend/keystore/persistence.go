@@ -90,15 +90,11 @@ func UpsertIdentityPrivateKey(ctx context.Context, db *store.Store, key store.Id
 		}
 	}
 	if key.ID == 0 {
-		res, err := tx.ExecContext(ctx, `INSERT INTO identity_pgp_private_keys
+		if err := tx.QueryRowContext(ctx, `INSERT INTO identity_pgp_private_keys
 			(user_id, identity_id, label, fingerprint, key_id, user_ids, public_key_armored, encrypted_private_key, private_key_storage, revocation_certificate, is_active_signing, is_active_encryption, is_decrypt_only, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			key.UserID, key.IdentityID, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.EncryptedPrivateKey, key.PrivateKeyStorage, key.RevocationCertificate, boolInt(key.IsActiveSigning), boolInt(key.IsActiveEncryption), boolInt(key.IsDecryptOnly), ts, ts)
-		if err != nil {
-			return rollback()
-		}
-		key.ID, err = res.LastInsertId()
-		if err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			RETURNING id`,
+			key.UserID, key.IdentityID, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.EncryptedPrivateKey, key.PrivateKeyStorage, key.RevocationCertificate, boolInt(key.IsActiveSigning), boolInt(key.IsActiveEncryption), boolInt(key.IsDecryptOnly), ts, ts).Scan(&key.ID); err != nil {
 			return rollback()
 		}
 	} else {
@@ -259,15 +255,11 @@ func UpsertContactPublicKey(ctx context.Context, db *store.Store, key store.Cont
 		}
 	}
 	if key.ID == 0 {
-		res, err := tx.ExecContext(ctx, `INSERT INTO contact_pgp_public_keys
+		if err := tx.QueryRowContext(ctx, `INSERT INTO contact_pgp_public_keys
 			(user_id, contact_id, email, normalized_email, label, fingerprint, key_id, user_ids, public_key_armored, source_kind, source_detail, is_preferred, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			key.UserID, key.ContactID, key.Email, key.NormalizedEmail, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.SourceKind, key.SourceDetail, boolInt(key.IsPreferred), ts, ts)
-		if err != nil {
-			return rollback()
-		}
-		key.ID, err = res.LastInsertId()
-		if err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			RETURNING id`,
+			key.UserID, key.ContactID, key.Email, key.NormalizedEmail, key.Label, key.Fingerprint, key.KeyID, key.UserIDs, key.PublicKeyArmored, key.SourceKind, key.SourceDetail, boolInt(key.IsPreferred), ts, ts).Scan(&key.ID); err != nil {
 			return rollback()
 		}
 	} else {
