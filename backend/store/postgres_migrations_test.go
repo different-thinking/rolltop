@@ -139,11 +139,15 @@ func TestApplyPostgresMigrationIsAtomicAndRecorded(t *testing.T) {
 	dsn := pgtestdb.New(t)
 	conn, ctx := openMigrationTestConn(t, dsn)
 
-	good := testMigration("0001-good", `CREATE TABLE migration_probe (id bigint PRIMARY KEY)`)
+	good := testMigration("9001-good", `CREATE TABLE migration_probe (id bigint PRIMARY KEY)`)
 	if err := applyPostgresMigration(ctx, conn, good); err != nil {
 		t.Fatalf("apply migration: %v", err)
 	}
-	state, err := readPostgresSchemaState(ctx, conn, baselineChecksum(), []postgresMigration{good})
+	// The store open above applied the shipped list, so the expectation is
+	// shipped-plus-test: rows must stay a prefix of the list they are read
+	// against.
+	expected := append(append([]postgresMigration{}, postgresMigrations...), good)
+	state, err := readPostgresSchemaState(ctx, conn, baselineChecksum(), expected)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -153,7 +157,7 @@ func TestApplyPostgresMigrationIsAtomicAndRecorded(t *testing.T) {
 
 	// A migration that fails midway must leave neither its row nor its DDL:
 	// the first statement is valid, the second is not.
-	bad := testMigration("0002-bad",
+	bad := testMigration("9002-bad",
 		`CREATE TABLE migration_probe_two (id bigint PRIMARY KEY)`,
 		`CREATE TABLE migration_probe_two (id bigint PRIMARY KEY)`)
 	if err := applyPostgresMigration(ctx, conn, bad); err == nil {
