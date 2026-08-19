@@ -23,6 +23,10 @@ type droppedSearchIndexTally struct {
 	lastLog   time.Time
 	batches   int
 	documents int
+	// unmarked counts the folders whose repair mark itself failed, carried in
+	// the same tally so a database outage cannot outrun the throttle.
+	unmarked      int
+	unmarkedCause error
 }
 
 // reportDroppedSearchIndexBatch records that a batch of search documents could
@@ -49,6 +53,7 @@ func (s *Service) reportDroppedSearchIndexBatch(ctx context.Context, documents [
 		mailboxes[message.UserID][message.MailboxID] = struct{}{}
 	}
 	for userID, dropped := range byUser {
+		marks := droppedSearchIndexMarks{}
 		for mailboxID := range mailboxes[userID] {
 			// Recorded on a context of its own: the caller's may be the one
 			// that just failed, and losing the mark would leave a folder
@@ -57,18 +62,31 @@ func (s *Service) reportDroppedSearchIndexBatch(ctx context.Context, documents [
 			err := s.Store.MarkMailboxSearchIndexRepairRequired(markCtx, userID, mailboxID)
 			cancel()
 			if err != nil {
-				log.Printf("could not mark folder for full-text repair user_id=%d mailbox_id=%d error_type=%T error=%v",
-					userID, mailboxID, err, err)
+				marks.failed++
+				if marks.cause == nil {
+					marks.cause = err
+				}
 			}
 		}
-		s.logDroppedSearchIndexBatch(userID, dropped, len(mailboxes[userID]), cause)
+		// Reported through the same throttle as the write failure itself. A
+		// database that is down fails both, once per folder per batch, and a
+		// second unthrottled line would bury the first at exactly the moment
+		// the first is the one worth reading.
+		s.logDroppedSearchIndexBatch(userID, dropped, len(mailboxes[userID]), marks, cause)
 	}
+}
+
+// droppedSearchIndexMarks is what recording the folders for rebuild cost: how
+// many marks failed and the first reason, both reported with the drop itself.
+type droppedSearchIndexMarks struct {
+	failed int
+	cause  error
 }
 
 // droppedSearchIndexMarkTimeout bounds the one UPDATE per affected folder.
 const droppedSearchIndexMarkTimeout = 15 * time.Second
 
-func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int, cause error) {
+func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int, marks droppedSearchIndexMarks, cause error) {
 	s.droppedSearchIndexMu.Lock()
 	if s.droppedSearchIndex == nil {
 		s.droppedSearchIndex = map[int64]*droppedSearchIndexTally{}
@@ -80,6 +98,10 @@ func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int,
 	}
 	tally.documents += dropped
 	tally.batches++
+	tally.unmarked += marks.failed
+	if tally.unmarkedCause == nil {
+		tally.unmarkedCause = marks.cause
+	}
 	now := time.Now()
 	if !tally.lastLog.IsZero() && now.Sub(tally.lastLog) < droppedSearchIndexLogInterval {
 		s.droppedSearchIndexMu.Unlock()
@@ -88,12 +110,23 @@ func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int,
 	tally.lastLog = now
 	batches := tally.batches
 	documents := tally.documents
+	unmarked := tally.unmarked
+	unmarkedCause := tally.unmarkedCause
 	tally.batches = 0
 	tally.documents = 0
+	tally.unmarked = 0
+	tally.unmarkedCause = nil
 	s.droppedSearchIndexMu.Unlock()
 
 	// The cause is logged by type and value, never the documents: this runs on
 	// message content, and none of it may reach the log.
 	log.Printf("search index write failed, mail stored and folders marked for rebuild user_id=%d batches=%d documents=%d folders=%d error_type=%T error=%v",
 		userID, batches, documents, folders, cause, cause)
+	if unmarked > 0 {
+		// A folder nothing could mark is the worse half of this failure: it
+		// still reports verified coverage it no longer has, and no rebuild will
+		// be offered for it until something marks or rebuilds it.
+		log.Printf("could not mark folders for full-text repair user_id=%d folders=%d error_type=%T error=%v",
+			userID, unmarked, unmarkedCause, unmarkedCause)
+	}
 }

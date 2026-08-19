@@ -5,6 +5,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,3 +109,38 @@ func TestSearchIndexFailureIsNotSurvivableWhenStopping(t *testing.T) {
 		t.Fatal("an index failure aborted the sync")
 	}
 }
+
+// Both halves of this failure are rate limited together. A database that is
+// down fails the index write and the repair mark, once per folder per batch,
+// and an unthrottled second line buries the first at the moment it matters.
+func TestDroppedSearchIndexReportingIsRateLimitedPerTenant(t *testing.T) {
+	service := &Service{}
+	var lines int
+	previous := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		lines++
+		return len(p), nil
+	}))
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	marks := droppedSearchIndexMarks{failed: 3, cause: errors.New("database is down")}
+	for range 50 {
+		service.logDroppedSearchIndexBatch(1, 25, 3, marks, errors.New("invalid database"))
+	}
+	// The first report carries both lines; everything after it is inside the
+	// interval and must be silent.
+	if lines != 2 {
+		t.Fatalf("log lines = %d, want 2 (one drop report and one mark report)", lines)
+	}
+
+	// A second tenant reports independently: the throttle is per tenant, so one
+	// noisy tenant cannot silence another.
+	service.logDroppedSearchIndexBatch(2, 25, 1, droppedSearchIndexMarks{}, errors.New("invalid database"))
+	if lines != 3 {
+		t.Fatalf("log lines = %d after a second tenant, want 3", lines)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
