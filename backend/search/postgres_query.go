@@ -223,27 +223,48 @@ func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText stri
 	return hits, nil
 }
 
+// pgExplainIDChunk bounds one restriction list, matching the store's own cap.
+// A thread can hold more messages than that, and the Bleve path had no cap, so
+// the ids are walked in chunks and the best-scoring row across them wins -
+// which is the single hit the Bleve request asked for.
+const pgExplainIDChunk = 500
+
 func (s *Service) pgExplainMessageIDs(ctx context.Context, userID int64, messageIDs []int64, queryText string, opts SearchOptions) (ExplanationResult, bool, error) {
 	parsed := parseQuery(queryText)
 	spec := pgSearchSpec(userID, parsed, opts, 1, 0, s.pg.TrigramSearchEnabled())
 	ids := make([]int64, 0, len(messageIDs))
+	seen := make(map[int64]bool, len(messageIDs))
 	for _, id := range messageIDs {
-		if id > 0 {
-			ids = append(ids, id)
+		if id <= 0 || seen[id] {
+			continue
 		}
+		seen[id] = true
+		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return ExplanationResult{}, false, nil
 	}
-	spec.MessageIDs = ids
-	rows, err := s.pg.SearchMessageIDs(ctx, spec)
-	if err != nil {
-		return ExplanationResult{}, false, fmt.Errorf("postgres match: %w", err)
+	var best store.MessageSearchHit
+	found := false
+	for start := 0; start < len(ids); start += pgExplainIDChunk {
+		if err := ctx.Err(); err != nil {
+			return ExplanationResult{}, false, err
+		}
+		chunk := spec
+		chunk.MessageIDs = ids[start:min(start+pgExplainIDChunk, len(ids))]
+		rows, err := s.pg.SearchMessageIDs(ctx, chunk)
+		if err != nil {
+			return ExplanationResult{}, false, fmt.Errorf("postgres match: %w", err)
+		}
+		if len(rows) > 0 && (!found || rows[0].Score > best.Score) {
+			best = rows[0]
+			found = true
+		}
 	}
-	if len(rows) == 0 {
+	if !found {
 		return ExplanationResult{}, false, nil
 	}
-	row := rows[0]
+	row := best
 	terms := pgNeedleTerms(parsed)
 	fields := pgMatchedFields(row)
 	matches := make([]FieldTermMatch, 0, len(fields))

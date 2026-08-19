@@ -1310,31 +1310,39 @@ func reportIndexMemoryHeadroom(applied memlimit.Applied, searchRoot string) {
 		memlimit.FormatBytes(applied.Detected), memlimit.FormatBytes(max(headroom, 0)))
 }
 
-// markPostgresSearchBackfill schedules the initial fill of message_search for
-// one tenant: when search-visible messages exist but no rows do, the tenant's
-// folders are marked exactly as the corrupt-index handler marks them, and the
-// sync repair path re-indexes through the same IndexMessages call - which on
-// this backend writes rows. Idempotent across restarts: a tenant with rows, or
-// with nothing to index, is left alone.
+// markPostgresSearchBackfill schedules the fill of message_search for one
+// tenant: when search-visible messages outnumber the rows that cover them, the
+// tenant's folders are marked exactly as the corrupt-index handler marks them,
+// and the sync repair path re-indexes through the same IndexMessages call -
+// which on this backend writes rows.
+//
+// The comparison is a shortfall, not a presence check. The first start on this
+// backend has no rows at all, but the case that outlives it is the interim: a
+// spell served from Bleve leaves the rows behind by exactly the mail that
+// arrived meanwhile, and mail that is present but unindexed is invisible to
+// search with nothing to say so. Idempotent across restarts, since a tenant
+// whose rows already cover its mail marks nothing.
+//
+// A surplus of rows is deliberately not acted on: rows for messages in folders
+// that have since left search are stale but harmless, because every query
+// joins messages and filters by the live folder.
 func markPostgresSearchBackfill(ctx context.Context, db *store.Store, userID int64) error {
 	indexed, err := db.CountMessageSearchForUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("count postgres search rows user_id=%d: %w", userID, err)
 	}
-	if indexed > 0 {
-		return nil
-	}
 	searchable, err := db.CountSearchEnabledMessagesForUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("count search-enabled messages user_id=%d: %w", userID, err)
 	}
-	if searchable == 0 {
+	if searchable == 0 || indexed >= searchable {
 		return nil
 	}
 	marked, err := db.MarkUserSearchIndexRepairRequired(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("mark postgres search backfill user_id=%d: %w", userID, err)
 	}
-	log.Printf("postgres search backfill scheduled user_id=%d folders=%d messages=%d", userID, marked, searchable)
+	log.Printf("postgres search backfill scheduled user_id=%d folders=%d messages=%d indexed=%d",
+		userID, marked, searchable, indexed)
 	return nil
 }

@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -314,5 +316,154 @@ func TestPostgresBackendFuzzyDegradesWithoutTrigram(t *testing.T) {
 	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 10, 0, SearchOptions{})
 	if err != nil || len(hits) != 1 {
 		t.Fatalf("exact hits = %v, err = %v, want 1", hits, err)
+	}
+}
+
+// TestPostgresBackendSplitsAddressesAndURLs pins the tokenizer agreement: an
+// address or link in the body has to be reachable by its parts, which
+// PostgreSQL's own parser would keep as one lexeme.
+func TestPostgresBackendSplitsAddressesAndURLs(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	msg := seedPostgresSearchMessage(t, db, user, mailbox, 70, "Kontaktdaten",
+		"schreib an kontakt@firma-beispiel.de oder https://portal.firma-beispiel.de/anmelden")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: msg}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	for _, query := range []string{"firma", "beispiel", "kontakt", "portal", "anmelden", "kontakt@firma-beispiel.de"} {
+		hits, err := svc.SearchHitsWithOptions(ctx, user.ID, query, 10, 0, SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		if len(hits) != 1 || hits[0].ID != msg.ID {
+			t.Errorf("query %q found %v, want the message with the address and link", query, hits)
+		}
+	}
+}
+
+func TestPGIndexTextBoundsAndSplits(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	out := pgIndexText(long, pgMaxBodyBytes)
+	for _, run := range strings.Fields(out) {
+		if len(run) > pgMaxLexemeBytes {
+			t.Fatalf("run of %d bytes exceeds the per-lexeme ceiling", len(run))
+		}
+	}
+	if strings.ReplaceAll(out, " ", "") != long {
+		t.Fatal("splitting an oversized run lost or changed content")
+	}
+	if got := pgIndexText("Rechnung/2026 Nr. 7", 0); got != "" {
+		t.Fatalf("zero budget returned %q", got)
+	}
+	if got := pgIndexText("Ärger mit Ümlauten", 5); len(got) > 5 {
+		t.Fatalf("bounded text is %d bytes, want at most 5", len(got))
+	}
+}
+
+// TestPostgresBackendVectorStaysUnderLimit feeds the worst shape PostgreSQL
+// rejects - a message of nothing but distinct short words - and checks that
+// the projection keeps it insertable. Before the combined budget this failed
+// permanently: the repair path re-projects the same text and hits the same
+// hard limit forever.
+func TestPostgresBackendVectorStaysUnderLimit(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+
+	var body strings.Builder
+	for i := 0; body.Len() < 3*pgMaxVectorInputBytes; i++ {
+		fmt.Fprintf(&body, "a%d ", i)
+	}
+	huge := seedPostgresSearchMessage(t, db, user, mailbox, 80, "Riesige Nachricht", body.String())
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: huge,
+		Attachments: []AttachmentDoc{{Filename: "gross.txt", ContentType: "text/plain", Text: body.String()}}},
+	}); err != nil {
+		t.Fatalf("indexing an oversized message failed: %v", err)
+	}
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "riesige", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 || hits[0].ID != huge.ID {
+		t.Fatalf("hits = %v, err = %v; the subject must survive the budget", hits, err)
+	}
+}
+
+func TestPostgresBackendFoldsCaseBeyondASCII(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	msg := seedPostgresSearchMessage(t, db, user, mailbox, 90, "ÜBERWEISUNG ausgeführt", "der betrag ist raus")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: msg}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if _, err := db.DB().ExecContext(ctx, `UPDATE messages SET from_addr = 'Jörg Müller <joerg@beispiel.test>' WHERE id = $1`, msg.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "betrag subject:überweisung", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 || hits[0].ID != msg.ID {
+		t.Fatalf("subject filter hits = %v, err = %v; lowercase query must match the uppercase subject", hits, err)
+	}
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "betrag from:JÖRG", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("from filter hits = %v, err = %v; uppercase query must match the mixed-case sender", hits, err)
+	}
+	// The boost path lowercases app-side and compares against the column.
+	opts := SearchOptions{SenderBoosts: []SenderBoost{{Sender: "Jörg Müller", Boost: 5}}}
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "betrag", 10, 0, opts)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("boosted hits = %v, err = %v", hits, err)
+	}
+	if hits[0].Score <= 0 {
+		t.Fatalf("score = %v, want the non-ASCII sender boost applied", hits[0].Score)
+	}
+}
+
+// TestPostgresBackendExplainWalksLargeThreads covers the id list a big thread
+// hands to explain: the store caps one restriction at 500, and the Bleve path
+// it replaces had no cap at all.
+func TestPostgresBackendExplainWalksLargeThreads(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+
+	ids := make([]int64, 0, 640)
+	var target int64
+	docs := make([]MessageIndexDocument, 0, 640)
+	for i := 0; i < 640; i++ {
+		subject := "Sammelthread"
+		if i == 600 {
+			subject = "Sammelthread Schlüsselwort"
+		}
+		msg := seedPostgresSearchMessage(t, db, user, mailbox, uint32(1000+i), subject, "rumpf")
+		if i == 600 {
+			target = msg.ID
+		}
+		ids = append(ids, msg.ID)
+		docs = append(docs, MessageIndexDocument{Message: msg})
+	}
+	if err := svc.IndexMessages(ctx, docs); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	result, ok, err := svc.ExplainMessagesWithOptions(ctx, user.ID, ids, "schlüsselwort", SearchOptions{})
+	if err != nil {
+		t.Fatalf("explain over %d ids: %v", len(ids), err)
+	}
+	if !ok || result.ID != target {
+		t.Fatalf("explain = %+v, ok = %v; want the matching message %d from beyond the first chunk", result, ok, target)
+	}
+}
+
+// TestPostgresBackendSearchWithOptions covers the id-only entry point, which
+// list building uses and which never reached the postgres branch.
+func TestPostgresBackendSearchWithOptions(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	msg := seedPostgresSearchMessage(t, db, user, mailbox, 95, "Listenaufbau", "inhalt")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: msg}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	ids, err := svc.Search(ctx, user.ID, "listenaufbau", 10, 0)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != msg.ID {
+		t.Fatalf("ids = %v, want [%d]", ids, msg.ID)
 	}
 }

@@ -16,6 +16,15 @@ import (
 	"strings"
 )
 
+// collateDefault forces case handling that covers more than ASCII. The text
+// columns are declared COLLATE "C" (the baseline's translation of SQLite's
+// BINARY), under which lower() and ILIKE fold A-Z and leave every other
+// alphabet alone: subject:überweisung would miss "ÜBERWEISUNG", and a sender
+// boost for a non-ASCII address would never fire. The database's own collation
+// does the full mapping, and none of these predicates can use an index anyway
+// - they filter rows the GIN scan already selected.
+const collateDefault = ` COLLATE "default"`
+
 // MessageSearchBoost adds to a hit's score when the sender matches. Pattern is
 // compared as a lowercase substring of from_addr, which is how the Bleve
 // should-clause on the from field behaved for addresses.
@@ -149,7 +158,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		if pattern == "" || boost.Boost <= 0 {
 			continue
 		}
-		score.WriteString(` + CASE WHEN position(? in lower(m.from_addr)) > 0 THEN ?::float4 ELSE 0 END`)
+		score.WriteString(` + CASE WHEN position(? in lower(m.from_addr` + collateDefault + `)) > 0 THEN ?::float4 ELSE 0 END`)
 		args = append(args, pattern, boost.Boost)
 	}
 	if len(q.RecencyBuckets) > 0 && q.NowUnix > 0 {
@@ -220,6 +229,8 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		args = append(args, want)
 	}
 	if q.Language != "" {
+		// Language codes are ASCII by definition, so this one needs no
+		// collation override.
 		conditions = append(conditions, `lower(m.language_code) = lower(?)`)
 		args = append(args, q.Language)
 	}
@@ -235,12 +246,12 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		if pattern.value == "" {
 			continue
 		}
-		conditions = append(conditions, pattern.column+" ILIKE ?")
+		conditions = append(conditions, pattern.column+collateDefault+" ILIKE ?")
 		args = append(args, pattern.value)
 	}
 	if q.FilenamePattern != "" {
 		conditions = append(conditions, `EXISTS (SELECT 1 FROM attachments a
-			WHERE a.user_id = ms.user_id AND a.message_id = ms.message_id AND a.filename ILIKE ?)`)
+			WHERE a.user_id = ms.user_id AND a.message_id = ms.message_id AND a.filename`+collateDefault+` ILIKE ?)`)
 		args = append(args, q.FilenamePattern)
 	}
 	if q.AfterUnix > 0 {

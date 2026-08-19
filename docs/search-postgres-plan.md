@@ -96,8 +96,23 @@ today (`document_limits.go` limits stay), with `setweight`:
 | C | body text (bounded to `maxIndexedBodyBytes`) |
 | D | attachment names, types, and extracted attachment text |
 
-Text search configuration: start with `simple` (no stemming — closest to
-Bleve's current standard analyzer, keeps exact-match semantics and the
+Tokenization is app-side, not PostgreSQL's: each stream is normalized with the
+same `normalizeSearchText` the query side runs before it reaches
+`to_tsvector('simple', …)`. Leaving it to the parser keeps an address, URL, or
+host as a single lexeme, so a body mentioning `kontakt@firma-beispiel.de`
+would be unreachable by "firma" — where the Bleve tokenizer split it. One
+tokenizer on both sides is the only way index and query agree. Runs longer
+than PostgreSQL's 2000-byte lexeme ceiling are split rather than dropped.
+
+The four streams also share a combined 384KiB input budget, filled in weight
+order: PostgreSQL rejects a tsvector over 1MiB outright, and that error is not
+recoverable — the repair path re-projects the same message and fails again.
+Measured worst case is a doubling (409KB of short distinct words → 819KB
+vector), so the budget cannot reach the limit; a message that hits it loses
+attachment text before body text and never loses its subject.
+
+Text search configuration: `simple` (no stemming — closest to
+Bleve's standard analyzer, keeps exact-match semantics and the
 app-side German compound splitting doing the work it already does). Evaluate
 adding `german`/`english` stemmed lexemes as a second `setweight` pass once
 result quality can be compared side by side; that is a tuning decision to
@@ -135,7 +150,7 @@ Translation of the parsed query:
 | today (Bleve) | Postgres |
 |---|---|
 | filter operators (`is:`, `has:`, `lang:`, `before:` …) | `WHERE` clauses on the joined `messages` row |
-| `from:`/`to:`/`cc:`/`subject:`/`filename:` fields | `tsquery` against the weighted lexemes plus `ILIKE` fallback on the joined columns for exact substrings |
+| `from:`/`to:`/`cc:`/`subject:`/`filename:` fields | `ILIKE` on the joined columns, forced to the database collation so folding covers more than A-Z (the columns are `COLLATE "C"`) |
 | free text, unquoted | AND of lexemes, prefix match (`:*`) on the final term |
 | free text, quoted | phrase query (`<->` / `phraseto_tsquery`) |
 | negated terms | `AND NOT (tsv @@ ...)` |

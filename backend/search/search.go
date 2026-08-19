@@ -1599,6 +1599,17 @@ func (s *Service) Search(ctx context.Context, userID int64, queryText string, li
 // SearchWithOptions returns only IDs for list-building callers that will hydrate
 // full conversations from SQLite.
 func (s *Service) SearchWithOptions(ctx context.Context, userID int64, queryText string, limit, offset int, opts SearchOptions) ([]int64, error) {
+	if s.pg != nil {
+		hits, err := s.pgSearchHits(ctx, userID, queryText, limit, offset, opts)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]int64, 0, len(hits))
+		for _, hit := range hits {
+			ids = append(ids, hit.ID)
+		}
+		return ids, nil
+	}
 	res, err := s.search(ctx, userID, queryText, limit, offset, opts, false)
 	if err != nil {
 		return nil, err

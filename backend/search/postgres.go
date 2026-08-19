@@ -12,23 +12,35 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"rolltop/backend/store"
 )
 
-// Postgres-mode text budgets. A tsvector must stay under 1MiB; these caps keep
-// the four weighted streams' sum well below it while preserving substantially
-// more text than the list preview. A message that still overflows fails its
-// batch with a Postgres error and is retried by the repair path — the same
-// contract a Bleve write error has today.
+// Postgres-mode text budgets. Per-stream ceilings preserve substantially more
+// text than the list preview; pgMaxVectorInputBytes then bounds the four
+// together, because PostgreSQL rejects a tsvector over 1MiB outright and that
+// error is not recoverable by retrying: the repair path re-projects the same
+// message and fails again forever. Measured worst case is a doubling —
+// 409KB of short distinct words produced an 819KB vector, while realistic
+// prose stayed near 1.2x — so 384KiB of input cannot reach the limit.
+//
+// Streams are filled in weight order, so a message that hits the budget loses
+// attachment text before body text and never loses its subject.
 const (
-	pgMaxSubjectBytes    = 64 * 1024
-	pgMaxAddressBytes    = 128 * 1024
-	pgMaxBodyBytes       = 512 * 1024
-	pgMaxAttachmentBytes = 256 * 1024
+	pgMaxSubjectBytes     = 64 * 1024
+	pgMaxAddressBytes     = 128 * 1024
+	pgMaxBodyBytes        = 512 * 1024
+	pgMaxAttachmentBytes  = 256 * 1024
+	pgMaxVectorInputBytes = 384 * 1024
 	// pgMaxWordsBytes bounds the fuzzy word list. Distinct words only, so this
 	// covers the vocabulary of even a large message comfortably.
 	pgMaxWordsBytes = 128 * 1024
+	// pgMaxLexemeBytes is PostgreSQL's per-lexeme ceiling. A longer run is
+	// dropped with a notice rather than indexed, so runs are split at this
+	// width instead — a base64 blob then stays findable in pieces, which is
+	// what the Bleve tokenizer did with it.
+	pgMaxLexemeBytes = 2000
 )
 
 // OpenPostgresBackend serves search from the given store's message_search
@@ -77,18 +89,68 @@ func buildMessageSearchTexts(doc MessageIndexDocument) (a, b, c, d string) {
 	ccAddr := boundedIndexText(msg.CCAddr, maxIndexedHeaderBytes)
 	messageID := boundedIndexText(msg.MessageIDHeader, maxIndexedHeaderBytes)
 
-	a = boundedIndexText(joinIndexTexts(subject, compoundSearchText(subject)), pgMaxSubjectBytes)
-	b = boundedIndexText(joinIndexTexts(
+	budget := pgMaxVectorInputBytes
+	take := func(text string, limit int) string {
+		out := pgIndexText(text, min(limit, budget))
+		budget -= len(out)
+		return out
+	}
+	a = take(joinIndexTexts(subject, compoundSearchText(subject)), pgMaxSubjectBytes)
+	b = take(joinIndexTexts(
 		fromAddr, compoundSearchText(fromAddr), emailDomainTerms(fromAddr),
 		toAddr, ccAddr, messageID,
 	), pgMaxAddressBytes)
-	c = boundedIndexText(bodyForIndex, pgMaxBodyBytes)
-	d = boundedIndexText(joinIndexTexts(
+	c = take(bodyForIndex, pgMaxBodyBytes)
+	d = take(joinIndexTexts(
 		boundedIndexJoin(names, maxIndexedNamesBytes),
 		boundedIndexJoin(contentTypes, maxIndexedNamesBytes),
 		boundedIndexJoin(texts, maxIndexedAttachmentsBytes),
 	), pgMaxAttachmentBytes)
 	return a, b, c, d
+}
+
+// pgIndexText prepares one stream for to_tsvector. It tokenizes app-side -
+// the same normalization the query side runs - rather than leaving it to
+// PostgreSQL's parser, which keeps an address, URL, or host as a single
+// lexeme: a body mentioning kontakt@firma-beispiel.de would then be
+// unreachable by "firma", where the Bleve tokenizer split it into words. One
+// tokenizer on both sides is the only way index and query agree.
+func pgIndexText(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	normalized := splitOversizedRuns(normalizeSearchText(value), pgMaxLexemeBytes)
+	if len(normalized) <= limit {
+		return normalized
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(normalized[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(normalized[:cut])
+}
+
+// splitOversizedRuns breaks alphanumeric runs longer than limit into pieces at
+// rune boundaries. Normalization has already separated words, so a run this
+// long is a hash or an encoded blob rather than prose.
+func splitOversizedRuns(value string, limit int) string {
+	var out strings.Builder
+	run := 0
+	for offset, r := range value {
+		if r == ' ' {
+			run = 0
+			out.WriteRune(r)
+			continue
+		}
+		size := utf8.RuneLen(r)
+		if run+size > limit {
+			out.WriteByte(' ')
+			run = 0
+		}
+		run += size
+		out.WriteString(value[offset : offset+size])
+	}
+	return out.String()
 }
 
 // messageSearchWords renders the distinct normalized words of the four
