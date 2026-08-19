@@ -1493,10 +1493,19 @@ function MessageList({
   useEffect(() => {
     const sourceIDs = new Set(conversations.map((conversation) => conversation.message.id));
     const sourceMessageIDs = new Set(conversations.flatMap(conversationTransferMessageIDs));
+    // A row a mutation dismissed stays dismissed for as long as the list still
+    // carries it, and is released only when the list stops returning it or when
+    // something explicitly puts it back: an undo, a failed move, or a queued
+    // move this view gave up watching. Releasing it because the mutation
+    // finished tied the row to the round trip behind it - a queued move ends
+    // minutes after the click, and the rows returned to the screen for the gap
+    // between that end and the reload that finally drops them, which is exactly
+    // the flash the dismissal exists to prevent. The set stays bounded by the
+    // list either way: an id the server stops sending leaves it on the next page.
     setDismissedIDs((current) => {
       const next = new Set<number>();
       current.forEach((id) => {
-        if (sourceMessageIDs.has(id) && (hiddenMessageIDs.has(id) || pendingSwipeMoveIDs.has(id) || pendingSwipeSnoozeIDs.has(id))) next.add(id);
+        if (sourceMessageIDs.has(id)) next.add(id);
       });
       return next.size === current.size ? current : next;
     });
@@ -1529,7 +1538,7 @@ function MessageList({
         }
       }
     });
-  }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs, pendingSwipeMoveIDs, pendingSwipeSnoozeIDs]);
+  }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs]);
 
   // Focus lands on Cancel rather than the destructive control: a stray Enter on
   // a freshly opened confirmation must not delete a whole filter.
@@ -1719,6 +1728,24 @@ function MessageList({
       addToast(parts.join(" "));
       if (result.partial_error) addToast(result.partial_error, "error");
       clearSelection();
+      // Every row on screen matches the filter the server just took, so the page
+      // clears on the click rather than message by message as the background
+      // runs work through the folder. Only a pass that took the whole filter can
+      // say that: a truncated one stops somewhere inside it, and a skipped
+      // message is one this list may well be showing because it is already in
+      // Trash, so neither may hide a row the folder is going to keep.
+      // The runs are also the only proof these rows really left, and a delete
+      // that fails halfway has to give them back rather than leave a folder
+      // looking emptier than it is, so a pass that named none clears nothing.
+      const runIDs = (result.runs || []).map((run) => run.run_id).filter((id) => id > 0);
+      const wholeFilterTaken = queuedMessages > 0 && result.skipped === 0 && !result.truncated && runIDs.length > 0;
+      const clearedIDs = wholeFilterTaken
+        ? uniquePositiveIDs(visible.flatMap((conversation) => [conversation.message.id, ...conversationTransferMessageIDs(conversation)]))
+        : [];
+      if (clearedIDs.length > 0) {
+        optimisticallyDismiss(clearedIDs);
+        void watchQueuedMove(runIDs, clearedIDs, "Trash");
+      }
       onListChanged?.();
     } catch (err) {
       addToast(`Delete failed: ${messageFromError(err)}`, "error");
@@ -2022,13 +2049,23 @@ function MessageList({
       if (failed) {
         restoreDismissed(ids);
         addToast(`Move to ${destLabel} did not finish: ${failed.error || failed.status}.`, "error");
+      } else {
+        // The run is done, so the rows have left this list for real: take them
+        // out of its own data now rather than leaving that to the reload. The
+        // reload is a round trip away, and the folder refresh the finished run
+        // queues competes with it, so waiting for it to answer is what put moved
+        // mail back in front of the reader a minute after they filed it.
+        onMessagesMoved(ids);
       }
       onListChanged?.();
       return;
     }
     // Past the watch window the rows stop being hidden on trust: show whatever
     // the folder still holds rather than keeping them invisible for the session.
+    // Nothing else releases them - a dismissal now outlives the mutation - so
+    // this is the one place that has to put an unproven move back on screen.
     removePendingSwipeMoveIDs(ids);
+    restoreDismissed(ids);
     onListChanged?.();
   }
 

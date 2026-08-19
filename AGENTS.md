@@ -42,6 +42,15 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   section headings group on exactly that date. Thread-wide answers (message
   count, participants, read state, starred, attachments) still come from the
   whole thread.
+- Filing mail is decoupled from the IMAP work behind it. A row a list mutation
+  dismissed - delete, Report spam, archive, snooze - is gone from that list the
+  moment it is clicked and stays gone while the list still returns it; only an
+  undo, a proven failure, or a queued move the view stopped watching puts it
+  back. Never release a dismissal because the request finished or a run
+  completed: a queued move ends minutes later, and the rows return to the screen
+  for the gap until the reload answers, which is the flash the dismissal exists
+  to prevent. Whatever proves a move also takes the rows out of the list's own
+  data (`onMessagesMoved`) rather than leaving that to the reload.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
