@@ -209,6 +209,10 @@ func (s *Server) searchIndexReport(ctx context.Context) (searchIndexReport, erro
 		}
 		pending, err := s.store.CountMailboxesNeedingSearchIndexRepair(ctx, user.ID)
 		if err != nil {
+			// The row says only that the number is missing. Without this line
+			// the reason is nowhere - not even in the log tail further down
+			// the same page, which is where an operator looks next.
+			log.Printf("read search index repair state user_id=%d error_type=%T error=%v", user.ID, err, err)
 			tenant.Error = "Could not read this user's indexing state."
 		} else {
 			tenant.FoldersNeedingRebuild = pending

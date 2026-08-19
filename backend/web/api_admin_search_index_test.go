@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"rolltop/backend/search"
@@ -62,8 +63,8 @@ func TestAdminSearchIndexRequiresAdmin(t *testing.T) {
 func TestAdminSearchIndexReportLeavesIndexesAlone(t *testing.T) {
 	server, admin, _ := newDatabaseAdminServer(t)
 	root := attachSearchService(t, server)
-	indexPath := filepath.Join(root, "1", "bleve")
-	if err := os.MkdirAll(indexPath, 0o700); err != nil {
+	tenantRoot := filepath.Join(root, strconv.FormatInt(admin.ID, 10))
+	if err := os.MkdirAll(filepath.Join(tenantRoot, search.LiveIndexDirName), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,7 +80,7 @@ func TestAdminSearchIndexReportLeavesIndexesAlone(t *testing.T) {
 	if report.Tenants[0].FoldersNeedingRebuild != 0 {
 		t.Fatalf("folders needing rebuild = %d, want none", report.Tenants[0].FoldersNeedingRebuild)
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "1"))
+	entries, err := os.ReadDir(tenantRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

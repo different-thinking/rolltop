@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
-	bolt "go.etcd.io/bbolt"
+	bbolterrors "go.etcd.io/bbolt/errors"
 )
 
 // corruptPerUserIndex truncates the scorch root file the way an incomplete
@@ -39,7 +39,7 @@ func corruptPerUserIndex(t *testing.T, root string, userID int64) string {
 }
 
 func TestIsIndexCorruptionErrorMatchesDamagedFiles(t *testing.T) {
-	for _, err := range []error{bolt.ErrInvalid, bolt.ErrVersionMismatch, bolt.ErrChecksum,
+	for _, err := range []error{bbolterrors.ErrInvalid, bbolterrors.ErrVersionMismatch, bbolterrors.ErrChecksum,
 		bleve.ErrorIndexMetaMissing, bleve.ErrorIndexMetaCorrupt} {
 		if !IsIndexCorruptionError(err) {
 			t.Fatalf("%v is not treated as corruption", err)
@@ -53,7 +53,7 @@ func TestIsIndexCorruptionErrorMatchesDamagedFiles(t *testing.T) {
 func TestIsIndexCorruptionErrorLeavesTransientFailuresAlone(t *testing.T) {
 	for _, err := range []error{
 		nil,
-		bolt.ErrTimeout, // another process holds the index lock
+		bbolterrors.ErrTimeout, // another process holds the index lock
 		os.ErrPermission,
 		errors.New("too many open files"),
 		bleve.ErrorIndexPathDoesNotExist,

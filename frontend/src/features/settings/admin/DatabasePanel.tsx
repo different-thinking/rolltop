@@ -128,6 +128,8 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
     }
   }
 
+  const armedTenant = tenants?.find((tenant) => tenant.user_id === armedUser) || null;
+
   return (
     <div className="database-log">
       <h2>Search index</h2>
@@ -154,6 +156,19 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
             : ""}
         </p>
       ) : null}
+      {/* The armed state changes only a button label, which is not enough to
+          describe what the second click does — and nothing at all for a screen
+          reader. The sibling card names its target and consequence the same
+          way. */}
+      <div aria-live="polite">
+        {armedTenant ? (
+          <p className="settings-hint">
+            This rebuilds the search index for <strong>{armedTenant.email}</strong>
+            {armedTenant.present ? ` and discards the ${formatBytes(armedTenant.bytes)} it holds today` : ""}. Their
+            mail is untouched, but their search stays incomplete until the reindex finishes. Click again to confirm.
+          </p>
+        ) : null}
+      </div>
       {loading && !tenants ? <p className="settings-hint">Loading search index status…</p> : null}
       {tenants && tenants.length > 0 ? (
         <table className="database-table">

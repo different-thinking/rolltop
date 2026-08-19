@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
-	bolt "go.etcd.io/bbolt"
+	bbolterrors "go.etcd.io/bbolt/errors"
 )
 
 // CorruptIndexHandler is told which tenant's index is about to be moved aside.
@@ -59,9 +59,9 @@ func IsIndexCorruptionError(err error) bool {
 		return false
 	}
 	for _, target := range []error{
-		bolt.ErrInvalid,         // "invalid database" - the root file is not a bolt database
-		bolt.ErrVersionMismatch, // a bolt file from another architecture or a torn header
-		bolt.ErrChecksum,        // the meta page does not match its checksum
+		bbolterrors.ErrInvalid,         // "invalid database" - the root file is not a bolt database
+		bbolterrors.ErrVersionMismatch, // a bolt file from another architecture or a torn header
+		bbolterrors.ErrChecksum,        // the meta page does not match its checksum
 		bleve.ErrorIndexMetaMissing,
 		bleve.ErrorIndexMetaCorrupt,
 	} {

@@ -105,6 +105,21 @@ func TestSearchIndexFailureIsNotSurvivableWhenStopping(t *testing.T) {
 	if searchIndexFailureIsSurvivable(context.Background(), context.DeadlineExceeded) {
 		t.Fatal("a deadline was treated as an index problem")
 	}
+	// A closing service is the process going away: the pending rows belong to
+	// the next start, not to a batch this run quietly discards.
+	closing, err := search.Open(filepath.Join(t.TempDir(), "closing-bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, closedErr := closing.CountMailboxMessages(context.Background(), 1, 1); closedErr == nil {
+		t.Fatal("a closed search service answered a query")
+	} else if searchIndexFailureIsSurvivable(context.Background(), closedErr) {
+		t.Fatalf("a closing service was treated as an index problem: %v", closedErr)
+	}
+
 	if !searchIndexFailureIsSurvivable(context.Background(), errors.New("invalid database")) {
 		t.Fatal("an index failure aborted the sync")
 	}
