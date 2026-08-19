@@ -159,6 +159,41 @@ site and in review.
   as the original would take the message out of view entirely. Showing a message
   twice is recoverable; hiding the only copy is not.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- `attachment_indexed_at = 0` is **not** a reindex queue. It flags attachment
+  enrichment, and the maintenance worker's first act is to clear every pending
+  row without indexing it unless `AllowBackgroundAttachmentHydration` is on,
+  which production never sets. Marking rows through it to refill an index is a
+  silent no-op that leaves the tenant unsearchable while the page reports
+  success. What refills an index is the explicit rebuild - purge the folder's
+  documents, then index what the folder has and the index does not
+  (`rebuildMailboxSearchIndex`) - offered per account in the folder settings and
+  per tenant on the admin database page. Reuse it; do not grow a second one.
+- The search index is derived state and must never hold the mail hostage. A
+  Bleve write that fails drops its batch and marks the folders it touched as
+  coverage nothing has verified (`search_index_state_known = 0`), which the
+  folder list and the admin page already show and the rebuild acts on; it does
+  not abort the mailbox, because the index is rebuildable from stored mail and a
+  missed IMAP sync window is not. Only a cancelled context and a closing service
+  still stop the sync, and both report it with one sentinel
+  (`search.IsServiceClosingError`) rather than a second spelling per code path.
+  An index that cannot be opened at all is quarantined and replaced on the spot,
+  with the tenant's folders marked *before* the directory moves - a crash in
+  between must leave a folder to rebuild, never one that claims to be indexed
+  into an index that no longer exists. Only errors naming a damaged file qualify
+  (`search.IsIndexCorruptionError`); a held lock or a full disk is a passing
+  condition whose index is fine, and rebuilding on one of those answers a
+  five-second problem with hours of reindexing.
+- Exactly one goroutine may open a given tenant's index, and the gate that
+  guarantees it (`Service.openGates`) also covers the quarantine. Two
+  concurrent `bleve.Open` calls on one scorch directory block on its bolt lock
+  indefinitely, and a handle closed as a duplicate takes the live index down
+  with it - the surviving cache entry then answers every search with "index is
+  closed" until the process restarts. Deduplicating after the open is not
+  enough; the open itself has to be serialised.
+- Repairing a search index must stay reachable from the admin database page.
+  Rolltop is deployed as a container, so an operator with a broken index and no
+  shell cannot reach `rolltop reset-search`; the SQLite-era verify/backup/repair
+  buttons were rightly removed, that one was not theirs to take with them.
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens Bleve or the blob store. The database no longer needs it
   — PostgreSQL handles concurrent clients — but Bleve does, and that is now the

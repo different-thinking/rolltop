@@ -30,6 +30,7 @@ import type {
   SMTPAccount,
   ScopeMoveResponse,
   SearchExplanation,
+  SearchIndexReport,
   ServerLogLine,
   StorageStats,
   SwipePreferences,
@@ -644,6 +645,9 @@ export const api = {
   postgresSchema: (csrf: string, dsn: string, action: PostgresSchemaAction) =>
     postJSON<PostgresState>("/api/admin/postgres-schema", csrf, { dsn, action }),
   database: () => getJSON<DatabaseOverview>("/api/admin/database"),
+  searchIndex: () => getJSON<SearchIndexReport>("/api/admin/search-index"),
+  rebuildSearchIndex: (csrf: string, userID: number) =>
+    postJSON<SearchIndexReport>("/api/admin/search-index", csrf, { user_id: userID }),
   // The tail answers without an ETag, so every call reaches the server: a
   // revalidated answer is the one thing this endpoint must never give.
   serverLog: (limit = 200) => getJSON<{ lines: ServerLogLine[] }>(`/api/admin/log?limit=${limit}`),

@@ -171,6 +171,12 @@ type Service struct {
 	pluginLoadErr  error
 	backendPlugins *plugins.BackendManager
 
+	// droppedSearchIndex counts, per tenant, the search documents a failing
+	// index write had to discard, so the log reports them at a bounded rate
+	// instead of per batch and attributes them to the tenant that lost them.
+	droppedSearchIndexMu sync.Mutex
+	droppedSearchIndex   map[int64]*droppedSearchIndexTally
+
 	attachmentIndexMu         sync.Mutex
 	attachmentIndexCursor     map[int64]int64
 	attachmentIndexRetryAfter map[attachmentIndexRetryKey]time.Time

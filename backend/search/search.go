@@ -30,23 +30,29 @@ import (
 
 // Service owns Bleve indexes and query construction for either combined-test or per-user production mode.
 type Service struct {
-	index              bleve.Index
-	root               string
-	perUser            bool
-	mu                 sync.Mutex
-	indexes            map[int64]bleve.Index
-	writers            map[int64]*writerLock
-	writeCoordinator   *bleveWriteCoordinator
-	closing            bool
-	writes             sync.WaitGroup
-	closeDone          chan struct{}
-	closeErr           error
-	closeWriterTimeout time.Duration
-	writerWaitLogAfter time.Duration
-	activeStallAfter   time.Duration
-	activeStallHandler func(int64)
-	activeStallOnce    sync.Once
-	bleveErrorLog      func(string, ...any)
+	index   bleve.Index
+	root    string
+	perUser bool
+	mu      sync.Mutex
+	// openGates serialise opening one tenant's index, so exactly one goroutine
+	// ever opens - or quarantines and replaces - a given index. Without it two
+	// callers racing on a cache miss both open the directory, and only one of
+	// the handles is kept; the other is closed while its owner still holds it.
+	openGates           map[int64]*sync.Mutex
+	corruptIndexHandler CorruptIndexHandler
+	indexes             map[int64]bleve.Index
+	writers             map[int64]*writerLock
+	writeCoordinator    *bleveWriteCoordinator
+	closing             bool
+	writes              sync.WaitGroup
+	closeDone           chan struct{}
+	closeErr            error
+	closeWriterTimeout  time.Duration
+	writerWaitLogAfter  time.Duration
+	activeStallAfter    time.Duration
+	activeStallHandler  func(int64)
+	activeStallOnce     sync.Once
+	bleveErrorLog       func(string, ...any)
 	// stallDiagnosticsDir is the data directory a writer stall reports into, so
 	// its stack outlives the process log. Empty leaves reports in the log only.
 	stallDiagnosticsDir string
@@ -174,6 +180,14 @@ type bleveErrorContext struct {
 }
 
 var errSearchServiceClosing = errors.New("search service is closing")
+
+// IsServiceClosingError reports whether err is the shutdown sentinel. Callers
+// that otherwise treat an index failure as "index it later" need to tell that
+// apart from "the process is going away", where later never comes and the work
+// belongs to the next start instead.
+func IsServiceClosingError(err error) bool {
+	return errors.Is(err, errSearchServiceClosing)
+}
 
 const (
 	searchCloseWriterTimeout = 2 * time.Second
@@ -883,7 +897,14 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	if !s.perUser {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.closing || s.index == nil {
+		// The same condition as the per-user branch below, reported with the
+		// same sentinel: callers that treat an index failure as "index it
+		// later" have to be able to tell a closing service apart from a broken
+		// one, and two spellings of "closing" is how one of them gets missed.
+		if s.closing {
+			return nil, errSearchServiceClosing
+		}
+		if s.index == nil {
 			return nil, fmt.Errorf("search index is not open")
 		}
 		return s.index, nil
@@ -891,21 +912,34 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	if userID == 0 {
 		return nil, fmt.Errorf("user id is required for search index")
 	}
-	s.mu.Lock()
-	if s.closing {
-		s.mu.Unlock()
-		return nil, errSearchServiceClosing
+	if index, err := s.cachedIndexForUser(userID); index != nil || err != nil {
+		return index, err
 	}
-	if index := s.indexes[userID]; index != nil {
-		s.mu.Unlock()
-		return index, nil
-	}
-	s.mu.Unlock()
 
-	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName))
+	// One opener per tenant. The gate also covers the quarantine below, so a
+	// directory can never be renamed while another goroutine is opening it.
+	gate := s.openGateForUser(userID)
+	gate.Lock()
+	defer gate.Unlock()
+	if index, err := s.cachedIndexForUser(userID); index != nil || err != nil {
+		return index, err
+	}
+
+	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)
+	index, err := openIndex(path)
 	if err != nil {
 		s.reportBleveError(bleveErrorContext{Operation: "open-index", UserID: userID}, err)
-		return nil, err
+		if !IsIndexCorruptionError(err) {
+			return nil, err
+		}
+		// The index on disk is unusable and will stay that way. Replacing it
+		// here keeps the failure inside the search feature: the alternative is
+		// this error surfacing on every stored message until someone runs a
+		// command, with the mailbox not syncing in the meantime.
+		index, err = s.repairUnopenableIndex(userID, path, err)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	if s.closing {
@@ -915,16 +949,34 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 		}
 		return nil, errSearchServiceClosing
 	}
-	if existing := s.indexes[userID]; existing != nil {
-		s.mu.Unlock()
-		if err := index.Close(); err != nil {
-			s.reportBleveError(bleveErrorContext{Operation: "close-duplicate-index", UserID: userID}, err)
-		}
-		return existing, nil
-	}
 	s.indexes[userID] = index
 	s.mu.Unlock()
 	return index, nil
+}
+
+// cachedIndexForUser answers from the cache, or reports that the service is
+// closing. A nil index with a nil error means "not open yet, go and open it".
+func (s *Service) cachedIndexForUser(userID int64) (bleve.Index, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errSearchServiceClosing
+	}
+	return s.indexes[userID], nil
+}
+
+func (s *Service) openGateForUser(userID int64) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openGates == nil {
+		s.openGates = make(map[int64]*sync.Mutex)
+	}
+	gate := s.openGates[userID]
+	if gate == nil {
+		gate = &sync.Mutex{}
+		s.openGates[userID] = gate
+	}
+	return gate
 }
 
 // DropUser closes and forgets a tenant's index handle.

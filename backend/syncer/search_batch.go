@@ -4,6 +4,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 
 	"rolltop/backend/search"
 	"rolltop/backend/store"
@@ -123,6 +124,14 @@ func (b *fetchedSearchIndexBatch) Empty() bool {
 // Flush commits all pending search documents, then marks their attachment text
 // extraction as complete. The mark intentionally happens after the Bleve batch
 // so interrupted syncs leave rows eligible for reindex repair.
+//
+// That ordering is also what lets a failed commit be survivable. Search is a
+// derived view of mail that is already stored, so a batch that cannot be
+// written is dropped and the folders it touched are marked as coverage nothing
+// has verified, which an explicit rebuild acts on. Returning the error instead
+// would abort the mailbox, which is how an unreadable index or a full disk used
+// to stop mail arriving entirely - the index is rebuildable from stored mail,
+// the IMAP sync window is not.
 func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 	if len(b.items) == 0 {
 		return nil
@@ -134,7 +143,12 @@ func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 	if b.service.Search != nil {
 		generationRecoveryPhase(ctx, "search-index-batch", "bleve")
 		if err := b.service.Search.IndexMessages(ctx, documents); err != nil {
-			return err
+			if !searchIndexFailureIsSurvivable(ctx, err) {
+				return err
+			}
+			b.service.reportDroppedSearchIndexBatch(ctx, documents, err)
+			b.reset()
+			return nil
 		}
 	}
 	updatesByUser := map[int64][]store.MessageAttachmentIndexUpdate{}
@@ -182,10 +196,33 @@ func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 			}
 		}
 	}
-	// Release the committed payload instead of parking it in the backing array
-	// until the next twenty-five messages overwrite it entry by entry.
+	b.reset()
+	return nil
+}
+
+// reset releases the payload instead of parking it in the backing array until
+// the next twenty-five messages overwrite it entry by entry.
+func (b *fetchedSearchIndexBatch) reset() {
 	clear(b.items)
 	b.items = b.items[:0]
 	b.bytes = 0
-	return nil
+}
+
+// searchIndexFailureIsSurvivable separates "this batch could not be indexed"
+// from "stop what you are doing". A cancelled context is the sync turn's own
+// budget or a shutdown, and a closing service is the process going away: in
+// both cases the work belongs to the next run, and swallowing them here would
+// turn a stop signal into a silent loss of the pending rows the caller was
+// about to checkpoint.
+func searchIndexFailureIsSurvivable(ctx context.Context, err error) bool {
+	if err == nil {
+		return true
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return !search.IsServiceClosingError(err)
 }
