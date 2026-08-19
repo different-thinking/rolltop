@@ -68,3 +68,30 @@ mehreren Stellen mit 404: Anhang nicht für den Benutzer gefunden, Blob-Datei
 nicht zu öffnen, oder der Anhang lässt sich in der geparsten Rohnachricht
 nicht wiederfinden. Welche der drei es hier war, ist aus der Konsole allein
 nicht zu sehen — dafür bräuchte es das Serverlog zur Anhang-ID 19026.
+
+## 2026-08-19 — Event-Stream bricht ab (ERR_HTTP2_PROTOCOL_ERROR)
+
+```
+about:srcdoc:1 Blocked script execution in 'about:srcdoc' because the document's
+frame is sandboxed and the 'allow-scripts' permission is not set.
+about:srcdoc:117  GET https://3703c955.eu-center.hostim.dev/attachments/19026/inline 404 (Not Found)
+about:srcdoc:1 Blocked script execution in 'about:srcdoc' because ... (2x wiederholt)
+/api/events:1  GET https://3703c955.eu-center.hostim.dev/api/events net::ERR_HTTP2_PROTOCOL_ERROR 200 (OK)
+```
+
+Die ersten vier Zeilen sind die bereits gesammelten (Sandbox dreimal, dazu der
+404 auf Anhang 19026). Neu ist die letzte.
+
+Kontext: `/api/events` ist der SSE-Stream. Das Frontend öffnet ihn in
+`frontend/src/App.tsx:680` per `new EventSource("/api/events")`, bedient wird
+er von `apiEvents` (`backend/web/api_sync.go:37`) mit
+`Content-Type: text/event-stream`, `Cache-Control: no-store` und
+`X-Accel-Buffering: no`.
+
+Bemerkenswert: Der Status ist 200 (OK) und trotzdem meldet der Browser
+`net::ERR_HTTP2_PROTOCOL_ERROR`. Das ist das Muster einer Verbindung, die
+nach den Headern abbricht — also eine lang laufende Antwort, die
+zwischendurch beendet wird, statt eines fehlgeschlagenen Requests. Ob das der
+Server, ein Proxy oder ein Timeout in der Kette ist, sagt die Konsole nicht.
+Zu prüfen wäre später, was zwischen Browser und App terminiert (die URL
+läuft über `eu-center.hostim.dev`) und ob ein Keepalive im Stream fehlt.
