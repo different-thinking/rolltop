@@ -222,8 +222,6 @@ jobs:
 
           exit "$status"
 
-      # `go test` compiles every package, but not with `-buildmode=plugin`.
-      # Only re-link the shared objects when plugin backends actually change.
       # The preflight script lost its Go twin with backend/pgpreflight, and an
       # operator tool that nothing runs is one that quietly stops working. It
       # aborts on the first failed check (ON_ERROR_STOP plus its own RAISE), so
@@ -235,6 +233,8 @@ jobs:
           PGPASSWORD: rolltop
         run: psql -v ON_ERROR_STOP=1 -h localhost -U rolltop -d rolltop_test -f scripts/pg-preflight.sql
 
+      # `go test` compiles every package, but not with `-buildmode=plugin`.
+      # Only re-link the shared objects when plugin backends actually change.
       - name: Build Plugin Backends
         if: needs.changes.outputs.plugin_backends == 'true'
         run: |
