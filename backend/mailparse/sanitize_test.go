@@ -89,6 +89,33 @@ func TestParseRepairsRawLatin1HeadersAndBody(t *testing.T) {
 	}
 }
 
+// A display name is quoted before it is joined, and strconv.Quote escapes bytes
+// that are not valid UTF-8 into literal \xNN text - valid UTF-8 that no later
+// repair would recognise as broken. The repair therefore has to happen first.
+func TestParseRepairsDisplayNameInEncodedWordWithWrongCharset(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: =?UTF-8?Q?M=FCller=2C_Bj=F6rn?= <bjoern@example.test>",
+		"To: =?UTF-8?Q?Empf=E4nger?= <inbox@example.test>",
+		"Subject: =?UTF-8?Q?Wichtige_=C4nderung?=",
+		"Content-Type: text/plain",
+		"",
+		"body",
+	}, "\r\n")
+	parsed, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if want := `"Müller, Björn" <bjoern@example.test>`; parsed.From != want {
+		t.Fatalf("from = %q, want %q", parsed.From, want)
+	}
+	if want := `"Empfänger" <inbox@example.test>`; parsed.To != want {
+		t.Fatalf("to = %q, want %q", parsed.To, want)
+	}
+	if strings.Contains(parsed.From, `\x`) {
+		t.Fatalf("from kept an escaped raw byte: %q", parsed.From)
+	}
+}
+
 func TestParseRepairsBodyThatLiesAboutItsCharset(t *testing.T) {
 	raw := strings.Join([]string{
 		"From: sender@example.test",

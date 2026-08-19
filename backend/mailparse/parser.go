@@ -373,13 +373,20 @@ func addressHeader(value string) string {
 	}
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		if addr.Name != "" {
-			out = append(out, strconv.Quote(strings.TrimSpace(addr.Name))+" <"+addr.Address+">")
-		} else {
-			out = append(out, addr.Address)
+		// Each part is repaired before it is quoted, not after: strconv.Quote
+		// escapes a byte that is not valid UTF-8 into the literal text \xNN,
+		// which is itself valid UTF-8 and therefore nothing SanitizeText would
+		// touch afterwards. An encoded word that declares UTF-8 and carries
+		// ISO-8859-1 - the common case for a display name - would be stored as
+		// "M\xfcller" for good.
+		address := SanitizeText(addr.Address)
+		if name := SanitizeText(strings.TrimSpace(addr.Name)); name != "" {
+			out = append(out, strconv.Quote(name)+" <"+address+">")
+			continue
 		}
+		out = append(out, address)
 	}
-	return SanitizeText(strings.Join(out, ", "))
+	return strings.Join(out, ", ")
 }
 
 func decodedHeader(value string) string {
