@@ -467,3 +467,133 @@ func TestPostgresBackendSearchWithOptions(t *testing.T) {
 		t.Fatalf("ids = %v, want [%d]", ids, msg.ID)
 	}
 }
+
+// TestPostgresBackendFuzzyHitNamesFields covers the reporting gap a fuzzy-only
+// match leaves: the weight-class columns answer for the lexeme query, so a row
+// that came in through similarity alone matches none of them, and attachment
+// snippets read these names.
+func TestPostgresBackendFuzzyHitNamesFields(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	if err := db.EnsureTrigramSearch(ctx); err != nil {
+		t.Fatalf("ensure trigram search: %v", err)
+	}
+	msg := seedPostgresSearchMessage(t, db, user, mailbox, 110, "Zahlungserinnerung", "bitte um ausgleich")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: msg}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "zahlungserinerung", 10, 0, SearchOptions{})
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("fuzzy hits = %v, err = %v, want 1", hits, err)
+	}
+	if len(hits[0].Fields) == 0 {
+		t.Fatal("a fuzzy-only hit reported no matched fields")
+	}
+}
+
+func TestPostgresBackendSimilarityIsTenantScoped(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	other, err := db.CreateUser(ctx, "pg-similar-other@example.test", "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := seedPostgresSearchMessage(t, db, user, mailbox, 120, "Wartungsfenster", "wartung")
+	related := seedPostgresSearchMessage(t, db, user, mailbox, 121, "Wartungsfenster Rückfrage", "wartung")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: current}, {Message: related}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	request := plugins.SimilarMessagesRequest{
+		CandidateMessageIDs: []int64{related.ID},
+		Terms:               []plugins.SimilarityTerm{{Field: plugins.SimilarityFieldSubject, Text: "Wartungsfenster", Weight: 2}},
+		Limit:               5,
+	}
+	results, err := svc.SimilarMessages(ctx, db, other.ID, request)
+	if err != nil {
+		t.Fatalf("cross-tenant similarity: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("another tenant saw %d similar messages", len(results))
+	}
+	if _, ok, err := svc.ExplainMessagesWithOptions(ctx, other.ID, []int64{related.ID}, "wartungsfenster", SearchOptions{}); err != nil || ok {
+		t.Fatalf("another tenant explained a foreign message, ok = %v, err = %v", ok, err)
+	}
+}
+
+// TestPostgresBackendSimilarityMatchesAnyWord pins the semantics the Bleve
+// backend has: a multi-word subject or body term matches on any of its words.
+func TestPostgresBackendSimilarityMatchesAnyWord(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	candidate := seedPostgresSearchMessage(t, db, user, mailbox, 130, "Serverwartung", "nur ein wort trifft")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: candidate}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	results, err := svc.SimilarMessages(ctx, db, user.ID, plugins.SimilarMessagesRequest{
+		CandidateMessageIDs: []int64{candidate.ID},
+		Terms:               []plugins.SimilarityTerm{{Field: plugins.SimilarityFieldSubject, Text: "Serverwartung Kantinenplan", Weight: 2}},
+		Limit:               5,
+	})
+	if err != nil {
+		t.Fatalf("similar: %v", err)
+	}
+	if len(results) != 1 || results[0].MessageID != candidate.ID {
+		t.Fatalf("results = %+v; a term's words must match individually", results)
+	}
+}
+
+// TestPostgresBackendPurgeReportsProgressInBatches covers the bound the Bleve
+// purge keeps: short commits, one callback per batch, and a caller-side abort
+// that stops the purge part way.
+func TestPostgresBackendPurgeReportsProgressInBatches(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	docs := make([]MessageIndexDocument, 0, 250)
+	for i := 0; i < 250; i++ {
+		msg := seedPostgresSearchMessage(t, db, user, mailbox, uint32(2000+i), "Aufräumen", "inhalt")
+		docs = append(docs, MessageIndexDocument{Message: msg})
+	}
+	if err := svc.IndexMessages(ctx, docs); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	var batches []int
+	purged, err := svc.PurgeMailboxWithProgress(ctx, user.ID, mailbox.ID, func(n int) error {
+		batches = append(batches, n)
+		return nil
+	})
+	if err != nil || purged != 250 {
+		t.Fatalf("purged = %d, err = %v, want 250", purged, err)
+	}
+	if len(batches) < 3 {
+		t.Fatalf("progress batches = %v, want several bounded batches", batches)
+	}
+	if count, err := svc.CountMailboxMessages(ctx, user.ID, mailbox.ID); err != nil || count != 0 {
+		t.Fatalf("count after purge = %d, err = %v", count, err)
+	}
+}
+
+func TestPostgresBackendPurgeStopsOnCallbackError(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	docs := make([]MessageIndexDocument, 0, 250)
+	for i := 0; i < 250; i++ {
+		msg := seedPostgresSearchMessage(t, db, user, mailbox, uint32(3000+i), "Abbruch", "inhalt")
+		docs = append(docs, MessageIndexDocument{Message: msg})
+	}
+	if err := svc.IndexMessages(ctx, docs); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if _, err := svc.PurgeMailboxWithProgress(ctx, user.ID, mailbox.ID, func(int) error {
+		return context.Canceled
+	}); err == nil {
+		t.Fatal("an aborting callback did not stop the purge")
+	}
+	count, err := svc.CountMailboxMessages(ctx, user.ID, mailbox.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 || count == 250 {
+		t.Fatalf("count = %d; an abort must stop part way", count)
+	}
+}

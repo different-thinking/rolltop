@@ -161,7 +161,9 @@ func messageSearchWords(streams ...string) string {
 	seen := map[string]bool{}
 	var b strings.Builder
 	for _, stream := range streams {
-		for _, word := range strings.Fields(normalizeSearchText(stream)) {
+		// The streams arrive normalized from pgIndexText, so splitting on
+		// whitespace is the whole tokenization here.
+		for _, word := range strings.Fields(stream) {
 			if seen[word] {
 				continue
 			}
@@ -243,15 +245,30 @@ func (s *Service) pgDeleteMessages(ctx context.Context, userID int64, messageIDs
 	return nil
 }
 
+// pgPurgeMailbox mirrors the Bleve purge's cadence rather than issuing one
+// statement for the mailbox: bounded deletes keep the rebuild's progress
+// visible, leave room between them for other writers, and give a cancelled
+// context somewhere to take effect. A caller that aborts from onBatch stops
+// the purge part way, exactly as it does on the Bleve path.
 func (s *Service) pgPurgeMailbox(ctx context.Context, userID, mailboxID int64, onBatch func(int) error) (int, error) {
-	deleted, err := s.pg.PurgeMessageSearchForMailbox(ctx, userID, mailboxID)
-	if err != nil {
-		return 0, err
-	}
-	if onBatch != nil && deleted > 0 {
-		if err := onBatch(int(deleted)); err != nil {
-			return int(deleted), err
+	const batchSize = 100
+	deleted := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		removed, err := s.pg.PurgeMessageSearchForMailboxBatch(ctx, userID, mailboxID, batchSize)
+		if err != nil {
+			return deleted, err
+		}
+		if removed == 0 {
+			return deleted, nil
+		}
+		deleted += int(removed)
+		if onBatch != nil {
+			if err := onBatch(int(removed)); err != nil {
+				return deleted, err
+			}
 		}
 	}
-	return int(deleted), nil
 }

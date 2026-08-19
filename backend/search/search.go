@@ -60,6 +60,9 @@ type Service struct {
 	// stallDiagnosticsDir is the data directory a writer stall reports into, so
 	// its stack outlives the process log. Empty leaves reports in the log only.
 	stallDiagnosticsDir string
+	// searchBytes caches the measured size of each tenant's Postgres search
+	// rows, guarded by mu. See postgresIndexBytes.
+	searchBytes map[int64]searchBytesSample
 }
 
 // writerLock is a context-friendly FIFO gate. Unlike polling sync.Mutex.TryLock,

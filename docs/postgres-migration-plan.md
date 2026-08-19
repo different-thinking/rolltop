@@ -536,11 +536,13 @@ review a package against. The switch itself is small: stop the old instance,
 start the new one against the empty database (§11); data builds up afterwards
 as mailboxes are reconnected.
 
-**Still open before phase 6:** the baseline upgrade path (WP7's surviving
-obligation). Today `OpenPostgres` refuses to start when the recorded checksum
-differs from the running binary's, which is right for a throwaway database and
-wrong for a production one that is merely older. It has to be settled before
-the first database worth keeping exists — that is, before the switch.
+**Settled (phase 5):** the baseline upgrade path, WP7's surviving obligation.
+`OpenPostgres` still refuses a baseline checksum it did not write — that
+mismatch means tampering, not age — and schema changes now ride numbered
+migrations layered on the frozen baseline
+(`backend/store/postgres_migrations.go`), applied at open when outstanding. A
+database that is merely older upgrades itself; `baseline.sql` is never edited
+again.
 
 ## 6. Code that got deleted — **done**
 

@@ -16,6 +16,14 @@ import (
 	"strings"
 )
 
+// maxMessageSearchTextTerms bounds one query's term lists. Each term adds a
+// condition and up to two bind parameters, and every one of them costs a
+// to_tsquery evaluation per candidate row, so an unbounded query is both a
+// parameter-limit hazard and a way to make one request expensive. The caller
+// trims to a smaller working limit; this is the boundary that refuses rather
+// than trusts.
+const maxMessageSearchTextTerms = 64
+
 // collateDefault forces case handling that covers more than ASCII. The text
 // columns are declared COLLATE "C" (the baseline's translation of SQLite's
 // BINARY), under which lower() and ILIKE fold A-Z and leave every other
@@ -123,6 +131,12 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 	}
 	hasText := strings.TrimSpace(q.TSQuery) != ""
 
+	if len(q.TextTerms) > maxMessageSearchTextTerms {
+		return nil, fmt.Errorf("a search may carry at most %d text terms, got %d", maxMessageSearchTextTerms, len(q.TextTerms))
+	}
+	if len(q.NotTSQueries) > maxMessageSearchTextTerms {
+		return nil, fmt.Errorf("a search may carry at most %d negated terms, got %d", maxMessageSearchTextTerms, len(q.NotTSQueries))
+	}
 	fuzzy := false
 	for _, term := range q.TextTerms {
 		if term.FuzzyTerm != "" {

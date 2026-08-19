@@ -37,6 +37,15 @@ type MessageSearchDoc struct {
 // configuration is deliberate: no stemming, matching Bleve's standard
 // analyzer, with German compound handling done app-side in the text streams
 // exactly as before (docs/search-postgres-plan.md §3).
+// One row costs seven bind parameters, so PostgreSQL's 65,535-parameter ceiling
+// lands at 9,363 documents. Callers batch far below that today, but a method
+// that builds one statement per call has to carry the bound itself rather than
+// trust every future caller to know it.
+const (
+	messageSearchUpsertChunk  = 500
+	messageSearchUpsertParams = 7
+)
+
 const messageSearchVectorSQL = `setweight(to_tsvector('simple', ?), 'A') || setweight(to_tsvector('simple', ?), 'B') || setweight(to_tsvector('simple', ?), 'C') || setweight(to_tsvector('simple', ?), 'D')`
 
 // UpsertMessageSearch writes one tenant's batch of search rows. Re-indexing an
@@ -53,24 +62,32 @@ func (s *Store) UpsertMessageSearch(ctx context.Context, userID int64, docs []Me
 	if err != nil {
 		return err
 	}
-	var values strings.Builder
-	args := make([]any, 0, len(docs)*6)
-	for i, doc := range docs {
-		if doc.UserID != userID {
-			return fmt.Errorf("message search doc for user %d in a batch for user %d", doc.UserID, userID)
+	for start := 0; start < len(docs); start += messageSearchUpsertChunk {
+		chunk := docs[start:min(start+messageSearchUpsertChunk, len(docs))]
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if doc.MessageID <= 0 {
-			return fmt.Errorf("message search doc without a message id")
+		var values strings.Builder
+		args := make([]any, 0, len(chunk)*messageSearchUpsertParams)
+		for i, doc := range chunk {
+			if doc.UserID != userID {
+				return fmt.Errorf("message search doc for user %d in a batch for user %d", doc.UserID, userID)
+			}
+			if doc.MessageID <= 0 {
+				return fmt.Errorf("message search doc without a message id")
+			}
+			if i > 0 {
+				values.WriteString(", ")
+			}
+			values.WriteString("(?, ?, " + messageSearchVectorSQL + ", ?)")
+			args = append(args, doc.MessageID, doc.UserID, doc.TextA, doc.TextB, doc.TextC, doc.TextD, doc.Words)
 		}
-		if i > 0 {
-			values.WriteString(", ")
+		if _, err := db.ExecContext(ctx, `INSERT INTO message_search (message_id, user_id, tsv, words) VALUES `+values.String()+`
+			ON CONFLICT (message_id) DO UPDATE SET user_id = EXCLUDED.user_id, tsv = EXCLUDED.tsv, words = EXCLUDED.words`, args...); err != nil {
+			return err
 		}
-		values.WriteString("(?, ?, " + messageSearchVectorSQL + ", ?)")
-		args = append(args, doc.MessageID, doc.UserID, doc.TextA, doc.TextB, doc.TextC, doc.TextD, doc.Words)
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO message_search (message_id, user_id, tsv, words) VALUES `+values.String()+`
-		ON CONFLICT (message_id) DO UPDATE SET user_id = EXCLUDED.user_id, tsv = EXCLUDED.tsv, words = EXCLUDED.words`, args...)
-	return err
+	return nil
 }
 
 // DeleteMessageSearch removes search rows by message id and reports how many
@@ -106,19 +123,30 @@ func (s *Store) DeleteMessageSearch(ctx context.Context, userID int64, messageID
 	return total, nil
 }
 
-// PurgeMessageSearchForMailbox removes every search row whose message currently
-// lives in the given mailbox — the search-visibility toggle path.
-func (s *Store) PurgeMessageSearchForMailbox(ctx context.Context, userID, mailboxID int64) (int64, error) {
+// PurgeMessageSearchForMailboxBatch removes at most limit search rows for one
+// mailbox and reports how many it removed; zero means the mailbox is clear.
+//
+// Bounded on purpose. A whole-mailbox DELETE would hold its row locks for the
+// length of the statement, write one large transaction, and give a cancelled
+// rebuild nowhere to stop — the same reasons the Bleve purge commits in small
+// batches, and what "keep sync bounded in time as well as memory" asks for.
+func (s *Store) PurgeMessageSearchForMailboxBatch(ctx context.Context, userID, mailboxID int64, limit int) (int64, error) {
 	if userID <= 0 {
 		return 0, fmt.Errorf("user id must be positive")
+	}
+	if limit <= 0 {
+		return 0, fmt.Errorf("limit must be positive")
 	}
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return 0, err
 	}
 	result, err := db.ExecContext(ctx, `DELETE FROM message_search
-		WHERE user_id = ? AND message_id IN (SELECT id FROM messages WHERE user_id = ? AND mailbox_id = ?)`,
-		userID, userID, mailboxID)
+		WHERE user_id = ? AND message_id IN (
+			SELECT ms.message_id FROM message_search ms
+			JOIN messages m ON m.id = ms.message_id AND m.user_id = ms.user_id
+			WHERE ms.user_id = ? AND m.mailbox_id = ?
+			LIMIT ?)`, userID, userID, mailboxID, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -136,6 +164,31 @@ func (s *Store) CountMessageSearchForUser(ctx context.Context, userID int64) (in
 	}
 	var count int
 	err = db.QueryRowContext(ctx, `SELECT count(*) FROM message_search WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
+}
+
+// CountMessageSearchEnabledForUser counts the search rows that cover messages
+// currently in search-visible folders — the set CountSearchEnabledMessagesForUser
+// measures on the message side.
+//
+// Comparing against the unfiltered row count is what makes a shortfall
+// invisible: rows left behind by a folder that has since left search inflate
+// the total, so a tenant can look covered while search-visible messages have no
+// row at all. Both sides have to count the same population.
+func (s *Store) CountMessageSearchEnabledForUser(ctx context.Context, userID int64) (int, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(ctx, `SELECT count(*)
+		FROM message_search ms
+		JOIN messages m ON m.id = ms.message_id AND m.user_id = ms.user_id
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE ms.user_id = ? AND mb.include_in_search = 1`, userID).Scan(&count)
 	return count, err
 }
 

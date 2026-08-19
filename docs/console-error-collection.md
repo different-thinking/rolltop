@@ -9,7 +9,7 @@ Kontext dazu, wo im Code sie herkommt.
 
 ## 2026-08-19 — Edge
 
-```
+```text
 about:srcdoc:1 Blocked script execution in 'about:srcdoc' because the document's
 frame is sandboxed and the 'allow-scripts' permission is not set.
 ```
@@ -26,7 +26,7 @@ laufen. Die Meldung ist also die Folge einer Absicht, kein Absturz.
 
 ## 2026-08-19 — Sync aus den Einstellungen, 409
 
-```
+```text
 api.ts:138  POST https://3703c955.eu-center.hostim.dev/api/account/sync 409 (Conflict)
 postJSON @ api.ts:138
 syncAccount @ api.ts:615
@@ -51,7 +51,7 @@ die Oberfläche das als Fehler zeigt oder ruhig behandelt.
 
 ## 2026-08-19 — Nachricht geöffnet, Inline-Anhang 404
 
-```
+```text
 about:srcdoc:1 Blocked script execution in 'about:srcdoc' because the document's
 frame is sandboxed and the 'allow-scripts' permission is not set.
 about:srcdoc:117  GET https://3703c955.eu-center.hostim.dev/attachments/19026/inline 404 (Not Found)
@@ -71,7 +71,7 @@ nicht zu sehen — dafür bräuchte es das Serverlog zur Anhang-ID 19026.
 
 ## 2026-08-19 — Event-Stream bricht ab (ERR_HTTP2_PROTOCOL_ERROR)
 
-```
+```text
 about:srcdoc:1 Blocked script execution in 'about:srcdoc' because the document's
 frame is sandboxed and the 'allow-scripts' permission is not set.
 about:srcdoc:117  GET https://3703c955.eu-center.hostim.dev/attachments/19026/inline 404 (Not Found)
@@ -98,7 +98,7 @@ läuft über `eu-center.hostim.dev`) und ob ein Keepalive im Stream fehlt.
 
 ## 2026-08-19 — Löschen vieler Mails, 504
 
-```
+```text
 api.ts:138
  POST https://3703c955.eu-center.hostim.dev/api/messages/scope-trash 504 (Gateway Timeout)
 postJSON	@	api.ts:138

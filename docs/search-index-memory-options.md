@@ -6,8 +6,9 @@ passt nicht mehr in diesen Rest, der Kernel wirft seine Seiten raus, ein
 Commit von 232 KB lief über zwei Minuten und löste den Neustart um 17:06 aus.
 
 `ROLLTOP_MEMORY_LIMIT` senken verschiebt die Grenze, verkleinert aber weder
-den Index noch die Ursache. Diese Notiz sammelt die Alternativen. Nichts davon
-ist umgesetzt.
+den Index noch die Ursache. Diese Notiz sammelt die Alternativen. Die Optionen
+1 bis 3 sind Vorschläge geblieben; Option 4 ist inzwischen umgesetzt und liegt
+hinter `ROLLTOP_SEARCH_BACKEND=postgres` (siehe `search-postgres-plan.md`).
 
 ## 1. Das `_all`-Feld abschalten (größter Hebel im Index)
 

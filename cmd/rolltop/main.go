@@ -660,20 +660,25 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		// folders marked here, and the sync repair path refills them the same
 		// way it refills a quarantined Bleve index.
 		searchSvc = search.OpenPostgresBackend(db)
-		// Fuzzy matching needs pg_trgm and its index; both are optional at the
-		// hoster's discretion, so a refusal only costs fuzzy, never the start.
-		if err := db.EnsureTrigramSearch(ctx); err != nil {
-			log.Printf("postgres search: fuzzy matching unavailable: %v", err)
-		} else {
-			log.Printf("postgres search: fuzzy matching enabled (pg_trgm)")
-		}
-		startup.update("Search", "checking postgres search coverage", 0, max(1, len(users)))
-		for i, user := range users {
-			if err := markPostgresSearchBackfill(ctx, db, user.ID); err != nil {
-				return nil, err
+		// Neither of these gates readiness. Fuzzy matching needs pg_trgm and a
+		// trigram index: the extension may be refused by the hoster, and
+		// building the index on an already filled table takes as long as it
+		// takes. The coverage check is two counting queries per tenant and only
+		// ever schedules background repair. Serving mail waits for neither, so
+		// both run behind the listener; fuzzy simply starts answering once its
+		// index exists.
+		go func() {
+			if err := db.EnsureTrigramSearch(context.Background()); err != nil {
+				log.Printf("postgres search: fuzzy matching unavailable: %v", err)
+			} else {
+				log.Printf("postgres search: fuzzy matching enabled (pg_trgm)")
 			}
-			startup.update("Search", "checking postgres search coverage", i+1, max(1, len(users)))
-		}
+			for _, user := range users {
+				if err := markPostgresSearchBackfill(context.Background(), db, user.ID); err != nil {
+					log.Printf("postgres search backfill check: %v", err)
+				}
+			}
+		}()
 	} else {
 		searchSvc, err = search.OpenPerUser(searchRoot)
 		if err != nil {
@@ -1323,11 +1328,13 @@ func reportIndexMemoryHeadroom(applied memlimit.Applied, searchRoot string) {
 // search with nothing to say so. Idempotent across restarts, since a tenant
 // whose rows already cover its mail marks nothing.
 //
-// A surplus of rows is deliberately not acted on: rows for messages in folders
-// that have since left search are stale but harmless, because every query
-// joins messages and filters by the live folder.
+// Both counts measure the same population - messages in search-visible folders
+// - or the comparison lies: rows left behind by a folder that has since left
+// search would otherwise inflate the indexed side and hide a real shortfall.
+// Those stale rows are harmless in themselves, because every query joins
+// messages and filters by the live folder, so nothing prunes them here.
 func markPostgresSearchBackfill(ctx context.Context, db *store.Store, userID int64) error {
-	indexed, err := db.CountMessageSearchForUser(ctx, userID)
+	indexed, err := db.CountMessageSearchEnabledForUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("count postgres search rows user_id=%d: %w", userID, err)
 	}

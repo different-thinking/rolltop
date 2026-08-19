@@ -6,17 +6,19 @@
 // matches (subject/addresses/body/attachments), which is coarser than Bleve's
 // per-term locations but carries the same highlighting decisions.
 //
-// Known reductions against the Bleve path, recorded in
-// docs/search-postgres-plan.md §5: no fuzzy matching yet (pg_trgm is a later
-// phase), query-side compound splitting relies on the split terms already in
-// the vector, and Explain reports weight-class matches instead of a scorer
-// tree.
+// Fuzzy matching rides pg_trgm word similarity over the indexed word list and
+// is available only where the extension is (EnsureTrigramSearch); without it
+// the same queries run exact. Reductions against the Bleve path, recorded in
+// docs/search-postgres-plan.md §5: query-side compound splitting relies on the
+// split terms already in the vector, and Explain reports weight-class matches
+// instead of a scorer tree.
 
 package search
 
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +31,13 @@ import (
 // floors sit below that; anything at 0.22 and lower measured as unrelated.
 // Short terms stay exact — two or three letters share trigrams with half the
 // vocabulary.
+// pgMaxQueryTerms is the working limit on how many words of one query reach
+// SQL, below the store's own refusal. Each term costs a condition and a
+// per-candidate to_tsquery evaluation, and a query past this width is a paste
+// accident rather than a search; the extra words are dropped instead of
+// failing the request.
+const pgMaxQueryTerms = 32
+
 const (
 	pgFuzzyThresholdBalanced  = 0.35
 	pgFuzzyThresholdForgiving = 0.30
@@ -92,6 +101,9 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 			spec.FuzzyThreshold = pgFuzzyThresholdForgiving
 		}
 		terms := strings.Fields(normalizeSearchText(parsed.Text))
+		if len(terms) > pgMaxQueryTerms {
+			terms = terms[:pgMaxQueryTerms]
+		}
 		anyFuzzy := false
 		for i, term := range terms {
 			entry := store.MessageSearchTextTerm{TSQuery: pgTSQuery(term, false, i == len(terms)-1)}
@@ -109,6 +121,9 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 		}
 	}
 	for _, negated := range parsed.NegatedText {
+		if len(spec.NotTSQueries) >= pgMaxQueryTerms {
+			break
+		}
 		if q := pgTSQuery(negated.Text, negated.Quoted, false); q != "" {
 			spec.NotTSQueries = append(spec.NotTSQueries, q)
 		}
@@ -172,7 +187,15 @@ func escapeLikePattern(value string) string {
 
 // pgMatchedFields translates weight-class matches into the field names the
 // explain panel and the highlighter already understand.
-func pgMatchedFields(hit store.MessageSearchHit) []string {
+//
+// The class columns answer for the lexeme query only, so a row that came in
+// through fuzzy similarity alone matches none of them. Reporting nothing there
+// would quietly switch off attachment snippets, which read these names
+// (api_message.go). The word list the similarity ran against is built from all
+// four streams and cannot say which one held the similar word, so a fuzzy-only
+// hit reports the full set: coarser than the Bleve locations, and honest about
+// being unable to narrow it.
+func pgMatchedFields(hit store.MessageSearchHit, fuzzy bool) []string {
 	var fields []string
 	if hit.MatchedA {
 		fields = append(fields, "subject")
@@ -186,7 +209,21 @@ func pgMatchedFields(hit store.MessageSearchHit) []string {
 	if hit.MatchedD {
 		fields = append(fields, "attachments")
 	}
+	if len(fields) == 0 && fuzzy {
+		return []string{"subject", "from", "body", "attachments"}
+	}
 	return fields
+}
+
+// specUsesFuzzy reports whether any term in the compiled spec can match by
+// similarity, which is what makes an otherwise field-less hit explainable.
+func specUsesFuzzy(spec store.MessageSearchQuery) bool {
+	for _, term := range spec.TextTerms {
+		if term.FuzzyTerm != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func pgNeedleTerms(parsed parsedQuery) []string {
@@ -210,13 +247,14 @@ func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText stri
 		return nil, fmt.Errorf("postgres search: %w", err)
 	}
 	terms := pgNeedleTerms(parsed)
+	fuzzy := specUsesFuzzy(spec)
 	hits := make([]Hit, 0, len(rows))
 	for _, row := range rows {
 		hits = append(hits, Hit{
 			ID:         row.MessageID,
 			Score:      row.Score,
 			Terms:      terms,
-			Fields:     pgMatchedFields(row),
+			Fields:     pgMatchedFields(row, fuzzy),
 			QueryTerms: terms,
 		})
 	}
@@ -266,7 +304,7 @@ func (s *Service) pgExplainMessageIDs(ctx context.Context, userID int64, message
 	}
 	row := best
 	terms := pgNeedleTerms(parsed)
-	fields := pgMatchedFields(row)
+	fields := pgMatchedFields(row, specUsesFuzzy(spec))
 	matches := make([]FieldTermMatch, 0, len(fields))
 	for _, field := range fields {
 		matches = append(matches, FieldTermMatch{Field: field, Terms: terms})
@@ -279,6 +317,25 @@ func (s *Service) pgExplainMessageIDs(ctx context.Context, userID int64, message
 		QueryTerms:   terms,
 		FieldMatches: matches,
 	}, true, nil
+}
+
+// pgSimilarityTSQuery renders one similarity term. Bleve's match query ORs a
+// term's words, and only the multi-word domain term is switched to AND
+// (similarity.go), so the same split is made here: anything else would make
+// the Postgres backend stricter than the Bleve one for the same request.
+func pgSimilarityTSQuery(term normalizedSimilarityTerm) string {
+	words := strings.Fields(normalizeSearchText(term.text))
+	if len(words) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(words))
+	for i, word := range words {
+		quoted[i] = "'" + strings.ReplaceAll(word, "'", "''") + "'"
+	}
+	if term.field == plugins.SimilarityFieldFromDomain && len(quoted) > 1 {
+		return strings.Join(quoted, " & ")
+	}
+	return strings.Join(quoted, " | ")
 }
 
 // pgSimilarityClass maps a similarity term's field onto the weight class its
@@ -304,7 +361,7 @@ func (s *Service) pgSearchSimilarMessageIDs(ctx context.Context, userID int64, c
 	probes := make([]store.MessageSearchTermProbe, 0, len(terms))
 	probeTerms := make([]normalizedSimilarityTerm, 0, len(terms))
 	for _, term := range terms {
-		tsq := pgTSQuery(term.text, false, false)
+		tsq := pgSimilarityTSQuery(term)
 		if tsq == "" {
 			continue
 		}
@@ -360,18 +417,13 @@ func (s *Service) pgSearchSimilarMessageIDs(ctx context.Context, userID int64, c
 	return hits, nil
 }
 
+// sortSimilarityHits orders descending by score, then by id so a tie is
+// resolved the same way on every run.
 func sortSimilarityHits(hits []similarityHit) {
-	for i := 1; i < len(hits); i++ {
-		for j := i; j > 0 && similarityHitLess(hits[j-1], hits[j]); j-- {
-			hits[j], hits[j-1] = hits[j-1], hits[j]
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
 		}
-	}
-}
-
-// similarityHitLess orders descending by score, then id for determinism.
-func similarityHitLess(a, b similarityHit) bool {
-	if a.score != b.score {
-		return a.score < b.score
-	}
-	return a.id < b.id
+		return hits[i].id > hits[j].id
+	})
 }

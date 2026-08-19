@@ -121,9 +121,14 @@ func TestMessageSearchRowsRoundTrip(t *testing.T) {
 	if err != nil || deleted != 1 {
 		t.Fatalf("delete = %d, err = %v, want 1", deleted, err)
 	}
-	purged, err := db.PurgeMessageSearchForMailbox(ctx, user.ID, mailbox.ID)
+	purged, err := db.PurgeMessageSearchForMailboxBatch(ctx, user.ID, mailbox.ID, 100)
 	if err != nil || purged != 1 {
 		t.Fatalf("purge = %d, err = %v, want 1", purged, err)
+	}
+	// A second call on a cleared mailbox reports nothing left, which is what
+	// ends the caller's purge loop.
+	if again, err := db.PurgeMessageSearchForMailboxBatch(ctx, user.ID, mailbox.ID, 100); err != nil || again != 0 {
+		t.Fatalf("second purge = %d, err = %v, want 0", again, err)
 	}
 	count, err = db.CountMessageSearchForUser(ctx, user.ID)
 	if err != nil || count != 0 {
@@ -180,5 +185,97 @@ func TestMessageSearchScopesByUser(t *testing.T) {
 		{MessageID: msg.ID, UserID: other.ID, TextA: "falscher Mandant"},
 	}); mismatch == nil {
 		t.Fatal("cross-tenant doc in a batch was accepted")
+	}
+}
+
+// TestCountMessageSearchEnabledCountsOnlySearchableFolders pins what the
+// backfill comparison needs: rows for messages whose folder has left search
+// must not count as coverage, or a real shortfall hides behind them.
+func TestCountMessageSearchEnabledCountsOnlySearchableFolders(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	user, account, mailbox := searchTestFixtures(t, ctx, db)
+	hidden, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "Archiv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE mailboxes SET include_in_search = 0 WHERE id = $1`, hidden.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two searchable messages, one of them indexed, plus a row left behind by
+	// the folder that has since left search. That stale row is exactly what
+	// made the unfiltered count look like full coverage.
+	indexed := seedSearchMessage(t, ctx, db, user, account, mailbox, 40, "Sichtbar")
+	seedSearchMessage(t, ctx, db, user, account, mailbox, 42, "Noch nicht indiziert")
+	stale := seedSearchMessage(t, ctx, db, user, account, hidden, 41, "Ausgeblendet")
+	if err := db.UpsertMessageSearch(ctx, user.ID, []MessageSearchDoc{
+		{MessageID: indexed.ID, UserID: user.ID, TextA: "Sichtbar"},
+		{MessageID: stale.ID, UserID: user.ID, TextA: "Ausgeblendet"},
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	searchable, err := db.CountSearchEnabledMessagesForUser(ctx, user.ID)
+	if err != nil || searchable != 2 {
+		t.Fatalf("searchable = %d, err = %v, want 2", searchable, err)
+	}
+	all, err := db.CountMessageSearchForUser(ctx, user.ID)
+	if err != nil || all != 2 {
+		t.Fatalf("unfiltered count = %d, err = %v, want 2", all, err)
+	}
+	if all < searchable {
+		t.Fatal("the unfiltered count no longer hides the shortfall; this test has lost its point")
+	}
+	covered, err := db.CountMessageSearchEnabledForUser(ctx, user.ID)
+	if err != nil || covered != 1 {
+		t.Fatalf("search-enabled count = %d, err = %v, want 1", covered, err)
+	}
+	if covered >= searchable {
+		t.Fatalf("covered %d vs searchable %d: the shortfall must stay visible", covered, searchable)
+	}
+}
+
+// TestUpsertMessageSearchChunksLargeBatches covers the parameter ceiling: seven
+// bind parameters per row put PostgreSQL's 65,535 limit at 9,363 documents, and
+// this method builds the statement, so it carries the bound itself.
+func TestUpsertMessageSearchChunksLargeBatches(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	user, account, mailbox := searchTestFixtures(t, ctx, db)
+
+	const count = messageSearchUpsertChunk*2 + 7
+	docs := make([]MessageSearchDoc, 0, count)
+	for i := 0; i < count; i++ {
+		msg := seedSearchMessage(t, ctx, db, user, account, mailbox, uint32(500+i), "Stapel")
+		docs = append(docs, MessageSearchDoc{MessageID: msg.ID, UserID: user.ID, TextA: "Stapel", Words: "stapel"})
+	}
+	if err := db.UpsertMessageSearch(ctx, user.ID, docs); err != nil {
+		t.Fatalf("upsert of %d documents: %v", count, err)
+	}
+	got, err := db.CountMessageSearchForUser(ctx, user.ID)
+	if err != nil || got != count {
+		t.Fatalf("count = %d, err = %v, want %d", got, err, count)
+	}
+}
+
+func TestSearchMessageIDsRefusesUnboundedTermLists(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	user, _, _ := searchTestFixtures(t, ctx, db)
+
+	terms := make([]MessageSearchTextTerm, maxMessageSearchTextTerms+1)
+	for i := range terms {
+		terms[i] = MessageSearchTextTerm{TSQuery: "'wort'"}
+	}
+	if _, err := db.SearchMessageIDs(ctx, MessageSearchQuery{UserID: user.ID, TextTerms: terms}); err == nil {
+		t.Fatal("an unbounded term list was accepted")
+	}
+	negations := make([]string, maxMessageSearchTextTerms+1)
+	for i := range negations {
+		negations[i] = "'wort'"
+	}
+	if _, err := db.SearchMessageIDs(ctx, MessageSearchQuery{UserID: user.ID, TSQuery: "'x'", NotTSQueries: negations}); err == nil {
+		t.Fatal("an unbounded negation list was accepted")
 	}
 }
