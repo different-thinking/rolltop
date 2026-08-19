@@ -2338,9 +2338,14 @@ export function SettingsView({
         <h3>Full Text Search</h3>
         <p className="settings-hint">
           {backendLabel ? `Your search index is kept in ${backendLabel}. ` : ""}
-          {storage.IndexPresent
-            ? `It covers ${formatStatCount(indexed)} of the ${formatStatCount(searchable)} emails in folders you have included in search.`
-            : "Nothing is indexed yet, so search cannot find anything until the first index is built."}
+          {/* A figure that could not be read is not a figure of zero, so a page
+              that could not measure says so rather than reporting an empty
+              index for a search that is working. */}
+          {storage.Error
+            ? "Some of these figures could not be read this time; the reason is under Total."
+            : storage.IndexPresent
+              ? `It covers ${formatStatCount(indexed)} of the ${formatStatCount(searchable)} emails in folders you have included in search.`
+              : "Nothing is indexed yet, so search cannot find anything until the first index is built."}
           {storage.FuzzyAvailable
             ? " Typo-tolerant matching is available."
             : " Typo-tolerant matching is unavailable, so searches have to spell words the way the email does."}

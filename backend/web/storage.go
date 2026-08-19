@@ -133,13 +133,16 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, fmt.Sprintf("full text index: %v", err))
 		}
 	} else if s.search != nil {
-		stats.IndexBytes, _ = s.search.PerUserIndexBytes(userID)
+		// A measurement that failed is not a measurement of zero. Sizing the
+		// Postgres rows is a full scan behind a timeout, so it can fail on a
+		// busy database while search itself is fine, and reporting that as an
+		// empty index is precisely the false alarm this page exists to avoid.
+		var measured bool
+		stats.IndexBytes, measured = s.search.PerUserIndexBytes(userID)
+		if !measured {
+			errs = append(errs, "full text index: size could not be measured")
+		}
 	}
-	// One rule for both backends: an index is present when it holds something.
-	// The service's own presence flag answers a different question — the admin
-	// page asks whether a directory exists at all — and reading it here would
-	// report "indexed" for a tenant whose rows are not there yet.
-	stats.IndexPresent = stats.IndexBytes > 0
 	if s.search != nil {
 		stats.FuzzyAvailable = s.search.FuzzyAvailable()
 		stats.IndexMessageCount, err = s.search.CountUserMessages(context.Background(), userID)
@@ -147,6 +150,12 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, fmt.Sprintf("full text index message count: %v", err))
 		}
 	}
+	// An index is present when it holds documents, not when it occupies bytes:
+	// the document count is one cheap query on either backend, while the size
+	// is a directory walk or a full scan that can legitimately fail. Deriving
+	// presence from the size would let one slow query tell a reader their
+	// search is empty.
+	stats.IndexPresent = stats.IndexMessageCount > 0
 	if s.store != nil {
 		stats.FullTextSearchMessageCount, err = s.store.CountSearchEnabledMessagesForUser(context.Background(), userID)
 		if err != nil {
@@ -358,10 +367,16 @@ func (s *Server) apiStorageSearchRebuild(w http.ResponseWriter, r *http.Request)
 	}
 	s.invalidateStorageStats(cu.User.ID)
 	s.events.Notify(cu.User.ID)
+	// Measured rather than cached, and deliberately not written back into the
+	// cache: the runs have started but not finished, so these figures are the
+	// state at the moment of the click. Caching them would pin a pre-rebuild
+	// answer for the next five minutes, which is the opposite of what dropping
+	// the entry above was for. The GET that follows recomputes into the cache
+	// in the ordinary way.
 	writeJSON(w, map[string]any{
 		"ok":            true,
 		"started_runs":  started,
 		"busy_accounts": busy,
-		"storage":       s.cachedStorageStats(cu.User.ID),
+		"storage":       s.storageStatsForUser(cu.User.ID),
 	})
 }

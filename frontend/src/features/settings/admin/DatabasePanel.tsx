@@ -1,17 +1,27 @@
 // File overview: Admin database page. It reports where the mirror is stored and
 // how that storage is doing — the PostgreSQL connection and its size, and the
-// data volume that still holds the blobs and the search index.
+// data volume that holds the blobs and, on the Bleve backend, the search index.
+// Which backend is in force is reported rather than assumed: on the Postgres
+// backend the volume's index figure describes nothing, because the index is
+// rows in the database above it.
+//
+// This is the whole-server view, and that is what keeps it separate from the
+// storage page in a user's own settings: the connection, the pool, the free
+// space and the log tail are one instance's state, and the database's size
+// cannot be split honestly between the tenants inside it.
 //
 // The three operations it used to offer (verify, back up, repair) were all
 // SQLite maintenance and went with it: integrity is the database server's
 // problem now, and backups are `pg_dump` on a schedule rather than a button
-// that writes into the volume it is protecting against.
+// that writes into the volume it is protecting against. The PostgreSQL
+// migration console went the same way once the migration was done — it existed
+// to rehearse a schema against an empty target, which a serving database is
+// not.
 //
-// Two cards below still act, each deliberately its own. The search index card
-// rebuilds one tenant's index, which is derived state on the volume that can
-// break on its own and costs nothing to throw away; taking that with the SQLite
-// buttons left an operator without a shell no way to repair search at all. The
-// PostgreSQL migration console creates and drops a schema.
+// One card below still acts: the search index card rebuilds one tenant's index.
+// That is derived state which can break on its own and costs nothing to throw
+// away, and taking it with the SQLite buttons would have left an operator
+// without a shell no way to repair search at all.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 

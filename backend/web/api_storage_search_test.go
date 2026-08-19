@@ -131,6 +131,23 @@ func TestStorageStatsReportThePostgresIndexRatherThanTheVolume(t *testing.T) {
 	}
 }
 
+// A tenant with nothing indexed has to read as exactly that, and without an
+// error: it is the ordinary state of a new account, not a failure.
+func TestStorageStatsReportAnUnbuiltIndexAsAbsent(t *testing.T) {
+	f := newStorageSearchFixture(t)
+	f.seedMessage(t, 1, "never indexed")
+	stats := f.server.storageStatsForUser(f.owner.ID)
+	if stats.Error != "" {
+		t.Fatalf("storage stats reported errors: %s", stats.Error)
+	}
+	if stats.IndexPresent {
+		t.Fatal("an index with no documents reported present")
+	}
+	if stats.IndexMessageCount != 0 || stats.FullTextSearchMessageCount != 1 {
+		t.Fatalf("coverage = %d of %d, want 0 of 1", stats.IndexMessageCount, stats.FullTextSearchMessageCount)
+	}
+}
+
 // Folders waiting for a rebuild are how a reader learns that search is
 // answering from less than their mailbox. The count is per tenant, like every
 // other figure on the page.
