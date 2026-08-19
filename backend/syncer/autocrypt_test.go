@@ -114,7 +114,12 @@ func testClientSidePGPPluginDir(t *testing.T) string {
 			testPGPPluginErr = err
 			return
 		}
-		cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", filepath.Join(backendDir, "client_side_pgp.so"), "./plugins/client_side_pgp/backend")
+		// GoBuildFlags carries -race when this test binary is instrumented;
+		// without it plugin.Open rejects the plugin over a mismatched build
+		// fingerprint.
+		args := append([]string{"build"}, plugins.GoBuildFlags()...)
+		args = append(args, "-buildmode=plugin", "-o", filepath.Join(backendDir, "client_side_pgp.so"), "./plugins/client_side_pgp/backend")
+		cmd := exec.Command("go", args...)
 		cmd.Dir = repoRoot
 		cmd.Env = append(os.Environ(), "GOCACHE=/tmp/rolltop-go-build")
 		if out, err := cmd.CombinedOutput(); err != nil {

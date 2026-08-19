@@ -149,10 +149,54 @@ baseline's own `COLLATE "C"` columns are present.
 
 ### WP1 — Connection, config, startup
 
+Shipped so far (`backend/store/postgres.go`): `OpenPostgres` connects through
+`pgx/v5`'s `database/sql` adapter, sizes the pool (default 10, half the hosted
+role's limit of 20), and puts the WP2 baseline into an empty database. It does
+**not** run the SQLite migration chain — PostgreSQL gets the squashed baseline
+recorded as one `schema_migrations` row, so drift is caught by the same
+checksum rule rather than a second mechanism. Three states are distinguished
+rather than collapsed into "create if missing", because the two failure states
+lose data quietly:
+
+| Database | Behaviour |
+| --- | --- |
+| empty | apply the baseline, record its checksum |
+| carries the recorded baseline | verify the checksum, open |
+| has tables but no recorded baseline | refuse: this is somebody else's database |
+
+The baseline is applied as one simple-protocol query rather than split on
+semicolons — it contains a dollar-quoted function body full of them, and
+PostgreSQL wraps a multi-statement simple query in one implicit transaction, so
+a failure halfway through leaves no partial schema. A test asserts that.
+
+**The migration console** (`/admin/database` → *PostgreSQL migration*) drives
+the staged path against the real target from inside the app container, so the
+network path, the server's locale and the role's privileges are the ones the
+migration will actually meet:
+
+| Step | What it does | Changes the target |
+| --- | --- | --- |
+| Preflight | version, encoding, collation behaviour, extensions, UTF-8 strictness, SQL features, latency | only `CREATE EXTENSION`, which the migration wants anyway |
+| Check database | classifies it: empty / current schema / other build / not ours | no |
+| Create schema | applies the generated baseline to an empty database | yes |
+| Drop schema | removes Rolltop's tables and trigger function, keeps extensions | yes |
+
+The point is rehearsal rather than one attempt: create, look, drop, repeat,
+long before any data moves and long before the server is pointed at it. Two
+safety rules are enforced server-side rather than in the UI, so a mislabelled
+button cannot become a dropped database — a database holding anything that is
+not Rolltop's is refused for both create and drop, and the create step refuses
+anything but an empty database. The drop takes a second, explicit confirmation
+that names the database and its row count.
+
+Still to do, deliberately held until WP3 makes the store serve queries:
+
 - `backend/config/config.go`: replace `ROLLTOP_DB_PATH` with
   `ROLLTOP_DATABASE_URL` (standard Postgres DSN). Add pool knobs
   (`ROLLTOP_DB_MAX_CONNS`, default ~10). Remove
-  `ROLLTOP_STARTUP_INTEGRITY_CHECK`.
+  `ROLLTOP_STARTUP_INTEGRITY_CHECK`. Landing the environment variables before
+  the store can answer a query would advertise a configuration that starts a
+  server which cannot serve.
 - `backend/store/store.go`: `open()` loses the SQLite DSN parameters, the
   `MkdirAll`, the corruption classification on migrate, and split mode.
   `dataDB`/`mustDataDB`/`UserStore`/`UserDB` remain as API but resolve to the
@@ -307,6 +351,19 @@ the Dockerfile build stages are unchanged in shape.
 
 ### WP7 — One-shot data migration tool
 
+**Open obligation, to be settled before the first durable Postgres database
+exists.** `OpenPostgres` records the baseline as one `schema_migrations` row and
+refuses to start when the recorded checksum differs from the running binary's.
+That is right while every Postgres database is a throwaway test one, but the
+baseline is *designed to be regenerated in place*, so the same signal will mean
+two different things once a real database exists: "the schema was tampered with"
+and "this binary is newer than the database". The second needs an upgrade path,
+not a refusal. Whatever WP3 does to the schema — the `lower()` expression index
+is already queued — regenerates the baseline, so this has to be decided in the
+same phase that creates the first database worth keeping. The likely shape is
+incremental Postgres migrations layered on the baseline, with the baseline row
+pinned to the version it was created at rather than to the current file.
+
 New subcommand `rolltop migrate-to-postgres`:
 
 1. Takes the instance lock (server must be stopped) and opens the system
@@ -350,13 +407,20 @@ are easy to regress by porting a query mechanically:
 The biggest hidden cost. ~12.6k LOC of store tests plus the web/syncer suites
 all call `store.Open(tempfile)`.
 
-- New helper `storetest.Open(t)`: connects to a Postgres from
-  `TEST_DATABASE_URL`, creates a uniquely named database from a migrated
-  **template database** (`CREATE DATABASE ... TEMPLATE rolltop_test_tmpl`),
-  drops it in `t.Cleanup`. Template creation happens once per `go test`
-  process (sync.Once + advisory lock for parallel packages). Template-clone
-  is ~50–100 ms, which keeps the suite tolerable; running the baseline per
-  test would not be.
+- `backend/store/pgtestdb` (shipped) hands out one empty database per test from
+  `TEST_DATABASE_URL` and drops it in `t.Cleanup`. It skips when the variable
+  is unset and *fails* when it is set but unusable, so a broken CI service
+  cannot report a green suite that verified nothing.
+- The **template database** the plan called for is not built yet, because the
+  measurement it was justified by came out differently: applying the baseline
+  to an empty database takes ~360 ms locally. A template clone would save most
+  of that, but only matters once the suite has hundreds of store tests — which
+  is exactly when WP3 converts them. Build it then, with the real number in
+  hand, rather than now against five tests. When it lands, template creation
+  happens once per `go test` process (sync.Once + advisory lock for parallel
+  packages).
+- New helper `storetest.Open(t)` wrapping `pgtestdb` and `OpenPostgres`, added
+  alongside the first converted package so it has callers on the day it lands.
 - `Open(path)` callers migrate to `storetest.Open(t)` mostly mechanically.
 - CI (`ci.yml`, `pr.yml`): add a `postgres:17` service container, set
   `TEST_DATABASE_URL`. Local dev: `docker compose -f compose.dev.yml up db`
@@ -383,7 +447,7 @@ all call `store.Open(tempfile)`.
 | --- | --- | --- |
 | 0 | **Done** (shipped on `main`, `f9f686d` + `0552945`): WAL without the shared `-shm` index via `locking_mode=exclusive` and one connection per database, auto-detected from the filesystem superblock (`backend/store/access.go`) with a `ROLLTOP_SQLITE_ACCESS` override; live maintenance rerouted through the owning handle. Deviation from this plan's sketch: `synchronous` stays `NORMAL`, so durability of the most recent commits still depends on checkpoint-time fsync — acceptable residual risk for the interim, since the corruption vector (shm coherence) is gone. | — |
 | 1 | WP2 baseline + CI Postgres service (**done**). WP1's config/pool and WP8's per-test template-database helper both move to phase 2, where the store conversion gives them a consumer; landing either earlier would be unused code | ~~hoster answer: managed PG or RBD~~ resolved, see §12 — managed PG 16 confirmed; collation provisioning (§3.4) still to coordinate |
-| 2 | WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
+| 2 | WP1's connection/schema layer (**done**: `OpenPostgres`, `pgtestdb`), then WP3 + WP4 store conversion, package by package, tests green against PG | 1 |
 | 3 | WP6 plugins | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
 | 5 | WP7 migration tool + dry run against a copy of production data | 2 |

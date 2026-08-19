@@ -116,6 +116,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiAdminPlugin(w, r, strings.TrimPrefix(path, "admin/plugins/"))
 	case path == "admin/postgres-preflight":
 		s.apiAdminPostgresPreflight(w, r)
+	case path == "admin/postgres-schema":
+		s.apiAdminPostgresSchema(w, r)
 	case path == "admin/database":
 		s.apiAdminDatabase(w, r)
 	case path == "admin/database/job":

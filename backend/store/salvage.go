@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"rolltop/backend/plugins"
+	"rolltop/backend/sqlident"
 )
 
 const (
@@ -532,7 +533,7 @@ func repairForeignKeys(ctx context.Context, conn *sql.Conn) (int64, error) {
 			break
 		}
 		for _, item := range violations {
-			if _, err := conn.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE rowid = ?`, quoteIdentifier(item.table)), item.rowID); err != nil {
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE rowid = ?`, sqlident.Quote(item.table)), item.rowID); err != nil {
 				return dropped, err
 			}
 			dropped++
@@ -634,7 +635,7 @@ func commonColumns(ctx context.Context, source, dest *sql.DB, table string) ([]s
 }
 
 func tableColumns(ctx context.Context, db *sql.DB, table string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, quoteIdentifier(table)))
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, sqlident.Quote(table)))
 	if err != nil {
 		return nil, err
 	}
@@ -657,7 +658,7 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) ([]string, erro
 // tableHasRowID reports whether the table can be scanned with a rowid cursor.
 // WITHOUT ROWID tables have no such cursor, so they cannot skip damaged rows.
 func tableHasRowID(ctx context.Context, db *sql.DB, table string) bool {
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT rowid FROM %s LIMIT 1`, quoteIdentifier(table)))
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT rowid FROM %s LIMIT 1`, sqlident.Quote(table)))
 	if err != nil {
 		// A corrupt page is not an answer about the schema; assume a rowid
 		// table so the caller keeps its skip-and-resume behavior.
@@ -672,7 +673,7 @@ func tableHasRowID(ctx context.Context, db *sql.DB, table string) bool {
 // too, in which case the probe budget bounds the scan instead.
 func tableMaxRowID(ctx context.Context, db *sql.DB, table string) (int64, bool) {
 	var rowID sql.NullInt64
-	if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT max(rowid) FROM %s`, quoteIdentifier(table))).Scan(&rowID); err != nil {
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT max(rowid) FROM %s`, sqlident.Quote(table))).Scan(&rowID); err != nil {
 		return 0, false
 	}
 	if !rowID.Valid {
@@ -683,7 +684,7 @@ func tableMaxRowID(ctx context.Context, db *sql.DB, table string) (int64, bool) 
 
 func nextRowID(ctx context.Context, db *sql.DB, table string, cursor int64) (int64, bool, error) {
 	var rowID sql.NullInt64
-	err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT min(rowid) FROM %s WHERE rowid >= ?`, quoteIdentifier(table)), cursor).Scan(&rowID)
+	err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT min(rowid) FROM %s WHERE rowid >= ?`, sqlident.Quote(table)), cursor).Scan(&rowID)
 	if err != nil {
 		return 0, false, err
 	}
@@ -699,22 +700,22 @@ func selectStatement(table string, columns []string, withRowID bool) string {
 		quoted = append(quoted, "rowid")
 	}
 	for _, column := range columns {
-		quoted = append(quoted, quoteIdentifier(column))
+		quoted = append(quoted, sqlident.Quote(column))
 	}
 	if !withRowID {
-		return fmt.Sprintf(`SELECT %s FROM %s`, strings.Join(quoted, ", "), quoteIdentifier(table))
+		return fmt.Sprintf(`SELECT %s FROM %s`, strings.Join(quoted, ", "), sqlident.Quote(table))
 	}
-	return fmt.Sprintf(`SELECT %s FROM %s WHERE rowid >= ? ORDER BY rowid LIMIT ?`, strings.Join(quoted, ", "), quoteIdentifier(table))
+	return fmt.Sprintf(`SELECT %s FROM %s WHERE rowid >= ? ORDER BY rowid LIMIT ?`, strings.Join(quoted, ", "), sqlident.Quote(table))
 }
 
 func insertStatement(table string, columns []string) string {
 	quoted := make([]string, 0, len(columns))
 	placeholders := make([]string, 0, len(columns))
 	for _, column := range columns {
-		quoted = append(quoted, quoteIdentifier(column))
+		quoted = append(quoted, sqlident.Quote(column))
 		placeholders = append(placeholders, "?")
 	}
-	return fmt.Sprintf(`INSERT OR IGNORE INTO %s (%s) VALUES (%s)`, quoteIdentifier(table), strings.Join(quoted, ", "), strings.Join(placeholders, ", "))
+	return fmt.Sprintf(`INSERT OR IGNORE INTO %s (%s) VALUES (%s)`, sqlident.Quote(table), strings.Join(quoted, ", "), strings.Join(placeholders, ", "))
 }
 
 func scanTargets(values []any) []any {
@@ -723,10 +724,6 @@ func scanTargets(values []any) []any {
 		pointers[i] = &values[i]
 	}
 	return pointers
-}
-
-func quoteIdentifier(name string) string {
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func reportProgress(progress func(string), message string) {

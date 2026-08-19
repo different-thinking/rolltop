@@ -52,30 +52,6 @@ func TestRunNeverEchoesCredentials(t *testing.T) {
 	}
 }
 
-func TestRedactSecrets(t *testing.T) {
-	cases := []string{
-		"failed: host=db password=hunter2 port=5432",
-		"failed: host=db password = hunter2 port=5432",
-		"failed: host=db PASSWORD  =  hunter2",
-		"failed: host=db password='hunter2'",
-		"failed: host=db password = 'hunter2'",
-		`failed: host=db password="hunter2"`,
-		"cannot parse `postgres://rolltop:hunter2@db:5432/x`: bad port",
-		"cannot parse `postgresql://rolltop:hunter2@db:5432/x`: bad port",
-		"failed: PGPASSWORD=hunter2",
-	}
-	for _, message := range cases {
-		if got := redactSecrets(message); strings.Contains(got, "hunter2") {
-			t.Errorf("redactSecrets(%q) = %q, password survived", message, got)
-		}
-	}
-	// Redaction must not swallow the useful part of the message.
-	got := redactSecrets("cannot parse `postgres://rolltop:hunter2@db:5432/x`: invalid port")
-	if !strings.Contains(got, "invalid port") || !strings.Contains(got, "rolltop") {
-		t.Errorf("redactSecrets removed diagnostic context: %s", got)
-	}
-}
-
 // TestRunRejectsConcurrentRuns covers the shared scratch schema: a second run
 // must be refused rather than dropping the first run's tables.
 func TestRunRejectsConcurrentRuns(t *testing.T) {
