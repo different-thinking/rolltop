@@ -163,10 +163,10 @@ index, stale for the interim, and the existing repair closes the gap.
 
 | phase | contents | PR-sized? |
 |---|---|---|
-| A | incremental schema migrations (§2) | yes — independently valuable |
-| B | migration 0001, Postgres write path + counts/ids/purge/drop, backfill trigger, `ROLLTOP_SEARCH_BACKEND` flag | yes |
-| C | read path: search/match/similar, ranking knobs, explain | yes |
-| D | flip the default, README/compose, observe | small |
+| A | **Done**: incremental schema migrations (§2) — `backend/store/postgres_migrations.go` | yes — independently valuable |
+| B | **Done**: migration 0001, Postgres write path + counts/ids/purge/drop, backfill trigger, `ROLLTOP_SEARCH_BACKEND` flag | yes |
+| C | **Done**: read path — search/match/similar via one SQL spec (`message_search_query.go`), ranking knobs (weights, sender boosts, recency buckets), explain as weight-class matches. Fuzzy deferred (pg_trgm), query-side compound splitting leans on the indexed split terms | yes |
+| D | flip the default after comparing result quality on real mail, README/compose, observe | small |
 | E | retire Bleve: delete the watchdog/quarantine/coordinator/footprint machinery, drop the index from `/data`, revisit the single-process constraint | yes |
 
 ## 8. Open questions

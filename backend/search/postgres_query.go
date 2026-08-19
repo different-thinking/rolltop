@@ -245,12 +245,14 @@ func pgSimilarityClass(field string) string {
 // share of the total weight.
 func (s *Service) pgSearchSimilarMessageIDs(ctx context.Context, userID int64, candidateIDs []int64, terms []normalizedSimilarityTerm, limit int) ([]similarityHit, error) {
 	probes := make([]store.MessageSearchTermProbe, 0, len(terms))
+	probeTerms := make([]normalizedSimilarityTerm, 0, len(terms))
 	for _, term := range terms {
 		tsq := pgTSQuery(term.text, false, false)
 		if tsq == "" {
 			continue
 		}
 		probes = append(probes, store.MessageSearchTermProbe{TSQuery: tsq, WeightClass: pgSimilarityClass(term.field)})
+		probeTerms = append(probeTerms, term)
 	}
 	if len(probes) == 0 {
 		return nil, nil
@@ -269,11 +271,7 @@ func (s *Service) pgSearchSimilarMessageIDs(ctx context.Context, userID int64, c
 		var matchedTerms, matchedFields []string
 		fieldSeen := map[string]bool{}
 		count := 0
-		probeIndex := 0
-		for _, term := range terms {
-			if pgTSQuery(term.text, false, false) == "" {
-				continue
-			}
+		for probeIndex, term := range probeTerms {
 			if probeIndex < len(flags) && flags[probeIndex] {
 				score += term.weight
 				matchedWeight += term.weight
@@ -284,7 +282,6 @@ func (s *Service) pgSearchSimilarMessageIDs(ctx context.Context, userID int64, c
 					matchedFields = append(matchedFields, term.field)
 				}
 			}
-			probeIndex++
 		}
 		if count == 0 {
 			continue

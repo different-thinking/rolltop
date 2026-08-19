@@ -168,6 +168,13 @@ site and in review.
   documents, then index what the folder has and the index does not
   (`rebuildMailboxSearchIndex`) - offered per account in the folder settings and
   per tenant on the admin database page. Reuse it; do not grow a second one.
+- Search runs on one of two backends (`ROLLTOP_SEARCH_BACKEND`): Bleve indexes
+  on `/data` (default), or `message_search` rows in PostgreSQL
+  (`docs/search-postgres-plan.md`). The service type is the same either way;
+  the pg mode never enters the writer gates, stall watchdog, or quarantine
+  below, because a transactional row write has nothing for them to guard.
+  Everything in this section about Bleve lifecycle applies to the Bleve
+  backend only.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the

@@ -52,6 +52,7 @@ Common optional variables:
 export ROLLTOP_ADDR=":8080"
 export ROLLTOP_DATA_DIR="/data"
 export ROLLTOP_INDEX_PATH="/data/bleve"
+export ROLLTOP_SEARCH_BACKEND="bleve"
 export ROLLTOP_DB_MAX_CONNS="10"
 export ROLLTOP_DB_CONNECT_TIMEOUT="2m"
 export ROLLTOP_SESSION_TTL="720h"
@@ -105,6 +106,19 @@ The limit is a ceiling, not a reservation: the process only uses what it needs,
 and going over it makes the collector work harder rather than failing an
 allocation. Give the container at least a gigabyte for a first sync of a large
 mailbox.
+
+`ROLLTOP_SEARCH_BACKEND` selects where full-text search lives. The default
+`bleve` keeps the per-tenant mmap'd indexes under `ROLLTOP_INDEX_PATH` — the
+setup all of the above is about. `postgres` serves search from a `tsvector`
+table in the relational database instead: no mmap contending with the heap, no
+index directory on `/data`, and the writer-stall restart machinery is never
+armed. On first start with the postgres backend, tenants whose messages are
+not yet in the table are marked and re-indexed through the normal repair path
+— for a large mailbox that is hours of background indexing, the same as after
+an index rebuild. Switching back to `bleve` serves the old on-disk index,
+stale for the interim until a repair closes the gap. The migration story and
+the differences between the backends are documented in
+`docs/search-postgres-plan.md`.
 
 `ROLLTOP_DATABASE_URL` is the PostgreSQL connection string and is required —
 there is no local fallback. The database has to exist and be empty on first
