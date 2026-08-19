@@ -385,3 +385,93 @@ func TestUnreadableStateDoesNotReplayAnEarlierReport(t *testing.T) {
 		t.Fatalf("a lost state file was not reported as an unclean shutdown: %q", logs)
 	}
 }
+
+// A platform that recreates the container to apply a configuration change stops
+// the process first and kills it when its grace period runs out. That is a
+// shutdown that did not fit, not a kernel OOM kill, and the next start has to
+// say so - the container log the difference would otherwise be visible in is
+// gone by then.
+func TestKillDuringShutdownIsReportedAsAShortGracePeriod(t *testing.T) {
+	dataDir := t.TempDir()
+	func() {
+		testlog.Capture(t)
+		reporter := armCrashOutput(dataDir)
+		reporter.beginRun("test")
+		reporter.beginShutdown("SIGTERM")
+		reporter.shutdownPhase("closing the search index")
+		// No finish: the grace period ran out here.
+	}()
+
+	logs := restart(t, dataDir, nil)
+
+	if !strings.Contains(logs, "asked to stop with SIGTERM") {
+		t.Fatalf("stop signal not reported on the next start: %q", logs)
+	}
+	if !strings.Contains(logs, "closing the search index") {
+		t.Fatalf("the phase the shutdown died in was not reported: %q", logs)
+	}
+	if !strings.Contains(logs, "stop grace period") {
+		t.Fatalf("the next start did not name the remedy: %q", logs)
+	}
+	if strings.Contains(logs, "killed externally") {
+		t.Fatalf("a stopped process was reported as an external kill: %q", logs)
+	}
+}
+
+// Without a recorded signal the diagnosis is unchanged, and it now says why it
+// reached that conclusion rather than only stating it.
+func TestSilentKillStillNamesTheKernel(t *testing.T) {
+	dataDir := t.TempDir()
+	func() {
+		testlog.Capture(t)
+		reporter := armCrashOutput(dataDir)
+		reporter.beginRun("test")
+	}()
+
+	logs := restart(t, dataDir, nil)
+
+	if !strings.Contains(logs, "no stop signal was recorded") {
+		t.Fatalf("silent kill did not report the absence of a stop signal: %q", logs)
+	}
+}
+
+// The state is rewritten several times during a shutdown, and every one of those
+// writes could move the size baseline past a crash dump written just before it.
+// A panic during shutdown must still be reported.
+func TestCrashDuringShutdownIsStillReported(t *testing.T) {
+	dataDir := t.TempDir()
+	func() {
+		testlog.Capture(t)
+		reporter := armCrashOutput(dataDir)
+		reporter.beginRun("test")
+		reporter.beginShutdown("SIGTERM")
+		appendToCrashLog(t, dataDir, "panic: simulated during shutdown\n\ngoroutine 1 [running]:")
+		reporter.shutdownPhase("closing the database pool")
+	}()
+
+	logs := restart(t, dataDir, nil)
+
+	if !strings.Contains(logs, "previous run ended with a crash or fatal error") {
+		t.Fatalf("crash written during shutdown was hidden by a later state write: %q", logs)
+	}
+}
+
+// A clean shutdown says nothing on the next start, whatever it recorded on the
+// way out.
+func TestCompletedShutdownAfterASignalStaysQuiet(t *testing.T) {
+	dataDir := t.TempDir()
+	func() {
+		testlog.Capture(t)
+		reporter := armCrashOutput(dataDir)
+		reporter.beginRun("test")
+		reporter.beginShutdown("SIGTERM")
+		reporter.shutdownPhase("draining HTTP requests")
+		reporter.finish(nil)
+	}()
+
+	logs := restart(t, dataDir, nil)
+
+	if strings.Contains(logs, "previous run") {
+		t.Fatalf("a completed shutdown was reported as an incident: %q", logs)
+	}
+}

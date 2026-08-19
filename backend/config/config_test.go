@@ -309,3 +309,34 @@ func TestLoadReadsDatabasePoolSettings(t *testing.T) {
 		t.Errorf("max conns with the variable unset = %d, want 0 (defer to the store)", cfg.DatabaseMaxConns)
 	}
 }
+
+func TestLoadReadsShutdownTimeout(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("default shutdown timeout = %s, want 10s", cfg.ShutdownTimeout)
+	}
+
+	t.Setenv("ROLLTOP_SHUTDOWN_TIMEOUT", "45s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ShutdownTimeout != 45*time.Second {
+		t.Fatalf("configured shutdown timeout = %s, want 45s", cfg.ShutdownTimeout)
+	}
+
+	// A budget with nothing to divide would skip the closes it exists to make
+	// room for, so it is refused rather than clamped.
+	for _, value := range []string{"0", "-5s", "500ms"} {
+		t.Setenv("ROLLTOP_SHUTDOWN_TIMEOUT", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("shutdown timeout %q was accepted", value)
+		}
+	}
+}

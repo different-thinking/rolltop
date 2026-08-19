@@ -62,6 +62,9 @@ services:
     # One data directory belongs to one process, so the replacement container
     # has to wait for this one to let go of it. The grace period covers draining
     # HTTP and closing the search index; the database needs nothing flushed.
+    # Rolltop bounds its own shutdown with ROLLTOP_SHUTDOWN_TIMEOUT (default
+    # 10s): keep that value inside this period, or the process is SIGKILLed
+    # part-way through a shutdown it was told it had time for.
     stop_grace_period: 30s
 
 volumes:
