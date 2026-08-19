@@ -27,8 +27,12 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	if err != nil {
 		parsed = mailparse.ParsedMessage{
 			Subject: fmt.Sprintf("Unparseable message UID %d", item.UID),
-			Text:    fmt.Sprintf("rolltop stored the raw message, but could not parse its MIME body: %v. Download the raw .eml to inspect it.", err),
+			// The parse error quotes the header line it choked on, which is
+			// where the undecodable bytes usually are, so this text is
+			// sanitized like any other field derived from the raw message.
+			Text: fmt.Sprintf("rolltop stored the raw message, but could not parse its MIME body: %v. Download the raw .eml to inspect it.", err),
 		}
+		parsed.Sanitize()
 	}
 	generationRecoveryPhase(ctx, "plugin-security", "")
 	securityState, securityHandled, err := s.detectMessageSecurity(ctx, userID, item.Raw, plugins.MessageBody{Purpose: "storage", Text: parsed.Text, HTML: parsed.HTML})
@@ -41,8 +45,11 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		if transform, err := s.transformMessageSecurityBody(ctx, userID, item.Raw, securityState, plugins.MessageBody{Purpose: "storage", Text: parsed.Text, HTML: parsed.HTML}); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
 		} else if transform.Applied {
-			parsed.Text = transform.Body.Text
-			parsed.HTML = transform.Body.HTML
+			// A plugin body is decoded outside the parser - a decrypted PGP
+			// part carries its own charset - so it is repaired here rather
+			// than trusted to be storable text.
+			parsed.Text = mailparse.SanitizeText(transform.Body.Text)
+			parsed.HTML = mailparse.SanitizeText(transform.Body.HTML)
 			if transform.DropAttachments {
 				parsed.Files = nil
 			}
@@ -468,8 +475,11 @@ func (s *Service) prepareSearchVisibleAttachmentIndexMessageFromRaw(ctx context.
 		if transform, err := s.transformMessageSecurityBody(ctx, msg.UserID, raw, securityState, plugins.MessageBody{Purpose: "storage", Text: parsed.Text, HTML: parsed.HTML}); err != nil {
 			return nil, err
 		} else if transform.Applied {
-			parsed.Text = transform.Body.Text
-			parsed.HTML = transform.Body.HTML
+			// A plugin body is decoded outside the parser - a decrypted PGP
+			// part carries its own charset - so it is repaired here rather
+			// than trusted to be storable text.
+			parsed.Text = mailparse.SanitizeText(transform.Body.Text)
+			parsed.HTML = mailparse.SanitizeText(transform.Body.HTML)
 			if transform.DropAttachments {
 				parsed.Files = nil
 			}

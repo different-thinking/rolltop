@@ -54,8 +54,10 @@ func (s *Server) displayBodiesForMessage(ctx context.Context, userID int64, msg 
 		state.Signed = state.Signed || detected.Signed
 	}
 	if transform, err := s.transformMessageSecurityBody(ctx, userID, raw, state, plugins.MessageBody{Purpose: "display", Text: parsedText, HTML: parsedHTML}); err == nil && transform.Applied {
-		parsedText = transform.Body.Text
-		parsedHTML = transform.Body.HTML
+		// These bodies are persisted below, and a plugin decoded them outside
+		// the parser, so they are repaired the same way parsed text is.
+		parsedText = mailparse.SanitizeText(transform.Body.Text)
+		parsedHTML = mailparse.SanitizeText(transform.Body.HTML)
 	}
 	htmlBody, textBody = s.persistDisplayBodies(ctx, userID, msg, htmlBody, textBody, parsedHTML, parsedText)
 	return htmlBody, textBody, false

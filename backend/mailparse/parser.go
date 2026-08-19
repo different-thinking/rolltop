@@ -151,11 +151,13 @@ func Parse(raw []byte) (ParsedMessage, error) {
 	if err := parsePart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed); err != nil {
 		if isTolerableEOF(err) {
 			parsed.Text = cleanIndexedText(parsed.Text)
+			parsed.Sanitize()
 			return parsed, nil
 		}
 		return ParsedMessage{}, err
 	}
 	parsed.Text = cleanIndexedText(parsed.Text)
+	parsed.Sanitize()
 	return parsed, nil
 }
 
@@ -169,10 +171,12 @@ func ParseDisplayBody(r io.Reader) (string, string, error) {
 	var parsed ParsedMessage
 	if err := parseDisplayPart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed); err != nil {
 		if isTolerableEOF(err) {
+			parsed.Sanitize()
 			return normalizeDisplayText(parsed.Text), parsed.HTML, nil
 		}
 		return "", "", err
 	}
+	parsed.Sanitize()
 	return normalizeDisplayText(parsed.Text), parsed.HTML, nil
 }
 
@@ -365,15 +369,22 @@ func addressHeader(value string) string {
 	}
 	addrs, err := (&mail.AddressParser{WordDecoder: wordDecoder()}).ParseList(value)
 	if err != nil {
-		return strings.TrimSpace(value)
+		return SanitizeText(strings.TrimSpace(value))
 	}
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		if addr.Name != "" {
-			out = append(out, strconv.Quote(strings.TrimSpace(addr.Name))+" <"+addr.Address+">")
-		} else {
-			out = append(out, addr.Address)
+		// Each part is repaired before it is quoted, not after: strconv.Quote
+		// escapes a byte that is not valid UTF-8 into the literal text \xNN,
+		// which is itself valid UTF-8 and therefore nothing SanitizeText would
+		// touch afterwards. An encoded word that declares UTF-8 and carries
+		// ISO-8859-1 - the common case for a display name - would be stored as
+		// "M\xfcller" for good.
+		address := SanitizeText(addr.Address)
+		if name := SanitizeText(strings.TrimSpace(addr.Name)); name != "" {
+			out = append(out, strconv.Quote(name)+" <"+address+">")
+			continue
 		}
+		out = append(out, address)
 	}
 	return strings.Join(out, ", ")
 }
@@ -385,9 +396,9 @@ func decodedHeader(value string) string {
 	}
 	out, err := wordDecoder().DecodeHeader(value)
 	if err != nil {
-		return value
+		return SanitizeText(value)
 	}
-	return out
+	return SanitizeText(out)
 }
 
 // DecodeTextBytes exposes MIME charset decoding for callers that need consistent text handling outside full parsing.
@@ -411,23 +422,22 @@ func charsetReader(charset string, input io.Reader) (io.Reader, error) {
 }
 
 // decodeTextBytes prefers the declared MIME charset, then handles common older
-// Japanese escape sequences, and finally falls back to UTF-8/raw bytes so bad mail
-// still produces some display/index text.
+// Japanese escape sequences, and finally falls back to repairing the raw bytes
+// so bad mail still produces some display/index text. Every path ends in
+// SanitizeText: a part that declares no charset, or declares one it does not
+// hold, is the usual source of the bytes PostgreSQL rejects.
 func decodeTextBytes(data []byte, charset string) string {
 	if strings.TrimSpace(charset) != "" {
 		if text, ok := decodeBytesAsCharset(data, charset); ok {
-			return text
+			return SanitizeText(text)
 		}
 	}
 	if looksLikeISO2022JP(data) {
 		if text, ok := decodeBytesAsCharset(data, "iso-2022-jp"); ok {
-			return text
+			return SanitizeText(text)
 		}
 	}
-	if utf8.Valid(data) {
-		return string(data)
-	}
-	return string(data)
+	return SanitizeText(string(data))
 }
 
 func decodeBytesAsCharset(data []byte, charset string) (string, bool) {

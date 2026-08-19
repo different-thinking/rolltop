@@ -196,7 +196,7 @@ site and in review.
   guessed at — `Rebind` returns a `*pgbind.MixedPlaceholderError`, because
   numbering `?` from `$1` in a statement that already says `$1` binds two
   arguments to one slot and returns another tenant's rows without failing.
-- Four PostgreSQL rules the SQLite schema let us ignore, each of which produced
+- Five PostgreSQL rules the SQLite schema let us ignore, each of which produced
   a real failure during the move:
   - In `INSERT ... SELECT`, a bare parameter in the SELECT list is typed
     **before** the target column is consulted, so it defaults to `text` and is
@@ -209,6 +209,17 @@ site and in review.
     recovering and carrying on the way SQLite allowed. Where a write may
     legitimately conflict, ask for that outcome — `ON CONFLICT ... DO NOTHING`
     with an empty `RETURNING` — instead of provoking the error and handling it.
+  - `TEXT` holds valid UTF-8 and nothing else: an invalid byte sequence or a
+    NUL byte is rejected outright (SQLSTATE 22021), where SQLite stored any
+    bytes it was handed. Mail carries both, and a header written as raw
+    ISO-8859-1 rather than as an encoded word is the ordinary case, not a
+    corruption — so text derived from a message is repaired at the parse
+    boundary with `mailparse.SanitizeText`, which reads the bad bytes as
+    Windows-1252 and leaves the valid UTF-8 around them alone. `Parse`,
+    `ParseDisplayBody` and `DecodeTextBytes` already do it for what they
+    return; anything that produces message text outside the parser — a plugin
+    that decrypted a body, an error string quoting the header it choked on —
+    repeats it for its own values before storing them.
 - `GROUP BY` must list every selected column that is not functionally dependent
   on a grouped primary key, and PostgreSQL derives that dependency per table:
   grouping by `mb.id` covers `mb`'s columns and none of a joined table's.
