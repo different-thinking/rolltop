@@ -72,7 +72,7 @@ func (s *Service) reportDroppedSearchIndexBatch(ctx context.Context, documents [
 		// database that is down fails both, once per folder per batch, and a
 		// second unthrottled line would bury the first at exactly the moment
 		// the first is the one worth reading.
-		s.logDroppedSearchIndexBatch(userID, dropped, len(mailboxes[userID]), marks, cause)
+		_ = s.logDroppedSearchIndexBatch(userID, dropped, len(mailboxes[userID]), marks, cause)
 	}
 }
 
@@ -86,7 +86,12 @@ type droppedSearchIndexMarks struct {
 // droppedSearchIndexMarkTimeout bounds the one UPDATE per affected folder.
 const droppedSearchIndexMarkTimeout = 15 * time.Second
 
-func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int, marks droppedSearchIndexMarks, cause error) {
+// logDroppedSearchIndexBatch reports one tenant's losses, at most once per
+// interval. It returns whether this call reported, which is what makes the
+// throttle testable without reading the process-wide log: other goroutines in
+// this package log while a test runs, so counting lines there measures them
+// too.
+func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int, marks droppedSearchIndexMarks, cause error) bool {
 	s.droppedSearchIndexMu.Lock()
 	if s.droppedSearchIndex == nil {
 		s.droppedSearchIndex = map[int64]*droppedSearchIndexTally{}
@@ -105,7 +110,7 @@ func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int,
 	now := time.Now()
 	if !tally.lastLog.IsZero() && now.Sub(tally.lastLog) < droppedSearchIndexLogInterval {
 		s.droppedSearchIndexMu.Unlock()
-		return
+		return false
 	}
 	tally.lastLog = now
 	batches := tally.batches
@@ -129,4 +134,5 @@ func (s *Service) logDroppedSearchIndexBatch(userID int64, dropped, folders int,
 		log.Printf("could not mark folders for full-text repair user_id=%d folders=%d error_type=%T error=%v",
 			userID, unmarked, unmarkedCause, unmarkedCause)
 	}
+	return true
 }
