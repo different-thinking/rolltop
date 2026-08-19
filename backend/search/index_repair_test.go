@@ -4,11 +4,12 @@ package search
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -157,52 +158,93 @@ func TestOpenCorruptIndexKeepsIndexWhenReindexCannotBeScheduled(t *testing.T) {
 	}
 }
 
-func TestRebuildPerUserIndexMovesLiveIndexAside(t *testing.T) {
+// Two goroutines racing on the same damaged index must both end up with the
+// one live handle. Opening it twice and closing the loser is how the surviving
+// tenant's search dies with "index is closed" until the process restarts.
+func TestConcurrentOpenOfCorruptIndexSharesOneHandle(t *testing.T) {
 	root := t.TempDir()
+	corruptPerUserIndex(t, root, 9)
+
 	service, err := OpenPerUser(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = service.Close() })
-	if _, err := service.indexForUser(11); err != nil {
-		t.Fatal(err)
-	}
+	var repairs atomic.Int64
+	service.SetCorruptIndexHandler(func(int64) error {
+		repairs.Add(1)
+		return nil
+	})
 
-	quarantine, err := service.RebuildPerUserIndex(context.Background(), 11)
-	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+	const racers = 8
+	indexes := make([]bleve.Index, racers)
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			indexes[i], errs[i] = service.indexForUser(9)
+		}()
 	}
-	if quarantine.QuarantinePath == "" {
-		t.Fatal("rebuild reported no quarantine")
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("racer %d failed to open the repaired index: %v", i, err)
+		}
+		if indexes[i] != indexes[0] {
+			t.Fatalf("racer %d received a second handle for the same index", i)
+		}
 	}
-	if _, err := os.Stat(quarantine.QuarantinePath); err != nil {
-		t.Fatalf("quarantined index is missing: %v", err)
+	if got := repairs.Load(); got != 1 {
+		t.Fatalf("repairs = %d, want exactly one", got)
 	}
-	if _, err := os.Stat(filepath.Join(root, "11", LiveIndexDirName)); !os.IsNotExist(err) {
-		t.Fatalf("live index still present after rebuild: %v", err)
-	}
-	// The next write opens a fresh index in the place the old one left.
-	if _, err := service.indexForUser(11); err != nil {
-		t.Fatalf("open index after rebuild: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "11", LiveIndexDirName)); err != nil {
-		t.Fatalf("replacement index was not created: %v", err)
+	// The surviving handle must still be usable: a closed one answers every
+	// search with "index is closed" for as long as the process lives.
+	if _, err := indexes[0].DocCount(); err != nil {
+		t.Fatalf("shared index handle is not usable: %v", err)
 	}
 }
 
-func TestRebuildPerUserIndexWithoutIndexIsNotAnError(t *testing.T) {
-	root := t.TempDir()
-	service, err := OpenPerUser(root)
+// The same race without corruption: an ordinary first open from several
+// goroutines must also produce exactly one handle.
+func TestConcurrentFirstOpenSharesOneHandle(t *testing.T) {
+	service, err := OpenPerUser(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = service.Close() })
 
-	quarantine, err := service.RebuildPerUserIndex(context.Background(), 12)
-	if err != nil {
-		t.Fatalf("rebuild without an index: %v", err)
+	const racers = 8
+	indexes := make([]bleve.Index, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			index, err := service.indexForUser(21)
+			if err != nil {
+				t.Errorf("racer %d: %v", i, err)
+				return
+			}
+			indexes[i] = index
+		}()
 	}
-	if quarantine.QuarantinePath != "" {
-		t.Fatalf("quarantine = %q, want none", quarantine.QuarantinePath)
+	close(start)
+	wg.Wait()
+
+	for i := range indexes {
+		if indexes[i] != indexes[0] {
+			t.Fatalf("racer %d received a second handle for the same index", i)
+		}
+	}
+	if _, err := indexes[0].DocCount(); err != nil {
+		t.Fatalf("shared index handle is not usable: %v", err)
 	}
 }

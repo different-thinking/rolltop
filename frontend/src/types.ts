@@ -780,27 +780,29 @@ export type VolumeStatus = {
 /** SearchIndexTenant is one tenant's search index on the data volume.
  *
  * `present` is false for a user who has never been indexed and for one whose
- * index was just rebuilt — the next indexed message creates a new one.
- * `pending_messages` is the work still queued, so a rebuild in progress shows
- * as a number that falls rather than as a page that looks unchanged. */
+ * index was quarantined after it turned out to be unreadable.
+ * `folders_needing_rebuild` counts search-visible folders whose coverage
+ * nothing has verified, which is exactly what a rebuild acts on. */
 export type SearchIndexTenant = {
   user_id: number;
   email: string;
   name?: string;
   present: boolean;
   bytes: number;
-  pending_messages: number;
+  folders_needing_rebuild: number;
   /** Why this tenant's numbers are missing, if they are. One unreadable
    * tenant must not blank the card for the others. */
   error?: string;
 };
 
-/** SearchIndexReport is the search index card payload. After a rebuild it also
- * names the tenant that was rebuilt and how much was queued for reindexing. */
+/** SearchIndexReport is the search index card payload. After a rebuild it names
+ * the tenant, how many per-account runs started, and how many accounts were
+ * already busy syncing and so could not start one. */
 export type SearchIndexReport = {
   tenants: SearchIndexTenant[];
   rebuilt?: number;
-  queued_messages?: number;
+  started_runs?: number;
+  busy_accounts?: number;
 };
 
 /** DatabaseOverview is the admin database page payload. */

@@ -68,11 +68,27 @@ func TestStoreFetchedMessageSurvivesFailingSearchIndex(t *testing.T) {
 	if stored.Subject != "arrives without search" {
 		t.Fatalf("stored subject = %q", stored.Subject)
 	}
-	// The row must stay pending so the attachment-index worker retries it once
-	// the index is usable again. A dropped batch that marked rows indexed would
-	// leave the message unfindable forever.
-	if !stored.AttachmentIndexedAt.IsZero() {
-		t.Fatalf("dropped search batch marked the message indexed at %s", stored.AttachmentIndexedAt)
+	// The message is stored but not indexed, and nothing retries that on its
+	// own: the folder must therefore be left reporting coverage nothing has
+	// verified, which is the state an explicit rebuild acts on. Without the
+	// mark the folder claims to be searchable and the message is lost to
+	// search for good.
+	summaries, err := fixture.store.ListMailboxesForUser(ctx, fixture.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, summary := range summaries {
+		if summary.ID != fixture.source.ID {
+			continue
+		}
+		found = true
+		if summary.SearchIndexKnown {
+			t.Fatal("dropped search batch left the folder claiming verified coverage")
+		}
+	}
+	if !found {
+		t.Fatalf("mailbox %d is missing from the summaries", fixture.source.ID)
 	}
 }
 

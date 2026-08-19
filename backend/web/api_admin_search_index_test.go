@@ -76,6 +76,9 @@ func TestAdminSearchIndexReportLeavesIndexesAlone(t *testing.T) {
 	if !report.Tenants[0].Present {
 		t.Fatalf("tenant index reported absent: %+v", report.Tenants[0])
 	}
+	if report.Tenants[0].FoldersNeedingRebuild != 0 {
+		t.Fatalf("folders needing rebuild = %d, want none", report.Tenants[0].FoldersNeedingRebuild)
+	}
 	entries, err := os.ReadDir(filepath.Join(root, "1"))
 	if err != nil {
 		t.Fatal(err)
@@ -85,33 +88,18 @@ func TestAdminSearchIndexReportLeavesIndexesAlone(t *testing.T) {
 	}
 }
 
-func TestAdminSearchIndexRebuildQuarantinesAndQueuesReindex(t *testing.T) {
+// A rebuild has to refill the index, not only empty it. The card starts the
+// same purge-and-repair runs the folder settings offer, so a server without a
+// sync runner must refuse rather than silently do the half that loses data.
+func TestAdminSearchIndexRebuildNeedsTheRebuildMachinery(t *testing.T) {
 	server, admin, _ := newDatabaseAdminServer(t)
-	root := attachSearchService(t, server)
-	// A live index directory is what the rebuild has to move aside.
-	if err := os.MkdirAll(filepath.Join(root, "1", search.LiveIndexDirName), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	attachSearchService(t, server)
 
 	recorder := httptest.NewRecorder()
 	server.apiAdminSearchIndex(recorder, adminDatabaseRequest(t, server, admin, http.MethodPost, searchIndexPath,
 		map[string]int64{"user_id": admin.ID}))
-	report := decodeSearchIndexReport(t, recorder)
-	if report.Rebuilt != admin.ID {
-		t.Fatalf("rebuilt = %d, want %d", report.Rebuilt, admin.ID)
-	}
-	if _, err := os.Stat(filepath.Join(root, "1", search.LiveIndexDirName)); !os.IsNotExist(err) {
-		t.Fatalf("live index survived the rebuild: %v", err)
-	}
-	entries, err := os.ReadDir(filepath.Join(root, "1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("tenant directory = %v, want exactly the quarantine", entries)
-	}
-	if report.Tenants[0].Present {
-		t.Fatalf("rebuilt tenant still reports a live index: %+v", report.Tenants[0])
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("rebuild without a runner status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

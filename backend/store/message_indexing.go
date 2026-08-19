@@ -103,27 +103,6 @@ func markSearchMessagesPendingIndex(ctx context.Context, db *sql.DB, userID int6
 	return result.RowsAffected()
 }
 
-// CountMessagesNeedingSearchIndex reports how many of a tenant's messages are
-// still waiting to be indexed, using the same scope the indexing worker walks.
-// The admin page reports it so a rebuild in progress is visible as a number
-// that falls, rather than as a page that looks identical while it works.
-func (s *Store) CountMessagesNeedingSearchIndex(ctx context.Context, userID int64) (int64, error) {
-	if userID <= 0 {
-		return 0, fmt.Errorf("user id must be positive")
-	}
-	db, err := s.dataDB(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
-	var pending int64
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages
-		WHERE user_id = ? AND attachment_indexed_at = 0
-			AND mailbox_id NOT IN (
-				SELECT id FROM mailboxes WHERE user_id = ? AND search_index_purged = 1
-			)`, userID, userID).Scan(&pending)
-	return pending, err
-}
-
 // ListMessagesNeedingAttachmentIndex returns messages whose raw bodies still need attachment text extraction.
 func (s *Store) ListMessagesNeedingAttachmentIndex(ctx context.Context, userID int64, limit int) ([]MessageRecord, error) {
 	messages, _, err := s.ListMessagesNeedingAttachmentIndexAfter(ctx, userID, 0, limit)
@@ -360,6 +339,60 @@ func (s *Store) PreparePurgedMailboxSearchIndexRepair(ctx context.Context, userI
 		return false, err
 	}
 	return true, nil
+}
+
+// MarkMailboxSearchIndexRepairRequired records that a mailbox's full-text
+// coverage can no longer be trusted, which is what an index write that had to
+// be dropped leaves behind.
+//
+// It clears only the "state known" flag. A deliberate purge stays purged: the
+// two answer different questions, and folding them together would quietly put
+// a folder the reader excluded from search back into the rebuild.
+func (s *Store) MarkMailboxSearchIndexRepairRequired(ctx context.Context, userID, mailboxID int64) error {
+	if userID <= 0 || mailboxID <= 0 {
+		return fmt.Errorf("user and mailbox ids must be positive")
+	}
+	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE mailboxes
+		SET search_index_state_known = 0
+		WHERE user_id = ? AND id = ? AND include_in_search = 1`, userID, mailboxID)
+	return err
+}
+
+// MarkUserSearchIndexRepairRequired does the same for every search-visible
+// mailbox a tenant has. It is what a quarantined index leaves behind: the
+// replacement is empty, so no folder's coverage is known any more.
+func (s *Store) MarkUserSearchIndexRepairRequired(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE mailboxes
+		SET search_index_state_known = 0
+		WHERE user_id = ? AND include_in_search = 1 AND search_index_state_known = 1`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// CountMailboxesNeedingSearchIndexRepair reports how many of a tenant's
+// search-visible folders have coverage nothing has verified. The admin page
+// reports it because it is the number a rebuild acts on.
+func (s *Store) CountMailboxesNeedingSearchIndexRepair(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var pending int64
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mailboxes
+		WHERE user_id = ? AND include_in_search = 1 AND search_index_state_known = 0`, userID).Scan(&pending)
+	return pending, err
 }
 
 // MarkMailboxSearchIndexActive records that exact mailbox repair completed.

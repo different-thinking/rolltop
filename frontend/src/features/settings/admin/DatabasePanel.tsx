@@ -93,7 +93,7 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
   // Rebuilding is armed by a first click and performed by a second: it throws
   // an index away and re-reads a whole mailbox to build the next one.
   const [armedUser, setArmedUser] = useState(0);
-  const [queued, setQueued] = useState<{ userID: number; messages: number } | null>(null);
+  const [queued, setQueued] = useState<{ runs: number; busy: number } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -119,7 +119,7 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
     try {
       const report = await api.rebuildSearchIndex(csrf, userID);
       setTenants(report.tenants);
-      setQueued({ userID, messages: report.queued_messages || 0 });
+      setQueued({ runs: report.started_runs || 0, busy: report.busy_accounts || 0 });
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -134,8 +134,9 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
       <p className="settings-hint">
         Each user has their own search index on the data volume. It is built from mail that is already stored, so
         rebuilding one loses nothing — search is incomplete for that user until the reindex finishes, and nothing
-        else is affected. Rebuild when search is missing mail you know is there, or after restoring the volume
-        from a copy.
+        else is affected. Rebuilding queues one run per mail server, the same work the folder settings offer per
+        account. Rebuild when search is missing mail you know is there, when folders below report that they need
+        it, or after restoring the volume from a copy.
       </p>
       <div className="database-log-actions">
         <button type="button" className="secondary" disabled={loading} onClick={() => void load()}>
@@ -146,8 +147,11 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
       {error ? <p className="settings-error">{error}</p> : null}
       {queued ? (
         <p className="settings-hint">
-          Rebuilding. {queued.messages.toLocaleString()} message{queued.messages === 1 ? "" : "s"} queued for
-          reindexing; the count below falls as the indexer works through them.
+          Rebuilding. {queued.runs} mail server{queued.runs === 1 ? "" : "s"} started reindexing — follow it in
+          Activity.
+          {queued.busy > 0
+            ? ` ${queued.busy} more ${queued.busy === 1 ? "was" : "were"} already syncing; try those again once it finishes.`
+            : ""}
         </p>
       ) : null}
       {loading && !tenants ? <p className="settings-hint">Loading search index status…</p> : null}
@@ -166,9 +170,11 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
                     <small className="database-detail">{tenant.error}</small>
                   ) : (
                     <small>
-                      {tenant.pending_messages > 0
-                        ? `${tenant.pending_messages.toLocaleString()} waiting to be indexed`
-                        : "Fully indexed"}
+                      {tenant.folders_needing_rebuild > 0
+                        ? `${tenant.folders_needing_rebuild} folder${
+                            tenant.folders_needing_rebuild === 1 ? "" : "s"
+                          } need rebuilding`
+                        : "Coverage verified"}
                     </small>
                   )}
                 </td>
@@ -180,7 +186,7 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
                       disabled={busyUser !== 0}
                       onClick={() => void rebuild(tenant.user_id)}
                     >
-                      Confirm rebuild
+                      {busyUser === tenant.user_id ? "Starting…" : "Confirm rebuild"}
                     </button>
                   ) : (
                     <button
@@ -189,7 +195,7 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
                       disabled={busyUser !== 0}
                       onClick={() => setArmedUser(tenant.user_id)}
                     >
-                      {busyUser === tenant.user_id ? "Rebuilding…" : "Rebuild"}
+                      Rebuild
                     </button>
                   )}
                 </td>

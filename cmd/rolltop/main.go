@@ -633,9 +633,9 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	}
 
 	startup.update("Search", "opening indexes", 0, 1)
-	// Queueing a tenant's rebuild is one UPDATE over that tenant's messages. It
-	// runs while a sync waits for its index, so it is bounded rather than left
-	// to inherit whatever deadline the caller happened to have.
+	// Marking a tenant's folders is one UPDATE over their mailbox rows. It runs
+	// while a sync waits for its index, so it is bounded rather than left to
+	// inherit whatever deadline the caller happened to have.
 	const corruptIndexReindexTimeout = 30 * time.Second
 	searchRoot := cfg.SearchRoot()
 	searchSvc, err := search.OpenPerUser(searchRoot)
@@ -646,18 +646,22 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	// the first line of. Put it on the volume, beside crash.log, where a shell
 	// in the container can still read it after the restart.
 	searchSvc.SetStallDiagnosticsDir(cfg.DataDir)
-	// An index that cannot be opened is moved aside and rebuilt rather than
-	// failing every message that would have been indexed into it. The rows are
-	// queued here, before the quarantine, so a crash in between leaves work to
-	// redo instead of an empty index nothing will refill.
+	// An index that cannot be opened is moved aside and replaced rather than
+	// failing every message that would have been indexed into it. The
+	// replacement is empty, so every search-visible folder is marked here as
+	// coverage nothing has verified - before the quarantine, so a crash in
+	// between leaves a folder to rebuild rather than one that claims to be
+	// indexed. Refilling it is the explicit rebuild, from the folder settings
+	// or the admin database page; nothing does it in the background, because
+	// re-reading a whole mailbox is not a thing to start behind the reader.
 	searchSvc.SetCorruptIndexHandler(func(userID int64) error {
 		markCtx, cancel := context.WithTimeout(context.Background(), corruptIndexReindexTimeout)
 		defer cancel()
-		marked, err := db.MarkSearchVisibleMessagesPendingIndex(markCtx, userID)
+		marked, err := db.MarkUserSearchIndexRepairRequired(markCtx, userID)
 		if err != nil {
 			return err
 		}
-		log.Printf("search index unreadable, queued rebuild user_id=%d pending_messages=%d", userID, marked)
+		log.Printf("search index unreadable, folders marked for rebuild user_id=%d folders=%d", userID, marked)
 		return nil
 	})
 	defer func() {

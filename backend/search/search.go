@@ -34,9 +34,11 @@ type Service struct {
 	root    string
 	perUser bool
 	mu      sync.Mutex
-	// repairMu serialises quarantining a tenant's index against every open of
-	// one, so a damaged directory cannot be re-cached while it is being moved.
-	repairMu            sync.Mutex
+	// openGates serialise opening one tenant's index, so exactly one goroutine
+	// ever opens - or quarantines and replaces - a given index. Without it two
+	// callers racing on a cache miss both open the directory, and only one of
+	// the handles is kept; the other is closed while its owner still holds it.
+	openGates           map[int64]*sync.Mutex
 	corruptIndexHandler CorruptIndexHandler
 	indexes             map[int64]bleve.Index
 	writers             map[int64]*writerLock
@@ -910,16 +912,18 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	if userID == 0 {
 		return nil, fmt.Errorf("user id is required for search index")
 	}
-	s.mu.Lock()
-	if s.closing {
-		s.mu.Unlock()
-		return nil, errSearchServiceClosing
+	if index, err := s.cachedIndexForUser(userID); index != nil || err != nil {
+		return index, err
 	}
-	if index := s.indexes[userID]; index != nil {
-		s.mu.Unlock()
-		return index, nil
+
+	// One opener per tenant. The gate also covers the quarantine below, so a
+	// directory can never be renamed while another goroutine is opening it.
+	gate := s.openGateForUser(userID)
+	gate.Lock()
+	defer gate.Unlock()
+	if index, err := s.cachedIndexForUser(userID); index != nil || err != nil {
+		return index, err
 	}
-	s.mu.Unlock()
 
 	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)
 	index, err := openIndex(path)
@@ -945,16 +949,34 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 		}
 		return nil, errSearchServiceClosing
 	}
-	if existing := s.indexes[userID]; existing != nil {
-		s.mu.Unlock()
-		if err := index.Close(); err != nil {
-			s.reportBleveError(bleveErrorContext{Operation: "close-duplicate-index", UserID: userID}, err)
-		}
-		return existing, nil
-	}
 	s.indexes[userID] = index
 	s.mu.Unlock()
 	return index, nil
+}
+
+// cachedIndexForUser answers from the cache, or reports that the service is
+// closing. A nil index with a nil error means "not open yet, go and open it".
+func (s *Service) cachedIndexForUser(userID int64) (bleve.Index, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errSearchServiceClosing
+	}
+	return s.indexes[userID], nil
+}
+
+func (s *Service) openGateForUser(userID int64) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openGates == nil {
+		s.openGates = make(map[int64]*sync.Mutex)
+	}
+	gate := s.openGates[userID]
+	if gate == nil {
+		gate = &sync.Mutex{}
+		s.openGates[userID] = gate
+	}
+	return gate
 }
 
 // DropUser closes and forgets a tenant's index handle.

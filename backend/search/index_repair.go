@@ -11,7 +11,6 @@
 package search
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -74,22 +73,12 @@ func IsIndexCorruptionError(err error) bool {
 }
 
 // repairUnopenableIndex moves a damaged index aside and returns a fresh empty
-// one in its place. The caller holds no lock; this takes the repair gate, which
-// every open of a per-user index goes through, so nothing can cache a handle on
-// the directory between the drop and the rename.
+// one in its place. The caller holds the tenant's open gate, so no other
+// goroutine is opening or caching a handle on the directory being renamed.
 func (s *Service) repairUnopenableIndex(userID int64, path string, cause error) (bleve.Index, error) {
-	s.repairMu.Lock()
-	defer s.repairMu.Unlock()
-
-	// Another goroutine may have finished this exact repair while this one
-	// waited for the gate, so the cache decides before the filesystem does.
 	s.mu.Lock()
-	cached := s.indexes[userID]
 	handler := s.corruptIndexHandler
 	s.mu.Unlock()
-	if cached != nil {
-		return cached, nil
-	}
 	if handler == nil {
 		return nil, cause
 	}
@@ -107,28 +96,4 @@ func (s *Service) repairUnopenableIndex(userID int64, path string, cause error) 
 	s.logf()("search index quarantined and rebuilt user_id=%d quarantine=%q cause_type=%T cause=%v",
 		userID, quarantine.QuarantinePath, cause, cause)
 	return index, nil
-}
-
-// RebuildPerUserIndex moves one tenant's live index aside while the server is
-// running and leaves the next indexing write to create an empty one.
-//
-// The caller marks the tenant's rows for reindexing first, for the reason
-// CorruptIndexHandler describes. Writes already holding a handle when this runs
-// land in the quarantined directory and are lost, which costs nothing: every
-// row is queued for reindexing anyway.
-func (s *Service) RebuildPerUserIndex(ctx context.Context, userID int64) (IndexQuarantine, error) {
-	if s == nil || !s.perUser {
-		return IndexQuarantine{}, errors.New("per-user search indexes are not configured")
-	}
-	if userID <= 0 {
-		return IndexQuarantine{}, errors.New("user id must be positive")
-	}
-	s.repairMu.Lock()
-	defer s.repairMu.Unlock()
-	// DropUser takes the tenant's writer gate, so an in-flight batch commit
-	// finishes before the directory moves.
-	if err := s.DropUser(ctx, userID); err != nil {
-		return IndexQuarantine{}, err
-	}
-	return QuarantinePerUserIndex(s.root, userID, time.Now())
 }

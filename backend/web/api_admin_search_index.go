@@ -10,7 +10,15 @@
 // Reading is deliberately side-effect free: the status walks the directory
 // instead of opening the index, so viewing this page can never quarantine
 // anything. Only the POST acts, and it is admin-only and CSRF-protected because
-// it throws away an index and schedules a full reindex of a tenant's mail.
+// it re-reads a tenant's whole mailbox.
+//
+// The rebuild is the same one the account settings already offer per account —
+// purge each search-visible folder's documents, then index what the folder has
+// that the index does not — run here for every account a tenant owns. It is
+// deliberately not a second implementation: marking rows and hoping a worker
+// picks them up does not refill an index, because the flag that looks like a
+// reindex queue (`attachment_indexed_at`) is an attachment-enrichment flag that
+// the maintenance worker clears without indexing anything.
 
 package web
 
@@ -39,10 +47,11 @@ type searchIndexTenant struct {
 	// normal state for a new user and the state right after a rebuild.
 	Present bool  `json:"present"`
 	Bytes   int64 `json:"bytes"`
-	// PendingMessages is how many messages are still waiting to be indexed.
-	// After a rebuild this is the tenant's whole searchable mailbox, and it
-	// falls as the indexing worker gets through it.
-	PendingMessages int64 `json:"pending_messages"`
+	// FoldersNeedingRebuild is how many of the tenant's search-visible folders
+	// have coverage nothing has verified — a folder whose index write was
+	// dropped, or every folder after an index was quarantined. It is the number
+	// the rebuild acts on, so it is the number worth showing.
+	FoldersNeedingRebuild int64 `json:"folders_needing_rebuild"`
 	// Error is why this tenant's numbers could not be read, if they could not.
 	// One unreadable tenant must not blank the card for the others.
 	Error string `json:"error,omitempty"`
@@ -53,8 +62,11 @@ type searchIndexReport struct {
 	// Rebuilt names the tenant a POST acted on, so the response can be rendered
 	// as a confirmation without the client having to correlate it.
 	Rebuilt int64 `json:"rebuilt,omitempty"`
-	// QueuedMessages is how many messages the rebuild marked for reindexing.
-	QueuedMessages int64 `json:"queued_messages,omitempty"`
+	// StartedRuns is how many per-account rebuild runs the request queued, and
+	// BusyAccounts how many could not start because that account was already
+	// syncing or reindexing.
+	StartedRuns  int `json:"started_runs,omitempty"`
+	BusyAccounts int `json:"busy_accounts,omitempty"`
 }
 
 func (s *Server) apiAdminSearchIndex(w http.ResponseWriter, r *http.Request) {
@@ -82,10 +94,6 @@ func (s *Server) apiAdminSearchIndexRebuild(w http.ResponseWriter, r *http.Reque
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	if s.search == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "Search is not configured on this server.")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, searchIndexMaxBody)
 	var in struct {
 		UserID int64 `json:"user_id"`
@@ -107,29 +115,85 @@ func (s *Server) apiAdminSearchIndexRebuild(w http.ResponseWriter, r *http.Reque
 		s.serverError(w, r, err)
 		return
 	}
-	// Queued before the index moves, for the reason search.CorruptIndexHandler
-	// describes: the reverse order can leave an empty index with every row
-	// still flagged as indexed, and a search that answers nothing forever.
-	queued, err := s.store.MarkSearchVisibleMessagesPendingIndex(ctx, in.UserID)
+	// Checked after the request has been validated, so a malformed one is
+	// answered by what is wrong with it rather than by what this server cannot
+	// do about it.
+	if s.syncer == nil || s.syncer.Search == nil || s.syncRunner == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "Search indexing is not configured on this server.")
+		return
+	}
+	started, busy, err := s.startSearchRebuildForUser(ctx, in.UserID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	quarantine, err := s.search.RebuildPerUserIndex(ctx, in.UserID)
-	if err != nil {
-		s.serverError(w, r, err)
+	if started == 0 {
+		if busy > 0 {
+			writeAPIError(w, http.StatusConflict,
+				"Sync or full-text reindexing is already running for this user's mail servers.")
+			return
+		}
+		writeAPIError(w, http.StatusBadRequest, "This user has no search-visible folders to rebuild.")
 		return
 	}
-	log.Printf("search index rebuild requested user_id=%d queued_messages=%d quarantine=%q",
-		in.UserID, queued, quarantine.QuarantinePath)
+	s.notifyUserChanged(in.UserID)
 	report, err := s.searchIndexReport(ctx)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	report.Rebuilt = in.UserID
-	report.QueuedMessages = queued
+	report.StartedRuns = started
+	report.BusyAccounts = busy
 	writeJSON(w, report)
+}
+
+// startSearchRebuildForUser queues one rebuild run per mail account. Accounts
+// whose runner is busy are reported rather than waited on: the caller is an
+// HTTP request, and a sync that has just started can take hours.
+func (s *Server) startSearchRebuildForUser(ctx context.Context, userID int64) (started, busy int, err error) {
+	accounts, err := s.store.ListMailAccountsForUser(ctx, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	summaries, err := s.store.ListMailboxesForUser(ctx, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, account := range accounts {
+		mailboxes := make([]store.Mailbox, 0)
+		for _, summary := range summaries {
+			if summary.AccountID == account.ID && summary.IncludeInSearch {
+				mailboxes = append(mailboxes, summary.Mailbox)
+			}
+		}
+		if len(mailboxes) == 0 {
+			continue
+		}
+		_, ok, startErr := s.syncRunner.StartAccountSearchRebuildToCompletion(userID, account, mailboxes,
+			"Rebuilding full-text indexes", func(runCtx context.Context, runID int64, progress *store.SyncProgress) error {
+				for i, mailbox := range mailboxes {
+					if err := s.rebuildMailboxSearchIndex(runCtx, userID, mailbox, runID, progress); err != nil {
+						return err
+					}
+					progress.MailboxesDone = i + 1
+					if err := s.store.UpdateSyncRunProgress(runCtx, userID, runID, *progress); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		if startErr != nil {
+			return started, busy, startErr
+		}
+		if !ok {
+			busy++
+			continue
+		}
+		started++
+	}
+	log.Printf("search index rebuild requested user_id=%d runs_started=%d accounts_busy=%d", userID, started, busy)
+	return started, busy, nil
 }
 
 func (s *Server) searchIndexReport(ctx context.Context) (searchIndexReport, error) {
@@ -143,11 +207,11 @@ func (s *Server) searchIndexReport(ctx context.Context) (searchIndexReport, erro
 		if s.search != nil {
 			tenant.Bytes, tenant.Present = s.search.PerUserIndexBytes(user.ID)
 		}
-		pending, err := s.store.CountMessagesNeedingSearchIndex(ctx, user.ID)
+		pending, err := s.store.CountMailboxesNeedingSearchIndexRepair(ctx, user.ID)
 		if err != nil {
 			tenant.Error = "Could not read this user's indexing state."
 		} else {
-			tenant.PendingMessages = pending
+			tenant.FoldersNeedingRebuild = pending
 		}
 		report.Tenants = append(report.Tenants, tenant)
 	}

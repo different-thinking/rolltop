@@ -127,10 +127,11 @@ func (b *fetchedSearchIndexBatch) Empty() bool {
 //
 // That ordering is also what lets a failed commit be survivable. Search is a
 // derived view of mail that is already stored, so a batch that cannot be
-// written is dropped and its rows stay pending for the attachment-index worker
-// to pick up. Returning the error instead would abort the mailbox, which is how
-// an unreadable index or a full disk used to stop mail arriving entirely -
-// the index is rebuildable, the sync window is not.
+// written is dropped and the folders it touched are marked as coverage nothing
+// has verified, which an explicit rebuild acts on. Returning the error instead
+// would abort the mailbox, which is how an unreadable index or a full disk used
+// to stop mail arriving entirely - the index is rebuildable from stored mail,
+// the IMAP sync window is not.
 func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 	if len(b.items) == 0 {
 		return nil
@@ -145,7 +146,7 @@ func (b *fetchedSearchIndexBatch) Flush(ctx context.Context) error {
 			if !searchIndexFailureIsSurvivable(ctx, err) {
 				return err
 			}
-			b.service.reportDroppedSearchIndexBatch(documents, err)
+			b.service.reportDroppedSearchIndexBatch(ctx, documents, err)
 			b.reset()
 			return nil
 		}
