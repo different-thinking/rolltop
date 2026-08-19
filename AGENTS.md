@@ -50,7 +50,10 @@ Rolltop V1 is a Go, SQLite, Bleve, and local-blob email mirror. Keep all user-ow
   completed: a queued move ends minutes later, and the rows return to the screen
   for the gap until the reload answers, which is the flash the dismissal exists
   to prevent. Whatever proves a move also takes the rows out of the list's own
-  data (`onMessagesMoved`) rather than leaving that to the reload.
+  data (`onMessagesMoved`) rather than leaving that to the reload - and only
+  what proves it may: a queued move has been accepted, not performed, so
+  reporting its rows moved takes them out of the list the dismissal is measured
+  against, and the next reload hands them back with nothing hiding them.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick

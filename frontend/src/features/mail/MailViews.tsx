@@ -1427,6 +1427,11 @@ function MessageList({
   const pendingSwipeActionIDs = useRef<Set<number>>(new Set());
   const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const swipeDismissTimers = useRef<Map<number, number>>(new Map());
+  // Rows this list dismissed itself, as opposed to the ones it dismissed on
+  // behalf of the app-wide hidden set. Only the latter come back when that hide
+  // is released - a thread move's undo, a failed drag, a category filing that
+  // finished - because a dismissal of its own is answered by its own mutation.
+  const selfDismissedIDs = useRef<Set<number>>(new Set());
   const keyboardIndexRef = useRef<number | null>(null);
   // Set on unmount so the queued-move watch stops touching state after the view
   // is gone; it outlives a single render by design.
@@ -1509,6 +1514,9 @@ function MessageList({
       });
       return next.size === current.size ? current : next;
     });
+    selfDismissedIDs.current.forEach((id) => {
+      if (!sourceMessageIDs.has(id)) selfDismissedIDs.current.delete(id);
+    });
     setPendingSwipeMoveIDs((current) => {
       const next = new Set(Array.from(current).filter((id) => sourceMessageIDs.has(id)));
       return next.size === current.size ? current : next;
@@ -1517,6 +1525,7 @@ function MessageList({
       const next = new Set(Array.from(current).filter((id) => sourceMessageIDs.has(id)));
       return next.size === current.size ? current : next;
     });
+    const releasedFromHide: number[] = [];
     sourceIDs.forEach((id) => {
       if (hiddenMessageIDs.has(id)) {
         if (!moveOutTimers.current.has(id)) {
@@ -1536,9 +1545,14 @@ function MessageList({
           window.clearTimeout(timer);
           moveOutTimers.current.delete(id);
         }
+        // The hide is gone and this list never dismissed the row itself, so the
+        // hide was the only reason it was not on screen: the move it stood for
+        // was undone or failed, and the row belongs back in the list.
+        if (dismissedIDs.has(id) && !selfDismissedIDs.current.has(id)) releasedFromHide.push(id);
       }
     });
-  }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs]);
+    if (releasedFromHide.length > 0) restoreDismissed(releasedFromHide);
+  }, [conversations, hiddenKey, pendingSwipeMoveKey, pendingSwipeSnoozeKey, sourceKey, hiddenMessageIDs, dismissedIDs]);
 
   // Focus lands on Cancel rather than the destructive control: a stray Enter on
   // a freshly opened confirmation must not delete a whole filter.
@@ -1731,14 +1745,16 @@ function MessageList({
       // Every row on screen matches the filter the server just took, so the page
       // clears on the click rather than message by message as the background
       // runs work through the folder. Only a pass that took the whole filter can
-      // say that: a truncated one stops somewhere inside it, and a skipped
-      // message is one this list may well be showing because it is already in
-      // Trash, so neither may hide a row the folder is going to keep.
-      // The runs are also the only proof these rows really left, and a delete
-      // that fails halfway has to give them back rather than leave a folder
-      // looking emptier than it is, so a pass that named none clears nothing.
+      // say that: a truncated one stops somewhere inside it, a skipped message
+      // is one this list may well be showing because it is already in Trash, and
+      // a partial start leaves a whole account's mail where it was, so none of
+      // them may hide a row the folder is going to keep. The runs are the only
+      // proof the rows really left, and a delete that fails halfway has to give
+      // them back rather than leave a folder looking emptier than it is, so a
+      // pass that named no run to watch clears nothing either.
       const runIDs = (result.runs || []).map((run) => run.run_id).filter((id) => id > 0);
-      const wholeFilterTaken = queuedMessages > 0 && result.skipped === 0 && !result.truncated && runIDs.length > 0;
+      const wholeFilterTaken = queuedMessages > 0 && result.skipped === 0 && !result.truncated
+        && !result.partial_error && runIDs.length > 0;
       const clearedIDs = wholeFilterTaken
         ? uniquePositiveIDs(visible.flatMap((conversation) => [conversation.message.id, ...conversationTransferMessageIDs(conversation)]))
         : [];
@@ -1883,10 +1899,17 @@ function MessageList({
     if (snoozedView && !keepalive && movedRowIDs.length > 0) {
       void Promise.allSettled(movedRowIDs.map((rowID) => api.unsnoozeMessage(csrf, rowID)));
     }
-    if (movedMessageIDs.length > 0) onMessagesMoved(movedMessageIDs);
     // A queued move is only accepted, not done: its messages still sit in the
-    // source folder until the background run reaches them. They stay pending so
-    // a reload of this page does not show them again on their way out.
+    // source folder until the background run reaches them, so only the messages
+    // that really moved are reported moved. Taking a queued row out of the list
+    // would drop the dismissal that is keeping it off the screen - a dismissal
+    // lasts while the list carries the row - and the reload below would hand it
+    // back as a row nothing is hiding any more. The watch reports them instead,
+    // once the run proves they left.
+    const settledMovedIDs = movedMessageIDs.filter((id) => !stillQueuedIDs.has(id));
+    if (settledMovedIDs.length > 0) onMessagesMoved(settledMovedIDs);
+    // They stay pending so a reload of this page does not show them again on
+    // their way out.
     removePendingSwipeMoveIDs(dismissIDs.filter((id) => !stillQueuedIDs.has(id)));
     if (restoreIDs.length > 0) {
       restoreDismissed(uniquePositiveIDs(restoreIDs));
@@ -1950,6 +1973,7 @@ function MessageList({
   }
 
   function optimisticallyDismiss(ids: number[]) {
+    ids.forEach((id) => selfDismissedIDs.current.add(id));
     setDismissedIDs((current) => new Set([...current, ...ids]));
     setSelectedIDs((current) => {
       const next = new Set(current);
@@ -1959,10 +1983,14 @@ function MessageList({
   }
 
   function restoreDismissed(ids: number[]) {
+    ids.forEach((id) => selfDismissedIDs.current.delete(id));
     setDismissedIDs((current) => {
       const next = new Set(current);
-      ids.forEach((id) => next.delete(id));
-      return next;
+      let changed = false;
+      ids.forEach((id) => {
+        if (next.delete(id)) changed = true;
+      });
+      return changed ? next : current;
     });
   }
 
@@ -2306,13 +2334,19 @@ function MessageList({
         // The reminder belongs to this row's own message, so a partial move that
         // relocated only sibling thread messages must leave it in place.
         if (unsnooze && !keepalive && movedIDs.includes(conversation.message.id)) void api.unsnoozeMessage(csrf, conversation.message.id).catch(() => undefined);
+        // Queued messages are held back from onMessagesMoved for the same
+        // reason as in the bulk path: they have not left the folder yet, and a
+        // row taken out of the list loses the dismissal hiding it.
         if (error === undefined) {
-          onMessagesMoved(messageIDs);
+          const settledIDs = messageIDs.filter((id) => !queued.has(id));
+          if (settledIDs.length > 0) onMessagesMoved(settledIDs);
           onListChanged?.();
           return;
         }
-        if (movedIDs.length > 0) onMessagesMoved(movedIDs);
-        else {
+        if (movedIDs.length > 0) {
+          const settledIDs = movedIDs.filter((id) => !queued.has(id));
+          if (settledIDs.length > 0) onMessagesMoved(settledIDs);
+        } else {
           cancelSwipeDismiss(conversation.message.id);
           restoreDismissed(dismissedIDs);
         }
