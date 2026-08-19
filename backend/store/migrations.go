@@ -9,11 +9,11 @@
 // plugin_migrations. What is left is the two pieces both of those share: the
 // checksum, and the progress type the startup page renders.
 //
-// The first core schema change after the cutover needs a mechanism this does
-// not yet have — a migration layered on top of the baseline, for databases that
-// already carry it (§11 of docs/postgres-migration-plan.md). Until then,
-// changing the schema means changing baseline.sql, which only a database that
-// does not exist yet can pick up.
+// Core schema changes after the cutover are incremental migrations layered on
+// the frozen baseline (postgresMigrations, postgres_migrations.go), applied by
+// ensurePostgresSchema when outstanding. baseline.sql itself is never edited
+// again: only a database that does not exist yet could pick the edit up, and
+// every database that does exist would refuse to start.
 
 package store
 

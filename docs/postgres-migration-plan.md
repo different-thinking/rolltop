@@ -438,18 +438,13 @@ database" — and only the first deserves a refusal. Any edit to `baseline.sql`
 produces the second, and `baseline.sql` is now the hand-owned place schema
 changes are made, so *every* schema change from here produces it.
 
-Nothing in the tree answers this yet. `backend/store/migrations.go` holds the
-checksum and the progress type and no runner at all — the SQLite runner that
-used to sit there was dead code and was deleted rather than left as a
-misleading answer. The shape this needs is incremental PostgreSQL migrations
-layered on the baseline, with the baseline row pinned to the version it was
-created at rather than to the current file, and a startup path that applies
-the outstanding ones instead of refusing. Plugin migrations already work that
-way (`plugin_migrations`, one row per migration, checksummed, applied under
-the schema lock only when something is outstanding) and are the model to copy.
-
-Until it exists, the operating rule is the honest one: editing `baseline.sql`
-only reaches a database that does not exist yet.
+**Shipped**: `backend/store/postgres_migrations.go` answers this in the shape
+sketched here — incremental migrations layered on the frozen baseline, one
+checksummed `schema_migrations` row per entry (scope `postgres`), applied in
+order under the schema lock by `ensurePostgresSchema` when outstanding, with
+refusals for edited entries, unknown (newer-build) rows, and gaps. The
+operating rule tightened accordingly: `baseline.sql` is never edited again —
+every schema change is a numbered migration.
 
 ### WP3 query obligations from the baseline
 
@@ -530,7 +525,7 @@ all call `store.Open(tempfile)`.
 | 2 | WP1's connection/schema layer, then WP3 + WP4 store conversion (**done**) | 1 |
 | 3 | WP6 plugins (**done**) | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs (**done**) | 2 |
-| 5 | WP7 residue: settle the baseline upgrade path, rehearse create/drop against the provisioned target via the migration console | 2 |
+| 5 | **Done** (create/drop rehearsed via the migration console; baseline upgrade path shipped as incremental migrations — `backend/store/postgres_migrations.go`, frozen baseline, numbered checksummed entries applied at open) | — |
 | 6 | Fresh start (§11) | 3–5 |
 | 7 | Bleve → Postgres FTS (§10, separate plan) | 6 |
 

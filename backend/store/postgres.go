@@ -36,13 +36,13 @@ import (
 
 const (
 	// postgresSchemaScope and postgresSchemaVersion identify the squashed
-	// baseline in schema_migrations. The version is not a sequence number: the
-	// baseline is regenerated in place from the SQLite schema, so a change to it
-	// shows up as a checksum mismatch rather than as a new version. That is the
-	// right behaviour while every PostgreSQL database is a throwaway test one;
-	// the first durable database needs the upgrade path recorded under WP7 in
-	// docs/postgres-migration-plan.md, because a regenerated baseline would
-	// otherwise refuse to start against a database that is merely older.
+	// baseline in schema_migrations. The baseline is frozen: its checksum is
+	// the recorded identity of a database's origin, and a mismatch still means
+	// tampering, never age. Schema changes are numbered entries layered on top
+	// (postgresMigrations, postgres_migrations.go), each with its own row in
+	// the same table, applied at startup when outstanding. Editing baseline.sql
+	// is therefore never the way to change the schema again — it would refuse
+	// to start against every database that already exists.
 	postgresSchemaScope   = "postgres"
 	postgresSchemaVersion = "baseline"
 
@@ -358,11 +358,11 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 	}
 
 	checksum := baselineChecksum()
-	present, err := verifyPostgresBaseline(ctx, conn, checksum)
+	state, err := readPostgresSchemaState(ctx, conn, checksum, postgresMigrations)
 	if err != nil {
 		return err
 	}
-	if present {
+	if state.BaselinePresent && len(state.Outstanding) == 0 {
 		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "already applied", Done: 1, Total: 1})
 		return nil
 	}
@@ -373,49 +373,39 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 	}
 	defer unlock()
 
-	// Another process may have created the schema while this one waited.
-	present, err = verifyPostgresBaseline(ctx, conn, checksum)
+	// Another process may have created or advanced the schema while this one
+	// waited on the lock.
+	state, err = readPostgresSchemaState(ctx, conn, checksum, postgresMigrations)
 	if err != nil {
 		return err
 	}
-	if present {
+	if state.BaselinePresent && len(state.Outstanding) == 0 {
 		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "already applied", Done: 1, Total: 1})
 		return nil
 	}
-	blocking, err := postgresBlockingObjects(ctx, conn)
-	if err != nil {
-		return err
+	if !state.BaselinePresent {
+		blocking, err := postgresBlockingObjects(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if len(blocking) > 0 {
+			return fmt.Errorf("postgres: the target database already contains objects but no recorded Rolltop baseline (%s); point the server at an empty database",
+				describeBlockingObjects(blocking))
+		}
+		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "create schema", Done: 0, Total: 1 + len(state.Outstanding)})
+		if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
+			return err
+		}
 	}
-	if len(blocking) > 0 {
-		return fmt.Errorf("postgres: the target database already contains objects but no recorded Rolltop baseline (%s); point the server at an empty database",
-			describeBlockingObjects(blocking))
+	total := 1 + len(state.Outstanding)
+	for i, m := range state.Outstanding {
+		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: m.Version, Step: "apply migration", Done: 1 + i, Total: total})
+		if err := applyPostgresMigration(ctx, conn, m); err != nil {
+			return err
+		}
 	}
-	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "create schema", Done: 0, Total: 1})
-	if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
-		return err
-	}
-	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "complete", Done: 1, Total: 1})
+	reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "complete", Done: total, Total: total})
 	return nil
-}
-
-// verifyPostgresBaseline reports whether the database already carries this
-// binary's baseline. A database without a schema_migrations table, or with one
-// that has no baseline row, is reported as absent rather than as an error, since
-// that is the ordinary empty-database case. A row that disagrees is an error:
-// serving a schema this binary was not built for is how data gets lost.
-func verifyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string) (bool, error) {
-	stage, _, err := postgresStage(ctx, conn, checksum)
-	if err != nil {
-		return false, err
-	}
-	switch stage {
-	case PostgresStageBaseline:
-		return true, nil
-	case PostgresStageMismatch:
-		return false, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two yet")
-	default:
-		return false, nil
-	}
 }
 
 // postgresStage classifies a database without judging it, which is what the
@@ -430,7 +420,7 @@ func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string
 	// and pinPostgresSearchPath can never read and write different namespaces.
 	var table sql.NullString
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1)::text`,
-		pgschema.Schema+".schema_migrations").Scan(&table); err != nil {
+		schemaMigrationsQualified()).Scan(&table); err != nil {
 		return "", 0, postgresError("inspect the schema", err)
 	}
 	if table.Valid {
@@ -594,16 +584,34 @@ func describeBlockingObjects(names []string) string {
 // body full of them.
 func applyPostgresBaseline(ctx context.Context, conn *sql.Conn, checksum string) error {
 	script := pgschema.Baseline + "\n" + recordBaselineStatement(checksum)
+	if err := execPostgresScript(ctx, conn, script); err != nil {
+		return postgresError("apply the schema baseline", err)
+	}
+	return nil
+}
+
+// execPostgresScript runs a multi-statement script over the simple protocol,
+// which wraps it in one implicit transaction. Handed to pgx directly rather
+// than run through database/sql because the extended protocol accepts one
+// statement per call, and splitting scripts on semicolons would mean parsing
+// around dollar-quoted bodies full of them.
+func execPostgresScript(ctx context.Context, conn *sql.Conn, script string) error {
 	return conn.Raw(func(driverConn any) error {
 		c, ok := pgbind.Unwrap(driverConn).(*stdlib.Conn)
 		if !ok {
 			return fmt.Errorf("postgres: unexpected driver connection %T", driverConn)
 		}
 		if _, err := c.Conn().Exec(ctx, script); err != nil {
-			return postgresError("apply the schema baseline", err)
+			return err
 		}
 		return nil
 	})
+}
+
+// schemaMigrationsQualified names the bookkeeping table in the schema the
+// baseline writes into, for to_regclass probes.
+func schemaMigrationsQualified() string {
+	return pgschema.Schema + ".schema_migrations"
 }
 
 // recordBaselineStatement renders the schema_migrations row as literal SQL.
