@@ -5,13 +5,14 @@ Rolltop's relational storage from per-tenant SQLite files to a single
 PostgreSQL database, what has to change in the code, where the risks are, and
 what the switch deliberately does not cover.
 
-**Decision (2026-08-19): no data migration.** The switch is a fresh setup:
-the app starts against an empty PostgreSQL database and the existing local
-data is abandoned — mail re-mirrors from IMAP once accounts are re-created,
-everything else (users, settings, contacts, snoozes, plugin data) is set up
-again by hand. WP7's one-shot migration tool is dropped; §11 describes the
-fresh-setup cutover. Everything about *code and schema* in this plan is
-unaffected by that decision — only the sections that moved data are.
+**Decision (2026-08-19): no data migration.** The app starts over like a new
+installation: an empty PostgreSQL database, users created anew, mailboxes
+connected one by one, their data arriving step by step through the normal
+sync path. The existing local data is abandoned; there is no cutover-scale
+data transfer or resync to plan, schedule, or verify. WP7's one-shot
+migration tool is dropped; §11 describes the fresh start. Everything about
+*code and schema* in this plan is unaffected by that decision — only the
+sections that moved data are.
 
 ## 1. Why
 
@@ -358,27 +359,29 @@ every plugin, `.github/workflows/ci.yml:101`, so drift is caught). CGO stays
 required by `-buildmode=plugin` regardless of dropping `mattn/go-sqlite3`, so
 the Dockerfile build stages are unchanged in shape.
 
-### WP7 — Dropped: fresh setup instead of a data migration
+### WP7 — Dropped: fresh start instead of a data migration
 
 Decision (2026-08-19): the existing data is **not** migrated. The planned
 `rolltop migrate-to-postgres` subcommand — read-only SQLite opens, `CopyFrom`
 streaming in FK order, sequence `setval` resets, row-count/checksum
-verification, migration-side text sanitization — is not built. The cutover
+verification, migration-side text sanitization — is not built. The switch
 (§11) starts the app against the empty, hoster-created database instead;
 `OpenPostgres` applies the WP2 baseline on first start (WP1), and nothing
 else is needed.
 
-What the fresh setup abandons, explicitly: all locally stored state — user
+What the fresh start abandons, explicitly: all locally stored state — user
 accounts, mail-account/IMAP configuration, contacts, snoozes, tags,
-settings, plugin data. Mail itself re-mirrors from IMAP once accounts are
-re-created. Blobs and Bleve indexes on `/data` reference database ids that
-the fresh database does not share, so `/data` is cleared during cutover
-(§11) and both rebuild from the initial sync.
+settings, plugin data. Mail arrives again through the normal sync path as
+each mailbox is reconnected, step by step, at whatever pace the accounts are
+added. Blobs and Bleve indexes on `/data` reference database ids that the
+fresh database does not share, so `/data` is cleared during the switch
+(§11) and both build up from scratch.
 
-One consequence for §8.1: there are no legacy rows to sanitize, but the
-initial full sync re-parses the entire historical corpus through the write
-path on day one — so the parse-boundary sanitization must land *before*
-cutover, not after.
+One consequence for §8.1: there are no legacy rows to sanitize, but
+connecting a mailbox still mirrors its history from the IMAP server — years
+of hostile input reach the write path whenever an account is added. The
+parse-boundary sanitization must therefore be in place before the first
+mailbox is connected.
 
 **What survives from this work package — the baseline upgrade path, to be
 settled before the fresh production database is created.** `OpenPostgres`
@@ -460,14 +463,15 @@ all call `store.Open(tempfile)`.
 | 3 | WP6 plugins | 2 |
 | 4 | WP5 maintenance-surface removal + WP9 docs | 2 |
 | 5 | WP7 residue: settle the baseline upgrade path, rehearse create/drop against the provisioned target via the migration console | 2 |
-| 6 | Cutover as fresh setup (§11) | 3–5 |
+| 6 | Fresh start (§11) | 3–5 |
 | 7 | Bleve → Postgres FTS (§10, separate plan) | 6 |
 
 Phases 2–4 are parallelizable per package. Realistic effort: phase 1 ~2–4
 days, phase 2 the bulk (1–2 weeks of focused work given test conversion),
-phases 3–5 ~1 week combined, plus a cutover day — the cutover window is
-dominated by the initial IMAP resync (§11), not by any data transfer. The
-corruption machinery deletion (§6) lands as its own satisfying PR.
+phases 3–5 ~1 week combined. The switch itself is small — stop the old
+instance, start the new one against the empty database (§11); data builds
+up afterwards as mailboxes are reconnected. The corruption machinery
+deletion (§6) lands as its own satisfying PR.
 
 ## 6. Code that gets deleted
 
@@ -511,12 +515,12 @@ boundary (`backend/mailparse`): `strings.ToValidUTF8(s, "�")` + strip `\x00`
 for every header-derived string before it reaches the store. Today only
 scattered sites do this (`api_message.go:228`, `compose.go:415`); it must
 become systematic, or the syncer will hit insert errors on the first
-malformed message after cutover. The fresh setup (no data migration, WP7)
-removes the second half of this problem — there are no legacy rows to carry
-over — but raises the stakes on this half: the initial full sync pushes the
-*entire* historical corpus through the parse path at once, so every broken
-encoding that accumulated over the years arrives on day one. This must be in
-place before cutover.
+malformed message. The fresh start (no data migration, WP7) removes the
+second half of this problem — there are no legacy rows to carry over — but
+not this half: reconnecting a mailbox mirrors its history from the IMAP
+server, so every broken encoding that accumulated over the years still
+reaches the parse path, account by account. This must be in place before
+the first mailbox is connected.
 
 Columns that must stay byte-faithful (none known — hashes are hex, tokens are
 base64) would need `BYTEA`; audit during WP2 confirms.
@@ -526,13 +530,13 @@ base64) would need `BYTEA`; audit during WP2 confirms.
 A per-user SQLite file made every query ~µs and made N+1 loops invisible.
 Postgres adds a network round trip per statement. The web request paths are
 fine (few queries per request), but syncer inner loops (per-message location
-upserts, fingerprint checks) deserve measurement. Note the shape of the risk
-with the current 200k+ message corpus: incremental sync touches deltas only,
-so steady-state cost barely changes — the paths that walk the whole corpus
-are the initial full sync (which the fresh-setup cutover runs at full
-production scale on day one, §11) and the rebuild flows (mailbox generation
-rebuild, index hydration). The first sync after cutover doubles as the
-full-scale measurement run; watch its timing logs.
+upserts, fingerprint checks) deserve measurement. Note the shape of the
+risk: incremental sync touches deltas only, so steady-state cost barely
+changes — the paths that walk a whole mailbox are a mailbox's first sync
+after it is connected (§11) and the rebuild flows (mailbox generation
+rebuild, index hydration). There is no big-bang moment in the fresh start;
+the corpus builds up account by account. Watch the timing logs when the
+first large mailbox syncs, and batch where it hurts.
 Mitigations if needed: `= ANY($1)` batching (already introduced by WP3),
 multi-row `INSERT ... VALUES (...),(...)`, pgx batch API in hot spots.
 Do not pre-optimize; measure.
@@ -611,31 +615,32 @@ complete, since Bleve's mmap'd segments are the remaining risk on `/data`:
 - Requires `pg_trgm` (and possibly `unaccent`) — confirm the hoster allows
   extensions before committing to this phase.
 
-## 11. Cutover and rollback (fresh setup)
+## 11. The switch (fresh start) and rollback
 
-No data moves. The cutover replaces the old instance with a fresh one:
+No data moves, and no data arrives at switch time either — the app starts
+over like a new installation, and the mailboxes fill it step by step
+afterwards:
 
-1. Freeze: stop the container (instance lock released), take a final Ceph
-   snapshot of `/data`. The snapshot is the only remaining copy of
-   local-only state (snoozes, contacts edits, settings) — it is an archive
+1. Stop the old container (instance lock released), take a final Ceph
+   snapshot of `/data`. The snapshot is the only remaining copy of the old
+   world (accounts, snoozes, contacts edits, settings) — it is an archive
    and the rollback point, not an input to the new instance.
 2. Clear `/data`: SQLite files (system + `users/`), blob store, Bleve
-   indexes. The fresh database assigns new ids that share nothing with the
-   old files, so stale blobs and indexes must not survive into the new
-   instance. Keep the crash-log location.
+   indexes. Nothing in it means anything to the fresh database — blobs and
+   indexes reference ids it does not share. Keep the crash-log location.
 3. Verify the hoster-created, empty database with the preflight (§3.4) if
    not already done, then start the new image with `ROLLTOP_DATABASE_URL` —
    `OpenPostgres` applies the WP2 baseline to the empty database.
-4. Re-create users and mail accounts by hand; reconnect IMAP. The initial
-   sync re-mirrors the full corpus (200k+ messages) — expect it to take a
-   while, and use it as the full-scale measurement run: watch for UTF-8
-   sanitization hits (§8.1) and per-row latency hot spots (§8.2).
-5. Compare per-mailbox message counts against the IMAP server once the
-   first full cycle per account completes.
-6. Rollback path (until the old image is retired): stop the new stack,
-   restore the `/data` snapshot, start the previous image. Anything created
-   in the Postgres interim is lost; mail state re-mirrors from IMAP either
-   way. Keep the rollback window short.
+4. Set the app up as a new installation: create users, then connect
+   mailboxes one by one, at whatever pace is convenient. Each mailbox's
+   history mirrors from IMAP through the normal sync path when it is
+   connected — there is no switch-scale sync to schedule or verify. Watch
+   the first large mailbox's sync for sanitization hits (§8.1) and latency
+   hot spots (§8.2).
+5. Rollback path (until the old image is retired): stop the new stack,
+   restore the `/data` snapshot, start the previous image. Everything set
+   up in the Postgres interim is lost; mail itself re-mirrors from IMAP
+   either way.
 
 ## 12. Open questions
 
@@ -692,11 +697,12 @@ as designed: equality needs nothing, ordering needs the column collation.
 
 **Latency sets the batching budget.** 0.58 ms per round trip is good for a
 network hop, and web request paths (a handful of queries each) will not
-notice. The number to watch is the full-corpus walk: with 200k+ messages, a
+notice. The number to watch is the full-mailbox walk: at 200k messages, a
 per-row loop costs about two minutes of pure round trips. That is the
-concrete threshold for the initial full sync after cutover (§8.2, §11) —
-watch the initial sync, mailbox generation build and index hydration, and
-batch with `= ANY($1)` or multi-row inserts wherever they exceed it.
+concrete threshold for a large mailbox's first sync after it is connected
+(§8.2, §11) and for the rebuild flows (mailbox generation, index
+hydration) — watch their timing logs and batch with `= ANY($1)` or
+multi-row inserts wherever they exceed it.
 
 **`CREATEDB=false` constrains the cutover and WP8.** The application role
 cannot create databases, so:
