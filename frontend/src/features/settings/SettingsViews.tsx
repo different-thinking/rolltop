@@ -2350,7 +2350,10 @@ export function SettingsView({
             ? " Typo-tolerant matching is available."
             : " Typo-tolerant matching is unavailable, so searches have to spell words the way the email does."}
         </p>
-        {shortfall > 0 || foldersPending > 0 ? (
+        {/* Suppressed when a figure is missing: a count that failed reads as
+            zero, and a zero on the indexed side would announce the whole
+            mailbox as unsearchable. */}
+        {!storage.Error && (shortfall > 0 || foldersPending > 0) ? (
           <p className="settings-error">
             {shortfall > 0
               ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index and will not be found by a search. `
