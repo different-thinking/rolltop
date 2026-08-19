@@ -95,3 +95,33 @@ zwischendurch beendet wird, statt eines fehlgeschlagenen Requests. Ob das der
 Server, ein Proxy oder ein Timeout in der Kette ist, sagt die Konsole nicht.
 Zu prüfen wäre später, was zwischen Browser und App terminiert (die URL
 läuft über `eu-center.hostim.dev`) und ob ein Keepalive im Stream fehlt.
+
+## 2026-08-19 — Löschen vieler Mails, 504
+
+```
+api.ts:138
+ POST https://3703c955.eu-center.hostim.dev/api/messages/scope-trash 504 (Gateway Timeout)
+postJSON	@	api.ts:138
+scopeTrashMessages	@	api.ts:412
+deleteWholeScope	@	MailViews.tsx:1740
+anonymousFunction	@	MailViews.tsx:2733
+```
+
+Beobachtung des Users: tritt beim Löschen vieler Mails auf.
+
+Kontext: `deleteWholeScope` (`frontend/src/features/mail/MailViews.tsx:1740`)
+ruft `scopeTrashMessages` (`frontend/src/api.ts:412`) auf, das ist
+`POST /api/messages/scope-trash` → `apiScopeTrashMessages`
+(`backend/web/api_message_scope.go:145`). Der Handler bekommt keine IDs,
+sondern nur den aktuellen Filter und löst die Auswahl serverseitig auf:
+`scopeTrashPlan` ermittelt bis zu `scopeTrashMessageLimit = 20000` IDs
+(bei einem Such-Scope `scopeSearchMessageLimit = 5000`, in Bleve-Seiten zu je
+100) — und zwar synchron, bevor geantwortet wird. Verschoben wird danach im
+Hintergrund per Sync-Runs.
+
+Das 504 kommt von einem Gateway, nicht vom Handler selbst: Die Antwort kam
+der Gegenstelle zu spät. Passend dazu, dass die Planauflösung mit der Anzahl
+der Treffer wächst. Offen für später: ob das Auflösen des Plans ebenfalls in
+den Hintergrund gehört (Antwort sofort, Fortschritt über den Event-Stream),
+oder ob das Limit bzw. das Timeout der Gegenstelle anzupassen ist. Wie viele
+Mails im konkreten Fall betroffen waren, ist nicht festgehalten.
