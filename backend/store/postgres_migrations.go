@@ -33,7 +33,24 @@ type postgresMigration struct {
 // postgresMigrations is append-only. The list order is the apply order, and a
 // database's applied rows must always be a prefix of it: this binary refuses
 // rows it does not know (a newer binary wrote them) and gaps it cannot explain.
-var postgresMigrations = []postgresMigration{}
+var postgresMigrations = []postgresMigration{
+	{
+		// The full-text search rows for the Postgres search backend
+		// (docs/search-postgres-plan.md §3). Deliberately narrow: volatile
+		// flags and the mailbox stay in messages and are joined at query time,
+		// and deleting a message deletes its search row through the cascade.
+		Version: "0001-message-search",
+		Statements: []string{
+			`CREATE TABLE message_search (
+				message_id bigint PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+				user_id bigint NOT NULL,
+				tsv tsvector NOT NULL
+			)`,
+			`CREATE INDEX idx_message_search_tsv ON message_search USING GIN (tsv)`,
+			`CREATE INDEX idx_message_search_user ON message_search (user_id)`,
+		},
+	},
+}
 
 func postgresMigrationChecksum(m postgresMigration) string {
 	return schemaChecksum(postgresSchemaScope, m.Version, m.Statements...)

@@ -7,11 +7,13 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // IndexFootprint reports the live per-user indexes under a root.
@@ -62,7 +64,22 @@ func MeasureIndexFootprint(root string) (IndexFootprint, error) {
 // index, so an admin page can report a damaged index without the side effect of
 // repairing it: that belongs to the write path, or to an explicit rebuild.
 func (s *Service) PerUserIndexBytes(userID int64) (int64, bool) {
-	if s == nil || !s.perUser || userID <= 0 {
+	if s == nil || userID <= 0 {
+		return 0, false
+	}
+	if s.pg != nil {
+		// The stored vectors are the closest Postgres analogue to on-disk
+		// segment bytes. Bounded so an admin page render cannot hang on a
+		// busy pool.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		bytes, err := s.pg.MessageSearchBytes(ctx, userID)
+		if err != nil {
+			return 0, false
+		}
+		return bytes, true
+	}
+	if !s.perUser {
 		return 0, false
 	}
 	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)

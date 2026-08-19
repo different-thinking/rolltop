@@ -33,6 +33,10 @@ type Service struct {
 	index   bleve.Index
 	root    string
 	perUser bool
+	// pg routes every write and maintenance call into message_search rows
+	// instead of Bleve when set (OpenPostgresBackend). The Bleve fields below
+	// stay zero-valued and the writer/stall machinery is never entered.
+	pg      *store.Store
 	mu      sync.Mutex
 	// openGates serialise opening one tenant's index, so exactly one goroutine
 	// ever opens - or quarantines and replaces - a given index. Without it two
@@ -986,7 +990,13 @@ func (s *Service) openGateForUser(userID int64) *sync.Mutex {
 // a writer appending segments to files nobody will ever read again. Callers
 // remove the directory *after* this returns.
 func (s *Service) DropUser(ctx context.Context, userID int64) error {
-	if !s.perUser || userID == 0 {
+	if userID == 0 {
+		return nil
+	}
+	if s.pg != nil {
+		return s.pg.DropMessageSearchForUser(ctx, userID)
+	}
+	if !s.perUser {
 		return nil
 	}
 	// The writer gate serialises this against an in-flight batch commit for the
@@ -1030,6 +1040,9 @@ func (s *Service) IndexMessages(ctx context.Context, documents []MessageIndexDoc
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if s.pg != nil {
+		return s.pgIndexMessages(ctx, documents)
 	}
 	plans, err := planMessageIndexTenants(ctx, documents)
 	if err != nil {
@@ -1296,6 +1309,9 @@ func (s *Service) DeleteMessagesWithProgress(ctx context.Context, userID int64, 
 	if len(unique) == 0 {
 		return nil
 	}
+	if s.pg != nil {
+		return s.pgDeleteMessages(ctx, userID, unique, onBatch)
+	}
 	index, err := s.indexForUser(userID)
 	if err != nil {
 		return err
@@ -1378,6 +1394,9 @@ func (s *Service) CountMailboxMessages(ctx context.Context, userID, mailboxID in
 	if userID == 0 || mailboxID == 0 {
 		return 0, nil
 	}
+	if s.pg != nil {
+		return s.pg.CountMessageSearchForMailbox(ctx, userID, mailboxID)
+	}
 	index, err := s.indexForUser(userID)
 	if err != nil {
 		return 0, err
@@ -1397,6 +1416,9 @@ func (s *Service) MessageIDsIndexed(ctx context.Context, userID int64, messageID
 	out := map[int64]bool{}
 	if userID == 0 || len(messageIDs) == 0 {
 		return out, nil
+	}
+	if s.pg != nil {
+		return s.pg.MessageSearchPresence(ctx, userID, messageIDs)
 	}
 	docIDs := make([]string, 0, len(messageIDs))
 	seen := map[int64]bool{}
@@ -1439,6 +1461,9 @@ func (s *Service) MailboxMessageIDs(ctx context.Context, userID, mailboxID int64
 	if userID == 0 || mailboxID == 0 {
 		return out, nil
 	}
+	if s.pg != nil {
+		return s.pg.MessageSearchMailboxIDs(ctx, userID, mailboxID)
+	}
 	index, err := s.indexForUser(userID)
 	if err != nil {
 		return nil, err
@@ -1480,6 +1505,9 @@ func (s *Service) PurgeMailbox(ctx context.Context, userID, mailboxID int64) (in
 func (s *Service) PurgeMailboxWithProgress(ctx context.Context, userID, mailboxID int64, onBatch func(int) error) (int, error) {
 	if userID == 0 || mailboxID == 0 {
 		return 0, nil
+	}
+	if s.pg != nil {
+		return s.pgPurgeMailbox(ctx, userID, mailboxID, onBatch)
 	}
 	index, err := s.indexForUser(userID)
 	if err != nil {
@@ -1544,6 +1572,9 @@ func (s *Service) CountUserMessages(ctx context.Context, userID int64) (int, err
 	}
 	if userID == 0 {
 		return 0, nil
+	}
+	if s.pg != nil {
+		return s.pg.CountMessageSearchForUser(ctx, userID)
 	}
 	q := bleve.NewTermQuery(strconv.FormatInt(userID, 10))
 	q.SetField("user_id")
