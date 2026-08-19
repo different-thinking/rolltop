@@ -73,6 +73,12 @@ type volumeStatus struct {
 type databaseOverview struct {
 	Database databaseStatus `json:"database"`
 	Volume   volumeStatus   `json:"volume"`
+	// SearchBackend names where the full-text index lives ("bleve" or
+	// "postgres"). The volume figures beside it only describe an index on the
+	// Bleve backend; on the other one the index is rows in the database above,
+	// and a page that does not say so reports an index of zero bytes as if
+	// search had stopped working.
+	SearchBackend string `json:"search_backend,omitempty"`
 }
 
 // databaseOverview assembles the page. A database that cannot be reached is
@@ -84,7 +90,8 @@ func (s *Server) databaseOverview(ctx context.Context) (databaseOverview, error)
 			Target:       s.databaseTarget,
 			PoolMaxConns: s.databaseMaxConns,
 		},
-		Volume: volumeStatus{DataDir: s.dataDir},
+		Volume:        volumeStatus{DataDir: s.dataDir},
+		SearchBackend: s.searchBackendName(),
 	}
 	// Free and total come from one statfs, which is cheap enough to do per
 	// request. The per-directory split does not: it walks every stored file.

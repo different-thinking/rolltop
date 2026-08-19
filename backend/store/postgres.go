@@ -408,50 +408,9 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 	return nil
 }
 
-// postgresStage classifies a database without judging it, which is what the
-// admin migration console needs: it has to describe a mismatched or foreign
-// database rather than refuse to look at one.
-//
-// The distinction between "no baseline row" and "no baseline row but objects
-// present" is the load-bearing one. Both are "not ours to use"; only the first
-// can be created into.
-func postgresStage(ctx context.Context, conn *sql.Conn, checksum string) (string, int64, error) {
-	// The qualifier is derived rather than written out, so this classification
-	// and pinPostgresSearchPath can never read and write different namespaces.
-	var table sql.NullString
-	if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1)::text`,
-		schemaMigrationsQualified()).Scan(&table); err != nil {
-		return "", 0, postgresError("inspect the schema", err)
-	}
-	if table.Valid {
-		var recorded string
-		var appliedAt int64
-		err := conn.QueryRowContext(ctx,
-			`SELECT checksum, applied_at FROM schema_migrations WHERE scope = $1 AND version = $2`,
-			postgresSchemaScope, postgresSchemaVersion).Scan(&recorded, &appliedAt)
-		if err == nil {
-			if recorded == checksum {
-				return PostgresStageBaseline, appliedAt, nil
-			}
-			return PostgresStageMismatch, appliedAt, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", 0, postgresError("read the schema version", err)
-		}
-	}
-	blocking, err := postgresBlockingObjects(ctx, conn)
-	if err != nil {
-		return "", 0, err
-	}
-	if len(blocking) == 0 {
-		return PostgresStageEmpty, 0, nil
-	}
-	return PostgresStageForeign, 0, nil
-}
-
-// maxListedBlockingObjects bounds how many object names an error or a console
-// summary names. Enough to recognise what is in the way, not so many that the
-// message becomes a schema dump.
+// maxListedBlockingObjects bounds how many object names the refusal names.
+// Enough to recognise what is in the way, not so many that the message becomes
+// a schema dump.
 const maxListedBlockingObjects = 10
 
 // postgresBlockingObjects lists the objects that stop this database from being

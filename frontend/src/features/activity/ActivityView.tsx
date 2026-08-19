@@ -103,6 +103,7 @@ export function ActivityView({
   const workers = activity?.workers || [];
   const services = activity?.services || [];
   const categoriesPending = activity?.categories_pending || 0;
+  const searchIndexPending = activity?.search_index_pending || 0;
   // One folder sync is a run row plus its runner-side worker rows, so summing
   // rows would count the same operation three times. The pill counts the runs
   // and only the workers that are not the runner's view of one.
@@ -113,7 +114,12 @@ export function ActivityView({
   // idle is only knowable after the first answer: everything defaults to empty
   // before it, and "Nothing is running" over a busy server is the one flash
   // this view must never show.
-  const idle = activity !== null && activeRuns.length === 0 && workers.length === 0 && categoriesPending === 0;
+  const idle =
+    activity !== null &&
+    activeRuns.length === 0 &&
+    workers.length === 0 &&
+    categoriesPending === 0 &&
+    searchIndexPending === 0;
 
   return (
     <>
@@ -176,7 +182,7 @@ export function ActivityView({
         </section>
       ) : null}
 
-      {workers.length > 0 || categoriesPending > 0 ? (
+      {workers.length > 0 || categoriesPending > 0 || searchIndexPending > 0 ? (
         <section className="panel activity-section">
           <h2>Background workers</h2>
           {categoriesPending > 0 ? (
@@ -185,6 +191,18 @@ export function ActivityView({
               <span>
                 {categoriesPending.toLocaleString()} {categoriesPending === 1 ? "message is" : "messages are"} still
                 waiting to be sorted into categories.
+              </span>
+            </div>
+          ) : null}
+          {/* Not work in flight, which is why it is a note rather than a row:
+              these folders are indexed by the next sync that reaches them, and
+              until then search answers without the mail they hold. */}
+          {searchIndexPending > 0 ? (
+            <div className="activity-note">
+              <Icon name="search" />
+              <span>
+                {searchIndexPending.toLocaleString()} {searchIndexPending === 1 ? "folder is" : "folders are"} waiting
+                to be added to the search index. Syncing fills them in; Settings &rsaquo; Storage rebuilds now.
               </span>
             </div>
           ) : null}

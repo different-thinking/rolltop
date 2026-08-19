@@ -174,6 +174,33 @@ from blobs exactly as after a Bleve quarantine. The Bleve directories stay on
 `/data`, untouched, as the rollback: flipping the flag back serves the old
 index, stale for the interim, and the existing repair closes the gap.
 
+## 6a. What the pages say about it
+
+The two backends keep the index in places a page cannot compare, so nothing
+that reports on search may measure the data volume: on this backend the volume
+holds no index, and a walk of it reports zero bytes and no missing folders for
+a search that is working perfectly. Everything asks the service instead —
+`Backend()`, `PerUserIndexBytes` (which sums `pg_column_size` over the tenant's
+rows behind a one-minute cache) and `FuzzyAvailable`.
+
+- **`/settings/account/general/storage`** names the backend, the measured size,
+  the coverage (`IndexMessageCount` of `FullTextSearchMessageCount`), whether
+  typo tolerance is answering, how many folders are waiting to be indexed, and
+  offers the reader a rebuild of their own index —
+  `POST /api/storage/search-index/rebuild`, which is `startSearchRebuildForUser`
+  for the signed-in user and takes no user id. The Bleve segment breakdown
+  renders only on the Bleve backend, which is the only one with files.
+- **`/activity`** shows index upkeep that runs beside the request path as
+  non-cancellable worker rows (`Service.StartMaintenance`; the trigram index
+  build is registered whole-server, the coverage check per tenant), plus a note
+  counting the folders still waiting. Without it, a trigram build is minutes of
+  search silently answering without typo tolerance.
+- **`/admin/database`** stays the whole-server view — connection, pool, free
+  space, log tail, and a rebuild for any tenant — and names the backend so the
+  volume's `index_bytes` beside it cannot be read as the search index when it
+  is not. Its PostgreSQL migration console was removed with this work: it
+  rehearsed a schema against an empty target, which a serving database is not.
+
 ## 7. Phases
 
 | phase | contents | PR-sized? |

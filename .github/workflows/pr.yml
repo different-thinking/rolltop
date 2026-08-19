@@ -94,12 +94,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Non-.go paths the Go tests read, and which therefore must run
-          # them: scripts/ carries the SQL twin of backend/pgpreflight that
-          # TestTwinsAgree compares against; backend/store/pgschema/ holds the
-          # generated PostgreSQL baseline whose only guards are Go tests; and
-          # plugins/*/migrations/ feeds the schema that baseline is derived
-          # from.
-          emit go '\.go$|^go\.mod$|^go\.sum$|^scripts/|^backend/store/pgschema/|^plugins/[^/]+/migrations/'
+          # them: backend/store/pgschema/ holds the PostgreSQL baseline whose
+          # only guards are Go tests, and plugins/*/migrations/ feeds the schema
+          # that baseline was derived from. scripts/ was here for the SQL twin
+          # of backend/pgpreflight; that package is gone, and no Go test reads
+          # scripts/ any more.
+          emit go '\.go$|^go\.mod$|^go\.sum$|^backend/store/pgschema/|^plugins/[^/]+/migrations/'
           emit plugin_backends '^plugins/[^/]+/backend/|^go\.mod$|^go\.sum$'
           emit spam_model '^plugins/experimental_spam_filter/(model|training)/'
           emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^plugins/[^/]+/(frontend|themes)/'

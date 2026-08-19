@@ -505,8 +505,47 @@ export type FolderProgress = {
   is_running: boolean;
 };
 
-/** StorageStats is a flexible storage usage payload keyed by backend stat names. */
-export type StorageStats = Record<string, unknown>;
+/** StorageIndexBreakdown describes the files a Bleve index occupies. It is
+ * absent on any other backend, which keeps its index in the database and has no
+ * files to break down. */
+export type StorageIndexBreakdown = {
+  FileCount?: number;
+  ZapCount?: number;
+  ZapBytes?: number;
+  LargestZapPath?: string;
+  LargestZapBytes?: number;
+  RootBytes?: number;
+  OtherBytes?: number;
+};
+
+/** StorageStats is one user's storage usage.
+ *
+ * `SearchBackend` names where the full-text index lives ("bleve" or
+ * "postgres"). It is what lets the page report a size of zero as "nothing
+ * indexed yet" rather than as a measurement of the wrong place: only the Bleve
+ * backend has a directory on the volume to walk.
+ *
+ * `IndexMessageCount` of `FullTextSearchMessageCount` is the coverage — how
+ * many of the messages in search-visible folders the index actually holds — and
+ * `FoldersNeedingRebuild` is how many folders are waiting for the rebuild that
+ * would close a gap between them. */
+export type StorageStats = {
+  MessageHeaderCount?: number;
+  SearchBackend?: string;
+  IndexPath?: string;
+  IndexBytes?: number;
+  IndexPresent?: boolean;
+  IndexMessageCount?: number;
+  FullTextSearchMessageCount?: number;
+  FoldersNeedingRebuild?: number;
+  FuzzyAvailable?: boolean;
+  IndexBreakdown?: StorageIndexBreakdown;
+  BlobPath?: string;
+  BlobBytes?: number;
+  MessageBodyCount?: number;
+  TotalBytes?: number;
+  Error?: string;
+};
 
 /**
  * MailCategorySummary is one category sidebar entry. The name is the server's
@@ -557,6 +596,9 @@ export type Activity = {
   services: ActivityService[];
   /** Messages still waiting to be filed into a category. */
   categories_pending: number;
+  /** Search-visible folders whose index coverage nothing has verified. Not work
+   * in flight — a count of what a rebuild still has to close. */
+  search_index_pending?: number;
 };
 
 /** Bootstrap is the first API payload that establishes auth, chrome, CSRF, and plugin state. */
@@ -805,60 +847,17 @@ export type SearchIndexReport = {
   busy_accounts?: number;
 };
 
-/** DatabaseOverview is the admin database page payload. */
+/** DatabaseOverview is the admin database page payload.
+ *
+ * `search_backend` names where the full-text index lives ("bleve" or
+ * "postgres"). The volume's `index_bytes` only describes an index on the Bleve
+ * backend; on the other one the index is rows in the database. */
 export type DatabaseOverview = {
   database: DatabaseStatus;
   volume: VolumeStatus;
+  search_backend?: string;
 };
 
-/** PostgresPreflightCheck is one verified capability of a candidate
- * PostgreSQL migration target. Status "info" reports a fact that needs a
- * human judgement rather than having a hard pass condition. */
-export type PostgresPreflightCheck = {
-  id: string;
-  title: string;
-  status: "pass" | "fail" | "info";
-  detail: string;
-};
-
-/** PostgresPreflightReport is the outcome of one migration preflight run. */
-export type PostgresPreflightReport = {
-  ok: boolean;
-  checks: PostgresPreflightCheck[];
-  duration_ms: number;
-};
-
-/** PostgresSchemaAction is one step of the migration console. Only "inspect"
- * is read-only. */
-export type PostgresSchemaAction = "inspect" | "create" | "drop";
-
-/** PostgresState is what a candidate PostgreSQL database currently holds.
- *
- * `stage` drives the whole card: "empty" can be created into, "baseline"
- * carries the schema this build ships, "mismatch" carries one from another
- * build, and "foreign" holds objects that are not Rolltop's and is never
- * touched. `can_create` and `can_drop` are decided by the server rather than
- * derived here, so the buttons cannot disagree with what it will allow. */
-export type PostgresState = {
-  stage: "empty" | "baseline" | "mismatch" | "foreign";
-  server_version: string;
-  database: string;
-  user: string;
-  tables: number;
-  indexes: number;
-  foreign_keys: number;
-  triggers: number;
-  rows: number;
-  applied_at: number;
-  /** blocking names the objects that stop the schema from being created here.
-   * Present only when the stage is "foreign": the console cannot tell an
-   * operator's own tables from an older build's leftovers, so it drops
-   * neither and names what is in the way instead. */
-  blocking?: string[];
-  can_create: boolean;
-  can_drop: boolean;
-  summary: string;
-};
 
 /** ServerLogLine is one captured line of the process log tail. */
 export type ServerLogLine = {

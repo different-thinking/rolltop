@@ -52,6 +52,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiEvents(w, r)
 	case path == "storage":
 		s.apiStorage(w, r)
+	case path == "storage/search-index/rebuild":
+		s.apiStorageSearchRebuild(w, r)
 	case path == "push/vapid-public-key":
 		s.apiPushVAPIDPublicKey(w, r)
 	case path == "push/subscription":
@@ -116,10 +118,6 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiAdminPlugins(w, r)
 	case strings.HasPrefix(path, "admin/plugins/"):
 		s.apiAdminPlugin(w, r, strings.TrimPrefix(path, "admin/plugins/"))
-	case path == "admin/postgres-preflight":
-		s.apiAdminPostgresPreflight(w, r)
-	case path == "admin/postgres-schema":
-		s.apiAdminPostgresSchema(w, r)
 	case path == "admin/search-index":
 		s.apiAdminSearchIndex(w, r)
 	case path == "admin/database":

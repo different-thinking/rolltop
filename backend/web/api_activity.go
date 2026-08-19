@@ -75,11 +75,21 @@ func (s *Server) apiActivity(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	// Folders whose coverage nothing has verified are not work in flight, so
+	// they are a count rather than a row: after a backfill was scheduled or an
+	// index was quarantined, search is answering from an index that is missing
+	// mail, and nothing else on this page would say so.
+	searchPending, err := s.store.CountMailboxesNeedingSearchIndexRepair(r.Context(), cu.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	writeJSON(w, map[string]any{
-		"sync_runs":          apiSyncRuns(runs),
-		"workers":            s.activityWorkers(cu.User.ID),
-		"services":           s.activityServices(r, cu.User.ID),
-		"categories_pending": categoriesPending,
+		"sync_runs":            apiSyncRuns(runs),
+		"workers":              s.activityWorkers(cu.User.ID),
+		"services":             s.activityServices(r, cu.User.ID),
+		"categories_pending":   categoriesPending,
+		"search_index_pending": searchPending,
 	})
 }
 
@@ -87,11 +97,25 @@ func (s *Server) apiActivity(w http.ResponseWriter, r *http.Request) {
 // list. Without a runner there is no background work to report, which is a real
 // state on an install that only serves a mirror.
 func (s *Server) activityWorkers(userID int64) []apiActivityWorker {
+	out := []apiActivityWorker{}
+	// Index upkeep first: it is the work that started before any of the
+	// runner's, and on a fresh start it is often the only thing running.
+	for _, task := range s.search.MaintenanceTasks(userID) {
+		out = append(out, apiActivityWorker{
+			Key:       task.Key,
+			Kind:      task.Kind,
+			Label:     task.Label,
+			StartedAt: timeString(task.StartedAt),
+			// Not cancellable on purpose. These are single statements against
+			// the database — an extension, an index build, two counts — with no
+			// partial state to leave behind and nothing a cancel would free.
+			Cancellable: false,
+		})
+	}
 	if s.syncRunner == nil {
-		return []apiActivityWorker{}
+		return out
 	}
 	activities := s.syncRunner.WorkerActivities(userID)
-	out := make([]apiActivityWorker, 0, len(activities))
 	for _, activity := range activities {
 		out = append(out, apiActivityWorker{
 			Key:         activity.Key,

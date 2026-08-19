@@ -24,9 +24,6 @@ import type {
   MessageSnooze,
   MessageOriginalSource,
   PluginSetting,
-  PostgresPreflightReport,
-  PostgresSchemaAction,
-  PostgresState,
   SMTPAccount,
   ScopeMoveResponse,
   SearchExplanation,
@@ -574,6 +571,12 @@ export const api = {
     }>("/api/account"),
   folderProgress: () => getJSON<{ folders: FolderProgress[] }>("/api/account/folders/progress"),
   storage: () => getJSON<StorageStats>("/api/storage"),
+  // Rebuilds the signed-in user's own search index. It takes no user id: this
+  // is the reader acting on their own index, and acting on somebody else's is
+  // the admin route.
+  rebuildOwnSearchIndex: (csrf: string) =>
+    postJSON<{ ok: boolean; started_runs: number; busy_accounts: number; storage: StorageStats }>(
+      "/api/storage/search-index/rebuild", csrf),
   plugins: () => getJSON<{ enabled: string[] }>("/api/plugins"),
   saveProfile: (csrf: string, profile: {
     backup_email: string;
@@ -640,10 +643,6 @@ export const api = {
     postJSON<{ ok: boolean }>(`/api/admin/users/${id}/password`, csrf, { password }),
   deleteUser: (csrf: string, id: number) =>
     deleteJSON<{ ok: boolean }>(`/api/admin/users/${id}`, csrf),
-  postgresPreflight: (csrf: string, dsn: string) =>
-    postJSON<PostgresPreflightReport>("/api/admin/postgres-preflight", csrf, { dsn }),
-  postgresSchema: (csrf: string, dsn: string, action: PostgresSchemaAction) =>
-    postJSON<PostgresState>("/api/admin/postgres-schema", csrf, { dsn, action }),
   database: () => getJSON<DatabaseOverview>("/api/admin/database"),
   searchIndex: () => getJSON<SearchIndexReport>("/api/admin/search-index"),
   rebuildSearchIndex: (csrf: string, userID: number) =>
