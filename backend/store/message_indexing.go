@@ -103,6 +103,27 @@ func markSearchMessagesPendingIndex(ctx context.Context, db *sql.DB, userID int6
 	return result.RowsAffected()
 }
 
+// CountMessagesNeedingSearchIndex reports how many of a tenant's messages are
+// still waiting to be indexed, using the same scope the indexing worker walks.
+// The admin page reports it so a rebuild in progress is visible as a number
+// that falls, rather than as a page that looks identical while it works.
+func (s *Store) CountMessagesNeedingSearchIndex(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var pending int64
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages
+		WHERE user_id = ? AND attachment_indexed_at = 0
+			AND mailbox_id NOT IN (
+				SELECT id FROM mailboxes WHERE user_id = ? AND search_index_purged = 1
+			)`, userID, userID).Scan(&pending)
+	return pending, err
+}
+
 // ListMessagesNeedingAttachmentIndex returns messages whose raw bodies still need attachment text extraction.
 func (s *Store) ListMessagesNeedingAttachmentIndex(ctx context.Context, userID int64, limit int) ([]MessageRecord, error) {
 	messages, _, err := s.ListMessagesNeedingAttachmentIndexAfter(ctx, userID, 0, limit)

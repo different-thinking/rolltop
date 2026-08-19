@@ -8,6 +8,7 @@ require (
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pemistahl/lingua-go v1.4.0
+	go.etcd.io/bbolt v1.4.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/text v0.37.0
 )
@@ -40,7 +41,6 @@ require (
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
-	go.etcd.io/bbolt v1.4.0 // indirect
 	golang.org/x/exp v0.0.0-20221106115401-f9659909a136 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect

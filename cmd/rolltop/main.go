@@ -633,6 +633,10 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	}
 
 	startup.update("Search", "opening indexes", 0, 1)
+	// Queueing a tenant's rebuild is one UPDATE over that tenant's messages. It
+	// runs while a sync waits for its index, so it is bounded rather than left
+	// to inherit whatever deadline the caller happened to have.
+	const corruptIndexReindexTimeout = 30 * time.Second
 	searchRoot := cfg.SearchRoot()
 	searchSvc, err := search.OpenPerUser(searchRoot)
 	if err != nil {
@@ -642,6 +646,20 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	// the first line of. Put it on the volume, beside crash.log, where a shell
 	// in the container can still read it after the restart.
 	searchSvc.SetStallDiagnosticsDir(cfg.DataDir)
+	// An index that cannot be opened is moved aside and rebuilt rather than
+	// failing every message that would have been indexed into it. The rows are
+	// queued here, before the quarantine, so a crash in between leaves work to
+	// redo instead of an empty index nothing will refill.
+	searchSvc.SetCorruptIndexHandler(func(userID int64) error {
+		markCtx, cancel := context.WithTimeout(context.Background(), corruptIndexReindexTimeout)
+		defer cancel()
+		marked, err := db.MarkSearchVisibleMessagesPendingIndex(markCtx, userID)
+		if err != nil {
+			return err
+		}
+		log.Printf("search index unreadable, queued rebuild user_id=%d pending_messages=%d", userID, marked)
+		return nil
+	})
 	defer func() {
 		if cleanup {
 			_ = searchSvc.Close()

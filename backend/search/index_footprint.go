@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -54,6 +55,22 @@ func MeasureIndexFootprint(root string) (IndexFootprint, error) {
 		footprint.Tenants++
 	}
 	return footprint, nil
+}
+
+// PerUserIndexBytes reports the disk one tenant's live index occupies and
+// whether it exists at all. It reads the directory rather than opening the
+// index, so an admin page can report a damaged index without the side effect of
+// repairing it: that belongs to the write path, or to an explicit rebuild.
+func (s *Service) PerUserIndexBytes(userID int64) (int64, bool) {
+	if s == nil || !s.perUser || userID <= 0 {
+		return 0, false
+	}
+	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return 0, false
+	}
+	return directoryBytes(path), true
 }
 
 // VerifyPerUserIndexOpens reports whether a tenant's live index is present and

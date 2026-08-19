@@ -777,6 +777,32 @@ export type VolumeStatus = {
   measured_at_unix: number;
 };
 
+/** SearchIndexTenant is one tenant's search index on the data volume.
+ *
+ * `present` is false for a user who has never been indexed and for one whose
+ * index was just rebuilt — the next indexed message creates a new one.
+ * `pending_messages` is the work still queued, so a rebuild in progress shows
+ * as a number that falls rather than as a page that looks unchanged. */
+export type SearchIndexTenant = {
+  user_id: number;
+  email: string;
+  name?: string;
+  present: boolean;
+  bytes: number;
+  pending_messages: number;
+  /** Why this tenant's numbers are missing, if they are. One unreadable
+   * tenant must not blank the card for the others. */
+  error?: string;
+};
+
+/** SearchIndexReport is the search index card payload. After a rebuild it also
+ * names the tenant that was rebuilt and how much was queued for reindexing. */
+export type SearchIndexReport = {
+  tenants: SearchIndexTenant[];
+  rebuilt?: number;
+  queued_messages?: number;
+};
+
 /** DatabaseOverview is the admin database page payload. */
 export type DatabaseOverview = {
   database: DatabaseStatus;

@@ -30,23 +30,27 @@ import (
 
 // Service owns Bleve indexes and query construction for either combined-test or per-user production mode.
 type Service struct {
-	index              bleve.Index
-	root               string
-	perUser            bool
-	mu                 sync.Mutex
-	indexes            map[int64]bleve.Index
-	writers            map[int64]*writerLock
-	writeCoordinator   *bleveWriteCoordinator
-	closing            bool
-	writes             sync.WaitGroup
-	closeDone          chan struct{}
-	closeErr           error
-	closeWriterTimeout time.Duration
-	writerWaitLogAfter time.Duration
-	activeStallAfter   time.Duration
-	activeStallHandler func(int64)
-	activeStallOnce    sync.Once
-	bleveErrorLog      func(string, ...any)
+	index   bleve.Index
+	root    string
+	perUser bool
+	mu      sync.Mutex
+	// repairMu serialises quarantining a tenant's index against every open of
+	// one, so a damaged directory cannot be re-cached while it is being moved.
+	repairMu            sync.Mutex
+	corruptIndexHandler CorruptIndexHandler
+	indexes             map[int64]bleve.Index
+	writers             map[int64]*writerLock
+	writeCoordinator    *bleveWriteCoordinator
+	closing             bool
+	writes              sync.WaitGroup
+	closeDone           chan struct{}
+	closeErr            error
+	closeWriterTimeout  time.Duration
+	writerWaitLogAfter  time.Duration
+	activeStallAfter    time.Duration
+	activeStallHandler  func(int64)
+	activeStallOnce     sync.Once
+	bleveErrorLog       func(string, ...any)
 	// stallDiagnosticsDir is the data directory a writer stall reports into, so
 	// its stack outlives the process log. Empty leaves reports in the log only.
 	stallDiagnosticsDir string
@@ -174,6 +178,14 @@ type bleveErrorContext struct {
 }
 
 var errSearchServiceClosing = errors.New("search service is closing")
+
+// IsServiceClosingError reports whether err is the shutdown sentinel. Callers
+// that otherwise treat an index failure as "index it later" need to tell that
+// apart from "the process is going away", where later never comes and the work
+// belongs to the next start instead.
+func IsServiceClosingError(err error) bool {
+	return errors.Is(err, errSearchServiceClosing)
+}
 
 const (
 	searchCloseWriterTimeout = 2 * time.Second
@@ -883,7 +895,14 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	if !s.perUser {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.closing || s.index == nil {
+		// The same condition as the per-user branch below, reported with the
+		// same sentinel: callers that treat an index failure as "index it
+		// later" have to be able to tell a closing service apart from a broken
+		// one, and two spellings of "closing" is how one of them gets missed.
+		if s.closing {
+			return nil, errSearchServiceClosing
+		}
+		if s.index == nil {
 			return nil, fmt.Errorf("search index is not open")
 		}
 		return s.index, nil
@@ -902,10 +921,21 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	}
 	s.mu.Unlock()
 
-	index, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName))
+	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)
+	index, err := openIndex(path)
 	if err != nil {
 		s.reportBleveError(bleveErrorContext{Operation: "open-index", UserID: userID}, err)
-		return nil, err
+		if !IsIndexCorruptionError(err) {
+			return nil, err
+		}
+		// The index on disk is unusable and will stay that way. Replacing it
+		// here keeps the failure inside the search feature: the alternative is
+		// this error surfacing on every stored message until someone runs a
+		// command, with the mailbox not syncing in the meantime.
+		index, err = s.repairUnopenableIndex(userID, path, err)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	if s.closing {

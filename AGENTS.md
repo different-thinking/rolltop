@@ -159,6 +159,23 @@ site and in review.
   as the original would take the message out of view entirely. Showing a message
   twice is recoverable; hiding the only copy is not.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- The search index is derived state and must never hold the mail hostage. A
+  Bleve write that fails drops its batch and leaves `attachment_indexed_at`
+  unset, so the indexing worker retries; it does not abort the mailbox, because
+  the index can be rebuilt from stored mail and a missed IMAP sync window
+  cannot. Only a cancelled context and a closing service still stop the sync,
+  and both report it with one sentinel (`search.IsServiceClosingError`) rather
+  than a second spelling per code path. An index that cannot be opened at all is
+  quarantined and rebuilt on the spot - the rows are queued for reindexing
+  *before* the directory moves, or a crash in between leaves an empty index with
+  every row still flagged as indexed and nothing left to refill it. Only errors
+  naming a damaged file qualify (`search.IsIndexCorruptionError`); a held lock or
+  a full disk is a passing condition whose index is fine, and rebuilding on one
+  of those answers a five-second problem with hours of reindexing.
+- Repairing a search index must stay reachable from the admin database page.
+  Rolltop is deployed as a container, so an operator with a broken index and no
+  shell cannot reach `rolltop reset-search`; the SQLite-era verify/backup/repair
+  buttons were rightly removed, that one was not theirs to take with them.
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens Bleve or the blob store. The database no longer needs it
   — PostgreSQL handles concurrent clients — but Bleve does, and that is now the
