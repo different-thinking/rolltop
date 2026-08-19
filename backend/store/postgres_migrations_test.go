@@ -83,7 +83,7 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("unknown applied version is refused as newer", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion: baseline,
+			postgresSchemaVersion:  baseline,
 			"0009-from-the-future": "whatever",
 		}
 		_, err := classifyPostgresSchemaState(applied, baseline, list)

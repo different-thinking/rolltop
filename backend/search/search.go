@@ -36,8 +36,8 @@ type Service struct {
 	// pg routes every write and maintenance call into message_search rows
 	// instead of Bleve when set (OpenPostgresBackend). The Bleve fields below
 	// stay zero-valued and the writer/stall machinery is never entered.
-	pg      *store.Store
-	mu      sync.Mutex
+	pg *store.Store
+	mu sync.Mutex
 	// openGates serialise opening one tenant's index, so exactly one goroutine
 	// ever opens - or quarantines and replaces - a given index. Without it two
 	// callers racing on a cache miss both open the directory, and only one of

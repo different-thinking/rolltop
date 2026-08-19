@@ -103,12 +103,12 @@ type MessageSearchQuery struct {
 // weight classes of the vector the text query matched — subject (A),
 // addresses (B), body (C), attachments (D) — for highlighting and explain.
 type MessageSearchHit struct {
-	MessageID    int64
-	Score        float64
-	MatchedA     bool
-	MatchedB     bool
-	MatchedC     bool
-	MatchedD     bool
+	MessageID int64
+	Score     float64
+	MatchedA  bool
+	MatchedB  bool
+	MatchedC  bool
+	MatchedD  bool
 }
 
 // SearchMessageIDs runs one ranked search. Restricted throughout to the
