@@ -120,7 +120,12 @@ func (s *Service) SimilarMessages(ctx context.Context, db *store.Store, userID i
 	if limit <= 0 || limit > plugins.MaxSimilarityResults {
 		limit = plugins.MaxSimilarityResults
 	}
-	hits, err := s.searchSimilarMessageIDs(ctx, userID, ids, terms, limit)
+	var hits []similarityHit
+	if s.pg != nil {
+		hits, err = s.pgSearchSimilarMessageIDs(ctx, userID, ids, terms, limit)
+	} else {
+		hits, err = s.searchSimilarMessageIDs(ctx, userID, ids, terms, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

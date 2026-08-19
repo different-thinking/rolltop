@@ -1617,6 +1617,9 @@ func (s *Service) SearchWithOptions(ctx context.Context, userID int64, queryText
 // SearchHitsWithOptions asks Bleve for term locations so the UI can show what
 // matched in snippets, attachments, and the message-detail iframe.
 func (s *Service) SearchHitsWithOptions(ctx context.Context, userID int64, queryText string, limit, offset int, opts SearchOptions) ([]Hit, error) {
+	if s.pg != nil {
+		return s.pgSearchHits(ctx, userID, queryText, limit, offset, opts)
+	}
 	res, err := s.search(ctx, userID, queryText, limit, offset, opts, true)
 	if err != nil {
 		return nil, err
@@ -1683,6 +1686,11 @@ func (s *Service) explainMessageIDsWithOptions(ctx context.Context, userID int64
 	queryText = strings.TrimSpace(queryText)
 	if userID == 0 || len(messageIDs) == 0 || queryText == "" {
 		return ExplanationResult{}, false, nil
+	}
+	if s.pg != nil {
+		// The Postgres backend reports weight-class matches instead of a
+		// Bleve scorer tree; the explain flag adds nothing it could include.
+		return s.pgExplainMessageIDs(ctx, userID, messageIDs, queryText, opts)
 	}
 	docIDs := make([]string, 0, len(messageIDs))
 	seenDocIDs := map[int64]bool{}
