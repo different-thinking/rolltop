@@ -7,11 +7,13 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // IndexFootprint reports the live per-user indexes under a root.
@@ -62,7 +64,13 @@ func MeasureIndexFootprint(root string) (IndexFootprint, error) {
 // index, so an admin page can report a damaged index without the side effect of
 // repairing it: that belongs to the write path, or to an explicit rebuild.
 func (s *Service) PerUserIndexBytes(userID int64) (int64, bool) {
-	if s == nil || !s.perUser || userID <= 0 {
+	if s == nil || userID <= 0 {
+		return 0, false
+	}
+	if s.pg != nil {
+		return s.postgresIndexBytes(userID)
+	}
+	if !s.perUser {
 		return 0, false
 	}
 	path := filepath.Join(s.root, strconv.FormatInt(userID, 10), LiveIndexDirName)
@@ -71,6 +79,51 @@ func (s *Service) PerUserIndexBytes(userID int64) (int64, bool) {
 		return 0, false
 	}
 	return directoryBytes(path), true
+}
+
+// postgresSearchBytesTTL is how long one tenant's measured size is reused.
+//
+// The measurement sums pg_column_size over every one of the tenant's rows, so
+// no index can serve it and the cost grows with the mailbox. It answers an
+// admin page that lists tenants, which would otherwise pay one full scan per
+// tenant per render, so the figure is cached: a size that moves by the minute
+// is not what an operator reads it for.
+const postgresSearchBytesTTL = time.Minute
+
+type searchBytesSample struct {
+	bytes      int64
+	measuredAt time.Time
+}
+
+// postgresIndexBytes serves the cached size, refreshing it when stale. A failed
+// measurement is logged rather than swallowed: without that, a query that
+// always fails is indistinguishable from a tenant with no rows.
+func (s *Service) postgresIndexBytes(userID int64) (int64, bool) {
+	s.mu.Lock()
+	sample, ok := s.searchBytes[userID]
+	s.mu.Unlock()
+	if ok && time.Since(sample.measuredAt) < postgresSearchBytesTTL {
+		return sample.bytes, true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bytes, err := s.pg.MessageSearchBytes(ctx, userID)
+	if err != nil {
+		s.logf()("measure postgres search bytes user_id=%d: %v", userID, err)
+		// A stale figure beats none while the database is unhappy.
+		if ok {
+			return sample.bytes, true
+		}
+		return 0, false
+	}
+	s.mu.Lock()
+	if s.searchBytes == nil {
+		s.searchBytes = make(map[int64]searchBytesSample)
+	}
+	s.searchBytes[userID] = searchBytesSample{bytes: bytes, measuredAt: time.Now()}
+	s.mu.Unlock()
+	return bytes, true
 }
 
 // VerifyPerUserIndexOpens reports whether a tenant's live index is present and
@@ -90,6 +143,13 @@ func (s *Service) PerUserIndexBytes(userID int64) (int64, bool) {
 func (s *Service) VerifyPerUserIndexOpens(userID int64) error {
 	if s == nil {
 		return fmt.Errorf("search service is not configured")
+	}
+	if s.pg != nil {
+		// There is no per-tenant index directory to open on this backend, and
+		// s.root is empty, so the Bleve path below would look for one relative
+		// to the working directory. Nothing calls this in Postgres mode today;
+		// the guard is here so nothing can start to.
+		return nil
 	}
 	_, exists, err := inspectPerUserIndex(s.root, userID)
 	if err != nil {

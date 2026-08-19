@@ -569,7 +569,9 @@ func run() (runErr error) {
 	// storage whose latency this warning is about. Nothing depends on the result,
 	// so it must not stand between the process and serving traffic - least of all
 	// during the recovery restarts this release exists to make cheap.
-	go reportIndexMemoryHeadroom(appliedMemory, cfg.SearchRoot())
+	if cfg.SearchBackend != config.SearchBackendPostgres {
+		go reportIndexMemoryHeadroom(appliedMemory, cfg.SearchRoot())
+	}
 	// A deployment that starts the replacement before stopping the process it
 	// replaces makes both want this directory for a few seconds. Waiting is what
 	// keeps the second process out of SQLite and the Bleve indexes without
@@ -825,45 +827,6 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	// inherit whatever deadline the caller happened to have.
 	const corruptIndexReindexTimeout = 30 * time.Second
 	searchRoot := cfg.SearchRoot()
-	searchSvc, err := search.OpenPerUser(searchRoot)
-	if err != nil {
-		return nil, err
-	}
-	// A writer stall is diagnosed from a stack that the container log keeps only
-	// the first line of. Put it on the volume, beside crash.log, where a shell
-	// in the container can still read it after the restart.
-	searchSvc.SetStallDiagnosticsDir(cfg.DataDir)
-	// An index that cannot be opened is moved aside and replaced rather than
-	// failing every message that would have been indexed into it. The
-	// replacement is empty, so every search-visible folder is marked here as
-	// coverage nothing has verified - before the quarantine, so a crash in
-	// between leaves a folder to rebuild rather than one that claims to be
-	// indexed. Refilling it is the explicit rebuild, from the folder settings
-	// or the admin database page; nothing does it in the background, because
-	// re-reading a whole mailbox is not a thing to start behind the reader.
-	searchSvc.SetCorruptIndexHandler(func(userID int64) error {
-		markCtx, cancel := context.WithTimeout(context.Background(), corruptIndexReindexTimeout)
-		defer cancel()
-		marked, err := db.MarkUserSearchIndexRepairRequired(markCtx, userID)
-		if err != nil {
-			return err
-		}
-		log.Printf("search index unreadable, folders marked for rebuild user_id=%d folders=%d", userID, marked)
-		return nil
-	})
-	defer func() {
-		if cleanup {
-			_ = searchSvc.Close()
-		}
-	}()
-	users, err := db.ServiceableUsers(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list users for stalled search recovery: %w", err)
-	}
-	startup.update("Search", "checking recovery markers", 0, max(1, len(users)))
-	if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users, time.Now()); err != nil {
-		return nil, err
-	}
 	restartRequired := make(chan restartRequest, 1)
 	requestRestart := func(userID int64, reason string) {
 		select {
@@ -871,9 +834,78 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		default:
 		}
 	}
-	searchSvc.SetActiveWriterStallHandler(func(userID int64) {
-		requestRestart(userID, fmt.Sprintf("search index writer stalled for user %d", userID))
-	})
+	var searchSvc *search.Service
+	users, err := db.ServiceableUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list users for search startup: %w", err)
+	}
+	if cfg.SearchBackend == config.SearchBackendPostgres {
+		// Search rows live in the relational database; none of the Bleve
+		// lifecycle below - stall watchdog, recovery markers, quarantine -
+		// applies. A tenant that has search-visible messages but no rows yet
+		// (first start on this backend, or a rollback interim) gets its
+		// folders marked here, and the sync repair path refills them the same
+		// way it refills a quarantined Bleve index.
+		searchSvc = search.OpenPostgresBackend(db)
+		// Neither of these gates readiness. Fuzzy matching needs pg_trgm and a
+		// trigram index: the extension may be refused by the hoster, and
+		// building the index on an already filled table takes as long as it
+		// takes. The coverage check is two counting queries per tenant and only
+		// ever schedules background repair. Serving mail waits for neither, so
+		// both run behind the listener; fuzzy simply starts answering once its
+		// index exists.
+		go func() {
+			if err := db.EnsureTrigramSearch(context.Background()); err != nil {
+				log.Printf("postgres search: fuzzy matching unavailable: %v", err)
+			} else {
+				log.Printf("postgres search: fuzzy matching enabled (pg_trgm)")
+			}
+			for _, user := range users {
+				if err := markPostgresSearchBackfill(context.Background(), db, user.ID); err != nil {
+					log.Printf("postgres search backfill check: %v", err)
+				}
+			}
+		}()
+	} else {
+		searchSvc, err = search.OpenPerUser(searchRoot)
+		if err != nil {
+			return nil, err
+		}
+		// A writer stall is diagnosed from a stack that the container log keeps only
+		// the first line of. Put it on the volume, beside crash.log, where a shell
+		// in the container can still read it after the restart.
+		searchSvc.SetStallDiagnosticsDir(cfg.DataDir)
+		// An index that cannot be opened is moved aside and replaced rather than
+		// failing every message that would have been indexed into it. The
+		// replacement is empty, so every search-visible folder is marked here as
+		// coverage nothing has verified - before the quarantine, so a crash in
+		// between leaves a folder to rebuild rather than one that claims to be
+		// indexed. Refilling it is the explicit rebuild, from the folder settings
+		// or the admin database page; nothing does it in the background, because
+		// re-reading a whole mailbox is not a thing to start behind the reader.
+		searchSvc.SetCorruptIndexHandler(func(userID int64) error {
+			markCtx, cancel := context.WithTimeout(context.Background(), corruptIndexReindexTimeout)
+			defer cancel()
+			marked, err := db.MarkUserSearchIndexRepairRequired(markCtx, userID)
+			if err != nil {
+				return err
+			}
+			log.Printf("search index unreadable, folders marked for rebuild user_id=%d folders=%d", userID, marked)
+			return nil
+		})
+		startup.update("Search", "checking recovery markers", 0, max(1, len(users)))
+		if _, err := recoverMarkedSearchIndexes(ctx, db, searchSvc, searchRoot, users, time.Now()); err != nil {
+			return nil, err
+		}
+		searchSvc.SetActiveWriterStallHandler(func(userID int64) {
+			requestRestart(userID, fmt.Sprintf("search index writer stalled for user %d", userID))
+		})
+	}
+	defer func() {
+		if cleanup {
+			_ = searchSvc.Close()
+		}
+	}()
 
 	startup.update("Services", "initializing sync and web services", 0, 1)
 	blobStore := blob.New(cfg.DataDir)
@@ -964,6 +996,11 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		pluginHost: webServer, db: db, search: searchSvc, handler: webServer.Handler(),
 		restartRequired: restartRequired,
 		markSearchRecovery: func() {
+			if searchSvc.PostgresBackend() {
+				// Postgres rows are transactional; an abandoned close leaves
+				// nothing in doubt and nothing to mark.
+				return
+			}
 			// Only a tenant whose writer is still inside Bleve has anything in
 			// doubt. Marking every tenant would queue a full reindex for
 			// accounts whose index was published in full, and that reindex is
@@ -1463,4 +1500,43 @@ func reportIndexMemoryHeadroom(applied memlimit.Applied, searchRoot string) {
 		"Give the container more memory, or lower ROLLTOP_MEMORY_LIMIT so the index has room to stay resident.",
 		memlimit.FormatBytes(footprint.Bytes), memlimit.FormatBytes(applied.Bytes),
 		memlimit.FormatBytes(applied.Detected), memlimit.FormatBytes(max(headroom, 0)))
+}
+
+// markPostgresSearchBackfill schedules the fill of message_search for one
+// tenant: when search-visible messages outnumber the rows that cover them, the
+// tenant's folders are marked exactly as the corrupt-index handler marks them,
+// and the sync repair path re-indexes through the same IndexMessages call -
+// which on this backend writes rows.
+//
+// The comparison is a shortfall, not a presence check. The first start on this
+// backend has no rows at all, but the case that outlives it is the interim: a
+// spell served from Bleve leaves the rows behind by exactly the mail that
+// arrived meanwhile, and mail that is present but unindexed is invisible to
+// search with nothing to say so. Idempotent across restarts, since a tenant
+// whose rows already cover its mail marks nothing.
+//
+// Both counts measure the same population - messages in search-visible folders
+// - or the comparison lies: rows left behind by a folder that has since left
+// search would otherwise inflate the indexed side and hide a real shortfall.
+// Those stale rows are harmless in themselves, because every query joins
+// messages and filters by the live folder, so nothing prunes them here.
+func markPostgresSearchBackfill(ctx context.Context, db *store.Store, userID int64) error {
+	indexed, err := db.CountMessageSearchEnabledForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("count postgres search rows user_id=%d: %w", userID, err)
+	}
+	searchable, err := db.CountSearchEnabledMessagesForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("count search-enabled messages user_id=%d: %w", userID, err)
+	}
+	if searchable == 0 || indexed >= searchable {
+		return nil
+	}
+	marked, err := db.MarkUserSearchIndexRepairRequired(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("mark postgres search backfill user_id=%d: %w", userID, err)
+	}
+	log.Printf("postgres search backfill scheduled user_id=%d folders=%d messages=%d indexed=%d",
+		userID, marked, searchable, indexed)
+	return nil
 }

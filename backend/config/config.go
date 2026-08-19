@@ -41,6 +41,11 @@ type Config struct {
 	DatabaseConnectTimeout time.Duration
 	IndexPath              string
 	PluginDir              string
+	// SearchBackend selects where full-text search lives: "bleve" keeps the
+	// per-tenant mmap'd indexes under IndexPath, "postgres" serves search from
+	// the message_search table in the relational database
+	// (docs/search-postgres-plan.md). Default "bleve" until the cutover.
+	SearchBackend string
 
 	MasterKey []byte
 
@@ -71,6 +76,14 @@ type Config struct {
 }
 
 const defaultDataDir = "/data"
+
+// The two ROLLTOP_SEARCH_BACKEND values. Bleve stays the default until the
+// Postgres read path has been compared against it on real mail
+// (docs/search-postgres-plan.md §7, phase D).
+const (
+	SearchBackendBleve    = "bleve"
+	SearchBackendPostgres = "postgres"
+)
 
 // DataDirFromEnv resolves the data directory on its own, without loading or
 // validating the rest of the configuration. Startup paths that must run before
@@ -111,6 +124,12 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("ROLLTOP_DB_CONNECT_TIMEOUT must not be negative, got %s", databaseConnectTimeout)
 	}
 	indexPath := env("ROLLTOP_INDEX_PATH", filepath.Join(dataDir, "bleve"))
+	searchBackend := strings.ToLower(strings.TrimSpace(env("ROLLTOP_SEARCH_BACKEND", SearchBackendBleve)))
+	switch searchBackend {
+	case SearchBackendBleve, SearchBackendPostgres:
+	default:
+		return Config{}, fmt.Errorf("ROLLTOP_SEARCH_BACKEND must be %q or %q, got %q", SearchBackendBleve, SearchBackendPostgres, searchBackend)
+	}
 	pluginDir := env("ROLLTOP_PLUGIN_DIR", "plugins")
 	if abs, err := filepath.Abs(pluginDir); err == nil {
 		pluginDir = abs
@@ -185,6 +204,7 @@ func Load() (Config, error) {
 		DatabaseMaxConns:       databaseMaxConns,
 		DatabaseConnectTimeout: databaseConnectTimeout,
 		IndexPath:              indexPath,
+		SearchBackend:          searchBackend,
 		PluginDir:              pluginDir,
 		MasterKey:              key,
 		SessionTTL:             sessionTTL,

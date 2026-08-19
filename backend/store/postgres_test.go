@@ -298,8 +298,8 @@ func TestOpenPostgresBaselineIsAtomic(t *testing.T) {
 		`SELECT count(*) FROM schema_migrations WHERE scope = $1`, postgresSchemaScope).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 1 {
-		t.Errorf("schema_migrations holds %d baseline rows after a failed apply, want 1", rows)
+	if want := 1 + len(postgresMigrations); rows != want {
+		t.Errorf("schema_migrations holds %d rows after a failed apply, want %d", rows, want)
 	}
 }
 
@@ -382,8 +382,10 @@ func TestOpenPostgresConcurrentFirstStart(t *testing.T) {
 		`SELECT count(*) FROM schema_migrations WHERE scope = $1`, postgresSchemaScope).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 1 {
-		t.Errorf("schema_migrations holds %d baseline rows, want 1", rows)
+	// One baseline row plus one row per shipped core migration; a duplicate of
+	// either is what the concurrent starters could have produced.
+	if want := 1 + len(postgresMigrations); rows != want {
+		t.Errorf("schema_migrations holds %d rows, want %d", rows, want)
 	}
 }
 

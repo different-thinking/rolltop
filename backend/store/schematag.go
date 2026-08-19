@@ -19,18 +19,25 @@ import (
 
 // SchemaTag identifies the schema a template database carries.
 //
-// It covers the baseline and deliberately nothing else. Plugin migrations are
-// excluded because the catalog is not a constant: a test binary that loads a
-// compiled plugin registers more migrations than one that does not, so
-// including them made the tag change part-way through a run and every test
-// after that point asked for a template nobody had built.
-//
-// Leaving them out costs nothing, because the plugin migrations are applied to
-// each cloned database when the store opens it — which is what they have to do
-// in production anyway.
+// It covers the baseline and the core migrations and deliberately nothing
+// else. Both are compile-time constants, so the tag is stable for one binary;
+// including the core migrations means editing one while developing it selects
+// a fresh template instead of tripping the immutability refusal against a
+// template that recorded the previous draft. Plugin migrations stay excluded
+// because that catalog is not a constant: a test binary that loads a compiled
+// plugin registers more migrations than one that does not, so including them
+// made the tag change part-way through a run and every test after that point
+// asked for a template nobody had built. Leaving them out costs nothing,
+// because the plugin migrations are applied to each cloned database when the
+// store opens it — which is what they have to do in production anyway.
 func SchemaTag() string {
-	sum := sha256.Sum256([]byte(pgschema.Baseline))
-	return hex.EncodeToString(sum[:])[:16]
+	h := sha256.New()
+	_, _ = h.Write([]byte(pgschema.Baseline))
+	for _, m := range postgresMigrations {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(postgresMigrationChecksum(m)))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // PrepareTestTemplate puts exactly the schema SchemaTag names into a database.
