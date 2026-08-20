@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,18 +23,40 @@ import (
 // user's own settings, and no honest share of it can be attributed to one
 // tenant. MessageHeaderCount is what this view can say about the relational
 // side, and it says it as a count.
+//
+// The full-text figures are asked of the search service rather than measured on
+// the volume, because where the index lives is the backend's business: Bleve
+// leaves a directory this process can walk, PostgreSQL leaves rows only a query
+// can size. Walking the volume on the Postgres backend reports zero bytes and
+// no missing index, which reads as "search is empty" for a search that is
+// working perfectly.
 type StorageStats struct {
-	MessageHeaderCount         int
-	IndexPath                  string
-	IndexBytes                 int64
+	MessageHeaderCount int
+	// SearchBackend names where the index lives ("bleve" or "postgres"), so a
+	// page reporting zero bytes can say which of the two it measured.
+	SearchBackend string
+	IndexPath     string
+	IndexBytes    int64
+	// IndexPresent is false when this tenant has no index yet — a new user, or
+	// the interim right after a rebuild was started. It separates "nothing
+	// indexed" from "index of zero bytes", which the number alone cannot.
+	IndexPresent               bool
 	IndexMessageCount          int
 	FullTextSearchMessageCount int
-	IndexBreakdown             StorageIndexBreakdown
-	BlobPath                   string
-	BlobBytes                  int64
-	MessageBodyCount           int
-	TotalBytes                 int64
-	Error                      string
+	// FoldersNeedingRebuild counts this tenant's search-visible folders whose
+	// coverage nothing has verified. It is what the rebuild acts on.
+	FoldersNeedingRebuild int64
+	// FuzzyAvailable reports whether typo-tolerant matching can answer. See
+	// search.Service.FuzzyAvailable.
+	FuzzyAvailable bool
+	// IndexBreakdown describes the Bleve directory and is empty on any other
+	// backend, which has no files to break down.
+	IndexBreakdown   StorageIndexBreakdown
+	BlobPath         string
+	BlobBytes        int64
+	MessageBodyCount int
+	TotalBytes       int64
+	Error            string
 }
 
 // StorageIndexBreakdown describes the per-user Bleve directory without exposing
@@ -78,9 +101,19 @@ func (s *Server) cachedStorageStats(userID int64) StorageStats {
 
 func (s *Server) storageStatsForUser(userID int64) StorageStats {
 	indexPath, blobPath := s.userStoragePaths(userID)
+	backend := search.BackendBleve
+	if s.search != nil {
+		backend = s.search.Backend()
+	}
 	stats := StorageStats{
-		IndexPath: joinedStoragePaths(indexPath),
-		BlobPath:  joinedStoragePaths(blobPath),
+		SearchBackend: backend,
+		BlobPath:      joinedStoragePaths(blobPath),
+	}
+	if backend == search.BackendBleve {
+		// The path is the directory this tenant's index occupies. There is none
+		// on the Postgres backend, and naming one there points an operator at a
+		// directory that will never exist.
+		stats.IndexPath = joinedStoragePaths(indexPath)
 	}
 	var errs []string
 	var err error
@@ -90,20 +123,47 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, fmt.Sprintf("message header count: %v", err))
 		}
 	}
-	stats.IndexBytes, stats.IndexBreakdown, err = bleveIndexBreakdown(indexPath)
-	if err != nil {
-		errs = append(errs, fmt.Sprintf("full text index: %v", err))
+	if stats.SearchBackend == search.BackendBleve {
+		// Only Bleve has files, and the breakdown is the whole reason this
+		// walks the directory rather than asking the service for one number:
+		// segment counts and the largest segment are what a stalling index
+		// looks like from outside.
+		stats.IndexBytes, stats.IndexBreakdown, err = bleveIndexBreakdown(indexPath)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("full text index: %v", err))
+		}
+	} else if s.search != nil {
+		// A measurement that failed is not a measurement of zero. Sizing the
+		// Postgres rows is a full scan behind a timeout, so it can fail on a
+		// busy database while search itself is fine, and reporting that as an
+		// empty index is precisely the false alarm this page exists to avoid.
+		var measured bool
+		stats.IndexBytes, measured = s.search.PerUserIndexBytes(userID)
+		if !measured {
+			errs = append(errs, "full text index: size could not be measured")
+		}
 	}
 	if s.search != nil {
+		stats.FuzzyAvailable = s.search.FuzzyAvailable()
 		stats.IndexMessageCount, err = s.search.CountUserMessages(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("full text index message count: %v", err))
 		}
 	}
+	// An index is present when it holds documents, not when it occupies bytes:
+	// the document count is one cheap query on either backend, while the size
+	// is a directory walk or a full scan that can legitimately fail. Deriving
+	// presence from the size would let one slow query tell a reader their
+	// search is empty.
+	stats.IndexPresent = stats.IndexMessageCount > 0
 	if s.store != nil {
 		stats.FullTextSearchMessageCount, err = s.store.CountSearchEnabledMessagesForUser(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("search-enabled message count: %v", err))
+		}
+		stats.FoldersNeedingRebuild, err = s.store.CountMailboxesNeedingSearchIndexRepair(context.Background(), userID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("folders needing a search rebuild: %v", err))
 		}
 	}
 	stats.BlobBytes, err = pathSize(blobPath)
@@ -243,4 +303,80 @@ func pathSize(path string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// searchBackendName reports where the index lives, so a page can say which of
+// the two it is describing. Empty when there is no search service, which the
+// pages read as "nothing to say about search".
+func (s *Server) searchBackendName() string {
+	if s.search == nil {
+		return ""
+	}
+	return s.search.Backend()
+}
+
+// invalidateStorageStats drops one tenant's cached figures. The cache holds for
+// five minutes, which is right for a page someone opens to look at and wrong
+// the moment they act on it: a rebuild that started has already changed the
+// answer to every number on that page.
+func (s *Server) invalidateStorageStats(userID int64) {
+	s.storageMu.Lock()
+	delete(s.storageCached, userID)
+	s.storageMu.Unlock()
+}
+
+// apiStorageSearchRebuild rebuilds the signed-in user's own search index. It is
+// the same work the admin page offers per tenant and the folder settings offer
+// per account — startSearchRebuildForUser, one run per mail server — reachable
+// by the person whose search is incomplete rather than only by an admin.
+//
+// It takes no user id. A reader may rebuild their own index and nothing else;
+// the admin route is where acting on another tenant lives, behind an admin
+// check that this one deliberately does not repeat.
+func (s *Server) apiStorageSearchRebuild(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAPIAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.verifyCSRF(w, r) {
+		return
+	}
+	if s.syncer == nil || s.syncer.Search == nil || s.syncRunner == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "Search indexing is not configured on this server.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), searchIndexTimeout)
+	defer cancel()
+	started, busy, err := s.startSearchRebuildForUser(ctx, cu.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if started == 0 {
+		if busy > 0 {
+			writeAPIError(w, http.StatusConflict,
+				"Sync or full-text reindexing is already running for your mail servers.")
+			return
+		}
+		writeAPIError(w, http.StatusBadRequest, "There are no search-visible folders to rebuild.")
+		return
+	}
+	s.invalidateStorageStats(cu.User.ID)
+	s.events.Notify(cu.User.ID)
+	// Measured rather than cached, and deliberately not written back into the
+	// cache: the runs have started but not finished, so these figures are the
+	// state at the moment of the click. Caching them would pin a pre-rebuild
+	// answer for the next five minutes, which is the opposite of what dropping
+	// the entry above was for. The GET that follows recomputes into the cache
+	// in the ordinary way.
+	writeJSON(w, map[string]any{
+		"ok":            true,
+		"started_runs":  started,
+		"busy_accounts": busy,
+		"storage":       s.storageStatsForUser(cu.User.ID),
+	})
 }

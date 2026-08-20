@@ -166,8 +166,10 @@ site and in review.
   silent no-op that leaves the tenant unsearchable while the page reports
   success. What refills an index is the explicit rebuild - purge the folder's
   documents, then index what the folder has and the index does not
-  (`rebuildMailboxSearchIndex`) - offered per account in the folder settings and
-  per tenant on the admin database page. Reuse it; do not grow a second one.
+  (`rebuildMailboxSearchIndex`) - offered per account in the folder settings,
+  per tenant on the admin database page, and for their own index by the reader
+  on the storage page. All three go through `startSearchRebuildForUser` or the
+  per-folder call it wraps. Reuse it; do not grow a second one.
 - Search runs on one of two backends (`ROLLTOP_SEARCH_BACKEND`): Bleve indexes
   on `/data` (default), or `message_search` rows in PostgreSQL
   (`docs/search-postgres-plan.md`). The service type is the same either way;
@@ -201,6 +203,16 @@ site and in review.
   Rolltop is deployed as a container, so an operator with a broken index and no
   shell cannot reach `rolltop reset-search`; the SQLite-era verify/backup/repair
   buttons were rightly removed, that one was not theirs to take with them.
+- What a page says about search must come from the backend in force, never from
+  the data volume. `search.Service.Backend()`, `PerUserIndexBytes` and
+  `FuzzyAvailable` answer for both; walking `/data` answers only for Bleve, and
+  on the Postgres backend it reports an index of zero bytes and no missing
+  folders for a search that is working. The admin database page and
+  `/api/storage` both ask the service. Index upkeep that runs beside the request
+  path registers with `Service.StartMaintenance` so the activity view can show
+  it — a trigram index being built is minutes of search answering without typo
+  tolerance, and a log line is not where the reader who just missed a word will
+  look.
 - One data directory belongs to one process, and the instance lock is taken
   before anything opens Bleve or the blob store. The database no longer needs it
   — PostgreSQL handles concurrent clients — but Bleve does, and that is now the
@@ -225,11 +237,13 @@ site and in review.
   changes the recorded checksum, and a server whose database was built from an
   older version refuses to start rather than run against a schema it does not
   recognise. Changing the schema of a database already in service needs a
-  migration layered on the baseline, and **that mechanism does not exist yet** —
-  building it is the open item before the first durable database (§11 of
-  `docs/postgres-migration-plan.md`). There is no migration runner in
-  `backend/store/migrations.go` to revive; only the checksum and the progress
-  type live there.
+  migration layered on the baseline, which is `postgresMigrations` in
+  `backend/store/postgres_migrations.go`: an **append-only** list of numbered,
+  checksummed entries, each applied once under the schema lock inside one
+  implicit transaction with the row that records it. A database's applied rows
+  must always be a prefix of that list, so editing a shipped entry, renumbering
+  one, or leaving a gap is refused at startup rather than guessed at. Add a
+  migration; never edit the baseline for a database that already exists.
 - SQL is written with `?` placeholders and translated to `$1..$n` in the driver
   (`backend/pgbind`). That is deliberate: many statements are assembled at run
   time from fragments, and numbering them in the source would mean every

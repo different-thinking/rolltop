@@ -63,6 +63,9 @@ type Service struct {
 	// searchBytes caches the measured size of each tenant's Postgres search
 	// rows, guarded by mu. See postgresIndexBytes.
 	searchBytes map[int64]searchBytesSample
+	// maintenance records index upkeep that is running now, for the activity
+	// view. It carries its own mutex; see maintenanceRegistry.
+	maintenance maintenanceRegistry
 }
 
 // writerLock is a context-friendly FIFO gate. Unlike polling sync.Mutex.TryLock,

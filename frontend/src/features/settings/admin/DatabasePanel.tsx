@@ -1,17 +1,27 @@
 // File overview: Admin database page. It reports where the mirror is stored and
 // how that storage is doing — the PostgreSQL connection and its size, and the
-// data volume that still holds the blobs and the search index.
+// data volume that holds the blobs and, on the Bleve backend, the search index.
+// Which backend is in force is reported rather than assumed: on the Postgres
+// backend the volume's index figure describes nothing, because the index is
+// rows in the database above it.
+//
+// This is the whole-server view, and that is what keeps it separate from the
+// storage page in a user's own settings: the connection, the pool, the free
+// space and the log tail are one instance's state, and the database's size
+// cannot be split honestly between the tenants inside it.
 //
 // The three operations it used to offer (verify, back up, repair) were all
 // SQLite maintenance and went with it: integrity is the database server's
 // problem now, and backups are `pg_dump` on a schedule rather than a button
-// that writes into the volume it is protecting against.
+// that writes into the volume it is protecting against. The PostgreSQL
+// migration console went the same way once the migration was done — it existed
+// to rehearse a schema against an empty target, which a serving database is
+// not.
 //
-// Two cards below still act, each deliberately its own. The search index card
-// rebuilds one tenant's index, which is derived state on the volume that can
-// break on its own and costs nothing to throw away; taking that with the SQLite
-// buttons left an operator without a shell no way to repair search at all. The
-// PostgreSQL migration console creates and drops a schema.
+// One card below still acts: the search index card rebuilds one tenant's index.
+// That is derived state which can break on its own and costs nothing to throw
+// away, and taking it with the SQLite buttons would have left an operator
+// without a shell no way to repair search at all.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -23,19 +33,14 @@ import type { DatePrefs } from "../../../appTypes";
 import type {
   DatabaseOverview,
   DatabaseStatus,
-  PostgresPreflightCheck,
-  PostgresPreflightReport,
-  PostgresSchemaAction,
-  PostgresState,
   SearchIndexTenant,
   ServerLogLine
 } from "../../../types";
 
 const IDLE_POLL_MS = 15000;
 
-// databaseLabel and databaseTone follow the same convention as preflightState
-// and stageState below: status in, a label and a tone out, rendered through the
-// shared `database-state is-${tone}` badge.
+// databaseLabel and databaseTone are one convention: status in, a label and a
+// tone out, rendered through the shared `database-state is-${tone}` badge.
 function databaseLabel(database: DatabaseStatus): string {
   if (!database.reachable) return "Unreachable";
   if (database.in_recovery) return "Read-only replica";
@@ -48,32 +53,6 @@ function databaseTone(database: DatabaseStatus): "ok" | "warn" | "bad" {
   return "ok";
 }
 
-function preflightState(status: PostgresPreflightCheck["status"]): { label: string; tone: "ok" | "warn" | "bad" } {
-  if (status === "pass") return { label: "Pass", tone: "ok" };
-  if (status === "fail") return { label: "Fail", tone: "bad" };
-  return { label: "Info", tone: "warn" };
-}
-
-// Mirrors databaseState and preflightState so all three keep one convention.
-function stageState(stage: PostgresState["stage"]): { label: string; tone: "ok" | "warn" | "bad" } {
-  if (stage === "empty") return { label: "Empty", tone: "ok" };
-  if (stage === "baseline") return { label: "Schema present", tone: "ok" };
-  if (stage === "mismatch") return { label: "Other build", tone: "warn" };
-  return { label: "Not ours", tone: "bad" };
-}
-
-/**
- * PostgresMigrationCard is the staged console for the SQLite-to-PostgreSQL
- * migration. Each step is run and checked on its own against the real target,
- * so the migration is rehearsed rather than attempted once:
- *
- *   1. Preflight — can this database do what the port needs?
- *   2. Schema — create the generated schema here, look at it, drop it, repeat.
- *
- * The connection string is entered once, shared by both steps, held in
- * component state for the request only, and sent nowhere else; the server
- * neither stores nor logs it, and redacts it out of driver errors.
- */
 // SearchIndexCard is the one repair this page still offers, and the reason it
 // exists: the search index is derived state on the data volume, it can be
 // damaged on its own — an incomplete volume copy leaves one that no longer
@@ -85,7 +64,7 @@ function stageState(stage: PostgresState["stage"]): { label: string; tone: "ok" 
 // The server heals an index it finds unreadable on its own. This card is for
 // the cases it cannot see: search that returns too little, an index left behind
 // by a restore, a rebuild an operator simply wants to force.
-function SearchIndexCard({ csrf }: { csrf: string }) {
+function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
   const [tenants, setTenants] = useState<SearchIndexTenant[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -134,11 +113,19 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
     <div className="database-log">
       <h2>Search index</h2>
       <p className="settings-hint">
-        Each user has their own search index on the data volume. It is built from mail that is already stored, so
-        rebuilding one loses nothing — search is incomplete for that user until the reindex finishes, and nothing
-        else is affected. Rebuilding queues one run per mail server, the same work the folder settings offer per
-        account. Rebuild when search is missing mail you know is there, when folders below report that they need
-        it, or after restoring the volume from a copy.
+        {/* Only the two names this server can report are named. Anything else —
+            an overview that has not arrived, a build that reports nothing —
+            says so, because claiming the wrong one points an operator at the
+            wrong storage. */}
+        {backend === "postgres"
+          ? "Each user's search index is a set of rows in PostgreSQL, sized here by measuring them. "
+          : backend === "bleve"
+            ? "Each user has their own search index on the data volume. "
+            : "Where the search index is kept is not known yet. "}
+        It is built from mail that is already stored, so rebuilding one loses nothing — search is incomplete for
+        that user until the reindex finishes, and nothing else is affected. Rebuilding queues one run per mail
+        server, the same work the folder settings offer per account. Rebuild when search is missing mail you know
+        is there, when folders below report that they need it, or after restoring from a copy.
       </p>
       <div className="database-log-actions">
         <button type="button" className="secondary" disabled={loading} onClick={() => void load()}>
@@ -224,208 +211,6 @@ function SearchIndexCard({ csrf }: { csrf: string }) {
   );
 }
 
-function PostgresMigrationCard({ csrf, datePrefs }: { csrf: string; datePrefs?: DatePrefs }) {
-  const [dsn, setDsn] = useState("");
-  const [running, setRunning] = useState<"" | "preflight" | PostgresSchemaAction>("");
-  const [report, setReport] = useState<PostgresPreflightReport | null>(null);
-  const [state, setState] = useState<PostgresState | null>(null);
-  const [error, setError] = useState("");
-  // The drop is the one irreversible step, so it is armed by a first click and
-  // performed by a second. Any other action disarms it.
-  const [dropArmed, setDropArmed] = useState(false);
-
-  const busy = running !== "";
-  const ready = Boolean(dsn.trim());
-
-  // Everything shown describes the database the results came from. Editing the
-  // connection string makes all of it stale at once, and leaving it on screen
-  // is not merely untidy: the drop confirmation names a database and a row
-  // count, so a stale one would describe the old target while the drop ran
-  // against the new one.
-  function changeDsn(next: string) {
-    setDsn(next);
-    setReport(null);
-    setState(null);
-    setError("");
-    setDropArmed(false);
-  }
-
-  async function runPreflight() {
-    setRunning("preflight");
-    setError("");
-    setDropArmed(false);
-    try {
-      setReport(await api.postgresPreflight(csrf, dsn));
-    } catch (err) {
-      setReport(null);
-      setError(messageFromError(err));
-    } finally {
-      setRunning("");
-    }
-  }
-
-  async function runSchema(action: PostgresSchemaAction) {
-    setRunning(action);
-    setError("");
-    // Disarmed when the action starts, not when it succeeds. A failed inspect
-    // or create left the drop armed, so the next single click performed it.
-    setDropArmed(false);
-    try {
-      setState(await api.postgresSchema(csrf, dsn, action));
-    } catch (err) {
-      // The previous state is kept: a refused action means nothing changed, and
-      // blanking the panel would hide what the refusal was about.
-      setError(messageFromError(err));
-    } finally {
-      setRunning("");
-    }
-  }
-
-  return (
-    <div className="database-log postgres-preflight">
-      <h2>PostgreSQL migration</h2>
-      <p className="settings-hint">
-        The staged path to PostgreSQL, run against the real target from inside this server — so the network
-        path, the server&rsquo;s locale, and the role&rsquo;s privileges are the ones the migration will
-        actually meet. The connection string is used for the one request and is not stored or logged. One
-        action runs at a time.
-      </p>
-      <form
-        className="database-log-actions"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void runPreflight();
-        }}
-      >
-        <input
-          type="password"
-          value={dsn}
-          onChange={(event) => changeDsn(event.target.value)}
-          placeholder="postgres://user:password@host:5432/dbname"
-          autoComplete="off"
-          aria-label="PostgreSQL connection string"
-          disabled={busy}
-          style={{ flex: "1 1 24rem" }}
-        />
-      </form>
-      {error ? <p className="settings-error">{error}</p> : null}
-
-      <h3>Step 1 — Preflight</h3>
-      <p className="settings-hint">
-        Checks version and encoding, collation behavior, the extensions, UTF-8 strictness, the SQL features the
-        port relies on, and the round-trip latency of this exact path. Changes nothing but the extensions,
-        which the migration wants anyway.
-      </p>
-      <div className="database-log-actions">
-        <button type="button" className="secondary" disabled={busy || !ready} onClick={() => void runPreflight()}>
-          <Icon name="search" />
-          {running === "preflight" ? "Running checks…" : "Run preflight"}
-        </button>
-      </div>
-      {report ? (
-        <>
-          <p className={report.ok ? "settings-hint" : "settings-error"}>
-            {report.ok
-              ? `All checks passed in ${report.duration_ms} ms. This database is ready for the migration.`
-              : "At least one check failed. This database is not ready for the migration."}
-          </p>
-          <table className="database-table">
-            <tbody>
-              {report.checks.map((check) => (
-                <tr key={check.id}>
-                  <td>
-                    <span className={`database-state is-${preflightState(check.status).tone}`}>
-                      {preflightState(check.status).label}
-                    </span>
-                  </td>
-                  <td>
-                    {check.title}
-                    {check.detail ? <small className="database-detail">{check.detail}</small> : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      ) : null}
-
-      <h3>Step 2 — Schema</h3>
-      <p className="settings-hint">
-        Creates the generated schema — every table, index, foreign key and trigger the port needs — in an empty
-        database, so it is proven against the real server before any data moves. Drop it and create it again as
-        often as you like. A database holding anything that is not Rolltop&rsquo;s is refused outright, and the
-        drop leaves installed extensions in place.
-      </p>
-      <div className="database-log-actions">
-        <button type="button" className="secondary" disabled={busy || !ready} onClick={() => void runSchema("inspect")}>
-          <Icon name="sync" />
-          {running === "inspect" ? "Checking…" : "Check database"}
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled={busy || !ready || !state?.can_create}
-          onClick={() => void runSchema("create")}
-        >
-          <Icon name="add" />
-          {running === "create" ? "Creating schema…" : "Create schema"}
-        </button>
-        <button
-          type="button"
-          className={dropArmed ? "danger" : "secondary"}
-          disabled={busy || !ready || !state?.can_drop}
-          onClick={() => {
-            if (!dropArmed) {
-              setDropArmed(true);
-              return;
-            }
-            void runSchema("drop");
-          }}
-        >
-          <Icon name="trash" />
-          {running === "drop" ? "Dropping schema…" : dropArmed ? "Confirm: drop the schema" : "Drop schema"}
-        </button>
-      </div>
-      {dropArmed && state ? (
-        <p className="settings-error">
-          This drops every Rolltop table in <strong>{state.database}</strong>
-          {state.rows > 0 ? ` along with ${state.rows.toLocaleString()} rows of data` : " (no data rows)"}. It
-          cannot be undone. Click again to confirm.
-        </p>
-      ) : null}
-      {state ? (
-        <table className="database-table">
-          <tbody>
-            <tr>
-              <td>
-                <span className={`database-state is-${stageState(state.stage).tone}`}>
-                  {stageState(state.stage).label}
-                </span>
-              </td>
-              <td>
-                {state.summary}
-                <small className="database-detail">
-                  {state.database} as {state.user} — {state.server_version}
-                </small>
-                {state.blocking?.length ? (
-                  <small className="database-detail">
-                    Remove these by hand to create the schema here: {state.blocking.join(", ")}
-                  </small>
-                ) : null}
-                {state.applied_at > 0 ? (
-                  <small className="database-detail">
-                    Schema created {displayDateTime(new Date(state.applied_at * 1000).toISOString(), datePrefs)}
-                  </small>
-                ) : null}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      ) : null}
-    </div>
-  );
-}
-
 /**
  * AdminDatabaseView polls the maintenance overview. Polling is fast while a job
  * runs so its log streams, and slow otherwise so an idle admin tab is cheap.
@@ -501,6 +286,10 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
 
   const database = overview?.database || null;
   const volume = overview?.volume || null;
+  // Only the Bleve backend keeps the search index on this volume. On the other
+  // one those bytes are the directories the migration deliberately left behind
+  // as the rollback: real disk, but not the index anything is searching.
+  const searchOnVolume = overview?.search_backend === "bleve";
   const freePercent =
     volume && volume.total_bytes > 0 ? Math.round((volume.free_bytes / volume.total_bytes) * 100) : null;
   const lowDisk = freePercent !== null && freePercent < 10;
@@ -511,7 +300,12 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
         <h1>Database</h1>
         <p>
           Where the mirror is stored and how it is doing. The mail metadata lives in PostgreSQL; the message
-          blobs and the search indexes are still on this server&rsquo;s data volume.
+          blobs are on this server&rsquo;s data volume.
+          {searchOnVolume
+            ? " The search indexes are there too, one per user."
+            : overview?.search_backend === "postgres"
+              ? " The search index is rows in PostgreSQL, not files on the volume."
+              : ""}
         </p>
       </header>
 
@@ -561,7 +355,12 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
             <span className="database-disk">
               {volume.measured_at_unix > 0 ? (
                 <>
-                  {formatBytes(volume.blob_bytes)} message blobs · {formatBytes(volume.index_bytes)} search index
+                  {formatBytes(volume.blob_bytes)} message blobs
+                  {searchOnVolume
+                    ? ` · ${formatBytes(volume.index_bytes)} search index`
+                    : volume.index_bytes > 0
+                      ? ` · ${formatBytes(volume.index_bytes)} Bleve index, not in use`
+                      : ""}
                   {volume.other_bytes > 0 ? ` · ${formatBytes(volume.other_bytes)} other` : ""}
                   {" · measured "}
                   {displayDateTime(new Date(volume.measured_at_unix * 1000).toISOString(), datePrefs)}
@@ -573,8 +372,9 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
           </div>
           {lowDisk ? (
             <p className="settings-error">
-              The data volume is nearly full. Message blobs and the search index are written to it, and both stop
-              when it fills.
+              The data volume is nearly full. Message blobs
+              {searchOnVolume ? " and the search index are" : " are"} written to it, and
+              {searchOnVolume ? " both stop" : " that stops"} when it fills.
             </p>
           ) : null}
           <p className="settings-hint">
@@ -585,9 +385,7 @@ export function AdminDatabaseView({ csrf, datePrefs }: { csrf: string; datePrefs
         </>
       ) : null}
 
-      <SearchIndexCard csrf={csrf} />
-
-      <PostgresMigrationCard csrf={csrf} datePrefs={datePrefs} />
+      <SearchIndexCard csrf={csrf} backend={overview?.search_backend || ""} />
 
       {/* Outside the overview guard on purpose. When the overview itself fails
           — a system database that cannot even list its users — the tail is the

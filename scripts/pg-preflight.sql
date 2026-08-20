@@ -20,10 +20,12 @@
 -- EXTENSION calls are the one persistent effect, and those extensions are
 -- wanted for the migration anyway.
 --
--- Do not run this while the admin Database page's preflight runs against the
--- same database: both use the preflight_scratch schema and each starts by
--- dropping it, so concurrent runs delete each other's tables. The in-app
--- preflight serializes its own runs; it cannot see a psql session.
+-- Do not run two of these against one database at once: they share the
+-- preflight_scratch schema and each starts by dropping it, so concurrent runs
+-- delete each other's tables. The in-app preflight that used to be the other
+-- half of this warning was removed with the migration console; this script is
+-- now the only preflight, and pull request CI runs it against a throwaway
+-- PostgreSQL whenever it changes.
 --
 -- Tip: run once with \timing enabled (psql -c '\timing on' interactively) to
 -- get a feel for round-trip latency — but note that latency via the bastion

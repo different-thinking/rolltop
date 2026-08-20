@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { DatePrefs, LocationState, Toast } from "../../appTypes";
-import type { Account, AccountPurgeEstimate, Bootstrap, DuplicateCopyReport, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
+import type { Account, AccountPurgeEstimate, Bootstrap, DuplicateCopyReport, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageIndexBreakdown, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
 import { Icon } from "../../components/Icon";
 import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm, suggestedSyncStart, AUTH_GOOGLE, AUTH_PASSWORD } from "../../lib/accountForm";
@@ -63,19 +63,8 @@ function smtpToForm(account: SMTPAccount | null) {
   };
 }
 
-type StorageIndexBreakdownView = {
-  FileCount?: unknown;
-  ZapCount?: unknown;
-  ZapBytes?: unknown;
-  LargestZapPath?: unknown;
-  LargestZapBytes?: unknown;
-  RootBytes?: unknown;
-  OtherBytes?: unknown;
-};
-
-function storageIndexBreakdown(stats: StorageStats): StorageIndexBreakdownView {
-  const value = stats.IndexBreakdown;
-  return value && typeof value === "object" ? value as StorageIndexBreakdownView : {};
+function storageIndexBreakdown(stats: StorageStats): StorageIndexBreakdown {
+  return stats.IndexBreakdown || {};
 }
 
 function formatStatCount(value: unknown): string {
@@ -107,7 +96,7 @@ function smtpDeleteConfirmationName(account: SMTPAccount): string {
   return account.label.trim() || account.host.trim() || "SMTP server";
 }
 
-function hasStorageIndexBreakdown(value: StorageIndexBreakdownView): boolean {
+function hasStorageIndexBreakdown(value: StorageIndexBreakdown): boolean {
   return Boolean(value.FileCount || value.ZapCount || value.ZapBytes || value.LargestZapBytes || value.RootBytes || value.OtherBytes);
 }
 
@@ -394,6 +383,24 @@ function SearchSliderRow({ title, value, choices, description, onChange }: {
 
 function storageEmailDetail(value: unknown): string {
   return `${formatStatCount(value)} emails`;
+}
+
+// storageSearchCoverage reads as a fraction rather than a total, because the
+// total alone cannot answer the question the page is opened with: a number that
+// looks large is still a search missing half the mailbox. The denominator is
+// the messages in search-visible folders, which is the population the index is
+// supposed to hold.
+function storageSearchCoverage(stats: StorageStats): string {
+  const indexed = Number(stats.IndexMessageCount || 0);
+  const searchable = Number(stats.FullTextSearchMessageCount || 0);
+  if (searchable <= 0) return storageEmailDetail(indexed);
+  return `${formatStatCount(indexed)} of ${formatStatCount(searchable)} emails`;
+}
+
+function storageSearchBackendLabel(backend: string | undefined): string {
+  if (backend === "postgres") return "PostgreSQL";
+  if (backend === "bleve") return "the data volume";
+  return "";
 }
 
 function emptyAccountFormForUser(user: User) {
@@ -749,6 +756,11 @@ export function SettingsView({
   const [storage, setStorage] = useState<StorageStats>({});
   const [storageLoading, setStorageLoading] = useState(true);
   const [storageError, setStorageError] = useState("");
+  // Rebuilding is armed by a first click and performed by a second, the same
+  // way the admin card arms it: it throws the index away and re-reads the whole
+  // mailbox to build the next one.
+  const [searchRebuildArmed, setSearchRebuildArmed] = useState(false);
+  const [searchRebuildBusy, setSearchRebuildBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [accountNeedsPassword, setAccountNeedsPassword] = useState(false);
   const [googleConnections, setGoogleConnections] = useState<GoogleConnection[]>([]);
@@ -796,6 +808,29 @@ export function SettingsView({
   selectedSMTPIDRef.current = selectedSMTPID;
   selectedIdentityIDRef.current = selectedIdentityID;
   folderAccountIDsRef.current = new Map(folders.map((folder) => [folder.mailbox.id, folder.mailbox.account_id]));
+
+  // rebuildOwnSearchIndex queues the same per-account rebuild the admin page
+  // offers per tenant, for the signed-in user only. The response carries the
+  // refreshed figures, so the page does not have to re-request behind a
+  // five-minute cache that has just been made stale.
+  async function rebuildOwnSearchIndex() {
+    setSearchRebuildBusy(true);
+    try {
+      const result = await api.rebuildOwnSearchIndex(csrf);
+      setStorage(result.storage);
+      setStorageError("");
+      addToast(
+        result.busy_accounts > 0
+          ? `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started; ${result.busy_accounts} ${result.busy_accounts === 1 ? "was" : "were"} already syncing.`
+          : `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started reindexing - follow it in Activity.`
+      );
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setSearchRebuildBusy(false);
+      setSearchRebuildArmed(false);
+    }
+  }
 
   const loadStorage = useCallback(async () => {
     setStorageLoading(true);
@@ -2281,19 +2316,78 @@ export function SettingsView({
   function renderStorageSettings() {
     const indexBreakdown = storageIndexBreakdown(storage);
     const showIndexBreakdown = hasStorageIndexBreakdown(indexBreakdown);
+    const backendLabel = storageSearchBackendLabel(storage.SearchBackend);
+    const indexed = Number(storage.IndexMessageCount || 0);
+    const searchable = Number(storage.FullTextSearchMessageCount || 0);
+    // A shortfall is not the same as an unbuilt index: mail can be present and
+    // unindexed with nothing on screen saying so, which is search quietly
+    // answering from less than the mailbox.
+    const shortfall = searchable > indexed ? searchable - indexed : 0;
+    const foldersPending = Number(storage.FoldersNeedingRebuild || 0);
     if (storageLoading) return <SettingsLoading label="Calculating storage usage..." />;
     if (storageError) return <SettingsError message={storageError} onRetry={() => void loadStorage()} />;
     return (
       <section className="panel">
         <div className="storage-grid">
-		  <Stat label="Headers" value={formatStatCount(storage.MessageHeaderCount)} detail="emails in the database" />
-		  <Stat label="Full Text Search" value={formatBytes(storage.IndexBytes)} detail={storageEmailDetail(storage.IndexMessageCount)} />
-		  <Stat label="Local Cache" value={formatBytes(storage.BlobBytes)} detail={storageEmailDetail(storage.MessageBodyCount)} />
+          <Stat label="Headers" value={formatStatCount(storage.MessageHeaderCount)} detail="emails in the database" />
+          <Stat label="Full Text Search" value={formatBytes(storage.IndexBytes)} detail={storageSearchCoverage(storage)} />
+          <Stat label="Local Cache" value={formatBytes(storage.BlobBytes)} detail={storageEmailDetail(storage.MessageBodyCount)} />
           <Stat label="Total" value={formatBytes(storage.TotalBytes)} detail={String(storage.Error || "")} />
         </div>
+
+        <h3>Full Text Search</h3>
+        <p className="settings-hint">
+          {backendLabel ? `Your search index is kept in ${backendLabel}. ` : ""}
+          {/* A figure that could not be read is not a figure of zero, so a page
+              that could not measure says so rather than reporting an empty
+              index for a search that is working. */}
+          {storage.Error
+            ? "Some of these figures could not be read this time; the reason is under Total."
+            : storage.IndexPresent
+              ? `It covers ${formatStatCount(indexed)} of the ${formatStatCount(searchable)} emails in folders you have included in search.`
+              : "Nothing is indexed yet, so search cannot find anything until the first index is built."}
+          {storage.FuzzyAvailable
+            ? " Typo-tolerant matching is available."
+            : " Typo-tolerant matching is unavailable, so searches have to spell words the way the email does."}
+        </p>
+        {/* Suppressed when a figure is missing: a count that failed reads as
+            zero, and a zero on the indexed side would announce the whole
+            mailbox as unsearchable. */}
+        {!storage.Error && (shortfall > 0 || foldersPending > 0) ? (
+          <p className="settings-error">
+            {shortfall > 0
+              ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index and will not be found by a search. `
+              : ""}
+            {foldersPending > 0
+              ? `${formatStatCount(foldersPending)} ${foldersPending === 1 ? "folder is" : "folders are"} waiting to be indexed; a running sync fills them in, and rebuilding does it now.`
+              : "Rebuilding the index adds them."}
+          </p>
+        ) : null}
+        {/* The armed state changes only a button label, which says nothing to a
+            screen reader and little to anyone else. */}
+        <div aria-live="polite">
+          {searchRebuildArmed ? (
+            <p className="settings-hint">
+              This reads every email in your search-visible folders again and builds the index from scratch. Your
+              mail is untouched, but your search stays incomplete until it finishes. Click again to confirm.
+            </p>
+          ) : null}
+        </div>
+        <div className="actions">
+          {searchRebuildArmed ? (
+            <button type="button" className="danger" disabled={searchRebuildBusy} onClick={() => void rebuildOwnSearchIndex()}>
+              {searchRebuildBusy ? "Starting..." : "Confirm rebuild"}
+            </button>
+          ) : (
+            <button type="button" className="secondary" disabled={searchRebuildBusy} onClick={() => setSearchRebuildArmed(true)}>
+              Rebuild search index
+            </button>
+          )}
+        </div>
+
         {showIndexBreakdown ? (
           <>
-			<h3>Full Text Search detail</h3>
+            <h3>Full Text Search detail</h3>
             <div className="storage-grid">
               <Stat label="Index segments" value={formatBytes(indexBreakdown.ZapBytes)} detail={`${formatStatCount(indexBreakdown.ZapCount)} files`} />
               <Stat label="Largest segment" value={formatBytes(indexBreakdown.LargestZapBytes)} detail={statDetail(indexBreakdown.LargestZapPath)} />

@@ -139,13 +139,12 @@ locale, not configurable per database. That is acceptable, for two reasons:
 `scripts/pg-preflight.sql` verifies all of this against the actual target
 database (version/encoding gate, byte-exact equality, column- and
 index-level `COLLATE "C"` byte ordering, extensions, UTF-8 strictness, and
-the SQL features WP3 relies on). The same checks also run from the admin
-Database page ("PostgreSQL preflight", `backend/pgpreflight`), which
-exercises the real app-to-database network path and reports its round-trip
-latency — prefer that over the bastion route. Run either before phase 1;
-both were validated against a stock Postgres 16, and `TestTwinsAgree` keeps
-them in sync. Only one preflight runs at a time (they share a scratch
-schema); do not run the script and the page against one database at once.
+the SQL features WP3 relies on). The same checks used to run from the admin
+Database page ("PostgreSQL preflight", `backend/pgpreflight`), which exercised
+the real app-to-database network path; that page and its package were removed
+once the migration was done (see the note below), leaving the script as the
+one way to check a candidate database. Both were validated against a stock
+Postgres 16, and `TestTwinsAgree` kept them in sync while both existed.
 
 Note on how determinism is verified: a catalog lookup on the `pg_collation`
 row named `default` is *not* a check — that row is a pinned placeholder whose
@@ -183,10 +182,19 @@ semicolons — it contains a dollar-quoted function body full of them, and
 PostgreSQL wraps a multi-statement simple query in one implicit transaction, so
 a failure halfway through leaves no partial schema. A test asserts that.
 
-**The migration console** (`/admin/database` → *PostgreSQL migration*) drives
+> **Removed after the migration.** The in-app console and `backend/pgpreflight`
+> were deleted once the move was done: both existed to rehearse the schema
+> against an empty target, and a server that is already serving a durable
+> database has no such target. Schema changes now go through the incremental
+> migrations in `backend/store/postgres_migrations.go`.
+> `scripts/pg-preflight.sql` stays, and is the way to check a candidate
+> database from a shell. The section below describes what the console did while
+> it existed.
+
+**The migration console** (`/admin/database` → *PostgreSQL migration*) drove
 the staged path against the real target from inside the app container, so the
-network path, the server's locale and the role's privileges are the ones the
-migration will actually meet:
+network path, the server's locale and the role's privileges were the ones the
+migration would actually meet:
 
 | Step | What it does | Changes the target |
 | --- | --- | --- |
@@ -755,9 +763,8 @@ Hoster answers received 2026-08-18:
    `COLLATE "C"` in the baseline DDL. Equality stays byte-exact under any
    deterministic default collation, so this narrows the concern to
    ordering, which the column collation pins. Verified end-to-end by
-   `scripts/pg-preflight.sql` and by the in-app admin preflight
-   (`backend/pgpreflight`, admin Database page); run one of them against
-   the provisioned database before phase 1 starts.
+   `scripts/pg-preflight.sql` (and, while it existed, by the in-app admin
+   preflight); run it against the provisioned database before phase 1 starts.
 
 Still open:
 5. ~~Timing of phase 0~~ **Done** — shipped on `main` (see §5, phase 0).

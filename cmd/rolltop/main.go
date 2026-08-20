@@ -854,16 +854,29 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		// ever schedules background repair. Serving mail waits for neither, so
 		// both run behind the listener; fuzzy simply starts answering once its
 		// index exists.
+		//
+		// Both are registered as maintenance while they run, so the activity
+		// view can say what is happening. The trigram build is the one that
+		// needs it: on a filled table it is minutes during which every search
+		// answers without typo tolerance, and a log line is not somewhere the
+		// person whose search just missed a word is going to look.
 		go func() {
+			svc := searchSvc
+			done := svc.StartMaintenance("search_fuzzy_index",
+				"Building the index for typo-tolerant search", 0, time.Now())
 			if err := db.EnsureTrigramSearch(context.Background()); err != nil {
 				log.Printf("postgres search: fuzzy matching unavailable: %v", err)
 			} else {
 				log.Printf("postgres search: fuzzy matching enabled (pg_trgm)")
 			}
+			done()
 			for _, user := range users {
+				finished := svc.StartMaintenance("search_coverage_check",
+					"Checking what the search index covers", user.ID, time.Now())
 				if err := markPostgresSearchBackfill(context.Background(), db, user.ID); err != nil {
 					log.Printf("postgres search backfill check: %v", err)
 				}
+				finished()
 			}
 		}()
 	} else {
