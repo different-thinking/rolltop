@@ -184,6 +184,13 @@ type Service struct {
 	attachmentIndexContinueAt map[int64]time.Time
 	// attachmentIndexContinuationDelay is overridden only by focused tests.
 	attachmentIndexContinuationDelay time.Duration
+
+	// searchBacklog tracks the sweep that finds search-visible mail carrying no
+	// document at all. See search_backlog.go.
+	searchBacklogMu       sync.Mutex
+	searchBacklogCursor   map[int64]int64
+	searchBacklogSettled  map[int64]time.Time
+	searchBacklogInterval time.Duration
 }
 
 const (

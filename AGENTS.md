@@ -157,15 +157,30 @@ site and in review.
   Trash copies, and only accepts a row that shows in All Mail as the original a
   copy hides behind - a Spam-filed or otherwise All-Mail-excluded row standing in
   as the original would take the message out of view entirely. Showing a message
-  twice is recoverable; hiding the only copy is not.
+  twice is recoverable; hiding the only copy is not. Because the rule declines
+  far more groups than it acts on, a scan reports why
+  (`DuplicateScanStats.Outcomes`) alongside what it changed, and the settings
+  panel counts the copies one account holds of its own mail separately: a user
+  looking at mail they see twice cannot otherwise tell a copy Rolltop judged and
+  left alone from one it never considered.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
-- `attachment_indexed_at = 0` is **not** a reindex queue. It flags attachment
-  enrichment, and the maintenance worker's first act is to clear every pending
-  row without indexing it unless `AllowBackgroundAttachmentHydration` is on,
-  which production never sets. Marking rows through it to refill an index is a
-  silent no-op that leaves the tenant unsearchable while the page reports
-  success. What refills an index is the explicit rebuild - purge the folder's
-  documents, then index what the folder has and the index does not
+- `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
+  from stored data only. A pending row means one of two things and only the
+  index can tell them apart, so the maintenance worker asks it
+  (`Search.MessageIDsIndexed`): a row that already has a document is completed
+  as it stands, because enriching it with attachment text needs the raw message
+  that production does not fetch in the background
+  (`AllowBackgroundAttachmentHydration` stays off); a row with no document is
+  indexed from the local raw message when the blob is still there and from the
+  record's own fields when it is not. Never clear pending rows in bulk without
+  that question - stall recovery, generation rebuilds and re-enabling search on
+  a folder all queue rows through this flag expecting documents back, and
+  clearing them is how a tenant's search silently ends up holding half their
+  mail. Mail that is marked done and holds no document is outside both paths, so
+  a drained worker sweeps for it (`requeueMissingSearchDocuments`) behind a
+  count comparison and puts what it finds back in the queue.
+  What re-downloads message bodies is still only the explicit rebuild - purge
+  the folder's documents, then index what the folder has and the index does not
   (`rebuildMailboxSearchIndex`) - offered per account in the folder settings,
   per tenant on the admin database page, and for their own index by the reader
   on the storage page. All three go through `startSearchRebuildForUser` or the

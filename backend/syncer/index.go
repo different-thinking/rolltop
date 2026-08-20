@@ -225,16 +225,6 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 		return 0, nil
 	}
 	ctx = search.WithBackgroundIndexing(ctx)
-	// New mail is indexed synchronously during IMAP import. Do not turn pending
-	// historical attachment metadata into a whole-mailbox background rebuild:
-	// even local raw retention can make that consume the writer for hours.
-	if !s.AllowBackgroundAttachmentHydration {
-		if skipped, err := s.Store.SkipPendingHistoricalAttachmentIndexing(ctx, userID); err != nil {
-			return 0, err
-		} else if skipped > 0 {
-			log.Printf("attachment index skipped historical messages user_id=%d count=%d", userID, skipped)
-		}
-	}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -242,6 +232,44 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	messages, wrapped, err := s.Store.ListMessagesNeedingAttachmentIndexAfter(ctx, userID, cursor, limit)
 	if err != nil {
 		return 0, err
+	}
+	if len(messages) == 0 {
+		// An empty queue is not the same as a complete index. Mail can be marked
+		// done and hold no document — a quarantined index whose queue was
+		// cleared, a batch that was dropped — and nothing else looks for it, so
+		// the drained worker is where that search happens. What it finds is
+		// indexed in this same turn, so the count this returns stays what the
+		// turn actually did and a full page keeps the drain going.
+		queued, err := s.requeueMissingSearchDocuments(ctx, userID, limit)
+		if err != nil || queued == 0 {
+			return 0, err
+		}
+		messages, wrapped, err = s.Store.ListMessagesNeedingAttachmentIndexAfter(ctx, userID, cursor, limit)
+		if err != nil {
+			return 0, err
+		}
+	}
+	// A pending row means one of two very different things, and only the index
+	// itself can tell them apart. Either the message is in the index already and
+	// only its attachment text is outstanding, or it has no document at all -
+	// deferred during a generation rebuild, or queued by stall recovery, which
+	// marks rows pending and quarantines the index expecting them to come back.
+	//
+	// Completing the first kind without touching Bleve is what keeps this worker
+	// from becoming the whole-mailbox background rebuild it must not be. Doing
+	// the same to the second kind is how a tenant's search silently loses mail
+	// for good: the rows leave the queue, nothing else reindexes them, and the
+	// only remaining path is an explicit rebuild nobody knows to start.
+	published := map[int64]bool{}
+	if !s.AllowBackgroundAttachmentHydration && len(messages) > 0 {
+		ids := make([]int64, 0, len(messages))
+		for _, msg := range messages {
+			ids = append(ids, msg.ID)
+		}
+		published, err = s.Search.MessageIDsIndexed(ctx, userID, ids)
+		if err != nil {
+			return 0, err
+		}
 	}
 	// Maintenance is routinely preempted by foreground mailbox work. Checkpoint
 	// smaller prefixes so a cancellation cannot repeatedly discard an entire
@@ -251,6 +279,7 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	enriched := 0
 	deferred := 0
 	coolingDown := 0
+	settled := 0
 	type remoteMailboxPage struct {
 		mailbox  store.Mailbox
 		messages []store.MessageRecord
@@ -298,6 +327,30 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 				return indexed, err
 			}
 			mailboxes[msg.MailboxID] = mailbox
+		}
+		if !mailbox.IncludeInSearch {
+			// The folder left search while this row was queued. Drop whatever
+			// document it still has and complete the task; publishing one here
+			// would put a folder the reader excluded back into their results.
+			if err := s.Search.DeleteMessage(ctx, userID, msg.ID); err != nil {
+				return indexed, err
+			}
+			if err := s.Store.MarkMessageAttachmentIndexed(ctx, userID, msg.ID, msg.HasAttachments); err != nil && !store.IsNotFound(err) {
+				return indexed, err
+			}
+			settled++
+			continue
+		}
+		if published[msg.ID] {
+			// Searchable already; only the attachment text is missing, and
+			// extracting it needs the raw message this install does not fetch in
+			// the background. Complete the derived task rather than replacing a
+			// full document with the preview a record-only rebuild would carry.
+			if err := s.Store.MarkMessageAttachmentIndexed(ctx, userID, msg.ID, msg.HasAttachments); err != nil && !store.IsNotFound(err) {
+				return indexed, err
+			}
+			settled++
+			continue
 		}
 		raw, local, err := s.readLocalRawMessageForIndexRepair(userID, msg)
 		if err != nil {
@@ -368,11 +421,15 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	if len(messages) > 0 {
 		s.advanceAttachmentIndexCursor(userID, messages[len(messages)-1].ID)
 	}
-	if coolingDown > 0 {
-		log.Printf("attachment index batch user_id=%d inspected=%d indexed=%d enriched=%d cooling_down=%d wrapped=%t",
-			userID, len(messages), indexed, enriched, coolingDown, wrapped)
+	if coolingDown > 0 || settled > 0 {
+		log.Printf("attachment index batch user_id=%d inspected=%d indexed=%d enriched=%d settled=%d cooling_down=%d wrapped=%t",
+			userID, len(messages), indexed, enriched, settled, coolingDown, wrapped)
 	}
-	if enriched == 0 && deferred+coolingDown == len(messages) && len(messages) == limit &&
+	// Settling a published row is progress like any other: it takes the row out
+	// of the queue, so a turn that did nothing else must still be followed by the
+	// next page instead of parking on a retry timer.
+	progressed := enriched + settled
+	if progressed == 0 && deferred+coolingDown == len(messages) && len(messages) == limit &&
 		(!wrapped || deferred > 0) {
 		now := time.Now()
 		continueAt := s.deferAttachmentIndexContinuation(userID, now)
@@ -382,7 +439,7 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	}
 	// A wrapped page containing only cooling-down rows has completed a cursor
 	// cycle. Stop here and let the earliest per-message retry wake the worker.
-	if wrapped && enriched == 0 && len(messages) == limit {
+	if wrapped && progressed == 0 && len(messages) == limit {
 		return 0, nil
 	}
 	return len(messages), nil

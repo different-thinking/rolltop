@@ -13,6 +13,7 @@ import type {
   ContactAutocomplete,
   DatabaseOverview,
   DuplicateCopyReport,
+  DuplicateScanResult,
   ComposeAttachmentUpload,
   ComposeForm,
   ComposeIdentity,
@@ -631,8 +632,7 @@ export const api = {
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/local-references/purge`, csrf),
   duplicateCopies: () => getJSON<DuplicateCopyReport>("/api/account/duplicates"),
   rescanDuplicateCopies: (csrf: string, after = "") =>
-    postJSON<DuplicateCopyReport & { groups: number; newly_hidden: number; revealed: number; truncated: boolean; next: string }>(
-      "/api/account/duplicates/rescan", csrf, { after }),
+    postJSON<DuplicateScanResult>("/api/account/duplicates/rescan", csrf, { after }),
   trashDuplicateCopies: (csrf: string) =>
     postJSON<{ ok: boolean; queued: boolean; matched: number; skipped: number; queued_messages?: number; truncated: boolean; partial_error?: string }>(
       "/api/account/duplicates/trash", csrf),

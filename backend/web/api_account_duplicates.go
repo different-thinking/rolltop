@@ -9,6 +9,8 @@ package web
 import (
 	"net/http"
 	"sort"
+
+	"rolltop/backend/store"
 )
 
 // duplicateAccountSummary reports one account's share of the hidden copies.
@@ -74,11 +76,21 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 		s.serverError(w, r, err)
 		return
 	}
+	// Copies one account holds of its own mail are outside detection entirely.
+	// Counting them here is what separates "Rolltop looked and left these
+	// visible on purpose" from "Rolltop never saw them", which is the whole
+	// question a scan that hides nothing raises.
+	withinAccount, err := s.store.CountWithinAccountDuplicateGroupsForUser(r.Context(), cu.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"ok": true, "hidden": total, "accounts": summaries,
 		"groups": stats.Groups, "newly_hidden": stats.Hidden,
 		"revealed": stats.Revealed, "truncated": stats.Truncated,
-		"next": stats.NextHeader,
+		"next": stats.NextHeader, "outcomes": duplicateScanOutcomes(stats),
+		"within_account_groups": withinAccount,
 	})
 }
 
@@ -122,6 +134,20 @@ func (s *Server) apiAccountDuplicatesTrash(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.respondMovePlan(w, r, cu.User.ID, plan, "cleanup")
+}
+
+// duplicateScanOutcomes renders the store's per-group decisions as plain JSON
+// keys. The counts are of groups, not of messages: one group is one Message-ID
+// several accounts hold, and what the view reports is how many of those
+// detection declined to act on and why.
+func duplicateScanOutcomes(stats store.DuplicateScanStats) map[string]int {
+	out := map[string]int{}
+	for outcome, count := range stats.Outcomes {
+		if count > 0 {
+			out[string(outcome)] = count
+		}
+	}
+	return out
 }
 
 // duplicateAccountSummaries joins the per-account counts with the account names

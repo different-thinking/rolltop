@@ -18,11 +18,11 @@ import (
 
 // StorageStats is the per-user disk usage summary shown on the settings page.
 //
-// There is no per-tenant database figure here. PostgreSQL reports one size for
-// the whole database, which is a number for the admin page rather than for a
-// user's own settings, and no honest share of it can be attributed to one
-// tenant. MessageHeaderCount is what this view can say about the relational
-// side, and it says it as a count.
+// The database figure here is this tenant's own rows, not the database. What
+// PostgreSQL reports about itself covers every tenant plus its indexes, and that
+// belongs to the admin page; store.UserMailRowBytes measures the share this
+// reader's mail actually occupies, which is what makes it showable next to the
+// two directory sizes and addable into a total.
 //
 // The full-text figures are asked of the search service rather than measured on
 // the volume, because where the index lives is the backend's business: Bleve
@@ -32,6 +32,13 @@ import (
 // working perfectly.
 type StorageStats struct {
 	MessageHeaderCount int
+	// DatabaseBytes is what this tenant's mail rows occupy in PostgreSQL, and
+	// DatabaseMeasured says the figure was actually read. The measurement is a
+	// scan behind a timeout, so it can fail while the database is perfectly
+	// healthy, and a failed measurement reported as zero would announce a
+	// mailbox that costs nothing to store.
+	DatabaseBytes    int64
+	DatabaseMeasured bool
 	// SearchBackend names where the index lives ("bleve" or "postgres"), so a
 	// page reporting zero bytes can say which of the two it measured.
 	SearchBackend string
@@ -72,6 +79,11 @@ type StorageIndexBreakdown struct {
 }
 
 const storageStatsCacheTTL = 5 * time.Minute
+
+// storageDatabaseBytesTimeout bounds the per-tenant row measurement. It is the
+// same shape of query as the Postgres search-index size, and it gets the same
+// treatment: an answer or nothing, never a page that waits on it.
+const storageDatabaseBytesTimeout = 10 * time.Second
 
 type storageStatsCacheEntry struct {
 	Stats    StorageStats
@@ -121,6 +133,17 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 		stats.MessageHeaderCount, err = s.store.CountMessagesForUser(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("message header count: %v", err))
+		}
+		// Bounded on purpose: this walks the tenant's rows, and a busy database
+		// must cost the page a missing figure rather than a request that hangs.
+		databaseCtx, cancel := context.WithTimeout(context.Background(), storageDatabaseBytesTimeout)
+		stats.DatabaseBytes, err = s.store.UserMailRowBytes(databaseCtx, userID)
+		cancel()
+		if err != nil {
+			stats.DatabaseBytes = 0
+			errs = append(errs, fmt.Sprintf("database rows: %v", err))
+		} else {
+			stats.DatabaseMeasured = true
 		}
 	}
 	if stats.SearchBackend == search.BackendBleve {
@@ -176,7 +199,7 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, fmt.Sprintf("message body count: %v", err))
 		}
 	}
-	stats.TotalBytes = stats.IndexBytes + stats.BlobBytes
+	stats.TotalBytes = stats.DatabaseBytes + stats.IndexBytes + stats.BlobBytes
 	stats.Error = strings.Join(errs, "; ")
 	return stats
 }

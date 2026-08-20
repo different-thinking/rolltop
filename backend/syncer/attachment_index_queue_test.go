@@ -98,7 +98,13 @@ func TestAttachmentIndexQueueBatchesRemoteRowsByMailbox(t *testing.T) {
 	}
 }
 
-func TestAttachmentIndexSkipsHistoricalMessagesWithoutBackgroundRebuild(t *testing.T) {
+// A tenant whose search index was quarantined by stall recovery, or whose
+// messages were deferred by a generation rebuild, has rows queued here with no
+// document at all. This install does not fetch raw messages in the background,
+// so the record's own fields are what the document is built from - but it is
+// built, because nothing else will build it and the alternative is mail that no
+// search can find until someone runs an explicit rebuild.
+func TestAttachmentIndexPublishesUnindexedMessagesWithoutRemoteHydration(t *testing.T) {
 	fixture := newMoveTestFixture(t)
 	ctx := context.Background()
 	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
@@ -115,13 +121,131 @@ func TestAttachmentIndexSkipsHistoricalMessagesWithoutBackgroundRebuild(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if processed != 0 {
-		t.Fatalf("processed=%d, want 0 after bulk completion", processed)
+	if processed != 1 {
+		t.Fatalf("processed=%d, want 1", processed)
 	}
 	if calls := fetcher.totalCallCount(); calls != 0 {
 		t.Fatalf("background attachment hydration calls=%d, want 0", calls)
 	}
 	assertAttachmentIndexPending(t, ctx, fixture.store, fixture.userID, fixture.message.ID, false)
+	assertSearchContainsMessage(t, ctx, searchService, fixture.userID, "Manual spam move", fixture.message.ID)
+}
+
+// The other kind of pending row: the document is published and only its
+// attachment text is outstanding. Enriching it needs the raw message, which this
+// install will not fetch in the background, so the row is completed as it
+// stands - and the published document keeps the full body it was indexed with
+// rather than being overwritten by the preview the record carries.
+func TestAttachmentIndexSettlesPublishedRowsWithoutRewritingDocuments(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	ctx := context.Background()
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = searchService.Close() })
+	indexed := fixture.message
+	indexed.BodyText = "committed hydrated body text"
+	if err := searchService.IndexMessage(ctx, indexed, nil); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &attachmentIndexQueueFetcher{moveTestFetcher: fixture.fetcher}
+	fixture.service.Search = searchService
+	fixture.service.Fetcher = fetcher
+	fixture.service.AllowBackgroundAttachmentHydration = false
+
+	processed, err := fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed=%d, want 1", processed)
+	}
+	if calls := fetcher.totalCallCount(); calls != 0 {
+		t.Fatalf("background attachment hydration calls=%d, want 0", calls)
+	}
+	assertAttachmentIndexPending(t, ctx, fixture.store, fixture.userID, fixture.message.ID, false)
+	assertSearchContainsMessage(t, ctx, searchService, fixture.userID, "hydrated", fixture.message.ID)
+}
+
+// Mail that is marked indexed while holding no document is in no queue and in
+// no index: an ordinary drained turn is the only thing that can notice, and the
+// sweep it runs is what puts such rows back where the worker can publish them.
+func TestAttachmentIndexRequeuesMailMissingFromTheIndex(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	ctx := context.Background()
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = searchService.Close() })
+	// The row claims its indexing finished; the index holds nothing for it.
+	if err := fixture.store.MarkMessageAttachmentIndexed(ctx, fixture.userID, fixture.message.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &attachmentIndexQueueFetcher{moveTestFetcher: fixture.fetcher}
+	fixture.service.Search = searchService
+	fixture.service.Fetcher = fetcher
+	fixture.service.AllowBackgroundAttachmentHydration = false
+
+	processed, err := fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed=%d, want 1", processed)
+	}
+	if calls := fetcher.totalCallCount(); calls != 0 {
+		t.Fatalf("background attachment hydration calls=%d, want 0", calls)
+	}
+	assertSearchContainsMessage(t, ctx, searchService, fixture.userID, "Manual spam move", fixture.message.ID)
+
+	// With the gap closed, the next turn costs two counts and stops rather than
+	// walking the mailbox again.
+	processed, err = fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed != 0 {
+		t.Fatalf("second pass processed=%d, want 0", processed)
+	}
+}
+
+// A folder the reader took out of search is not a gap to fill: its rows are
+// completed and any document they still have is dropped.
+func TestAttachmentIndexLeavesFoldersExcludedFromSearchUnindexed(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	ctx := context.Background()
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = searchService.Close() })
+	if err := fixture.store.UpdateMailboxSettings(ctx, fixture.userID, fixture.source.ID, store.MailboxSettings{
+		SyncMode:      fixture.source.SyncMode,
+		Role:          fixture.source.Role,
+		Icon:          fixture.source.Icon,
+		ShowInSidebar: true,
+		ShowInAllMail: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &attachmentIndexQueueFetcher{moveTestFetcher: fixture.fetcher}
+	fixture.service.Search = searchService
+	fixture.service.Fetcher = fetcher
+	fixture.service.AllowBackgroundAttachmentHydration = false
+
+	if _, err := fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 25); err != nil {
+		t.Fatal(err)
+	}
+	assertAttachmentIndexPending(t, ctx, fixture.store, fixture.userID, fixture.message.ID, false)
+	hits, err := searchService.Search(ctx, fixture.userID, "Manual spam move", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsMessageID(hits, fixture.message.ID) {
+		t.Fatalf("search hits=%v, want message %d left out of the index", hits, fixture.message.ID)
+	}
 }
 
 func TestAttachmentIndexQueueCheckpointsBeforeForegroundCancellation(t *testing.T) {
