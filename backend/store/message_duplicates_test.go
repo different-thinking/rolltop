@@ -426,6 +426,17 @@ func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
 	}
+	// The reason matters as much as the decision: the address was found, the
+	// folder it was found in is the problem. Reporting this as "none of your
+	// addresses appear in To or Cc" would tell the user something untrue about
+	// their own mail.
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.Outcomes[DuplicateGroupOriginalNotVisible]; got != 1 {
+		t.Fatalf("original-not-visible groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	}
 	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
 	if err != nil {
 		t.Fatal(err)

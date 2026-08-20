@@ -541,6 +541,10 @@ export type StorageStats = {
   IndexMessageCount?: number;
   FullTextSearchMessageCount?: number;
   FoldersNeedingRebuild?: number;
+  /** Folders whose documents were purged and are waiting for a rebuild. */
+  FoldersPurged?: number;
+  /** True when both sides of the index/mail comparison were actually read. */
+  SearchCoverageMeasured?: boolean;
   FuzzyAvailable?: boolean;
   IndexBreakdown?: StorageIndexBreakdown;
   BlobPath?: string;

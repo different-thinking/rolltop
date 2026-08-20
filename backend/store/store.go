@@ -51,6 +51,9 @@ type Store struct {
 	// trigramSearch records that EnsureTrigramSearch found or installed
 	// pg_trgm and its index, which is what lets search offer fuzzy matching.
 	trigramSearch atomic.Bool
+	// mailFootprint caches the per-table column layout the storage figure is
+	// summed from. See storage_footprint.go.
+	mailFootprint mailFootprintCache
 }
 
 // MaxConns is the pool cap in force, for the admin page and anything else that

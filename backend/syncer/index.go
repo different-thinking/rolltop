@@ -260,13 +260,13 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	// the same to the second kind is how a tenant's search silently loses mail
 	// for good: the rows leave the queue, nothing else reindexes them, and the
 	// only remaining path is an explicit rebuild nobody knows to start.
-	published := map[int64]bool{}
+	indexedAlready := map[int64]bool{}
 	if !s.AllowBackgroundAttachmentHydration && len(messages) > 0 {
 		ids := make([]int64, 0, len(messages))
 		for _, msg := range messages {
 			ids = append(ids, msg.ID)
 		}
-		published, err = s.Search.MessageIDsIndexed(ctx, userID, ids)
+		indexedAlready, err = s.Search.MessageIDsIndexed(ctx, userID, ids)
 		if err != nil {
 			return 0, err
 		}
@@ -280,6 +280,14 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	deferred := 0
 	coolingDown := 0
 	settled := 0
+	published := 0
+	// Rows this turn completes without building a document: the ones already in
+	// the index, and the ones whose folder left search. Both are collected and
+	// written once per page - a Bleve delete takes the writer gate and commits a
+	// batch of its own, and a per-row mark is a round trip, so doing either per
+	// message turns a page of bookkeeping into a hundred of them.
+	settledUpdates := make([]store.MessageAttachmentIndexUpdate, 0, len(messages))
+	excludedIDs := make([]int64, 0)
 	type remoteMailboxPage struct {
 		mailbox  store.Mailbox
 		messages []store.MessageRecord
@@ -332,23 +340,21 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 			// The folder left search while this row was queued. Drop whatever
 			// document it still has and complete the task; publishing one here
 			// would put a folder the reader excluded back into their results.
-			if err := s.Search.DeleteMessage(ctx, userID, msg.ID); err != nil {
-				return indexed, err
-			}
-			if err := s.Store.MarkMessageAttachmentIndexed(ctx, userID, msg.ID, msg.HasAttachments); err != nil && !store.IsNotFound(err) {
-				return indexed, err
-			}
+			excludedIDs = append(excludedIDs, msg.ID)
+			settledUpdates = append(settledUpdates, store.MessageAttachmentIndexUpdate{
+				MessageID: msg.ID, HasAttachments: msg.HasAttachments,
+			})
 			settled++
 			continue
 		}
-		if published[msg.ID] {
+		if indexedAlready[msg.ID] {
 			// Searchable already; only the attachment text is missing, and
 			// extracting it needs the raw message this install does not fetch in
 			// the background. Complete the derived task rather than replacing a
 			// full document with the preview a record-only rebuild would carry.
-			if err := s.Store.MarkMessageAttachmentIndexed(ctx, userID, msg.ID, msg.HasAttachments); err != nil && !store.IsNotFound(err) {
-				return indexed, err
-			}
+			settledUpdates = append(settledUpdates, store.MessageAttachmentIndexUpdate{
+				MessageID: msg.ID, HasAttachments: msg.HasAttachments,
+			})
 			settled++
 			continue
 		}
@@ -394,6 +400,7 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 				return indexed, err
 			}
 			indexed++
+			published++
 			continue
 		}
 		item, err := s.prepareAttachmentIndexMessageFromRaw(ctx, msg, raw)
@@ -418,17 +425,21 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 	if err := batch.Flush(ctx); err != nil {
 		return indexed, err
 	}
+	if err := s.settleAttachmentIndexRows(ctx, userID, excludedIDs, settledUpdates); err != nil {
+		return indexed, err
+	}
 	if len(messages) > 0 {
 		s.advanceAttachmentIndexCursor(userID, messages[len(messages)-1].ID)
 	}
 	if coolingDown > 0 || settled > 0 {
-		log.Printf("attachment index batch user_id=%d inspected=%d indexed=%d enriched=%d settled=%d cooling_down=%d wrapped=%t",
-			userID, len(messages), indexed, enriched, settled, coolingDown, wrapped)
+		log.Printf("attachment index batch user_id=%d inspected=%d indexed=%d enriched=%d published=%d settled=%d cooling_down=%d wrapped=%t",
+			userID, len(messages), indexed, enriched, published, settled, coolingDown, wrapped)
 	}
-	// Settling a published row is progress like any other: it takes the row out
-	// of the queue, so a turn that did nothing else must still be followed by the
-	// next page instead of parking on a retry timer.
-	progressed := enriched + settled
+	// Anything that takes a row out of the queue is progress, whether a document
+	// was built from the raw message, published from the record alone, or the row
+	// was completed as it stood. A turn that only did the last two must still be
+	// followed by the next page rather than parking on a retry timer.
+	progressed := enriched + published + settled
 	if progressed == 0 && deferred+coolingDown == len(messages) && len(messages) == limit &&
 		(!wrapped || deferred > 0) {
 		now := time.Now()
@@ -443,6 +454,38 @@ func (s *Service) IndexPendingAttachmentsForUser(ctx context.Context, userID int
 		return 0, nil
 	}
 	return len(messages), nil
+}
+
+// settleAttachmentIndexRows completes the rows this turn finished without
+// building a document, in as few writes as the outcomes allow.
+//
+// A row whose folder left search loses its document first: the mark is what says
+// the row is done, so a crash between the two has to leave the row queued rather
+// than leave a document in a folder the reader excluded.
+//
+// A message can be moved or deleted while the turn is running, and the bulk mark
+// refuses the whole page when one of its rows is gone. That is right for a
+// caller that has to know; here it is a race with no consequence, so the page
+// falls back to per-row marks and lets the vanished ones go.
+func (s *Service) settleAttachmentIndexRows(ctx context.Context, userID int64, excludedIDs []int64, updates []store.MessageAttachmentIndexUpdate) error {
+	if len(excludedIDs) > 0 && s.Search != nil {
+		if err := s.Search.DeleteMessages(ctx, userID, excludedIDs); err != nil {
+			return err
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	err := s.Store.MarkMessagesAttachmentIndexed(ctx, userID, updates)
+	if err == nil || !store.IsNotFound(err) {
+		return err
+	}
+	for _, update := range updates {
+		if err := s.Store.MarkMessageAttachmentIndexed(ctx, userID, update.MessageID, update.HasAttachments); err != nil && !store.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // IndexAttachmentsForMessage reparses one raw message, indexes its attachment text, and updates message metadata.

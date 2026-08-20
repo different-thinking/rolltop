@@ -53,6 +53,18 @@ type StorageStats struct {
 	// FoldersNeedingRebuild counts this tenant's search-visible folders whose
 	// coverage nothing has verified. It is what the rebuild acts on.
 	FoldersNeedingRebuild int64
+	// FoldersPurged counts folders whose documents were deliberately deleted and
+	// not rebuilt since. Their mail is in the shortfall below and is invisible to
+	// background indexing, which skips purged folders on purpose: only a rebuild
+	// brings them back, and a page that does not say so leaves a number that
+	// never moves with no explanation.
+	FoldersPurged int64
+	// SearchCoverageMeasured says both sides of the shortfall - the documents in
+	// the index and the mail that should be in it - were actually read. A page
+	// that announces a shortfall built from a figure that failed is announcing a
+	// number it made up, and any other figure on this page failing is not a
+	// reason to withhold this one.
+	SearchCoverageMeasured bool
 	// FuzzyAvailable reports whether typo-tolerant matching can answer. See
 	// search.Service.FuzzyAvailable.
 	FuzzyAvailable bool
@@ -166,11 +178,14 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 			errs = append(errs, "full text index: size could not be measured")
 		}
 	}
+	indexCountMeasured := false
 	if s.search != nil {
 		stats.FuzzyAvailable = s.search.FuzzyAvailable()
 		stats.IndexMessageCount, err = s.search.CountUserMessages(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("full text index message count: %v", err))
+		} else {
+			indexCountMeasured = true
 		}
 	}
 	// An index is present when it holds documents, not when it occupies bytes:
@@ -183,10 +198,16 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 		stats.FullTextSearchMessageCount, err = s.store.CountSearchEnabledMessagesForUser(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("search-enabled message count: %v", err))
+		} else {
+			stats.SearchCoverageMeasured = indexCountMeasured
 		}
 		stats.FoldersNeedingRebuild, err = s.store.CountMailboxesNeedingSearchIndexRepair(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("folders needing a search rebuild: %v", err))
+		}
+		stats.FoldersPurged, err = s.store.CountMailboxesWithPurgedSearchIndexForUser(context.Background(), userID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("folders with a purged search index: %v", err))
 		}
 	}
 	stats.BlobBytes, err = pathSize(blobPath)

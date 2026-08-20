@@ -211,6 +211,38 @@ func TestAttachmentIndexRequeuesMailMissingFromTheIndex(t *testing.T) {
 	}
 }
 
+// A purged folder waits for its rebuild: the queue skips it and so does the
+// sweep. The two counts the sweep gates on have to agree about that, or it sees
+// a shortfall it can never close and walks the mailbox on every turn forever.
+func TestAttachmentIndexSweepSettlesWithAPurgedFolder(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	ctx := context.Background()
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = searchService.Close() })
+	if err := fixture.store.MarkMessageAttachmentIndexed(ctx, fixture.userID, fixture.message.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.MarkMailboxSearchIndexPurged(ctx, fixture.userID, fixture.source.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Search = searchService
+	fixture.service.Fetcher = &attachmentIndexQueueFetcher{moveTestFetcher: fixture.fetcher}
+	fixture.service.AllowBackgroundAttachmentHydration = false
+
+	if processed, err := fixture.service.IndexPendingAttachmentsForUser(ctx, fixture.userID, 25); err != nil || processed != 0 {
+		t.Fatalf("processed=%d, %v; want 0, nil", processed, err)
+	}
+	// Settled means the next turn does not even look: a purged folder is the
+	// rebuild's business, and re-walking the mailbox for it is the busy loop this
+	// gate exists to prevent.
+	if settled := fixture.service.searchBacklogSettledFor(fixture.userID, time.Now()); !settled {
+		t.Fatal("the sweep did not settle, so every drained turn will walk the mailbox again")
+	}
+}
+
 // A folder the reader took out of search is not a gap to fill: its rows are
 // completed and any document they still have is dropped.
 func TestAttachmentIndexLeavesFoldersExcludedFromSearchUnindexed(t *testing.T) {

@@ -178,7 +178,11 @@ site and in review.
   clearing them is how a tenant's search silently ends up holding half their
   mail. Mail that is marked done and holds no document is outside both paths, so
   a drained worker sweeps for it (`requeueMissingSearchDocuments`) behind a
-  count comparison and puts what it finds back in the queue.
+  count comparison whose two sides must describe the same population - a purged
+  folder is in neither, or the sweep sees a gap no walk can close and re-walks
+  the mailbox forever. A purged folder is nobody's backlog: the queue and the
+  sweep both skip it, and the storage page names it separately so a shortfall
+  that will not move is not blamed on a worker that was told to leave it.
   What re-downloads message bodies is still only the explicit rebuild - purge
   the folder's documents, then index what the folder has and the index does not
   (`rebuildMailboxSearchIndex`) - offered per account in the folder settings,

@@ -2367,6 +2367,9 @@ export function SettingsView({
     // answering from less than the mailbox.
     const shortfall = searchable > indexed ? searchable - indexed : 0;
     const foldersPending = Number(storage.FoldersNeedingRebuild || 0);
+    // Purged folders are the part of a shortfall no background work closes, so
+    // they are named separately from the part that fills itself in.
+    const foldersPurged = Number(storage.FoldersPurged || 0);
     if (storageLoading) return <SettingsLoading label="Calculating storage usage..." />;
     if (storageError) return <SettingsError message={storageError} onRetry={() => void loadStorage()} />;
     return (
@@ -2396,14 +2399,21 @@ export function SettingsView({
         {/* Suppressed when a figure is missing: a count that failed reads as
             zero, and a zero on the indexed side would announce the whole
             mailbox as unsearchable. */}
-        {!storage.Error && (shortfall > 0 || foldersPending > 0) ? (
+        {storage.SearchCoverageMeasured && (shortfall > 0 || foldersPending > 0 || foldersPurged > 0) ? (
           <p className="settings-error">
             {/* An ordinary sync indexes the mail it fetches and nothing else, so
                 it is not what closes either gap. Background indexing works
-                through the backlog on its own; only a rebuild re-reads a folder
-                and verifies what its index holds. */}
+                through the backlog on its own - except in a purged folder, which
+                it skips by design - and only a rebuild re-reads a folder and
+                verifies what its index holds. */}
             {shortfall > 0
-              ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index yet and a search will not find ${shortfall === 1 ? "it" : "them"}. Background indexing adds ${shortfall === 1 ? "it" : "them"} as it works through the backlog; a rebuild does it now, and also fetches the bodies of mail no longer cached here. `
+              ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index yet and a search will not find ${shortfall === 1 ? "it" : "them"}. `
+              : ""}
+            {shortfall > 0 && foldersPurged === 0
+              ? `Background indexing adds ${shortfall === 1 ? "it" : "them"} as it works through the backlog; a rebuild does it now, and also fetches the bodies of mail no longer cached here. `
+              : ""}
+            {foldersPurged > 0
+              ? `${formatStatCount(foldersPurged)} ${foldersPurged === 1 ? "folder had its index purged and is" : "folders had their index purged and are"} waiting for a rebuild; background indexing leaves ${foldersPurged === 1 ? "it" : "them"} alone, so nothing but a rebuild brings that mail back into search. `
               : ""}
             {foldersPending > 0
               ? `${formatStatCount(foldersPending)} ${foldersPending === 1 ? "folder has" : "folders have"} coverage nothing has verified since their index was last disturbed; a rebuild is what verifies it.`

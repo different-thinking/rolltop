@@ -76,22 +76,31 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 		s.serverError(w, r, err)
 		return
 	}
-	// Copies one account holds of its own mail are outside detection entirely.
-	// Counting them here is what separates "Rolltop looked and left these
-	// visible on purpose" from "Rolltop never saw them", which is the whole
-	// question a scan that hides nothing raises.
-	withinAccount, err := s.store.CountWithinAccountDuplicateGroupsForUser(r.Context(), cu.User.ID)
-	if err != nil {
-		s.serverError(w, r, err)
-		return
-	}
-	writeJSON(w, map[string]any{
+	payload := map[string]any{
 		"ok": true, "hidden": total, "accounts": summaries,
 		"groups": stats.Groups, "newly_hidden": stats.Hidden,
 		"revealed": stats.Revealed, "truncated": stats.Truncated,
 		"next": stats.NextHeader, "outcomes": duplicateScanOutcomes(stats),
-		"within_account_groups": withinAccount,
-	})
+	}
+	// Copies one account holds of its own mail are outside detection entirely.
+	// Counting them is what separates "Rolltop looked and left these visible on
+	// purpose" from "Rolltop never saw them", which is the whole question a scan
+	// that hides nothing raises.
+	//
+	// It is a grouping query over the tenant's messages and it answers for the
+	// whole mailbox, so it runs on the pass that finishes the scan rather than on
+	// each of the up-to-two-hundred passes a large mailbox takes - which would
+	// repeat one whole-mailbox scan per page for a figure only the last page's
+	// answer is ever read from.
+	if !stats.Truncated {
+		withinAccount, err := s.store.CountWithinAccountDuplicateGroupsForUser(r.Context(), cu.User.ID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		payload["within_account_groups"] = withinAccount
+	}
+	writeJSON(w, payload)
 }
 
 // apiAccountDuplicatesTrash moves every hidden copy into the Trash folder of the

@@ -37,6 +37,10 @@ const searchBacklogSettleFor = 15 * time.Minute
 // missing live ones. That case is what the explicit rebuild is for. What the
 // gate does guarantee is that a tenant whose index is complete pays two counts
 // every fifteen minutes rather than a scan of their mailbox on every turn.
+//
+// Both counts describe the same population - mail that should have a document
+// now - so a purged folder is outside both. Counting its mail on one side only
+// would leave a shortfall the walk cannot close, and this would never settle.
 func (s *Service) requeueMissingSearchDocuments(ctx context.Context, userID int64, limit int) (int, error) {
 	if s.Search == nil || s.Store == nil || userID <= 0 {
 		return 0, nil
@@ -51,7 +55,7 @@ func (s *Service) requeueMissingSearchDocuments(ctx context.Context, userID int6
 	if err != nil {
 		return 0, err
 	}
-	searchable, err := s.Store.CountSearchEnabledMessagesForUser(ctx, userID)
+	searchable, err := s.Store.CountIndexableMessagesForUser(ctx, userID)
 	if err != nil {
 		return 0, err
 	}

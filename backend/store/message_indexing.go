@@ -291,6 +291,29 @@ func (s *Store) ListSearchVisibleMessageIDsAfter(ctx context.Context, userID, af
 	return out, rows.Err()
 }
 
+// CountIndexableMessagesForUser counts the mail that should have a document
+// right now: search-visible, and not in a folder whose index was purged and is
+// waiting for its rebuild.
+//
+// It is deliberately not CountSearchEnabledMessagesForUser, which counts a
+// purged folder's mail as well. That is the honest denominator for a page
+// reporting coverage - the mail is missing from search either way - and the
+// wrong one for a sweep that skips purged folders: comparing a total that
+// includes them against an index that cannot contain them leaves a gap no walk
+// can ever close, and a sweep that never settles.
+func (s *Store) CountIndexableMessagesForUser(ctx context.Context, userID int64) (int, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND mb.include_in_search = 1 AND mb.search_index_purged = 0`, userID).Scan(&n)
+	return n, err
+}
+
 // MarkMessagesAttachmentIndexPending puts messages back in the indexing queue.
 // It is the repair for rows that left the queue without a document ever being
 // written, which the row itself cannot distinguish from a finished one: the
@@ -442,6 +465,28 @@ func (s *Store) CountMailboxesNeedingSearchIndexRepair(ctx context.Context, user
 	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mailboxes
 		WHERE user_id = ? AND include_in_search = 1 AND search_index_state_known = 0`, userID).Scan(&pending)
 	return pending, err
+}
+
+// CountMailboxesWithPurgedSearchIndexForUser reports how many search-visible
+// folders had their documents purged and have not been rebuilt since.
+//
+// A purged folder is the one shortfall no background work closes: the indexing
+// queue and the backlog sweep both skip it, because the purge is a deliberate
+// state that waits for its rebuild. A page showing the shortfall without this
+// number shows one that never moves and blames a worker that was told not to
+// touch it.
+func (s *Store) CountMailboxesWithPurgedSearchIndexForUser(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var purged int64
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mailboxes
+		WHERE user_id = ? AND include_in_search = 1 AND search_index_purged = 1`, userID).Scan(&purged)
+	return purged, err
 }
 
 // MarkMailboxSearchIndexActive records that exact mailbox repair completed.

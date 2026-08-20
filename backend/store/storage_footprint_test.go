@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // The figure the settings page shows next to two measured directories has to be
 // this tenant's own rows and nobody else's, or the page reports one person's
@@ -31,6 +34,48 @@ func TestUserMailRowBytesCountsOnlyTheTenantsOwnRows(t *testing.T) {
 	}
 	if other != 0 {
 		t.Fatalf("a tenant with no mail measured %d bytes, want 0", other)
+	}
+}
+
+// The per-column sum exists to avoid flattening rows, which reads every TOAST
+// chunk of the tenant's message previews. It is only worth doing if it measures
+// the same thing, so this compares it against the expensive figure: the two may
+// differ by row overhead and alignment, not by a column nobody summed.
+func TestUserMailRowBytesMatchesTheWholeRowFigureItAvoids(t *testing.T) {
+	f := newDuplicateFixture(t)
+	for uid := uint32(41); uid < 51; uid++ {
+		f.storeMessage(t, f.original, f.originalInbox, uid, fmt.Sprintf("<toasted-%d@partner.test>", uid), "info@firma.test")
+	}
+
+	measured, err := f.db.UserMailRowBytes(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := f.db.dataDB(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wholeRow int64
+	if err := db.QueryRowContext(f.ctx, `SELECT
+			(SELECT coalesce(sum(pg_column_size(m.*)), 0) FROM messages m WHERE m.user_id = ?)
+			+ (SELECT coalesce(sum(pg_column_size(a.*)), 0) FROM attachments a WHERE a.user_id = ?)
+			+ (SELECT coalesce(sum(pg_column_size(l.*)), 0) FROM locations l WHERE l.user_id = ?)
+			+ (SELECT coalesce(sum(pg_column_size(b.*)), 0) FROM blobs b WHERE b.user_id = ?)`,
+		f.userID, f.userID, f.userID, f.userID).Scan(&wholeRow); err != nil {
+		t.Fatal(err)
+	}
+	if wholeRow == 0 {
+		t.Fatal("whole-row figure is zero, so this comparison proves nothing")
+	}
+	difference := measured - wholeRow
+	if difference < 0 {
+		difference = -difference
+	}
+	// Generous on purpose: what this rejects is a missing column, which on rows
+	// carrying subjects and addresses is a large fraction, not a few bytes of
+	// per-row padding.
+	if difference*10 > wholeRow {
+		t.Fatalf("per-column bytes=%d, whole-row bytes=%d: too far apart to be the same measurement", measured, wholeRow)
 	}
 }
 

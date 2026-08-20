@@ -455,6 +455,14 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 	}
 	accounts := map[int64]bool{}
 	addressed := map[int64]bool{}
+	// namedAnywhere is the same question without the eligibility rule: which
+	// accounts the message names at all. It changes no decision - only a row that
+	// could stand in as the original may decide a group - but it is the
+	// difference between the two ways a group can end up with no deciding
+	// account, and the two are opposite advice. Mail nobody's address appears in
+	// is a Bcc or a list; mail the addressed account keeps only in Spam or Trash
+	// was found and left alone on purpose.
+	namedAnywhere := map[int64]bool{}
 	for _, item := range copies {
 		accounts[item.AccountID] = true
 		if item.DuplicateOf == item.ID {
@@ -462,11 +470,15 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 			// as unresolvable rather than trusting the stored pointer.
 			return nil, DuplicateGroupUndecidable
 		}
+		if !messageAddressesAccount(item, addresses[item.AccountID]) {
+			continue
+		}
+		namedAnywhere[item.AccountID] = true
 		// Only a row that could stand in as the original counts its account as
 		// addressed. A message the addressed account holds solely in Spam or
 		// Trash cannot cover for the copies, so its account does not get to
 		// decide the group.
-		if duplicateOriginalEligible(item) && messageAddressesAccount(item, addresses[item.AccountID]) {
+		if duplicateOriginalEligible(item) {
 			addressed[item.AccountID] = true
 		}
 	}
@@ -474,6 +486,9 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 		return nil, DuplicateGroupUndecidable
 	}
 	if len(addressed) == 0 {
+		if len(namedAnywhere) > 0 {
+			return nil, DuplicateGroupOriginalNotVisible
+		}
 		return nil, DuplicateGroupNoAddressee
 	}
 	if len(addressed) > 1 {
@@ -493,9 +508,10 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 		}
 	}
 	if original.ID == 0 {
-		// The addressed account holds the message only where the reader would not
-		// find it. Whatever the other accounts hold, hiding it behind that row
-		// would take the message out of view entirely.
+		// Unreachable: an account only counts as addressed through a row that
+		// could stand in as the original, so the loop above has just found one.
+		// Kept as the refusal it always was rather than as a nil-pointer waiting
+		// for the eligibility rule to change under it.
 		return nil, DuplicateGroupOriginalNotVisible
 	}
 	out := map[int64]int64{}
