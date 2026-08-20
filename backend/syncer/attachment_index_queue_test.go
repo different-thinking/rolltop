@@ -253,6 +253,11 @@ func TestAttachmentIndexLeavesFoldersExcludedFromSearchUnindexed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = searchService.Close() })
+	// Indexed first, so the assertion below is about a document that was dropped
+	// rather than one that was never written - which would pass on its own.
+	if err := searchService.IndexMessage(ctx, fixture.message, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.store.UpdateMailboxSettings(ctx, fixture.userID, fixture.source.ID, store.MailboxSettings{
 		SyncMode:      fixture.source.SyncMode,
 		Role:          fixture.source.Role,

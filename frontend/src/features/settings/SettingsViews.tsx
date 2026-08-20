@@ -796,7 +796,7 @@ export function SettingsView({
   // What the last scan decided not to do. Held separately from the report,
   // which describes the copies that are hidden right now rather than the
   // groups a pass walked past.
-  const [duplicateScan, setDuplicateScan] = useState<{ outcomes: Record<string, number>; withinAccountGroups: number } | null>(null);
+  const [duplicateScan, setDuplicateScan] = useState<{ outcomes: Record<string, number>; withinAccountMessages: number } | null>(null);
   const [duplicateError, setDuplicateError] = useState("");
   const [folderRunRefreshAccounts, setFolderRunRefreshAccounts] = useState<Set<number>>(() => new Set());
   const [savingIdentity, setSavingIdentity] = useState(false);
@@ -1670,24 +1670,30 @@ export function SettingsView({
   // Every line here is a refusal to hide mail, phrased as the rule that produced
   // it. A user who sees the same message twice needs to be able to tell which of
   // their copies Rolltop looked at and left alone, and why.
-  function duplicateScanReasons(scan: { outcomes: Record<string, number>; withinAccountGroups: number }): string[] {
+  function duplicateScanReasons(scan: { outcomes: Record<string, number>; withinAccountMessages: number }): string[] {
     const lines: string[] = [];
     const outcome = (key: string) => Number(scan.outcomes[key] || 0);
-    const groups = (count: number) => `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
+    const messages = (count: number) => `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
     if (outcome("no_addressee") > 0) {
-      lines.push(`${groups(outcome("no_addressee"))} name none of your addresses in To or Cc - Bcc, or a mailing list - so nothing says which account the delivery belongs to. Every copy stays visible.`);
+      lines.push(`${messages(outcome("no_addressee"))} name none of your addresses in To or Cc - Bcc, or a mailing list - so nothing says which account the delivery belongs to. Every copy stays visible.`);
     }
     if (outcome("many_addressees") > 0) {
-      lines.push(`${groups(outcome("many_addressees"))} were addressed to more than one of your accounts, so each copy is a delivery of its own.`);
+      lines.push(`${messages(outcome("many_addressees"))} were addressed to more than one of your accounts, so each copy is a delivery of its own.`);
     }
     if (outcome("original_not_visible") > 0) {
-      lines.push(`${groups(outcome("original_not_visible"))} are kept by the addressed account only in Spam, Trash, Sent, or Drafts, where hiding the other copies behind them would take the message out of view entirely.`);
+      // Every folder the copy could not stand in from, not only the named ones:
+      // a folder taken out of All Mail lands here too, and a sentence listing
+      // Spam and Trash would send that reader looking in the wrong place.
+      lines.push(`${messages(outcome("original_not_visible"))} are kept by the addressed account only where your lists do not show them - Spam, Trash, Sent, Drafts, or a folder you took out of All Mail - and hiding the other copies behind those would take the message out of view entirely.`);
     }
     if (outcome("nothing_to_hide") > 0) {
-      lines.push(`${groups(outcome("nothing_to_hide"))} have their other copies in Sent, Drafts, or Trash, which are never hidden.`);
+      lines.push(`${messages(outcome("nothing_to_hide"))} have their other copies in Sent, Drafts, or Trash, which are never hidden.`);
     }
-    if (scan.withinAccountGroups > 0) {
-      lines.push(`${groups(scan.withinAccountGroups)} appear more than once inside a single account - the same mail filed in two of that account's folders. Both are real messages on that server, so neither is hidden.`);
+    if (outcome("undecidable") > 0) {
+      lines.push(`${messages(outcome("undecidable"))} carry duplicate links that contradict themselves - a copy pointing at itself - so the scan changed nothing about them and left every copy visible.`);
+    }
+    if (scan.withinAccountMessages > 0) {
+      lines.push(`${messages(scan.withinAccountMessages)} appear more than once inside a single account - the same mail filed in two of that account's folders. Both are real messages on that server, so neither is hidden.`);
     }
     return lines;
   }
@@ -2662,7 +2668,7 @@ export function SettingsView({
         result = await api.rescanDuplicateCopies(csrf, cursor);
       }
       setDuplicates({ ok: result.ok, hidden: result.hidden, accounts: result.accounts });
-      setDuplicateScan({ outcomes, withinAccountGroups: Number(result.within_account_groups || 0) });
+      setDuplicateScan({ outcomes, withinAccountMessages: Number(result.within_account_messages || 0) });
       setDuplicateNotice(duplicateScanNotice(result.hidden, newlyHidden, revealed, Boolean(cursor)));
     } catch (err) {
       setDuplicateError(messageFromError(err));

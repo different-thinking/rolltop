@@ -194,8 +194,9 @@ func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64,
 	return stats, nil
 }
 
-// CountWithinAccountDuplicateGroupsForUser counts the Message-IDs a single
-// account holds more than once, which detection deliberately never touches.
+// CountWithinAccountDuplicatedMessagesForUser counts the messages a single
+// account holds more than one copy of, which detection deliberately never
+// touches.
 //
 // Two rows of one account with the same Message-ID are the same mail filed in
 // two of that account's folders - a Gmail label, a copy the user made - and both
@@ -203,7 +204,7 @@ func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64,
 // account holds. The number exists because a user looking at mail they see twice
 // is owed the difference between a copy Rolltop declined to hide and one it
 // never considered.
-func (s *Store) CountWithinAccountDuplicateGroupsForUser(ctx context.Context, userID int64) (int, error) {
+func (s *Store) CountWithinAccountDuplicatedMessagesForUser(ctx context.Context, userID int64) (int, error) {
 	if userID <= 0 {
 		return 0, nil
 	}
@@ -211,14 +212,18 @@ func (s *Store) CountWithinAccountDuplicateGroupsForUser(ctx context.Context, us
 	if err != nil {
 		return 0, err
 	}
-	var groups int
-	err = db.QueryRowContext(ctx, `SELECT count(*) FROM (
-			SELECT 1 FROM messages
+	// Counted per message rather than per account holding it: one message both
+	// of two accounts file twice is one message the reader sees more than once,
+	// and reporting it as two would describe their mailbox wrongly in exactly
+	// the way this number exists to avoid.
+	var messages int
+	err = db.QueryRowContext(ctx, `SELECT count(DISTINCT message_id_header) FROM (
+			SELECT message_id_header FROM messages
 			WHERE user_id = ? AND message_id_header <> '' AND duplicate_of_message_id = 0
 			GROUP BY message_id_header, account_id
 			HAVING count(*) > 1
-		) AS repeated`, userID).Scan(&groups)
-	return groups, err
+		) AS repeated`, userID).Scan(&messages)
+	return messages, err
 }
 
 // duplicateGroupHeaders pages the Message-IDs that more than one account holds.

@@ -219,12 +219,12 @@ func TestWithinAccountCopiesAreCountedRatherThanHidden(t *testing.T) {
 	if pointer := f.duplicatePointer(t, filed.ID); pointer != 0 {
 		t.Fatalf("within-account copy points at %d, want it left alone", pointer)
 	}
-	groups, err := f.db.CountWithinAccountDuplicateGroupsForUser(f.ctx, f.userID)
+	messages, err := f.db.CountWithinAccountDuplicatedMessagesForUser(f.ctx, f.userID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if groups != 1 {
-		t.Fatalf("within-account groups=%d, want 1", groups)
+	if messages != 1 {
+		t.Fatalf("within-account duplicated messages=%d, want 1", messages)
 	}
 }
 

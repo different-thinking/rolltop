@@ -72,11 +72,14 @@ func (s *Service) requeueMissingSearchDocuments(ctx context.Context, userID int6
 		return 0, err
 	}
 	if len(ids) == 0 {
-		// The walk reached the end without closing the gap. Start over rather
-		// than stopping: rows below the cursor may have lost their documents
-		// while this pass was above them, and the counts still say mail is
-		// missing.
-		s.advanceSearchBacklogCursor(userID, 0)
+		// A complete cycle that did not close the gap. Start over - rows below
+		// the cursor may have lost their documents while this pass was above
+		// them, and the counts still say mail is missing - but not immediately:
+		// a shortfall no walk can reach, an index counting documents for mail
+		// that is gone, would otherwise cost two counts and a page on every
+		// turn for as long as it lasts. Settling puts the next cycle behind the
+		// same interval a complete index gets.
+		s.settleSearchBacklog(userID, time.Now())
 		return 0, nil
 	}
 	s.advanceSearchBacklogCursor(userID, ids[len(ids)-1])

@@ -93,12 +93,12 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 	// repeat one whole-mailbox scan per page for a figure only the last page's
 	// answer is ever read from.
 	if !stats.Truncated {
-		withinAccount, err := s.store.CountWithinAccountDuplicateGroupsForUser(r.Context(), cu.User.ID)
+		withinAccount, err := s.store.CountWithinAccountDuplicatedMessagesForUser(r.Context(), cu.User.ID)
 		if err != nil {
 			s.serverError(w, r, err)
 			return
 		}
-		payload["within_account_groups"] = withinAccount
+		payload["within_account_messages"] = withinAccount
 	}
 	writeJSON(w, payload)
 }
