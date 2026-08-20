@@ -196,6 +196,23 @@ func (s *Server) searchConversationSeeds(ctx context.Context, userID int64, q st
 	return messages, nil
 }
 
+// Search hits are messages and the list shows conversations, so one page of
+// conversations is collected by paging hits until enough distinct threads have
+// been seen. How many that takes is a property of the mail, not of the request:
+// a term every message of one long thread carries yields one conversation per
+// hundred hits.
+//
+// Each of those pages costs the same as the first - a ranked search reads every
+// matching message whatever slice of the ranking it returns - so a thread-heavy
+// result set is where this loop turns one search into dozens. It starts at a
+// page that can answer the request in one round and doubles when that was not
+// enough, which leaves the common case as cheap as it was and bounds the
+// pathological one to a handful of rounds instead of dozens.
+const (
+	searchSeedBatchStart = 100
+	searchSeedBatchMax   = 500
+)
+
 func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q string, page, pageSize int, opts search.SearchOptions, own map[string]bool, mailboxFilter searchMailboxFilter, timing *searchTiming) ([]conversationSeed, error) {
 	searchQuery, starFilter := stripStarSearchOperators(q)
 	targetStart := (page - 1) * pageSize
@@ -215,7 +232,11 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		unique = append(unique, seed)
 	}
 	rawOffset := 0
-	const batchSize = 100
+	// One hit can only ever become one conversation, so a batch smaller than the
+	// page being assembled cannot fill it - asking for a hundred hits to collect
+	// the hundred-and-first conversation is a round that is wasted before it is
+	// made.
+	batchSize := min(max(searchSeedBatchStart, targetEnd), searchSeedBatchMax)
 	for len(unique) < targetEnd {
 		bleveStart := time.Now()
 		hits, err := s.search.SearchHitsWithOptions(ctx, userID, searchQuery, batchSize, rawOffset, opts)
@@ -272,6 +293,7 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		if len(hits) < batchSize {
 			break
 		}
+		batchSize = min(batchSize*2, searchSeedBatchMax)
 	}
 	if targetStart >= len(unique) {
 		return nil, nil

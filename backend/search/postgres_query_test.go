@@ -597,3 +597,105 @@ func TestPostgresBackendPurgeStopsOnCallbackError(t *testing.T) {
 		t.Fatalf("count = %d; an abort must stop part way", count)
 	}
 }
+
+// Typo tolerance is a fallback, not a co-equal branch: it reads a second copy
+// of every candidate's text, so it runs for the query that found nothing and
+// stays out of the way of the one that found a page of mail. The near-miss
+// document is the witness - it can only be reached by similarity.
+func TestPostgresSearchFuzzesOnlyWhileExactMatchesAreScarce(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	if err := db.EnsureTrigramSearch(ctx); err != nil {
+		t.Fatalf("ensure trigram search: %v", err)
+	}
+
+	// A neighbour whose mailbox is full of the same word. The gate counts
+	// matches to decide whether this tenant's query needs typo tolerance, and
+	// counting theirs would answer one reader's question with another's mail.
+	neighbour, neighbourInbox := newPostgresSearchTenant(t, db, "pg-search-neighbour@example.test")
+	crowd := make([]MessageIndexDocument, 0, pgFuzzyFallbackBelow*2)
+	for uid := uint32(5000); uid < 5000+uint32(pgFuzzyFallbackBelow)*2; uid++ {
+		crowd = append(crowd, MessageIndexDocument{
+			Message: seedPostgresSearchMessage(t, db, neighbour, neighbourInbox, uid, "Rechnung", "anbei die rechnung"),
+		})
+	}
+	if err := svc.IndexMessages(ctx, crowd); err != nil {
+		t.Fatalf("index neighbour: %v", err)
+	}
+
+	nearMiss := seedPostgresSearchMessage(t, db, user, mailbox, 900, "Rechnnung Dreher", "nur ueber aehnlichkeit erreichbar")
+	docs := []MessageIndexDocument{{Message: nearMiss}}
+	// One short of the gate: the query is still answered with typo tolerance.
+	for uid := uint32(901); uid < 901+uint32(pgFuzzyFallbackBelow)-1; uid++ {
+		docs = append(docs, MessageIndexDocument{
+			Message: seedPostgresSearchMessage(t, db, user, mailbox, uid, "Rechnung", "anbei die rechnung"),
+		})
+	}
+	if err := svc.IndexMessages(ctx, docs); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 200, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != pgFuzzyFallbackBelow {
+		t.Fatalf("hits = %d, want the %d exact matches plus the near miss - the neighbour's mail must not appear or count",
+			len(hits), pgFuzzyFallbackBelow)
+	}
+	if !hitsContain(hits, nearMiss.ID) {
+		t.Fatalf("hits = %v, want the near miss %d reached by similarity one match short of the gate", hits, nearMiss.ID)
+	}
+
+	// One more exact match puts the query exactly on the gate, which is where
+	// it closes: the near miss no longer has a way in. Testing the boundary
+	// itself is the point - a gate written one off would pass either side of it.
+	onTheGate := seedPostgresSearchMessage(t, db, user, mailbox, 900+uint32(pgFuzzyFallbackBelow), "Rechnung", "anbei die rechnung")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: onTheGate}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	hits, err = svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 200, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != pgFuzzyFallbackBelow {
+		t.Fatalf("hits = %d, want exactly the %d exact matches", len(hits), pgFuzzyFallbackBelow)
+	}
+	if hitsContain(hits, nearMiss.ID) {
+		t.Fatalf("near miss %d still matched with exactly %d exact hits, so the gate is off by one",
+			nearMiss.ID, pgFuzzyFallbackBelow)
+	}
+
+	// The ranked query cuts the page in an inner layer and answers the
+	// weight-class question in an outer one. Paging has to survive that.
+	first, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 10, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	second, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 10, 10, SearchOptions{})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	if len(first) != 10 || len(second) != 10 {
+		t.Fatalf("pages = %d and %d, want 10 each", len(first), len(second))
+	}
+	for _, hit := range second {
+		if hitsContain(first, hit.ID) {
+			t.Fatalf("message %d appears on both pages", hit.ID)
+		}
+	}
+	for _, hit := range first {
+		if len(hit.Fields) == 0 {
+			t.Fatalf("hit %d reports no matched field, so the deferred class query lost its answer", hit.ID)
+		}
+	}
+}
+
+func hitsContain(hits []Hit, id int64) bool {
+	for _, hit := range hits {
+		if hit.ID == id {
+			return true
+		}
+	}
+	return false
+}

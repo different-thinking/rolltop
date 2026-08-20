@@ -235,13 +235,60 @@ func pgNeedleTerms(parsed parsedQuery) []string {
 	return terms
 }
 
+// pgFuzzyFallbackBelow is how few exact matches a query needs before typo
+// tolerance is worth what it costs.
+//
+// Fuzzy matching probes a trigram similarity against the message's whole word
+// list, which is a second copy of its text and, on any real message, stored out
+// of line. Running it beside the lexeme query means reading that copy for every
+// candidate the query touches - measured at seventeen times the cost of the
+// exact search on an 85,000-message mailbox - and it earns nothing when the word
+// was spelled correctly and the page is already full of real matches.
+//
+// So it becomes what it always was for the reader: a fallback. A query that
+// already finds a page of mail is answered exactly; one that finds almost
+// nothing is the query that was probably mistyped, and that one pays. The gate
+// is one bounded count off the index, and it reads a property of the query
+// rather than of the page, so every page of the same search decides alike and
+// paging stays consistent.
+const pgFuzzyFallbackBelow = 50
+
+// pgExactSpec is one spec with its fuzzy half removed: membership and score
+// both fall back to the lexeme query alone.
+func pgExactSpec(spec store.MessageSearchQuery) store.MessageSearchQuery {
+	spec.TextTerms = nil
+	spec.FuzzyThreshold = 0
+	return spec
+}
+
+// pgResolveFuzzy drops the fuzzy half of a spec when the exact query alone
+// finds enough mail to fill a page.
+func (s *Service) pgResolveFuzzy(ctx context.Context, spec store.MessageSearchQuery) (store.MessageSearchQuery, error) {
+	if !specUsesFuzzy(spec) {
+		return spec, nil
+	}
+	exact := pgExactSpec(spec)
+	found, err := s.pg.CountMessageSearchMatches(ctx, exact, pgFuzzyFallbackBelow)
+	if err != nil {
+		return spec, fmt.Errorf("postgres search gate: %w", err)
+	}
+	if found >= pgFuzzyFallbackBelow {
+		return exact, nil
+	}
+	return spec, nil
+}
+
 func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText string, limit, offset int, opts SearchOptions) ([]Hit, error) {
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 || limit > maxHitsPerRequest {
 		limit = 50
 	}
 	offset = max(offset, 0)
 	parsed := parseQuery(queryText)
 	spec := pgSearchSpec(userID, parsed, opts, limit, offset, s.pg.TrigramSearchEnabled())
+	spec, err := s.pgResolveFuzzy(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.pg.SearchMessageIDs(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("postgres search: %w", err)
@@ -270,6 +317,10 @@ const pgExplainIDChunk = 500
 func (s *Service) pgExplainMessageIDs(ctx context.Context, userID int64, messageIDs []int64, queryText string, opts SearchOptions) (ExplanationResult, bool, error) {
 	parsed := parseQuery(queryText)
 	spec := pgSearchSpec(userID, parsed, opts, 1, 0, s.pg.TrigramSearchEnabled())
+	spec, err := s.pgResolveFuzzy(ctx, spec)
+	if err != nil {
+		return ExplanationResult{}, false, err
+	}
 	ids := make([]int64, 0, len(messageIDs))
 	seen := make(map[int64]bool, len(messageIDs))
 	for _, id := range messageIDs {

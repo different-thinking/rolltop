@@ -1755,6 +1755,20 @@ func (s *Service) explainMessageIDsWithOptions(ctx context.Context, userID int64
 	}, true, nil
 }
 
+// maxHitsPerRequest is the largest page one search request may ask for. Both
+// backends answer a request above it with the default page of fifty rather
+// than an error - the same thing they have always done with a nonsensical
+// limit, since a caller asking for more hits than the ceiling allows has
+// miscounted rather than asked for something.
+//
+// It is generous because the callers above this package do not want a page -
+// they want enough hits to fill a page of conversations, or every message a
+// filter matches, and they get there by asking again at a higher offset. Under
+// both backends a ranked search costs about the same whatever slice of the
+// ranking it returns, so those loops are far cheaper asking once for a large
+// page than repeatedly for a small one.
+const maxHitsPerRequest = 500
+
 // search applies pagination bounds, builds the tenant-scoped query, optionally
 // asks for term locations, and leaves result hydration to web/store layers.
 func (s *Service) search(ctx context.Context, userID int64, queryText string, limit, offset int, opts SearchOptions, includeLocations bool) (*bleve.SearchResult, error) {
@@ -1763,7 +1777,7 @@ func (s *Service) search(ctx context.Context, userID int64, queryText string, li
 		return nil, ctx.Err()
 	default:
 	}
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 || limit > maxHitsPerRequest {
 		limit = 50
 	}
 	if offset < 0 {

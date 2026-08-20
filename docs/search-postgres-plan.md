@@ -154,7 +154,7 @@ Translation of the parsed query:
 | free text, unquoted | AND of lexemes, prefix match (`:*`) on the final term |
 | free text, quoted | phrase query (`<->` / `phraseto_tsquery`) |
 | negated terms | `AND NOT (tsv @@ ...)` |
-| fuzzy (`Behavior.Fuzzy`) | **shipped**: per-term `pg_trgm` word similarity against a distinct-words column (migration 0002), OR-composed with the term's lexeme match; floors 0.35 (balanced) / 0.30 (forgiving) set per query with `SET LOCAL`, minimum term length 5/4 runes, quoted phrases never fuzz. Extension and trigram index are runtime-optional (`EnsureTrigramSearch`) — absent privileges degrade to exact matching, never block startup |
+| fuzzy (`Behavior.Fuzzy`) | **shipped, as a fallback**: per-term `pg_trgm` word similarity against a distinct-words column (migration 0002), OR-composed with the term's lexeme match; floors 0.35 (balanced) / 0.30 (forgiving) set per query with `SET LOCAL`, minimum term length 5/4 runes, quoted phrases never fuzz. Extension and trigram index are runtime-optional (`EnsureTrigramSearch`) — absent privileges degrade to exact matching, never block startup. It runs only when the exact query finds fewer than `pgFuzzyFallbackBelow` messages (§5a) |
 | ranking boosts (subject > from > body > attachments) | `ts_rank_cd` weight array `{D,C,B,A}` |
 | recency bias | multiply by an exponential decay on `messages.date_unix`, in the `ORDER BY` expression |
 | sender/contact boosts | `CASE WHEN from_addr = ANY($senders) THEN boost` factors |
@@ -162,6 +162,34 @@ Translation of the parsed query:
 | `Explain*` (term contributions panel) | reduced fidelity: per-field rank components instead of Bleve's scorer tree; the panel renders what it gets |
 | `SimilarMessages` | candidates already come from the store; scoring becomes `ts_rank` of the weighted term set restricted to `message_id = ANY(candidates)` |
 | `MatchMessageWithOptions` | the search query `AND message_id = $x` |
+
+## 5a. What the read path costs
+
+A message's vector and its word list are large enough to live outside the heap
+row, so the cost of a ranked query is how many rows it reads them for. Ranking
+has no way around it — `ts_rank_cd` needs the vector of every match — but the
+two things that used to ride along with it did:
+
+- **Weight-class reporting.** The four `ts_filter` columns concern the page that
+  comes back, and the table above always said so ("on the returned page only").
+  Written in the same `SELECT` as the score they did not behave that way:
+  PostgreSQL projects below the sort that feeds a `LIMIT`, so they answered for
+  every candidate. Measured on 85,000 messages with 7,083 matches, they cost
+  more than three times the ranking they sat next to. They now run in an outer
+  layer over the rows the inner one cut to.
+- **Fuzzy matching.** The similarity probe reads the word list, a second copy of
+  the message's text, for every candidate the query touches — 6.3s against 360ms
+  for the same search on that corpus. It earns nothing when the word was spelled
+  correctly, so it is now gated: a capped count off the GIN index (~6ms, and
+  0.04ms when the term matches nothing) decides, and only a query finding fewer
+  than fifty messages pays for typo tolerance. The gate reads the query, not the
+  page, so paging a search stays consistent.
+
+The third multiplier is above this package. Callers that need more hits than one
+page holds — collecting distinct conversations, resolving a whole-filter delete —
+get them by asking again at a higher offset, and each of those asks re-ranks the
+whole match set. They now ask for pages of up to `maxHitsPerRequest` (500)
+instead of 100, which is the same query for a fifth of the rounds.
 
 ## 6. Backfill and cutover
 

@@ -196,6 +196,21 @@ site and in review.
   below, because a transactional row write has nothing for them to guard.
   Everything in this section about Bleve lifecycle applies to the Bleve
   backend only.
+- On the Postgres backend, a message's text is stored out of line, so what a
+  ranked query costs is decided by how many rows it reads that text for - not
+  by how many it returns. Three rules follow, and all three were once broken at
+  once, which is how a mailbox that finished indexing started answering searches
+  with a gateway timeout. Anything that only concerns the page returned belongs
+  outside the layer that ranks and cuts: PostgreSQL projects below the sort that
+  feeds a limit, so the weight-class columns written beside the score answered
+  for every candidate to report on fifty. Fuzzy matching probes a second copy of
+  that text and is a fallback, never a co-equal branch - it runs when the exact
+  query finds almost nothing, which is the query that was mistyped, and the gate
+  that decides is a bounded count reading a property of the query, so every page
+  of one search decides alike. And a caller that needs more hits than a page
+  holds must ask for a bigger page, not for more pages: every page re-ranks the
+  whole match set, so the loops collecting conversations or resolving a
+  whole-filter delete pay the full cost again on each round.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the
