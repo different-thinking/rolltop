@@ -253,17 +253,89 @@ func (s *Store) MarkMessagesAttachmentIndexed(ctx context.Context, userID int64,
 	return tx.Commit()
 }
 
-// SkipPendingHistoricalAttachmentIndexing completes deferred historical
-// attachment enrichment without doing a whole-mailbox background rebuild.
-// New messages are indexed during their normal IMAP import; historical
-// attachment extraction is deliberately an explicit full-text rebuild task.
-func (s *Store) SkipPendingHistoricalAttachmentIndexing(ctx context.Context, userID int64) (int64, error) {
+// ListSearchVisibleMessageIDsAfter pages the ids of a tenant's search-visible
+// mail in id order. It is what the background sweep walks to find messages the
+// index does not hold; ids alone are enough, because the sweep asks the index
+// about them before it loads anything.
+func (s *Store) ListSearchVisibleMessageIDsAfter(ctx context.Context, userID, afterID int64, limit int) ([]int64, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("user id must be positive")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT m.id
+		FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND mb.include_in_search = 1 AND mb.search_index_purged = 0 AND m.id > ?
+		ORDER BY m.id LIMIT ?`, userID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// CountIndexableMessagesForUser counts the mail that should have a document
+// right now: search-visible, and not in a folder whose index was purged and is
+// waiting for its rebuild.
+//
+// It is deliberately not CountSearchEnabledMessagesForUser, which counts a
+// purged folder's mail as well. That is the honest denominator for a page
+// reporting coverage - the mail is missing from search either way - and the
+// wrong one for a sweep that skips purged folders: comparing a total that
+// includes them against an index that cannot contain them leaves a gap no walk
+// can ever close, and a sweep that never settles.
+func (s *Store) CountIndexableMessagesForUser(ctx context.Context, userID int64) (int, error) {
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND mb.include_in_search = 1 AND mb.search_index_purged = 0`, userID).Scan(&n)
+	return n, err
+}
+
+// MarkMessagesAttachmentIndexPending puts messages back in the indexing queue.
+// It is the repair for rows that left the queue without a document ever being
+// written, which the row itself cannot distinguish from a finished one: the
+// caller establishes that by asking the index.
+func (s *Store) MarkMessagesAttachmentIndexPending(ctx context.Context, userID int64, messageIDs []int64) (int64, error) {
 	if userID <= 0 {
 		return 0, fmt.Errorf("user id must be positive")
 	}
-	result, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages
-		SET attachment_indexed_at = ?, updated_at = ?
-		WHERE user_id = ? AND attachment_indexed_at = 0`, nowUnix(), nowUnix(), userID)
+	if len(messageIDs) == 0 {
+		return 0, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	args := make([]any, 0, len(messageIDs)+2)
+	args = append(args, nowUnix(), userID)
+	for _, id := range messageIDs {
+		args = append(args, id)
+	}
+	result, err := db.ExecContext(ctx, `UPDATE messages SET attachment_indexed_at = 0, updated_at = ?
+		WHERE user_id = ? AND id IN (`+sqlPlaceholders(len(messageIDs))+`)`, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -393,6 +465,28 @@ func (s *Store) CountMailboxesNeedingSearchIndexRepair(ctx context.Context, user
 	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mailboxes
 		WHERE user_id = ? AND include_in_search = 1 AND search_index_state_known = 0`, userID).Scan(&pending)
 	return pending, err
+}
+
+// CountMailboxesWithPurgedSearchIndexForUser reports how many search-visible
+// folders had their documents purged and have not been rebuilt since.
+//
+// A purged folder is the one shortfall no background work closes: the indexing
+// queue and the backlog sweep both skip it, because the purge is a deliberate
+// state that waits for its rebuild. A page showing the shortfall without this
+// number shows one that never moves and blames a worker that was told not to
+// touch it.
+func (s *Store) CountMailboxesWithPurgedSearchIndexForUser(ctx context.Context, userID int64) (int64, error) {
+	if userID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	var purged int64
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mailboxes
+		WHERE user_id = ? AND include_in_search = 1 AND search_index_purged = 1`, userID).Scan(&purged)
+	return purged, err
 }
 
 // MarkMailboxSearchIndexActive records that exact mailbox repair completed.

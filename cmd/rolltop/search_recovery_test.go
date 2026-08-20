@@ -134,8 +134,22 @@ func TestRecoverMarkedSearchIndexesQuarantinesOnlyTargetAndQueuesEveryVisibleLoc
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if count, err := searchSvc.CountUserMessages(ctx, owner.ID); err != nil || count != 0 {
-		t.Fatalf("automatic recovery search documents = %d, %v; want 0, nil", count, err)
+	// Recovery queued these rows expecting documents back, and the worker owes
+	// them exactly that: the two search-visible messages are searchable again
+	// without anything being fetched remotely, and the excluded folder's message
+	// is not.
+	if count, err := searchSvc.CountUserMessages(ctx, owner.ID); err != nil || count != 2 {
+		t.Fatalf("automatic recovery search documents = %d, %v; want 2, nil", count, err)
+	}
+	indexed, err := searchSvc.MessageIDsIndexed(ctx, owner.ID, []int64{manual.ID, never.ID, hidden.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexed[manual.ID] || !indexed[never.ID] {
+		t.Fatalf("recovered documents = %v, want the search-visible messages %d and %d", indexed, manual.ID, never.ID)
+	}
+	if indexed[hidden.ID] {
+		t.Fatalf("message %d in a folder excluded from search was indexed", hidden.ID)
 	}
 	assertSearchRecoveryMessagePreserved(t, ctx, db, owner.ID, manual, false)
 	assertSearchRecoveryMessagePreserved(t, ctx, db, owner.ID, never, false)

@@ -385,6 +385,13 @@ function storageEmailDetail(value: unknown): string {
   return `${formatStatCount(value)} emails`;
 }
 
+// storageDatabaseValue keeps a figure that could not be measured out of the
+// bytes column. The scan behind it runs under a timeout, and a busy database
+// answering nothing is not a mailbox that costs nothing to store.
+function storageDatabaseValue(stats: StorageStats): string {
+  return stats.DatabaseMeasured ? formatBytes(stats.DatabaseBytes) : "Not measured";
+}
+
 // storageSearchCoverage reads as a fraction rather than a total, because the
 // total alone cannot answer the question the page is opened with: a number that
 // looks large is still a search missing half the mailbox. The denominator is
@@ -786,6 +793,10 @@ export function SettingsView({
   const [duplicates, setDuplicates] = useState<DuplicateCopyReport | null>(null);
   const [duplicateBusy, setDuplicateBusy] = useState<"scan" | "trash" | null>(null);
   const [duplicateNotice, setDuplicateNotice] = useState("");
+  // What the last scan decided not to do. Held separately from the report,
+  // which describes the copies that are hidden right now rather than the
+  // groups a pass walked past.
+  const [duplicateScan, setDuplicateScan] = useState<{ outcomes: Record<string, number>; withinAccountMessages: number } | null>(null);
   const [duplicateError, setDuplicateError] = useState("");
   const [folderRunRefreshAccounts, setFolderRunRefreshAccounts] = useState<Set<number>>(() => new Set());
   const [savingIdentity, setSavingIdentity] = useState(false);
@@ -1656,6 +1667,37 @@ export function SettingsView({
     return parts.join(" ");
   }
 
+  // Every line here is a refusal to hide mail, phrased as the rule that produced
+  // it. A user who sees the same message twice needs to be able to tell which of
+  // their copies Rolltop looked at and left alone, and why.
+  function duplicateScanReasons(scan: { outcomes: Record<string, number>; withinAccountMessages: number }): string[] {
+    const lines: string[] = [];
+    const outcome = (key: string) => Number(scan.outcomes[key] || 0);
+    const messages = (count: number) => `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
+    if (outcome("no_addressee") > 0) {
+      lines.push(`${messages(outcome("no_addressee"))} name none of your addresses in To or Cc - Bcc, or a mailing list - so nothing says which account the delivery belongs to. Every copy stays visible.`);
+    }
+    if (outcome("many_addressees") > 0) {
+      lines.push(`${messages(outcome("many_addressees"))} were addressed to more than one of your accounts, so each copy is a delivery of its own.`);
+    }
+    if (outcome("original_not_visible") > 0) {
+      // Every folder the copy could not stand in from, not only the named ones:
+      // a folder taken out of All Mail lands here too, and a sentence listing
+      // Spam and Trash would send that reader looking in the wrong place.
+      lines.push(`${messages(outcome("original_not_visible"))} are kept by the addressed account only where your lists do not show them - Spam, Trash, Sent, Drafts, or a folder you took out of All Mail - and hiding the other copies behind those would take the message out of view entirely.`);
+    }
+    if (outcome("nothing_to_hide") > 0) {
+      lines.push(`${messages(outcome("nothing_to_hide"))} have their other copies in Sent, Drafts, or Trash, which are never hidden.`);
+    }
+    if (outcome("undecidable") > 0) {
+      lines.push(`${messages(outcome("undecidable"))} carry duplicate links that contradict themselves - a copy pointing at itself - so the scan changed nothing about them and left every copy visible.`);
+    }
+    if (scan.withinAccountMessages > 0) {
+      lines.push(`${messages(scan.withinAccountMessages)} appear more than once inside a single account - the same mail filed in two of that account's folders. Both are real messages on that server, so neither is hidden.`);
+    }
+    return lines;
+  }
+
   function duplicateTrashConfirmMessage(report: DuplicateCopyReport | null) {
     const hidden = report?.hidden || 0;
     const accounts = (report?.accounts || []).map((account) => `${account.label || account.email}: ${account.hidden.toLocaleString()}`);
@@ -1851,9 +1893,16 @@ export function SettingsView({
 		? `Headers ${localCount.toLocaleString()}/${remoteCount.toLocaleString()}`
 		: `Headers ${localCount.toLocaleString()} mirrored`;
       const missingLocalCount = Math.max(0, remoteCount - localCount);
+      // The remote count is every message on the server, including the ones a
+      // sync start date puts out of reach. Telling someone to sync a folder that
+      // is behind only because they chose a cutoff sends them after mail this
+      // account will never fetch, so the date is named instead.
+      const syncStartAt = imapAccounts.find((item) => item.id === folder.mailbox.account_id)?.sync_start_at || "";
 		let localProgressTitle = `Headers are stored locally for ${localCount.toLocaleString()} messages; the latest remote IMAP count is ${remoteCount.toLocaleString()}.`;
 		if (!remoteStatusAvailable) {
 			localProgressTitle = `Headers are stored locally for ${localCount.toLocaleString()} messages. The remote IMAP count is not available yet.`;
+		} else if (missingLocalCount > 0 && syncStartAt) {
+			localProgressTitle = `Headers are stored locally for ${localCount.toLocaleString()} messages; the latest remote IMAP count is ${remoteCount.toLocaleString()}. This account only mirrors mail delivered on or after ${syncStartAt}, so older messages are part of that difference and no sync will fetch them. Anything newer is restored by syncing this folder.`;
 		} else if (missingLocalCount > 0) {
 			localProgressTitle = `Headers are stored locally for ${localCount.toLocaleString()} messages; the latest remote IMAP count is ${remoteCount.toLocaleString()}. Sync this folder to restore ${missingLocalCount.toLocaleString()} missing headers.`;
       }
@@ -2324,12 +2373,15 @@ export function SettingsView({
     // answering from less than the mailbox.
     const shortfall = searchable > indexed ? searchable - indexed : 0;
     const foldersPending = Number(storage.FoldersNeedingRebuild || 0);
+    // Purged folders are the part of a shortfall no background work closes, so
+    // they are named separately from the part that fills itself in.
+    const foldersPurged = Number(storage.FoldersPurged || 0);
     if (storageLoading) return <SettingsLoading label="Calculating storage usage..." />;
     if (storageError) return <SettingsError message={storageError} onRetry={() => void loadStorage()} />;
     return (
       <section className="panel">
         <div className="storage-grid">
-          <Stat label="Headers" value={formatStatCount(storage.MessageHeaderCount)} detail="emails in the database" />
+          <Stat label="Headers" value={storageDatabaseValue(storage)} detail={`${formatStatCount(storage.MessageHeaderCount)} emails in the database`} />
           <Stat label="Full Text Search" value={formatBytes(storage.IndexBytes)} detail={storageSearchCoverage(storage)} />
           <Stat label="Local Cache" value={formatBytes(storage.BlobBytes)} detail={storageEmailDetail(storage.MessageBodyCount)} />
           <Stat label="Total" value={formatBytes(storage.TotalBytes)} detail={String(storage.Error || "")} />
@@ -2353,14 +2405,25 @@ export function SettingsView({
         {/* Suppressed when a figure is missing: a count that failed reads as
             zero, and a zero on the indexed side would announce the whole
             mailbox as unsearchable. */}
-        {!storage.Error && (shortfall > 0 || foldersPending > 0) ? (
+        {storage.SearchCoverageMeasured && (shortfall > 0 || foldersPending > 0 || foldersPurged > 0) ? (
           <p className="settings-error">
+            {/* An ordinary sync indexes the mail it fetches and nothing else, so
+                it is not what closes either gap. Background indexing works
+                through the backlog on its own - except in a purged folder, which
+                it skips by design - and only a rebuild re-reads a folder and
+                verifies what its index holds. */}
             {shortfall > 0
-              ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index and will not be found by a search. `
+              ? `${formatStatCount(shortfall)} ${shortfall === 1 ? "email is" : "emails are"} not in the index yet and a search will not find ${shortfall === 1 ? "it" : "them"}. `
+              : ""}
+            {shortfall > 0 && foldersPurged === 0
+              ? `Background indexing adds ${shortfall === 1 ? "it" : "them"} as it works through the backlog; a rebuild does it now, and also fetches the bodies of mail no longer cached here. `
+              : ""}
+            {foldersPurged > 0
+              ? `${formatStatCount(foldersPurged)} ${foldersPurged === 1 ? "folder had its index purged and is" : "folders had their index purged and are"} waiting for a rebuild; background indexing leaves ${foldersPurged === 1 ? "it" : "them"} alone, so nothing but a rebuild brings that mail back into search. `
               : ""}
             {foldersPending > 0
-              ? `${formatStatCount(foldersPending)} ${foldersPending === 1 ? "folder is" : "folders are"} waiting to be indexed; a running sync fills them in, and rebuilding does it now.`
-              : "Rebuilding the index adds them."}
+              ? `${formatStatCount(foldersPending)} ${foldersPending === 1 ? "folder has" : "folders have"} coverage nothing has verified since their index was last disturbed; a rebuild is what verifies it.`
+              : ""}
           </p>
         ) : null}
         {/* The armed state changes only a button label, which says nothing to a
@@ -2590,15 +2653,22 @@ export function SettingsView({
       let cursor = "";
       let newlyHidden = 0;
       let revealed = 0;
+      const outcomes: Record<string, number> = {};
       let result = await api.rescanDuplicateCopies(csrf, cursor);
       for (let pass = 0; pass < duplicateScanMaxPasses; pass++) {
         newlyHidden += result.newly_hidden;
         revealed += result.revealed;
+        // Each pass reports only its own groups, so the reasons have to be
+        // summed the same way the counts are.
+        Object.entries(result.outcomes || {}).forEach(([reason, count]) => {
+          outcomes[reason] = (outcomes[reason] || 0) + count;
+        });
         cursor = result.next || "";
         if (!cursor) break;
         result = await api.rescanDuplicateCopies(csrf, cursor);
       }
       setDuplicates({ ok: result.ok, hidden: result.hidden, accounts: result.accounts });
+      setDuplicateScan({ outcomes, withinAccountMessages: Number(result.within_account_messages || 0) });
       setDuplicateNotice(duplicateScanNotice(result.hidden, newlyHidden, revealed, Boolean(cursor)));
     } catch (err) {
       setDuplicateError(messageFromError(err));
@@ -2654,6 +2724,16 @@ export function SettingsView({
           <p className="muted">No duplicate copies are hidden right now.</p>
         )}
         {duplicateNotice ? <div className="notice">{duplicateNotice}</div> : null}
+        {duplicateScan && duplicateScanReasons(duplicateScan).length > 0 ? (
+          <>
+            <p className="muted">Copies the scan left visible on purpose:</p>
+            <ul className="duplicate-reason-list">
+              {duplicateScanReasons(duplicateScan).map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
         {duplicateError ? <div className="error">{duplicateError}</div> : null}
         <div className="actions split-actions">
           <button className="secondary" type="button" disabled={duplicateBusy !== null} onClick={rescanDuplicates}>

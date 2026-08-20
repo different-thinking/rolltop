@@ -531,6 +531,9 @@ export type StorageIndexBreakdown = {
  * would close a gap between them. */
 export type StorageStats = {
   MessageHeaderCount?: number;
+  /** Bytes this tenant's mail rows occupy in PostgreSQL, when they could be measured. */
+  DatabaseBytes?: number;
+  DatabaseMeasured?: boolean;
   SearchBackend?: string;
   IndexPath?: string;
   IndexBytes?: number;
@@ -538,6 +541,10 @@ export type StorageStats = {
   IndexMessageCount?: number;
   FullTextSearchMessageCount?: number;
   FoldersNeedingRebuild?: number;
+  /** Folders whose documents were purged and are waiting for a rebuild. */
+  FoldersPurged?: number;
+  /** True when both sides of the index/mail comparison were actually read. */
+  SearchCoverageMeasured?: boolean;
   FuzzyAvailable?: boolean;
   IndexBreakdown?: StorageIndexBreakdown;
   BlobPath?: string;
@@ -956,4 +963,24 @@ export type DuplicateCopyReport = {
   ok: boolean;
   hidden: number;
   accounts: DuplicateAccountSummary[];
+};
+
+/**
+ * DuplicateScanResult is one detection pass. Beyond what it changed it reports
+ * what it decided not to change: `outcomes` counts the cross-account groups by
+ * the reason they were left visible, and `within_account_messages` counts the
+ * messages a single account holds twice, which detection never judges at all.
+ * The latter is present only on the pass that finished the scan, because it
+ * answers for the whole mailbox rather than for one page of it.
+ * A scan that hides nothing is the normal steady state, and these are what say
+ * so rather than leaving it looking like detection failed.
+ */
+export type DuplicateScanResult = DuplicateCopyReport & {
+  groups: number;
+  newly_hidden: number;
+  revealed: number;
+  truncated: boolean;
+  next: string;
+  outcomes?: Record<string, number>;
+  within_account_messages?: number;
 };

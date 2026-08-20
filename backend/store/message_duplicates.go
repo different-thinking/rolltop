@@ -71,6 +71,33 @@ type DuplicateCopy struct {
 	DuplicateOf   int64
 }
 
+// DuplicateGroupOutcome names what detection decided about one group of copies.
+// A scan that changes nothing is the normal result once a mailbox has settled,
+// and without these the user cannot tell that from detection being broken.
+type DuplicateGroupOutcome string
+
+const (
+	// DuplicateGroupResolved means copies were pointed at an original.
+	DuplicateGroupResolved DuplicateGroupOutcome = "resolved"
+	// DuplicateGroupNoAddressee means neither To nor Cc names an address of
+	// yours in the folders that could stand in, so nothing identifies which
+	// account the delivery belongs to. Bcc and mailing-list mail land here.
+	DuplicateGroupNoAddressee DuplicateGroupOutcome = "no_addressee"
+	// DuplicateGroupManyAddressees means several of your accounts were
+	// addressed, so each copy is a delivery in its own right.
+	DuplicateGroupManyAddressees DuplicateGroupOutcome = "many_addressees"
+	// DuplicateGroupOriginalNotVisible means the addressed account keeps the
+	// message only where the lists do not show it - Junk, Trash, Sent, Drafts -
+	// so hiding the others behind it would hide the message entirely.
+	DuplicateGroupOriginalNotVisible DuplicateGroupOutcome = "original_not_visible"
+	// DuplicateGroupNothingToHide means an original was identified and every
+	// other copy sits in a folder copies are never hidden in.
+	DuplicateGroupNothingToHide DuplicateGroupOutcome = "nothing_to_hide"
+	// DuplicateGroupUndecidable means the stored pointers contradict themselves
+	// - a row pointing at itself - and the group is left exactly as it is.
+	DuplicateGroupUndecidable DuplicateGroupOutcome = "undecidable"
+)
+
 // DuplicateScanStats reports what one detection pass changed.
 type DuplicateScanStats struct {
 	// Groups counts Message-IDs held by more than one account.
@@ -79,6 +106,10 @@ type DuplicateScanStats struct {
 	Hidden int
 	// Revealed counts rows that stopped pointing at one.
 	Revealed int
+	// Outcomes counts the groups behind Hidden and Revealed by what detection
+	// decided about them, so a pass that hid nothing can say why rather than
+	// leaving the reader to conclude that detection missed their duplicates.
+	Outcomes map[DuplicateGroupOutcome]int
 	// NextHeader is the cursor a follow-up call passes as after. It is empty
 	// once the scan has seen every group.
 	NextHeader string
@@ -125,7 +156,12 @@ func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64,
 		updates := map[int64]int64{}
 		forEachDuplicateGroup(copies, func(group []DuplicateCopy) {
 			stats.Groups++
-			for id, original := range resolveDuplicateGroup(group, addresses) {
+			resolved, outcome := resolveDuplicateGroupWithOutcome(group, addresses)
+			if stats.Outcomes == nil {
+				stats.Outcomes = map[DuplicateGroupOutcome]int{}
+			}
+			stats.Outcomes[outcome]++
+			for id, original := range resolved {
 				updates[id] = original
 			}
 		})
@@ -156,6 +192,38 @@ func (s *Store) RefreshDuplicateCopiesForUser(ctx context.Context, userID int64,
 	stats.NextHeader = cursor
 	stats.Truncated = cursor != ""
 	return stats, nil
+}
+
+// CountWithinAccountDuplicatedMessagesForUser counts the messages a single
+// account holds more than one copy of, which detection deliberately never
+// touches.
+//
+// Two rows of one account with the same Message-ID are the same mail filed in
+// two of that account's folders - a Gmail label, a copy the user made - and both
+// are real messages on that server, so hiding either would misreport what the
+// account holds. The number exists because a user looking at mail they see twice
+// is owed the difference between a copy Rolltop declined to hide and one it
+// never considered.
+func (s *Store) CountWithinAccountDuplicatedMessagesForUser(ctx context.Context, userID int64) (int, error) {
+	if userID <= 0 {
+		return 0, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	// Counted per message rather than per account holding it: one message both
+	// of two accounts file twice is one message the reader sees more than once,
+	// and reporting it as two would describe their mailbox wrongly in exactly
+	// the way this number exists to avoid.
+	var messages int
+	err = db.QueryRowContext(ctx, `SELECT count(DISTINCT message_id_header) FROM (
+			SELECT message_id_header FROM messages
+			WHERE user_id = ? AND message_id_header <> '' AND duplicate_of_message_id = 0
+			GROUP BY message_id_header, account_id
+			HAVING count(*) > 1
+		) AS repeated`, userID).Scan(&messages)
+	return messages, err
 }
 
 // duplicateGroupHeaders pages the Message-IDs that more than one account holds.
@@ -377,28 +445,59 @@ func (s *Store) applyDuplicatePointers(ctx context.Context, db *sql.DB, userID i
 // one, and showing mail twice is a smaller failure than hiding the only copy the
 // user has.
 func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[string]bool) map[int64]int64 {
+	resolved, _ := resolveDuplicateGroupWithOutcome(copies, addresses)
+	return resolved
+}
+
+// resolveDuplicateGroupWithOutcome is the decision plus the reason for it. The
+// reason is what a scan reports when it hides nothing: every one of these
+// outcomes is a deliberate refusal to hide mail, and a user looking at copies
+// that stayed visible is owed the difference between "not a duplicate" and
+// "not detected".
+func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int64]map[string]bool) (map[int64]int64, DuplicateGroupOutcome) {
 	if len(copies) < 2 {
-		return nil
+		return nil, DuplicateGroupUndecidable
 	}
 	accounts := map[int64]bool{}
 	addressed := map[int64]bool{}
+	// namedAnywhere is the same question without the eligibility rule: which
+	// accounts the message names at all. It changes no decision - only a row that
+	// could stand in as the original may decide a group - but it is the
+	// difference between the two ways a group can end up with no deciding
+	// account, and the two are opposite advice. Mail nobody's address appears in
+	// is a Bcc or a list; mail the addressed account keeps only in Spam or Trash
+	// was found and left alone on purpose.
+	namedAnywhere := map[int64]bool{}
 	for _, item := range copies {
 		accounts[item.AccountID] = true
 		if item.DuplicateOf == item.ID {
 			// A row pointing at itself would hide itself forever. Treat the group
 			// as unresolvable rather than trusting the stored pointer.
-			return nil
+			return nil, DuplicateGroupUndecidable
 		}
+		if !messageAddressesAccount(item, addresses[item.AccountID]) {
+			continue
+		}
+		namedAnywhere[item.AccountID] = true
 		// Only a row that could stand in as the original counts its account as
 		// addressed. A message the addressed account holds solely in Spam or
 		// Trash cannot cover for the copies, so its account does not get to
 		// decide the group.
-		if duplicateOriginalEligible(item) && messageAddressesAccount(item, addresses[item.AccountID]) {
+		if duplicateOriginalEligible(item) {
 			addressed[item.AccountID] = true
 		}
 	}
-	if len(accounts) < 2 || len(addressed) != 1 {
-		return nil
+	if len(accounts) < 2 {
+		return nil, DuplicateGroupUndecidable
+	}
+	if len(addressed) == 0 {
+		if len(namedAnywhere) > 0 {
+			return nil, DuplicateGroupOriginalNotVisible
+		}
+		return nil, DuplicateGroupNoAddressee
+	}
+	if len(addressed) > 1 {
+		return nil, DuplicateGroupManyAddressees
 	}
 	originalAccount := int64(0)
 	for accountID := range addressed {
@@ -414,10 +513,11 @@ func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[strin
 		}
 	}
 	if original.ID == 0 {
-		// The addressed account holds the message only where the reader would not
-		// find it. Whatever the other accounts hold, hiding it behind that row
-		// would take the message out of view entirely.
-		return nil
+		// Unreachable: an account only counts as addressed through a row that
+		// could stand in as the original, so the loop above has just found one.
+		// Kept as the refusal it always was rather than as a nil-pointer waiting
+		// for the eligibility rule to change under it.
+		return nil, DuplicateGroupOriginalNotVisible
 	}
 	out := map[int64]int64{}
 	for _, item := range copies {
@@ -427,9 +527,9 @@ func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[strin
 		out[item.ID] = original.ID
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, DuplicateGroupNothingToHide
 	}
-	return out
+	return out, DuplicateGroupResolved
 }
 
 // preferredDuplicateOriginal picks the copy that represents the delivery best.

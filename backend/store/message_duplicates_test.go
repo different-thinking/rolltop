@@ -174,6 +174,60 @@ func TestDuplicateScanKeepsBothCopiesWhenBothAccountsWereAddressed(t *testing.T)
 	}
 }
 
+// A scan that hides nothing has to be able to say why. Without the reason, the
+// only thing a user can read from an unchanged count is that detection missed
+// their duplicates, which sends them looking for a bug in a decision the rule
+// made on purpose.
+func TestDuplicateScanReportsWhyItLeftCopiesVisible(t *testing.T) {
+	f := newDuplicateFixture(t)
+	f.storeMessage(t, f.original, f.originalInbox, 2, "<list@partner.test>", "members@list.test")
+	f.storeMessage(t, f.aggregate, f.aggregateInbox, 2, "<list@partner.test>", "members@list.test")
+	both := "info@firma.test, owner@gmail.test"
+	f.storeMessage(t, f.original, f.originalInbox, 3, "<both@partner.test>", both)
+	f.storeMessage(t, f.aggregate, f.aggregateInbox, 3, "<both@partner.test>", both)
+
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Hidden != 0 {
+		t.Fatalf("hidden=%d, want 0", stats.Hidden)
+	}
+	if got := stats.Outcomes[DuplicateGroupNoAddressee]; got != 1 {
+		t.Fatalf("no-addressee groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	}
+	if got := stats.Outcomes[DuplicateGroupManyAddressees]; got != 1 {
+		t.Fatalf("many-addressee groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	}
+}
+
+// Two rows of one account holding the same Message-ID are one message filed in
+// two of that account's folders. Detection never judges them, so the count is
+// the only thing that separates them from copies it considered and dismissed.
+func TestWithinAccountCopiesAreCountedRatherThanHidden(t *testing.T) {
+	f := newDuplicateFixture(t)
+	archive, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.aggregate, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.storeMessage(t, f.aggregate, f.aggregateInbox, 11, "<filed-twice@partner.test>", "owner@gmail.test")
+	filed := f.storeMessage(t, f.aggregate, archive.ID, 12, "<filed-twice@partner.test>", "owner@gmail.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != 0 {
+		t.Fatalf("within-account copy points at %d, want it left alone", pointer)
+	}
+	messages, err := f.db.CountWithinAccountDuplicatedMessagesForUser(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages != 1 {
+		t.Fatalf("within-account duplicated messages=%d, want 1", messages)
+	}
+}
+
 // A Sent copy is the user's own writing rather than a second delivery of someone
 // else's message, so it is never hidden behind another account's row.
 func TestDuplicateScanNeverHidesASentCopy(t *testing.T) {
@@ -371,6 +425,17 @@ func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
 	}
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
+	}
+	// The reason matters as much as the decision: the address was found, the
+	// folder it was found in is the problem. Reporting this as "none of your
+	// addresses appear in To or Cc" would tell the user something untrue about
+	// their own mail.
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.Outcomes[DuplicateGroupOriginalNotVisible]; got != 1 {
+		t.Fatalf("original-not-visible groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
 	if err != nil {

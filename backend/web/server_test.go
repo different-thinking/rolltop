@@ -993,8 +993,8 @@ func TestStorageStatsReportsCurrentUserOnly(t *testing.T) {
 	if stats.BlobBytes != 8 {
 		t.Fatalf("blob bytes = %d", stats.BlobBytes)
 	}
-	// The database is not on this volume any more, so the total is the index
-	// and the blobs.
+	// The database is not on this volume any more, and this server has no store
+	// to ask for the tenant's row bytes, so the total is the index and the blobs.
 	if stats.TotalBytes != 35 {
 		t.Fatalf("total bytes = %d", stats.TotalBytes)
 	}
