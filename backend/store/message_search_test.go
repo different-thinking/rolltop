@@ -279,3 +279,43 @@ func TestSearchMessageIDsRefusesUnboundedTermLists(t *testing.T) {
 		t.Fatal("an unbounded negation list was accepted")
 	}
 }
+
+// The gate in front of the expensive query has to answer the same population
+// question the query would, stop at its ceiling, and respect the filters - a
+// count that ignored them would wave through a query that finds nothing.
+func TestCountMessageSearchMatchesRespectsItsCeilingAndFilters(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	user, account, mailbox := searchTestFixtures(t, ctx, db)
+	var docs []MessageSearchDoc
+	for uid := uint32(1); uid <= 6; uid++ {
+		msg := seedSearchMessage(t, ctx, db, user, account, mailbox, uid, "Rechnung")
+		docs = append(docs, MessageSearchDoc{
+			MessageID: msg.ID, UserID: user.ID, TextA: "Rechnung",
+			TextB: "sender@example.test", TextC: "anbei die rechnung",
+		})
+	}
+	if err := db.UpsertMessageSearch(ctx, user.ID, docs); err != nil {
+		t.Fatal(err)
+	}
+	query := MessageSearchQuery{UserID: user.ID, TSQuery: "'rechnung'"}
+
+	full, err := db.CountMessageSearchMatches(ctx, query, 100)
+	if err != nil || full != 6 {
+		t.Fatalf("count = %d, err = %v, want 6", full, err)
+	}
+	capped, err := db.CountMessageSearchMatches(ctx, query, 4)
+	if err != nil || capped != 4 {
+		t.Fatalf("capped count = %d, err = %v, want the ceiling 4", capped, err)
+	}
+
+	filtered := query
+	filtered.FromPattern = "%nobody%"
+	none, err := db.CountMessageSearchMatches(ctx, filtered, 100)
+	if err != nil || none != 0 {
+		t.Fatalf("filtered count = %d, err = %v, want 0", none, err)
+	}
+	if _, err := db.CountMessageSearchMatches(ctx, query, 0); err == nil {
+		t.Fatal("a ceiling of zero was accepted, so an unbounded count can be asked for by accident")
+	}
+}

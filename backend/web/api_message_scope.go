@@ -28,10 +28,16 @@ const (
 	// more expensive. Moved messages leave the index, so the next pass starts
 	// from the front again.
 	scopeSearchMessageLimit = 5000
-	// scopeSearchHitBatch pages Bleve while a search scope is being resolved. It
-	// must stay within the search service's own per-request ceiling: a larger
+	// scopeSearchHitBatch pages the index while a search scope is being resolved.
+	// It must stay within the search service's own per-request ceiling: a larger
 	// value is silently clamped, and a short batch is what ends the paging loop.
-	scopeSearchHitBatch = 100
+	//
+	// It sits at that ceiling because a ranked search costs the same whatever
+	// slice of the ranking it hands back - the ranking itself reads every
+	// matching message. Resolving the limit below in hundred-hit rounds meant
+	// fifty full searches for one delete, which is how "delete everything this
+	// filter matches" became a request that outlived its gateway.
+	scopeSearchHitBatch = 500
 )
 
 // scopeSelection mirrors the list view the user is looking at. A query wins over

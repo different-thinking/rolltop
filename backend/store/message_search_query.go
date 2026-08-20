@@ -119,86 +119,38 @@ type MessageSearchHit struct {
 	MatchedD  bool
 }
 
-// SearchMessageIDs runs one ranked search. Restricted throughout to the
-// tenant on both tables, so a joined row can never cross users.
-func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]MessageSearchHit, error) {
-	if q.UserID <= 0 {
-		return nil, fmt.Errorf("user id must be positive")
-	}
-	db, err := s.dataDB(ctx, q.UserID)
-	if err != nil {
-		return nil, err
-	}
-	hasText := strings.TrimSpace(q.TSQuery) != ""
+// messageSearchLimitCeiling bounds one request's page. The callers above this
+// layer page through hits until they have collected enough conversations, and
+// every page costs the same ranking scan over the whole match set - so a larger
+// page is not a larger query, it is fewer of them.
+const messageSearchLimitCeiling = 500
 
-	if len(q.TextTerms) > maxMessageSearchTextTerms {
-		return nil, fmt.Errorf("a search may carry at most %d text terms, got %d", maxMessageSearchTextTerms, len(q.TextTerms))
-	}
-	if len(q.NotTSQueries) > maxMessageSearchTextTerms {
-		return nil, fmt.Errorf("a search may carry at most %d negated terms, got %d", maxMessageSearchTextTerms, len(q.NotTSQueries))
-	}
-	fuzzy := false
+// queryUsesFuzzy reports whether any term of the spec can match by similarity,
+// which is what turns the membership test into a scan of the word list.
+func queryUsesFuzzy(q MessageSearchQuery) bool {
 	for _, term := range q.TextTerms {
 		if term.FuzzyTerm != "" {
-			fuzzy = true
-			break
+			return true
 		}
 	}
-	if fuzzy && !(q.FuzzyThreshold > 0 && q.FuzzyThreshold <= 1) {
-		return nil, fmt.Errorf("fuzzy terms need a similarity threshold in (0, 1], got %g", q.FuzzyThreshold)
-	}
+	return false
+}
 
-	var score strings.Builder
-	var args []any
-	if hasText {
-		score.WriteString(`ts_rank_cd(?::float4[], ms.tsv, to_tsquery('simple', ?))`)
-		args = append(args, formatWeightArray(q.Weights), q.TSQuery)
-	} else {
-		score.WriteString(`0::float4`)
+// messageSearchFilters builds the WHERE conditions of one search. Membership is
+// the only part that differs between the ranked query and the count that gates
+// it: with fuzzy on a term may also match by similarity, without it the lexeme
+// query alone decides.
+func messageSearchFilters(q MessageSearchQuery, fuzzy bool) ([]string, []any, error) {
+	if len(q.TextTerms) > maxMessageSearchTextTerms {
+		return nil, nil, fmt.Errorf("a search may carry at most %d text terms, got %d", maxMessageSearchTextTerms, len(q.TextTerms))
 	}
-	if fuzzy {
-		// Rank fuzzy evidence below exact lexeme rank: similarity tops out at
-		// 0.3 per term, so an exact subject hit always outranks a typo match.
-		for _, term := range q.TextTerms {
-			if term.FuzzyTerm == "" {
-				continue
-			}
-			score.WriteString(` + (0.3 * word_similarity(?, ms.words))::float4`)
-			args = append(args, term.FuzzyTerm)
-		}
+	if len(q.NotTSQueries) > maxMessageSearchTextTerms {
+		return nil, nil, fmt.Errorf("a search may carry at most %d negated terms, got %d", maxMessageSearchTextTerms, len(q.NotTSQueries))
 	}
-	for _, boost := range q.SenderBoosts {
-		pattern := strings.ToLower(strings.TrimSpace(boost.Pattern))
-		if pattern == "" || boost.Boost <= 0 {
-			continue
-		}
-		score.WriteString(` + CASE WHEN position(? in lower(m.from_addr` + collateDefault + `)) > 0 THEN ?::float4 ELSE 0 END`)
-		args = append(args, pattern, boost.Boost)
-	}
-	if len(q.RecencyBuckets) > 0 && q.NowUnix > 0 {
-		score.WriteString(` + CASE`)
-		for _, bucket := range q.RecencyBuckets {
-			score.WriteString(` WHEN (? - m.date_unix) <= ? THEN ?::float4`)
-			args = append(args, q.NowUnix, bucket.MaxAgeSeconds, bucket.Boost)
-		}
-		score.WriteString(` ELSE 0 END`)
-	}
-
-	var matches string
-	if hasText {
-		matches = `ts_filter(ms.tsv, '{a}'::"char"[]) @@ to_tsquery('simple', ?),
-			ts_filter(ms.tsv, '{b}'::"char"[]) @@ to_tsquery('simple', ?),
-			ts_filter(ms.tsv, '{c}'::"char"[]) @@ to_tsquery('simple', ?),
-			ts_filter(ms.tsv, '{d}'::"char"[]) @@ to_tsquery('simple', ?)`
-		args = append(args, q.TSQuery, q.TSQuery, q.TSQuery, q.TSQuery)
-	} else {
-		matches = `false, false, false, false`
-	}
-
 	conditions := []string{"ms.user_id = ?", "m.user_id = ?"}
-	args = append(args, q.UserID, q.UserID)
+	args := []any{q.UserID, q.UserID}
 	switch {
-	case len(q.TextTerms) > 0:
+	case fuzzy && len(q.TextTerms) > 0:
 		for _, term := range q.TextTerms {
 			if strings.TrimSpace(term.TSQuery) == "" {
 				continue
@@ -211,7 +163,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 			conditions = append(conditions, `ms.tsv @@ to_tsquery('simple', ?)`)
 			args = append(args, term.TSQuery)
 		}
-	case hasText:
+	case strings.TrimSpace(q.TSQuery) != "":
 		conditions = append(conditions, `ms.tsv @@ to_tsquery('simple', ?)`)
 		args = append(args, q.TSQuery)
 	}
@@ -278,27 +230,155 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 	}
 	if len(q.MessageIDs) > 0 {
 		if len(q.MessageIDs) > 500 {
-			return nil, fmt.Errorf("message id restriction is limited to 500 ids, got %d", len(q.MessageIDs))
+			return nil, nil, fmt.Errorf("message id restriction is limited to 500 ids, got %d", len(q.MessageIDs))
 		}
 		for _, id := range q.MessageIDs {
 			args = append(args, id)
 		}
 		conditions = append(conditions, "ms.message_id IN ("+sqlPlaceholders(len(q.MessageIDs))+")")
 	}
+	return conditions, args, nil
+}
+
+// CountMessageSearchMatches counts what one query selects without its fuzzy
+// half and without ranking anything, stopping at ceiling.
+//
+// It exists so the expensive query can be avoided rather than measured. The
+// conditions run off the GIN index and the bitmap is not lossy, so no row's
+// vector is read: this is the same population question the ranked query answers,
+// asked at a fraction of the cost. The ceiling keeps a term matching half the
+// mailbox from turning the gate into the thing it guards against.
+func (s *Store) CountMessageSearchMatches(ctx context.Context, q MessageSearchQuery, ceiling int) (int, error) {
+	if q.UserID <= 0 {
+		return 0, fmt.Errorf("user id must be positive")
+	}
+	if ceiling <= 0 {
+		return 0, fmt.Errorf("ceiling must be positive")
+	}
+	db, err := s.dataDB(ctx, q.UserID)
+	if err != nil {
+		return 0, err
+	}
+	conditions, args, err := messageSearchFilters(q, false)
+	if err != nil {
+		return 0, err
+	}
+	args = append(args, ceiling)
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM (
+		SELECT 1 FROM message_search ms
+		JOIN messages m ON m.id = ms.message_id
+		WHERE `+strings.Join(conditions, " AND ")+`
+		LIMIT ?) capped`, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// SearchMessageIDs runs one ranked search. Restricted throughout to the
+// tenant on both tables, so a joined row can never cross users.
+//
+// The statement is two layers on purpose. Ranking has to read every matching
+// row's vector, but reporting which weight classes matched only concerns the
+// page that is returned - and PostgreSQL evaluates a projection below the sort
+// that feeds the limit, so writing them in one layer would run four ts_filter
+// calls per candidate to answer for fifty. On a mailbox where the vectors are
+// large enough to be stored out of line, that is four extra reads of the whole
+// matched corpus per keystroke. The inner layer ranks and cuts; the outer one
+// asks the class question of the rows that survived.
+func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]MessageSearchHit, error) {
+	if q.UserID <= 0 {
+		return nil, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, q.UserID)
+	if err != nil {
+		return nil, err
+	}
+	hasText := strings.TrimSpace(q.TSQuery) != ""
+	fuzzy := queryUsesFuzzy(q)
+	if fuzzy && !(q.FuzzyThreshold > 0 && q.FuzzyThreshold <= 1) {
+		return nil, fmt.Errorf("fuzzy terms need a similarity threshold in (0, 1], got %g", q.FuzzyThreshold)
+	}
+	conditions, conditionArgs, err := messageSearchFilters(q, fuzzy)
+	if err != nil {
+		return nil, err
+	}
+
+	var score strings.Builder
+	var scoreArgs []any
+	if hasText {
+		score.WriteString(`ts_rank_cd(?::float4[], ms.tsv, to_tsquery('simple', ?))`)
+		scoreArgs = append(scoreArgs, formatWeightArray(q.Weights), q.TSQuery)
+	} else {
+		score.WriteString(`0::float4`)
+	}
+	if fuzzy {
+		// Rank fuzzy evidence below exact lexeme rank: similarity tops out at
+		// 0.3 per term, so an exact subject hit always outranks a typo match.
+		for _, term := range q.TextTerms {
+			if term.FuzzyTerm == "" {
+				continue
+			}
+			score.WriteString(` + (0.3 * word_similarity(?, ms.words))::float4`)
+			scoreArgs = append(scoreArgs, term.FuzzyTerm)
+		}
+	}
+	for _, boost := range q.SenderBoosts {
+		pattern := strings.ToLower(strings.TrimSpace(boost.Pattern))
+		if pattern == "" || boost.Boost <= 0 {
+			continue
+		}
+		score.WriteString(` + CASE WHEN position(? in lower(m.from_addr` + collateDefault + `)) > 0 THEN ?::float4 ELSE 0 END`)
+		scoreArgs = append(scoreArgs, pattern, boost.Boost)
+	}
+	if len(q.RecencyBuckets) > 0 && q.NowUnix > 0 {
+		score.WriteString(` + CASE`)
+		for _, bucket := range q.RecencyBuckets {
+			score.WriteString(` WHEN (? - m.date_unix) <= ? THEN ?::float4`)
+			scoreArgs = append(scoreArgs, q.NowUnix, bucket.MaxAgeSeconds, bucket.Boost)
+		}
+		score.WriteString(` ELSE 0 END`)
+	}
 
 	limit := q.Limit
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 || limit > messageSearchLimitCeiling {
 		limit = 50
 	}
 	offset := max(q.Offset, 0)
-	args = append(args, limit, offset)
 
-	query := `SELECT ms.message_id, (` + score.String() + `)::float8 AS score, ` + matches + `
+	ranked := `SELECT ms.message_id, (` + score.String() + `)::float8 AS score, m.date_unix AS ranked_date
 		FROM message_search ms
 		JOIN messages m ON m.id = ms.message_id
 		WHERE ` + strings.Join(conditions, " AND ") + `
 		ORDER BY score DESC, m.date_unix DESC, ms.message_id DESC
 		LIMIT ? OFFSET ?`
+
+	var query string
+	var args []any
+	if hasText {
+		// The class columns are written before the subquery in the statement
+		// text, so their parameters bind first however the query nests.
+		args = append(args, q.TSQuery, q.TSQuery, q.TSQuery, q.TSQuery)
+		args = append(args, scoreArgs...)
+		args = append(args, conditionArgs...)
+		args = append(args, limit, offset, q.UserID)
+		query = `SELECT r.message_id, r.score,
+			ts_filter(ms.tsv, '{a}'::"char"[]) @@ to_tsquery('simple', ?),
+			ts_filter(ms.tsv, '{b}'::"char"[]) @@ to_tsquery('simple', ?),
+			ts_filter(ms.tsv, '{c}'::"char"[]) @@ to_tsquery('simple', ?),
+			ts_filter(ms.tsv, '{d}'::"char"[]) @@ to_tsquery('simple', ?)
+			FROM (` + ranked + `) r
+			JOIN message_search ms ON ms.message_id = r.message_id AND ms.user_id = ?
+			ORDER BY r.score DESC, r.ranked_date DESC, r.message_id DESC`
+	} else {
+		args = append(args, scoreArgs...)
+		args = append(args, conditionArgs...)
+		args = append(args, limit, offset)
+		query = `SELECT r.message_id, r.score, false, false, false, false
+			FROM (` + ranked + `) r
+			ORDER BY r.score DESC, r.ranked_date DESC, r.message_id DESC`
+	}
+
 	var rows *sql.Rows
 	if fuzzy {
 		// The <% operator reads its floor from a GUC, and the useful floor for
