@@ -318,4 +318,39 @@ func TestCountMessageSearchMatchesRespectsItsCeilingAndFilters(t *testing.T) {
 	if _, err := db.CountMessageSearchMatches(ctx, query, 0); err == nil {
 		t.Fatal("a ceiling of zero was accepted, so an unbounded count can be asked for by accident")
 	}
+
+	// The count decides whether a reader's search runs with typo tolerance, so
+	// a neighbour's mail landing in it would let one tenant's mailbox change
+	// what another tenant's search finds.
+	other, err := db.CreateUser(ctx, "search-rows-neighbour@example.test", "Neighbour", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAccount, err := db.CreateMailAccount(ctx, MailAccount{UserID: other.ID, Label: "Test", Email: "search-rows-neighbour@example.test", Host: "imap.example.test", Port: 993, Username: "u", EncryptedPassword: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherInbox, err := db.GetOrCreateMailbox(ctx, other.ID, otherAccount.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var otherDocs []MessageSearchDoc
+	for uid := uint32(100); uid <= 109; uid++ {
+		msg := seedSearchMessage(t, ctx, db, other, otherAccount, otherInbox, uid, "Rechnung")
+		otherDocs = append(otherDocs, MessageSearchDoc{
+			MessageID: msg.ID, UserID: other.ID, TextA: "Rechnung",
+			TextB: "sender@example.test", TextC: "anbei die rechnung",
+		})
+	}
+	if err := db.UpsertMessageSearch(ctx, other.ID, otherDocs); err != nil {
+		t.Fatal(err)
+	}
+	stillSix, err := db.CountMessageSearchMatches(ctx, query, 100)
+	if err != nil || stillSix != 6 {
+		t.Fatalf("count = %d, err = %v, want the tenant's own 6 with a neighbour holding 10 more", stillSix, err)
+	}
+	theirs, err := db.CountMessageSearchMatches(ctx, MessageSearchQuery{UserID: other.ID, TSQuery: "'rechnung'"}, 100)
+	if err != nil || theirs != 10 {
+		t.Fatalf("neighbour count = %d, err = %v, want 10", theirs, err)
+	}
 }

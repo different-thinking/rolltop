@@ -1756,8 +1756,10 @@ func (s *Service) explainMessageIDsWithOptions(ctx context.Context, userID int64
 }
 
 // maxHitsPerRequest is the largest page one search request may ask for. Both
-// backends clamp to it rather than refusing, so a caller asking for more gets a
-// page rather than an error.
+// backends answer a request above it with the default page of fifty rather
+// than an error - the same thing they have always done with a nonsensical
+// limit, since a caller asking for more hits than the ceiling allows has
+// miscounted rather than asked for something.
 //
 // It is generous because the callers above this package do not want a page -
 // they want enough hits to fill a page of conversations, or every message a

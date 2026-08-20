@@ -37,6 +37,30 @@ func openPostgresSearchFixtures(t *testing.T) (*Service, *store.Store, store.Use
 	return svc, db, user, mailbox
 }
 
+// newPostgresSearchTenant adds a second tenant to an open fixture, for the
+// assertions that only mean something with somebody else's mail in the same
+// tables.
+func newPostgresSearchTenant(t *testing.T, db *store.Store, email string) (store.User, store.Mailbox) {
+	t.Helper()
+	ctx := context.Background()
+	user, err := db.CreateUser(ctx, email, "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Label: "Test", Email: email,
+		Host: "imap.example.test", Port: 993, Username: "u", EncryptedPassword: "x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return user, mailbox
+}
+
 func seedPostgresSearchMessage(t *testing.T, db *store.Store, user store.User, mailbox store.Mailbox, uid uint32, subject, body string) store.MessageRecord {
 	t.Helper()
 	ctx := context.Background()
