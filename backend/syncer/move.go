@@ -79,7 +79,7 @@ func (s *Service) MoveMessages(ctx context.Context, userID int64, messageIDs []i
 				}
 				return false
 			}
-			if !result.Vanished {
+			if !result.Vanished && !result.SourceGone {
 				moved++
 			}
 			return true
@@ -192,10 +192,14 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	walkErr := s.moveMessagesInBatches(ctx, userID, ids, destMailboxID, s.observeMessageMove, executor.dispatcher(),
 		func(result moveMessageResult) bool {
 			progress.MessagesSeen++
-			if result.Vanished {
-				// Nothing was attempted, so this costs no progress write: a re-run
-				// over thousands of stale IDs would otherwise report every message
-				// it steps over, and none of them moved.
+			if result.Vanished || result.SourceGone {
+				// Nothing moved and nothing was left behind, so this costs no
+				// progress write: a re-run over thousands of stale IDs would
+				// otherwise report every message it steps over, and none of them
+				// moved. A message the source folder no longer holds counts here
+				// rather than as a failure — failing the run for it left a notice
+				// the user could neither act on nor get rid of, about a move that
+				// had nothing left to do.
 				return consecutiveFailures < moveRunConsecutiveFailureLimit
 			}
 			if result.UID > 0 {
@@ -242,7 +246,12 @@ type moveMessageResult struct {
 	MessageID int64
 	UID       uint32
 	Vanished  bool
-	Err       error
+	// SourceGone is a message the server proved is no longer in the folder it
+	// was to be moved out of. Like a vanished row it is handled rather than
+	// failed — there is nothing in that folder left to move — and the walk
+	// reconciles the folder afterwards so the mirror stops claiming otherwise.
+	SourceGone bool
+	Err        error
 }
 
 // moveMessagesInBatches walks message IDs in order, gathers the ones leaving the
@@ -298,7 +307,11 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		batchBytes = 0
 		for i, failure := range s.dispatchPreparedMoves(ctx, userID, dispatcher, dispatched, notifyMove, announce) {
 			prepared := dispatched[i]
-			if !record(s.moveResultFor(ctx, userID, prepared.messageID, prepared.msg.UID, failure)) {
+			result := s.moveResultFor(ctx, userID, prepared.messageID, prepared.msg.UID, failure)
+			if result.SourceGone {
+				s.noteMoveSourceLostMessage(userID, prepared.messageID, prepared.source, prepared.msg.UID)
+			}
+			if !record(result) {
 				keepGoing = false
 			}
 		}
@@ -346,6 +359,30 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 	return nil
 }
 
+// noteMoveSourceLostMessage records that a folder no longer holds mail the
+// mirror still has a row for, so the next sync turn of that folder reconciles
+// it instead of waiting out the large-folder pace. The refresh a move queues
+// for its source folder is what then clears the stale rows.
+//
+// The move deliberately does not list the folder itself. It is holding one
+// connection for the whole run, and a second concurrent login to the same
+// account is exactly what holding it exists to avoid; a foreground move would
+// also have to keep the tenant's turn — and the browser request — for a
+// full-folder UID listing that can span tens of thousands of messages. The sync
+// turn already has a connection selected on that folder and one definition of
+// what "no longer on the server" removes, so this only takes away the reason it
+// would skip reconciling.
+func (s *Service) noteMoveSourceLostMessage(userID, messageID int64, source store.Mailbox, uid uint32) {
+	log.Printf("move source no longer holds message user_id=%d message_id=%d mailbox=%q uid=%d",
+		userID, messageID, source.Name, uid)
+	if s == nil {
+		return
+	}
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	delete(s.lastReconciled, mailboxReconcileKey{userID: userID, mailboxID: source.ID})
+}
+
 // groupMessageIDsBySourceMailbox reorders a selection so messages leaving the
 // same folder sit together, keeping the caller's order within each folder and
 // leaving ids it cannot place where they were. It is a stable regrouping, not a
@@ -390,7 +427,17 @@ func (s *Service) groupMessageIDsBySourceMailbox(ctx context.Context, userID int
 // is only checked for a failure that says the row was missing.
 func (s *Service) moveResultFor(ctx context.Context, userID, messageID int64, uid uint32, failure error) moveMessageResult {
 	result := moveMessageResult{MessageID: messageID, UID: uid, Err: failure}
-	if failure == nil || !store.IsNotFound(failure) {
+	if failure == nil {
+		return result
+	}
+	if IsSourceUIDGone(failure) {
+		// The server, under the generation this move proved, says the message is
+		// not in that folder. Reporting that as a failed move made a move the
+		// user cannot ever complete: the row stays, the next attempt asks the
+		// same question, and the notice about it does not go away.
+		return moveMessageResult{MessageID: messageID, UID: uid, SourceGone: true}
+	}
+	if !store.IsNotFound(failure) {
 		return result
 	}
 	if _, recheck := s.Store.GetMessageForUser(ctx, userID, messageID); store.IsNotFound(recheck) {
@@ -639,7 +686,16 @@ func (s *Service) moveMessageVia(ctx context.Context, userID, messageID, destMai
 	}
 	receipt, moveErr := dispatcher.MoveMessageWithReceipt(ctx, prepared.account, prepared.source.Name,
 		prepared.dest.Name, prepared.msg.UID, prepared.sourceUIDValidity)
-	return s.applyMoveOutcome(ctx, userID, prepared, receipt, moveErr, notifyMove, announce)
+	err = s.applyMoveOutcome(ctx, userID, prepared, receipt, moveErr, notifyMove, announce)
+	if IsSourceUIDGone(err) {
+		// The same answer the batched path treats as handled. A lone move must
+		// not mean something different: this is the drag of a single message,
+		// and returning the failure left the caller retrying a move with nothing
+		// left to do against a row only reconciliation can remove.
+		s.noteMoveSourceLostMessage(userID, messageID, prepared.source, prepared.msg.UID)
+		return nil
+	}
+	return err
 }
 
 // moveDispatcher resolves what will issue the remote command: a caller-owned

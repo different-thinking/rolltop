@@ -87,7 +87,8 @@ func moveMessagesWithReceipts(ctx context.Context, c moveCommandClient, sourceMa
 		if _, found := present[uid]; !found {
 			outcomes = append(outcomes, syncer.MoveOutcome{
 				UID: uid,
-				Err: fmt.Errorf("source mailbox %q no longer contains UID %d; refresh before moving", sourceMailbox, uid),
+				Err: syncer.SourceUIDGone(fmt.Errorf("source mailbox %q no longer contains UID %d; refresh before moving",
+					sourceMailbox, uid)),
 			})
 			continue
 		}
