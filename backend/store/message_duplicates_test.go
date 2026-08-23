@@ -88,6 +88,23 @@ func (f duplicateFixture) storeMessage(t *testing.T, accountID, mailboxID int64,
 	return msg
 }
 
+// junkMailbox creates one account's Spam folder. The role is set by hand
+// because the folder name alone does not carry it, and the role is what takes
+// the folder out of the lists this test cares about.
+func (f duplicateFixture) junkMailbox(t *testing.T, accountID int64, name string) int64 {
+	t.Helper()
+	mailbox, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, accountID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, mailbox.ID, MailboxSettings{
+		SyncMode: "auto", Role: "junk", ShowInSidebar: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return mailbox.ID
+}
+
 func (f duplicateFixture) duplicatePointer(t *testing.T, messageID int64) int64 {
 	t.Helper()
 	db, err := f.db.dataDB(f.ctx, f.userID)
@@ -141,24 +158,32 @@ func TestDuplicateScanHidesTheCopyTheAccountWasNotAddressedIn(t *testing.T) {
 // Mail nobody was addressed in - a Bcc, or a mailing list - gives detection no
 // way to tell the original from the copy. Both stay visible, because showing a
 // message twice is recoverable and hiding the only copy is not.
-func TestDuplicateScanKeepsBothCopiesWhenNoAccountWasAddressed(t *testing.T) {
+func TestDuplicateScanHidesACopyNoAddressCanAttribute(t *testing.T) {
 	f := newDuplicateFixture(t)
 	first := f.storeMessage(t, f.original, f.originalInbox, 2, "<list@partner.test>", "members@list.test")
 	second := f.storeMessage(t, f.aggregate, f.aggregateInbox, 2, "<list@partner.test>", "members@list.test")
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []int64{first.ID, second.ID} {
-		if pointer := f.duplicatePointer(t, id); pointer != 0 {
-			t.Fatalf("message %d points at %d, want both copies visible", id, pointer)
-		}
+	if pointer := f.duplicatePointer(t, first.ID); pointer != 0 {
+		t.Fatalf("the copy that stays visible points at %d, want it kept as the original", pointer)
+	}
+	if pointer := f.duplicatePointer(t, second.ID); pointer != first.ID {
+		t.Fatalf("second copy points at %d, want it hidden behind %d", pointer, first.ID)
+	}
+	// The reason has to say that placement decided it, not that a recipient
+	// did: the two are different answers to "why is this copy the one I see".
+	if got := stats.Outcomes[DuplicateGroupResolvedByPlacement]; got != 1 {
+		t.Fatalf("placement-resolved groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 }
 
-// Both accounts addressed means the user really is on the message twice. That is
-// two deliveries, not one delivery mirrored twice.
-func TestDuplicateScanKeepsBothCopiesWhenBothAccountsWereAddressed(t *testing.T) {
+// Both accounts addressed still means one message. Which copy stays is then
+// decided among the addressed accounts rather than by an account that only
+// fetched the mail, so the survivor is one the sender actually wrote to.
+func TestDuplicateScanKeepsOneCopyWhenBothAccountsWereAddressed(t *testing.T) {
 	f := newDuplicateFixture(t)
 	recipients := "info@firma.test, owner@gmail.test"
 	first := f.storeMessage(t, f.original, f.originalInbox, 3, "<both@partner.test>", recipients)
@@ -167,10 +192,58 @@ func TestDuplicateScanKeepsBothCopiesWhenBothAccountsWereAddressed(t *testing.T)
 	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []int64{first.ID, second.ID} {
+	if pointer := f.duplicatePointer(t, first.ID); pointer != 0 {
+		t.Fatalf("the copy that stays visible points at %d, want it kept as the original", pointer)
+	}
+	if pointer := f.duplicatePointer(t, second.ID); pointer != first.ID {
+		t.Fatalf("second copy points at %d, want it hidden behind %d", pointer, first.ID)
+	}
+}
+
+// An account that merely fetched the mail must not outrank the account the
+// sender wrote to, even when the fetched copy is the one in an Inbox. Placement
+// only decides among the accounts a recipient named.
+func TestDuplicateScanPrefersAnAddressedAccountOverAFetchedInboxCopy(t *testing.T) {
+	f := newDuplicateFixture(t)
+	archive, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addressed := f.storeMessage(t, f.original, archive.ID, 4, "<filed@partner.test>", "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 4, "<filed@partner.test>", "info@firma.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, addressed.ID); pointer != 0 {
+		t.Fatalf("the addressed account's copy points at %d, want it kept as the original", pointer)
+	}
+	if pointer := f.duplicatePointer(t, fetched.ID); pointer != addressed.ID {
+		t.Fatalf("fetched copy points at %d, want it hidden behind %d", pointer, addressed.ID)
+	}
+}
+
+// Every copy in a folder the lists do not show is the one case where nothing can
+// stand in: hiding either behind the other would take the message out of view
+// entirely, so the group is left exactly as it is.
+func TestDuplicateScanKeepsBothCopiesWhenNoCopyIsVisible(t *testing.T) {
+	f := newDuplicateFixture(t)
+	first := f.junkMailbox(t, f.original, "Spam")
+	second := f.junkMailbox(t, f.aggregate, "Spam")
+	filed := f.storeMessage(t, f.original, first, 5, "<junked@partner.test>", "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, second, 5, "<junked@partner.test>", "info@firma.test")
+
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{filed.ID, fetched.ID} {
 		if pointer := f.duplicatePointer(t, id); pointer != 0 {
-			t.Fatalf("message %d points at %d, want both copies visible", id, pointer)
+			t.Fatalf("message %d points at %d, want both copies left alone", id, pointer)
 		}
+	}
+	if got := stats.Outcomes[DuplicateGroupOriginalNotVisible]; got != 1 {
+		t.Fatalf("original-not-visible groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 }
 
@@ -180,11 +253,20 @@ func TestDuplicateScanKeepsBothCopiesWhenBothAccountsWereAddressed(t *testing.T)
 // made on purpose.
 func TestDuplicateScanReportsWhyItLeftCopiesVisible(t *testing.T) {
 	f := newDuplicateFixture(t)
-	f.storeMessage(t, f.original, f.originalInbox, 2, "<list@partner.test>", "members@list.test")
-	f.storeMessage(t, f.aggregate, f.aggregateInbox, 2, "<list@partner.test>", "members@list.test")
-	both := "info@firma.test, owner@gmail.test"
-	f.storeMessage(t, f.original, f.originalInbox, 3, "<both@partner.test>", both)
-	f.storeMessage(t, f.aggregate, f.aggregateInbox, 3, "<both@partner.test>", both)
+	originalJunk := f.junkMailbox(t, f.original, "Spam")
+	aggregateJunk := f.junkMailbox(t, f.aggregate, "Spam")
+	f.storeMessage(t, f.original, originalJunk, 2, "<junked@partner.test>", "info@firma.test")
+	f.storeMessage(t, f.aggregate, aggregateJunk, 2, "<junked@partner.test>", "info@firma.test")
+	originalSent, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregateSent, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.aggregate, "Sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.storeMessage(t, f.original, originalSent.ID, 3, "<written@partner.test>", "partner@partner.test")
+	f.storeMessage(t, f.aggregate, aggregateSent.ID, 3, "<written@partner.test>", "partner@partner.test")
 
 	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
 	if err != nil {
@@ -193,11 +275,11 @@ func TestDuplicateScanReportsWhyItLeftCopiesVisible(t *testing.T) {
 	if stats.Hidden != 0 {
 		t.Fatalf("hidden=%d, want 0", stats.Hidden)
 	}
-	if got := stats.Outcomes[DuplicateGroupNoAddressee]; got != 1 {
-		t.Fatalf("no-addressee groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	if got := stats.Outcomes[DuplicateGroupOriginalNotVisible]; got != 1 {
+		t.Fatalf("original-not-visible groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
-	if got := stats.Outcomes[DuplicateGroupManyAddressees]; got != 1 {
-		t.Fatalf("many-addressee groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	if got := stats.Outcomes[DuplicateGroupNothingToHide]; got != 1 {
+		t.Fatalf("nothing-to-hide groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 }
 
@@ -403,39 +485,31 @@ func TestHiddenDuplicateCopyProducesNoNewMailEvent(t *testing.T) {
 	}
 }
 
-// A Spam-filed row in the addressed account cannot stand in as the original:
-// junk folders are forced out of All Mail, so hiding the aggregating account's
-// copy behind it would leave the message reachable only from that Spam list.
+// A Spam-filed row cannot stand in as the original even when it is the addressed
+// account's: junk folders are forced out of All Mail, so hiding the other copy
+// behind it would leave the message reachable only from that Spam list. The copy
+// a reader can actually see is the one that stays, whichever account holds it.
 func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
 	f := newDuplicateFixture(t)
-	junk, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Spam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, junk.ID, MailboxSettings{
-		SyncMode: "auto", Role: "junk", ShowInSidebar: true, IncludeInSearch: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	f.storeMessage(t, f.original, junk.ID, 10, "<spam@partner.test>", "info@firma.test")
+	junk := f.junkMailbox(t, f.original, "Spam")
+	filed := f.storeMessage(t, f.original, junk, 10, "<spam@partner.test>", "info@firma.test")
 	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 10, "<spam@partner.test>", "info@firma.test")
 
-	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
 	}
-	// The reason matters as much as the decision: the address was found, the
-	// folder it was found in is the problem. Reporting this as "none of your
-	// addresses appear in To or Cc" would tell the user something untrue about
-	// their own mail.
-	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
-	if err != nil {
-		t.Fatal(err)
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != fetched.ID {
+		t.Fatalf("the Spam copy points at %d, want it hidden behind the visible copy %d", pointer, fetched.ID)
 	}
-	if got := stats.Outcomes[DuplicateGroupOriginalNotVisible]; got != 1 {
-		t.Fatalf("original-not-visible groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	// No recipient could decide this one - the addressed account's only copy is
+	// the one that cannot stand in - so placement did, and the report has to say
+	// that rather than claim an address was missing.
+	if got := stats.Outcomes[DuplicateGroupResolvedByPlacement]; got != 1 {
+		t.Fatalf("placement-resolved groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
 	if err != nil {
@@ -460,15 +534,14 @@ func TestIncrementalRefreshReleasesAGroupItNoLongerResolves(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer == 0 {
 		t.Fatal("expected the fetched copy to start out hidden")
 	}
-	// The aggregating account gains the addressed alias, so both accounts now
-	// count as addressed and the group stops resolving.
-	db, err := f.db.dataDB(f.ctx, f.userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(f.ctx, `UPDATE mail_accounts SET email = ? WHERE user_id = ? AND id = ?`,
-		"info@firma.test", f.userID, f.aggregate); err != nil {
-		t.Fatal(err)
+	// Both folders leave All Mail, so no copy is left that could stand in as the
+	// original and the group stops resolving.
+	for _, mailboxID := range []int64{f.originalInbox, f.aggregateInbox} {
+		if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, mailboxID, MailboxSettings{
+			SyncMode: "auto", Role: "inbox", ShowInSidebar: true, ShowInAllMail: false, IncludeInSearch: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := f.db.RefreshDuplicateCopiesForMessageID(f.ctx, f.userID, header); err != nil {
 		t.Fatal(err)
@@ -529,12 +602,15 @@ func TestChangingAFolderOutOfAllMailReleasesItsHiddenCopies(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy still points at %d after its original left All Mail", pointer)
 	}
-	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
+	// Releasing is not the end of it: the row that left All Mail cannot stand in
+	// any more, so the copy that can now does, and the message keeps exactly one
+	// place the lists show it.
+	all, err := f.db.ListLatestThreadMessagesForUser(f.ctx, f.userID, 50, 0, ThreadListNewestFirst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 {
-		t.Fatalf("list returned %d messages, want both copies visible again", len(messages))
+	if len(all) != 1 || all[0].ID != fetched.ID {
+		t.Fatalf("all mail = %v, want only the copy still in All Mail (%d)", messageIDsOf(all), fetched.ID)
 	}
 }
 
@@ -585,7 +661,7 @@ func TestDuplicateScanNeverHidesBehindJunkThatOptedIntoAllMail(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.storeMessage(t, f.original, junk.ID, 11, "<optin@partner.test>", "info@firma.test")
+	filed := f.storeMessage(t, f.original, junk.ID, 11, "<optin@partner.test>", "info@firma.test")
 	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 11, "<optin@partner.test>", "info@firma.test")
 
 	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
@@ -593,6 +669,9 @@ func TestDuplicateScanNeverHidesBehindJunkThatOptedIntoAllMail(t *testing.T) {
 	}
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
+	}
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != fetched.ID {
+		t.Fatalf("the Spam copy points at %d, want it hidden behind the visible copy %d", pointer, fetched.ID)
 	}
 	// The whole-account list is where the failure would show: the junk row is
 	// excluded by role, so hiding this row too would leave nothing.

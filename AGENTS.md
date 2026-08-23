@@ -152,17 +152,24 @@ site and in review.
   SQLite trigger rather than in Go, because reconciliation, folder purges, account
   deletion, and generation rebuilds all delete message rows through different
   paths and a stale pointer in any of them hides mail that has no visible twin.
-  Detection itself stays narrow on purpose: it hides a copy only when exactly one
-  account in the group was addressed in `To` or `Cc`, never hides Sent, Drafts, or
-  Trash copies, and only accepts a row that shows in All Mail as the original a
-  copy hides behind - a Spam-filed or otherwise All-Mail-excluded row standing in
-  as the original would take the message out of view entirely. Showing a message
-  twice is recoverable; hiding the only copy is not. Because the rule declines
-  far more groups than it acts on, a scan reports why
-  (`DuplicateScanStats.Outcomes`) alongside what it changed, and the settings
-  panel counts the copies one account holds of its own mail separately: a user
-  looking at mail they see twice cannot otherwise tell a copy Rolltop judged and
-  left alone from one it never considered.
+  One Message-ID held by two accounts is one message - no second delivery reuses
+  that header - so a group resolves whenever some copy can stand in for the
+  others, and the only question is which. Recipients answer it when they can: the
+  account named in `To` or `Cc` holds the delivery the rest were fetched from.
+  When they cannot - Bcc, a mailing list, or several of the user's accounts named
+  at once - placement answers instead (an Inbox copy first, then the oldest row),
+  and the scan reports that group as `resolved_by_placement` rather than as a
+  refusal. What the rule still refuses is the failure that cannot be undone: it
+  never hides Sent, Drafts, or Trash copies, never hides a copy behind a row of
+  its own account, and only accepts a row that shows in All Mail and is not Junk
+  as the original a copy hides behind - a Spam-filed or otherwise
+  All-Mail-excluded row standing in as the original would take the message out of
+  view entirely. Showing a message twice is recoverable; hiding the only copy is
+  not. A scan reports what it decided (`DuplicateScanStats.Outcomes`) alongside
+  what it changed, and the settings panel counts the copies one account holds of
+  its own mail separately: those are two real messages on one server and
+  detection never judges them, which a user looking at mail they see twice cannot
+  otherwise tell from a group it never considered.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
   from stored data only. A pending row means one of two things and only the

@@ -1667,24 +1667,23 @@ export function SettingsView({
     return parts.join(" ");
   }
 
-  // Every line here is a refusal to hide mail, phrased as the rule that produced
-  // it. A user who sees the same message twice needs to be able to tell which of
-  // their copies Rolltop looked at and left alone, and why.
+  // Every line here is a decision the scan made and left standing, phrased as the
+  // rule that produced it. A user who sees the same message twice needs to be
+  // able to tell which of their copies Rolltop looked at and what it did, and a
+  // user whose mail just got quieter needs to know which copy is the one they
+  // are now looking at.
   function duplicateScanReasons(scan: { outcomes: Record<string, number>; withinAccountMessages: number }): string[] {
     const lines: string[] = [];
     const outcome = (key: string) => Number(scan.outcomes[key] || 0);
     const messages = (count: number) => `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
-    if (outcome("no_addressee") > 0) {
-      lines.push(`${messages(outcome("no_addressee"))} name none of your addresses in To or Cc - Bcc, or a mailing list - so nothing says which account the delivery belongs to. Every copy stays visible.`);
-    }
-    if (outcome("many_addressees") > 0) {
-      lines.push(`${messages(outcome("many_addressees"))} were addressed to more than one of your accounts, so each copy is a delivery of its own.`);
+    if (outcome("resolved_by_placement") > 0) {
+      lines.push(`${messages(outcome("resolved_by_placement"))} name none of your addresses in To or Cc - Bcc, or a mailing list - or name several of your accounts at once, so no recipient says which account the delivery belongs to. The Message-ID says it is one message either way, so the copy in a folder your lists show - an Inbox copy first - stays and the rest are hidden behind it.`);
     }
     if (outcome("original_not_visible") > 0) {
       // Every folder the copy could not stand in from, not only the named ones:
       // a folder taken out of All Mail lands here too, and a sentence listing
       // Spam and Trash would send that reader looking in the wrong place.
-      lines.push(`${messages(outcome("original_not_visible"))} are kept by the addressed account only where your lists do not show them - Spam, Trash, Sent, Drafts, or a folder you took out of All Mail - and hiding the other copies behind those would take the message out of view entirely.`);
+      lines.push(`${messages(outcome("original_not_visible"))} are kept only where your lists do not show them - Spam, Trash, Sent, Drafts, or a folder you took out of All Mail - so no copy could stand in for the others and hiding any of them would take the message out of view entirely.`);
     }
     if (outcome("nothing_to_hide") > 0) {
       lines.push(`${messages(outcome("nothing_to_hide"))} have their other copies in Sent, Drafts, or Trash, which are never hidden.`);
@@ -1693,7 +1692,7 @@ export function SettingsView({
       lines.push(`${messages(outcome("undecidable"))} carry duplicate links that contradict themselves - a copy pointing at itself - so the scan changed nothing about them and left every copy visible.`);
     }
     if (scan.withinAccountMessages > 0) {
-      lines.push(`${messages(scan.withinAccountMessages)} appear more than once inside a single account - the same mail filed in two of that account's folders. Both are real messages on that server, so neither is hidden.`);
+      lines.push(`${messages(scan.withinAccountMessages)} appear more than once inside a single account - the same mail filed twice by that one server. Both are real messages on it, so neither is hidden.`);
     }
     return lines;
   }
@@ -1706,7 +1705,7 @@ export function SettingsView({
       "",
       ...(accounts.length > 0 ? [...accounts, ""] : []),
       "Each copy is moved into the Trash folder of the account currently holding it.",
-      "The copy in the account the message was addressed to is not touched.",
+      "The copy that stays visible is not touched.",
       "Nothing is deleted outright, so anything moved by mistake can be moved back from Trash."
     ].join("\n");
   }
@@ -2706,10 +2705,13 @@ export function SettingsView({
         <h2>Duplicate copies (all accounts)</h2>
         <p className="muted">
           An account that collects mail from your other accounts - Gmail fetching POP3 mail, or a
-          forward - delivers a second copy of a message the addressed account already holds. Those
-          copies are hidden from lists, threads, and unread counts. Moving them to that account's
-          Trash stops the server from sending them again; the addressed account's mail is untouched.
-          Both actions below cover every IMAP server on this Rolltop account, not only this one.
+          forward - delivers a second copy of a message another of your accounts already holds. One
+          copy stays visible and the rest are hidden from lists, threads, and unread counts. The one
+          that stays is the copy in the account the message was addressed to, or - when no recipient
+          says which account that is - the copy in a folder your lists show. Moving the hidden ones
+          to their own account's Trash stops those servers from sending them again; the copy you can
+          see is never touched. Both actions below cover every IMAP server on this Rolltop account,
+          not only this one.
         </p>
         {hidden > 0 ? (
           <ul className="duplicate-account-list">
@@ -2726,7 +2728,7 @@ export function SettingsView({
         {duplicateNotice ? <div className="notice">{duplicateNotice}</div> : null}
         {duplicateScan && duplicateScanReasons(duplicateScan).length > 0 ? (
           <>
-            <p className="muted">Copies the scan left visible on purpose:</p>
+            <p className="muted">What the scan decided about the copies it found:</p>
             <ul className="duplicate-reason-list">
               {duplicateScanReasons(duplicateScan).map((reason) => (
                 <li key={reason}>{reason}</li>
