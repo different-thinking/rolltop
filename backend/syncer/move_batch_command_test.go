@@ -463,6 +463,40 @@ func TestMoveMessagesSettlesClaimedDispatchesAfterCancellation(t *testing.T) {
 	}
 }
 
+// A cancelled request reaches the settlement with the command already sent and
+// the server having moved the mail. Recording that has to outlive the
+// cancellation: a move called failed because the request went away leaves the
+// mirror holding rows for mail that is gone, and makes the next attempt pay a
+// remote existence check per message to discover it.
+func TestMoveMessagesRecordsASucceededMoveAfterCancellation(t *testing.T) {
+	fixture, fetcher := newBatchMoveFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The command lands; the reader closed the tab while it was in flight.
+	fetcher.onCommand = cancel
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 45; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+
+	moved, err := fixture.service.MoveMessages(ctx, fixture.userID, ids, fixture.destination.ID)
+	if err != nil {
+		t.Fatalf("a move the server completed reported failure: %v", err)
+	}
+	if moved != len(ids) {
+		t.Fatalf("moved = %d, want all %d recorded", moved, len(ids))
+	}
+
+	if len(fetcher.commands) == 0 {
+		t.Fatal("the test cancelled before anything was dispatched, so it proves nothing")
+	}
+	for _, id := range ids {
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, id); !store.IsNotFound(err) {
+			t.Fatalf("message %d stayed in the mirror after the server moved it: %v", id, err)
+		}
+	}
+}
+
 // A walk can settle messages without dispatching anything: an earlier attempt
 // already moved them remotely, and preparing them is what finishes the local
 // half. That walk has no batch boundary, so what it settled has to reach the

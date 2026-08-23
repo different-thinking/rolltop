@@ -794,14 +794,17 @@ func (s *Service) prepareMessageMove(ctx context.Context, userID, messageID, des
 // brings the local mirror in line with it.
 func (s *Service) applyMoveOutcome(ctx context.Context, userID int64, prepared *preparedMove,
 	receipt *MoveReceipt, moveErr error, notifyMove messageMoveNotifier, announce *moveAnnouncer) error {
+	// Settling a dispatch outlives the context it was dispatched under, whichever
+	// way it went. A batch is claimed before it is dispatched, so a cancelled
+	// request — a closed tab is enough — reaches here for every message in it
+	// with the command already sent. On the failure side a claim this process
+	// owns but never finished cannot be reconciled by anything short of a
+	// restart. On the success side the server has already moved the message, and
+	// a settlement that fails on the cancellation calls it left behind: the
+	// mirror keeps a row for mail that is gone, and the next attempt pays a
+	// remote existence check per message to find that out.
+	settleCtx := context.WithoutCancel(ctx)
 	if moveErr != nil {
-		// Settling a claimed dispatch outlives the context that failed it, the
-		// same way the success path below does. A cancelled request is the most
-		// ordinary way to reach here — a batch is claimed before it is
-		// dispatched, so a cancellation strands every claim in it — and a claim
-		// this process owns but never finished cannot be reconciled by anything
-		// short of a restart.
-		settleCtx := context.WithoutCancel(ctx)
 		if !IsMoveOutcomeUnknown(moveErr) {
 			if markErr := s.Store.MarkMessageTransferFailed(settleCtx, userID, prepared.transfer.ID); markErr != nil {
 				return errors.Join(moveErr, markErr)
@@ -817,17 +820,19 @@ func (s *Service) applyMoveOutcome(ctx context.Context, userID int64, prepared *
 		destinationUID = receipt.DestinationUID
 		destinationUIDValidity = int64(receipt.DestinationUIDValidity)
 	}
-	if err := s.Store.MarkMessageTransferSucceeded(ctx, userID, prepared.transfer.ID, destinationUID, destinationUIDValidity); err != nil {
-		finishErr := s.Store.FinishMessageTransferDispatch(context.WithoutCancel(ctx), userID, prepared.transfer.ID, prepared.claim)
+	if err := s.Store.MarkMessageTransferSucceeded(settleCtx, userID, prepared.transfer.ID, destinationUID, destinationUIDValidity); err != nil {
+		finishErr := s.Store.FinishMessageTransferDispatch(settleCtx, userID, prepared.transfer.ID, prepared.claim)
 		if errors.Is(finishErr, store.ErrNotFound) {
 			finishErr = nil
 		}
 		return errors.Join(err, finishErr)
 	}
+	// The observer is the one thing a cancelled request may still drop: it is a
+	// plugin acting on the move, not the mirror catching up with it.
 	if notifyMove != nil {
 		notifyMove(ctx, messageMoveContext(prepared.msg, prepared.source, prepared.dest))
 	}
-	return s.completeMovedMessageLocally(ctx, userID, prepared.msg, prepared.dest, prepared.transfer.ID, announce)
+	return s.completeMovedMessageLocally(settleCtx, userID, prepared.msg, prepared.dest, prepared.transfer.ID, announce)
 }
 
 func messageMoveContext(msg store.MessageRecord, source, destination store.Mailbox) plugins.MessageMoveContext {
