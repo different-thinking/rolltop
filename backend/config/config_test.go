@@ -340,3 +340,35 @@ func TestLoadReadsShutdownTimeout(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadReadsBreakInstanceLock covers the escape hatch a refused start points
+// an operator at. Off unless asked for: it turns the single-server guard off
+// for one start, and the damage it guards against is silent.
+func TestLoadReadsBreakInstanceLock(t *testing.T) {
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BreakInstanceLock {
+		t.Fatal("the single-server guard defaults to being breakable")
+	}
+
+	t.Setenv("ROLLTOP_BREAK_INSTANCE_LOCK", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.BreakInstanceLock {
+		t.Fatal("the override was set and not read")
+	}
+
+	// A typo here would otherwise read as "off" and leave the operator with the
+	// same refused start and no idea why the override did nothing.
+	t.Setenv("ROLLTOP_BREAK_INSTANCE_LOCK", "yes please")
+	if _, err := Load(); err == nil {
+		t.Fatal("an unparsable override was accepted")
+	}
+}

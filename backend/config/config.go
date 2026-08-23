@@ -67,6 +67,16 @@ type Config struct {
 	// deployments overlap the two containers for exactly that long.
 	StartupLockWait time.Duration
 
+	// BreakInstanceLock lets one start take the single-server database lock
+	// from a session the guard cannot vouch for. It exists for the case the
+	// guard cannot resolve on its own: a lock left behind by a server that no
+	// longer exists and that this build does not recognise as its own.
+	//
+	// It is deliberately an environment variable an operator sets for one
+	// start, not a setting to leave on. Leaving it on turns the guard off, and
+	// the failure it guards against is silent.
+	BreakInstanceLock bool
+
 	// ShutdownTimeout is the container runtime's stop grace period as Rolltop
 	// understands it: how long the whole shutdown may take between the stop
 	// signal and the SIGKILL that follows it. The phases of the shutdown are
@@ -169,6 +179,10 @@ func Load() (Config, error) {
 	if startupLockWait < 0 {
 		return Config{}, fmt.Errorf("ROLLTOP_STARTUP_LOCK_WAIT must not be negative, got %s", startupLockWait)
 	}
+	breakInstanceLock, err := parseBool("ROLLTOP_BREAK_INSTANCE_LOCK", false)
+	if err != nil {
+		return Config{}, err
+	}
 	// Ten seconds is what `docker stop` gives by default, so the default here
 	// describes the least room a shutdown is likely to get rather than the most.
 	shutdownTimeout, err := parseDuration("ROLLTOP_SHUTDOWN_TIMEOUT", 10*time.Second)
@@ -217,6 +231,7 @@ func Load() (Config, error) {
 		Google:                 google,
 		MemoryLimit:            memoryLimit,
 		StartupLockWait:        startupLockWait,
+		BreakInstanceLock:      breakInstanceLock,
 		ShutdownTimeout:        shutdownTimeout,
 	}, nil
 }

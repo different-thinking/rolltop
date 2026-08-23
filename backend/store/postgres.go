@@ -108,6 +108,11 @@ type PostgresOptions struct {
 	// process to let go. A rolling deployment overlaps the two containers, so
 	// zero here would make every deploy a crash loop.
 	InstanceLockWait time.Duration
+	// BreakInstanceLock takes the lock from a holder the guard would otherwise
+	// only report — one it cannot recognise as a rolltop session that has
+	// stopped answering. It is the operator asserting that no other server is
+	// running, and it is honoured only after InstanceLockWait has passed.
+	BreakInstanceLock bool
 }
 
 // OpenPostgres connects to a PostgreSQL database and makes sure it carries the
@@ -163,7 +168,10 @@ func OpenPostgres(ctx context.Context, dsn string, opts PostgresOptions) (*Store
 	// rather than joining in and writing over the first one's sync runs.
 	var instance *instanceLock
 	if opts.ExclusiveInstance {
-		instance, err = acquireInstanceLock(ctx, registered, opts.InstanceLockWait)
+		instance, err = acquireInstanceLock(ctx, registered, instanceLockOptions{
+			wait:      opts.InstanceLockWait,
+			breakHeld: opts.BreakInstanceLock,
+		})
 		if err != nil {
 			_ = db.Close()
 			s0.release()
