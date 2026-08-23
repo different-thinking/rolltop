@@ -1323,6 +1323,36 @@ function rowMoveFolderLabel(action: RowMoveAction): string {
 }
 
 /**
+ * rowSpamButtonState answers, for the row's Report spam button, exactly the
+ * routing question the click would ask. The button stands in for
+ * moveConversation, so every branch here mirrors one of its refusals: a gate
+ * that asks a narrower question either greys out mail the swipe beside it would
+ * happily file, or offers a click that can only fail.
+ */
+function rowSpamButtonState(conversation: Conversation, mailboxes: Mailbox[], busy: boolean): { disabled: boolean; title: string } {
+  const accountGroups = conversationAccountMessageIDs(conversation);
+  if (!accountGroups) {
+    return { disabled: true, title: "This conversation does not say which account its messages are in - reload the list" };
+  }
+  if (accountGroups.some((group) => !junkMailboxForAccount(mailboxes, group.accountID))) {
+    return {
+      disabled: true,
+      title: accountGroups.length > 1
+        ? "Every account in this conversation needs a Junk folder to report spam into"
+        : "This account has no Junk folder to report spam into"
+    };
+  }
+  // One account, one destination to name. The row's own mailbox settles
+  // "already there" only while the conversation is that account's alone: a copy
+  // in another account still has its own Junk folder to go to.
+  const only = accountGroups.length === 1 ? junkMailboxForAccount(mailboxes, accountGroups[0].accountID) : undefined;
+  if (only && conversation.message.mailbox_id === only.id) {
+    return { disabled: true, title: `Already in ${only.name}` };
+  }
+  return { disabled: busy, title: only ? `Report spam (${only.name})` : "Report spam" };
+}
+
+/**
  * rowMoveMissingTargetHint says which folder is missing and where to set it.
  * A conversation spanning accounts needs the folder in each of them, so it says
  * so rather than sending the reader to look at the one account they can see.
@@ -2918,24 +2948,8 @@ function MessageList({
         const movingOut = hiddenMessageIDs.has(msg.id);
         const rowActionsDisabled = selectionBusy || scopeSelected || movingOut || pendingSwipeActionIDs.current.has(msg.id);
         // Report spam stays visible with its reason in the tooltip when it
-        // cannot run, rather than appearing on some rows and not others. The
-        // button has to answer for the whole conversation the click would file,
-        // the way moveConversation does: a thread with a copy in another account
-        // still has that copy to report, so the row's own mailbox only settles
-        // the question while the row is the one account's alone.
-        const rowSpamAccountIDs = conversationTransferAccountIDs(conversation);
-        const rowJunkMailbox = junkMailboxForAccount(mailboxes, msg.account_id);
-        const rowJunkMissing = rowSpamAccountIDs.some((accountID) => !junkMailboxForAccount(mailboxes, accountID));
-        const rowSpamState = rowJunkMissing
-          ? {
-              disabled: true,
-              title: rowSpamAccountIDs.length > 1
-                ? "Every account in this conversation needs a Junk folder to report spam into"
-                : "This account has no Junk folder to report spam into"
-            }
-          : rowJunkMailbox && rowSpamAccountIDs.length === 1 && msg.mailbox_id === rowJunkMailbox.id
-            ? { disabled: true, title: `Already in ${rowJunkMailbox.name}` }
-            : { disabled: rowActionsDisabled, title: rowJunkMailbox && rowSpamAccountIDs.length === 1 ? `Report spam (${rowJunkMailbox.name})` : "Report spam" };
+        // cannot run, rather than appearing on some rows and not others.
+        const rowSpamState = rowSpamButtonState(conversation, mailboxes, rowActionsDisabled);
         const activeSwipe = swipeState?.id === msg.id ? swipeState : null;
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));

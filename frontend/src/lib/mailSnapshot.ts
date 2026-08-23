@@ -86,6 +86,12 @@ export function saveMailSnapshot(userID: number, mailboxID: string | null, pageN
     const serialized = JSON.stringify(snapshot);
     if (new TextEncoder().encode(serialized).byteLength > maxSnapshotBytes) return false;
     const key = mailSnapshotStorageKey(userID, mailboxID, pageNumber, order);
+    // Before the write, not after it: the quota recovery below evicts this
+    // user's own pages under the current prefix and cannot reach a superseded
+    // one, so pages left by an older format would hold the quota against every
+    // write that follows - the save fails, the prune that would have cleared
+    // them never runs, and nothing is ever written again.
+    dropSupersededSnapshots();
     if (!storeWithQuotaRecovery(key, serialized, userID, order)) return false;
     pruneMailSnapshots(userID, order);
     return true;
@@ -164,8 +170,8 @@ function storeWithQuotaRecovery(key: string, serialized: string, userID: number,
 }
 
 // dropSupersededSnapshots clears pages written in a format this build cannot
-// read. They are dead weight against the storage budget the prune below spends,
-// and no user's copy is worth keeping, so every one of them goes.
+// read. They are dead weight against the storage budget every write and prune
+// spends, and no user's copy is worth keeping, so every one of them goes.
 function dropSupersededSnapshots() {
   try {
     storageKeys().filter((key) => supersededSnapshotPrefixes.some((prefix) => key.startsWith(prefix)))
@@ -176,7 +182,6 @@ function dropSupersededSnapshots() {
 }
 
 function pruneMailSnapshots(userID: number, order: MailSortOrder) {
-  dropSupersededSnapshots();
   const pinned = mailSnapshotStorageKey(userID, null, 1, order);
   const entries = snapshotEntries(userID).sort((left, right) => {
     if (left.key === pinned) return -1;
