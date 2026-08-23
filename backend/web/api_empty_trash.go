@@ -55,13 +55,10 @@ func (s *Server) apiEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "Only a Trash folder can be emptied.")
 		return
 	}
-	finishForeground := func() {}
-	if s.syncRunner != nil {
-		finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule emptying the Trash", err)
-			return
-		}
+	finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+	if err != nil {
+		s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule emptying the Trash", err)
+		return
 	}
 	run, err := s.syncer.StartEmptyTrash(r.Context(), cu.User.ID, mailbox.ID, func() {
 		s.startMoveRefresh(cu.User.ID, mailbox.AccountID, []string{mailbox.Name})
