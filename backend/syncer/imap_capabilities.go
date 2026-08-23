@@ -113,6 +113,30 @@ type MoveSession interface {
 	Close() error
 }
 
+// MoveOutcome is what one requested UID got out of a batched move. Exactly one
+// of Err and a successful move applies: a nil Err means the server moved that
+// UID, and Receipt is nil when it moved it without usable COPYUID metadata.
+type MoveOutcome struct {
+	UID     uint32
+	Receipt *MoveReceipt
+	Err     error
+}
+
+// BatchMoveSession is an optional MoveSession capability: it moves a whole set
+// of UIDs out of one source mailbox with a single SELECT, UID SEARCH and UID
+// MOVE rather than repeating all three per message. That is the difference
+// between three network round trips per message and three per batch, which is
+// what a whole-filter delete of thousands of messages actually costs.
+//
+// The returned slice covers every requested UID when the error is nil; a
+// non-nil error means the batch as a whole did not run, and the caller decides
+// per message what that means. A session without this capability still works:
+// a batch falls back to one command per message.
+type BatchMoveSession interface {
+	MoveSession
+	MoveMessagesWithReceipts(ctx context.Context, sourceMailbox string, destMailbox string, uids []uint32, expectedSourceUIDValidity uint32) ([]MoveOutcome, error)
+}
+
 // MoveSessionFetcher is an optional Fetcher capability that lets a batch of
 // moves share one login instead of reconnecting for every message. A fetcher
 // without it still works: moves fall back to connecting per message.

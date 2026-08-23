@@ -24,6 +24,31 @@ site and in review.
   the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
   the UIDs the server reports gone afterwards. Keep all four properties.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
+- A move of many messages is one IMAP command, not one per message. Each message
+  used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
+  trips against a server that also rate limits them — which is why a
+  whole-filter delete took minutes and held the tenant's foreground reservation
+  for all of it. `Service.moveMessagesInBatches` gathers the messages leaving one
+  source mailbox generation and moves them together; three properties make that
+  safe and must survive any change to it. One command names **one** source
+  mailbox under **one** proven `UIDVALIDITY`, and names each UID once — so the
+  walk starts a new gathering whenever either changes, and reorders a selection
+  by source folder first, because a selection made in All Mail interleaves them
+  by date and would otherwise batch nothing. Outcomes are read **per message**:
+  a UID the server no longer has, a UID it refuses, and a UID it moved are three
+  answers inside one command, and a batch the server refuses outright is settled
+  by asking which of its UIDs are still in the source rather than by recording
+  the refusal against all of them. And a message whose dispatch has been claimed
+  is always dispatched and always recorded, even when the run is giving up — a
+  claim nobody settles is a transfer the next attempt has to reconcile against
+  the server. The gathering is bounded in bytes as well as in count, like every
+  other batch that holds message content.
+- What a move changed locally is announced once per batch, not once per message.
+  `moveAnnouncer` owns that: a lone move still announces immediately, but a run
+  that announced per message asked every open view to reload thousands of times
+  and kept the All Mail cache re-warming itself for as long as it worked, which
+  is most of what a large move cost everything else the reader was doing. The
+  run's progress row is written on an interval for the same reason.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,
