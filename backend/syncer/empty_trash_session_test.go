@@ -20,10 +20,37 @@ type sessionExpungeFetcher struct {
 	opens   int
 	closes  int
 	batches int
-	// failAfter refuses the batch at this index and every one after it, as a
-	// dropped socket would.
-	failAfter int
-	failErr   error
+	// fail decides, per attempt, whether the connection refuses this batch the
+	// way a dropped socket would. It sees how many attempts came before it and
+	// which UIDs this one names, so a test can kill one attempt, one batch, or
+	// everything.
+	fail func(attempt int, uids []uint32) error
+}
+
+// failEveryAttempt refuses every batch, as a connection that is dead for good does.
+func failEveryAttempt(err error) func(int, []uint32) error {
+	return func(int, []uint32) error { return err }
+}
+
+// failAttempt refuses exactly one attempt, as a connection dropped mid-purge does.
+func failAttempt(target int, err error) func(int, []uint32) error {
+	return func(attempt int, _ []uint32) error {
+		if attempt == target {
+			return err
+		}
+		return nil
+	}
+}
+
+// failBatchStartingAt refuses every attempt on the one batch that begins with
+// this UID, as a message the server will not delete does.
+func failBatchStartingAt(uid uint32, err error) func(int, []uint32) error {
+	return func(_ int, uids []uint32) error {
+		if len(uids) > 0 && uids[0] == uid {
+			return err
+		}
+		return nil
+	}
 }
 
 func (f *sessionExpungeFetcher) OpenExpungeSession(_ context.Context, _ store.MailAccount) (ExpungeSession, error) {
@@ -40,10 +67,12 @@ func (s *fakeExpungeSession) ExpungeMessages(ctx context.Context, mailbox string
 	if s.closed {
 		return nil, errors.New("expunge session is closed")
 	}
-	index := s.fetcher.batches
+	attempt := s.fetcher.batches
 	s.fetcher.batches++
-	if s.fetcher.failErr != nil && index >= s.fetcher.failAfter {
-		return nil, s.fetcher.failErr
+	if s.fetcher.fail != nil {
+		if err := s.fetcher.fail(attempt, uids); err != nil {
+			return nil, err
+		}
 	}
 	return s.fetcher.emptyTrashFetcher.ExpungeMessages(ctx, store.MailAccount{}, mailbox, uids, uidValidity)
 }
@@ -94,16 +123,124 @@ func TestEmptyTrashSharesOneConnectionAcrossItsBatches(t *testing.T) {
 	}
 }
 
+// A dropped connection is what a long purge runs into, not what ends it: the
+// batch is tried again on a fresh login and the folder still empties.
+func TestEmptyTrashReconnectsWhenTheHeldConnectionDies(t *testing.T) {
+	uids := trashUIDs(emptyTrashBatchSize*3 + 4)
+	fixture := newEmptyTrashFixture(t, uids)
+	fetcher := &sessionExpungeFetcher{
+		emptyTrashFetcher: fixture.fetcher,
+		fail:              failAttempt(1, errors.New("imap: connection closed")),
+	}
+	fixture.service.Fetcher = fetcher
+
+	finished := fixture.runEmpty(t)
+
+	if finished.Status != "ok" || finished.Error != "" {
+		t.Fatalf("run status=%q error=%q, want the purge to survive one dropped connection",
+			finished.Status, finished.Error)
+	}
+	if finished.MessagesStored != len(uids) {
+		t.Fatalf("run stored=%d of %d, want every message deleted", finished.MessagesStored, len(uids))
+	}
+	if len(fixture.fetcher.uids) != 0 {
+		t.Fatalf("server still holds %d messages after the purge", len(fixture.fetcher.uids))
+	}
+	if fetcher.opens != 2 {
+		t.Fatalf("logins = %d, want a second one only for the batch that lost its connection", fetcher.opens)
+	}
+	if fetcher.closes != fetcher.opens {
+		t.Fatalf("session closes = %d for %d logins, want every connection given back", fetcher.closes, fetcher.opens)
+	}
+	for uid, message := range fixture.messages {
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, message.ID); !store.IsNotFound(err) {
+			t.Fatalf("local row for UID %d survived the purge: %v", uid, err)
+		}
+	}
+}
+
+// One batch the server will not take must not strand the thousands behind it:
+// the rest of the folder is still emptied, and the run says what is left.
+func TestEmptyTrashCarriesOnPastABatchItCannotDelete(t *testing.T) {
+	uids := trashUIDs(emptyTrashBatchSize * 4)
+	fixture := newEmptyTrashFixture(t, uids)
+	fetcher := &sessionExpungeFetcher{
+		emptyTrashFetcher: fixture.fetcher,
+		fail:              failBatchStartingAt(uids[emptyTrashBatchSize], errors.New("server said no")),
+	}
+	fixture.service.Fetcher = fetcher
+
+	finished := fixture.runEmpty(t)
+
+	if finished.Status != "failed" || finished.Error == "" {
+		t.Fatalf("run status=%q error=%q, want the purge to report the batch it lost",
+			finished.Status, finished.Error)
+	}
+	wantDeleted := len(uids) - emptyTrashBatchSize
+	if finished.MessagesStored != wantDeleted {
+		t.Fatalf("run stored=%d, want the %d messages outside the refused batch", finished.MessagesStored, wantDeleted)
+	}
+	refused := uids[emptyTrashBatchSize : emptyTrashBatchSize*2]
+	if !slices.Equal(fixture.fetcher.uids, refused) {
+		t.Fatalf("server holds %v, want only the refused batch", fixture.fetcher.uids)
+	}
+	for _, uid := range refused {
+		message := fixture.messages[uid]
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, message.ID); err != nil {
+			t.Fatalf("local row for undeleted UID %d was dropped: %v", uid, err)
+		}
+	}
+	for _, uid := range uids[emptyTrashBatchSize*2:] {
+		message := fixture.messages[uid]
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, message.ID); !store.IsNotFound(err) {
+			t.Fatalf("local row for UID %d behind the refused batch survived: %v", uid, err)
+		}
+	}
+}
+
+// A connection that is dead for good stops the purge instead of being logged
+// into again once per remaining batch.
+func TestEmptyTrashStopsRetryingAConnectionThatStaysDead(t *testing.T) {
+	uids := trashUIDs(emptyTrashBatchSize * 6)
+	fixture := newEmptyTrashFixture(t, uids)
+	fetcher := &sessionExpungeFetcher{
+		emptyTrashFetcher: fixture.fetcher,
+		fail:              failEveryAttempt(errors.New("imap: connection closed")),
+	}
+	fixture.service.Fetcher = fetcher
+
+	finished := fixture.runEmpty(t)
+
+	if finished.Status != "failed" || finished.Error == "" {
+		t.Fatalf("run status=%q error=%q, want a purge that could not start to fail", finished.Status, finished.Error)
+	}
+	wantAttempts := emptyTrashBatchAttempts * emptyTrashBatchGiveUp
+	if fetcher.batches != wantAttempts {
+		t.Fatalf("expunge attempts = %d, want %d rather than one set per remaining batch",
+			fetcher.batches, wantAttempts)
+	}
+	if fetcher.closes != fetcher.opens {
+		t.Fatalf("session closes = %d for %d logins, want every dead connection dropped", fetcher.closes, fetcher.opens)
+	}
+	if len(fixture.fetcher.uids) != len(uids) {
+		t.Fatalf("server holds %d messages, want all %d still there", len(fixture.fetcher.uids), len(uids))
+	}
+}
+
 // A purge that dies partway still keeps what it did delete: the local mirror is
 // reconciled for the batches that landed, and the run says the rest are still
 // there.
 func TestEmptyTrashKeepsTheDeletedHalfWhenTheConnectionDies(t *testing.T) {
-	uids := trashUIDs(emptyTrashBatchSize + 5)
+	uids := trashUIDs(emptyTrashBatchSize*3 + 5)
 	fixture := newEmptyTrashFixture(t, uids)
 	fetcher := &sessionExpungeFetcher{
 		emptyTrashFetcher: fixture.fetcher,
-		failAfter:         1,
-		failErr:           errors.New("connection reset"),
+		fail: func(attempt int, _ []uint32) error {
+			if attempt == 0 {
+				return nil
+			}
+			return errors.New("connection reset")
+		},
 	}
 	fixture.service.Fetcher = fetcher
 
@@ -112,8 +249,8 @@ func TestEmptyTrashKeepsTheDeletedHalfWhenTheConnectionDies(t *testing.T) {
 	if finished.Status != "failed" || finished.Error == "" {
 		t.Fatalf("run status=%q error=%q, want the purge to report that it stopped", finished.Status, finished.Error)
 	}
-	if fetcher.closes != 1 {
-		t.Fatalf("session closes = %d, want the dead connection dropped once", fetcher.closes)
+	if fetcher.closes != fetcher.opens {
+		t.Fatalf("session closes = %d for %d logins, want every dead connection dropped", fetcher.closes, fetcher.opens)
 	}
 	// The first batch really was deleted on the server, so its local rows go.
 	for _, uid := range uids[:emptyTrashBatchSize] {

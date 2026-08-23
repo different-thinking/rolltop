@@ -23,6 +23,19 @@ site and in review.
   may flag `\Deleted` or expunge. It lists the folder live rather than trusting
   the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
   the UIDs the server reports gone afterwards. Keep all four properties.
+- **A dropped connection pauses a Trash purge; it never ends one.** Emptying a
+  full Trash folder is tens of thousands of messages over many minutes, and a
+  mail host closing that connection partway through is ordinary — Gmail does it
+  routinely. Failing the run on the first one left the folder with almost
+  everything still in it and made the user start over. A batch is therefore
+  tried again on a fresh login (`emptyTrashBatchAttempts`, backing off between
+  attempts), which is safe because it names the same UIDs and a UID the server
+  has already removed reads back as gone rather than as an error; and one batch
+  that exhausts its attempts does not stop the batches behind it. Only
+  `emptyTrashBatchGiveUp` batches failing in a row end the purge, so a
+  connection that is dead for good is not logged into once per remaining batch.
+  Whatever did go is still reconciled locally, and the run reports how many of
+  how many are left.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
 - A move of many messages is one IMAP command, not one per message. Each message
   used to pay its own SELECT, UID SEARCH and UID MOVE — three network round

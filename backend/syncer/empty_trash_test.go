@@ -181,8 +181,11 @@ func newEmptyTrashFixture(t *testing.T, uids []uint32) emptyTrashFixture {
 		messages[uid] = message
 	}
 	fetcher := &emptyTrashFetcher{uids: slices.Clone(uids)}
+	// Retries are part of what these tests exercise; the pause between them is
+	// not, and the production one would add seconds to every failing case.
+	service := &Service{Store: db, Fetcher: fetcher, emptyTrashRetryDelay: time.Microsecond}
 	return emptyTrashFixture{
-		store: db, service: &Service{Store: db, Fetcher: fetcher}, fetcher: fetcher,
+		store: db, service: service, fetcher: fetcher,
 		userID: user.ID, account: account, trash: trash, inbox: inbox, messages: messages,
 	}
 }

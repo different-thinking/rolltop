@@ -182,6 +182,11 @@ type Service struct {
 	droppedSearchIndexMu sync.Mutex
 	droppedSearchIndex   map[int64]*droppedSearchIndexTally
 
+	// emptyTrashRetryDelay spaces the attempts one Trash batch gets when the
+	// connection it deletes over dies. It is overridden only by focused tests,
+	// which must not sleep through the production pause.
+	emptyTrashRetryDelay time.Duration
+
 	attachmentIndexMu         sync.Mutex
 	attachmentIndexCursor     map[int64]int64
 	attachmentIndexRetryAfter map[attachmentIndexRetryKey]time.Time
