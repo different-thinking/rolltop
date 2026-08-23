@@ -24,6 +24,75 @@ site and in review.
   the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
   the UIDs the server reports gone afterwards. Keep all four properties.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
+- A move of many messages is one IMAP command, not one per message. Each message
+  used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
+  trips against a server that also rate limits them — which is why a
+  whole-filter delete took minutes and held the tenant's foreground reservation
+  for all of it. `Service.moveMessagesInBatches` gathers the messages leaving one
+  source mailbox generation and moves them together; three properties make that
+  safe and must survive any change to it. One command names **one** source
+  mailbox under **one** proven `UIDVALIDITY`, and names each UID once — so the
+  walk starts a new gathering whenever either changes, and reorders a selection
+  by source folder first, because a selection made in All Mail interleaves them
+  by date and would otherwise batch nothing. Outcomes are read **per message**:
+  a UID the server no longer has, a UID it refuses, and a UID it moved are three
+  answers inside one command, and a batch the server refuses outright is settled
+  by asking which of its UIDs are still in the source rather than by recording
+  the refusal against all of them. And a message whose dispatch has been claimed
+  is always dispatched and always recorded, even when the run is giving up — a
+  claim nobody settles is a transfer the next attempt has to reconcile against
+  the server. The gathering is bounded in bytes as well as in count, like every
+  other batch that holds message content.
+- What a move changed locally is settled once per batch, not once per message.
+  `moveAnnouncer` owns both halves of that — the search documents the moved
+  messages leave behind and telling the reader. A lone move still settles both
+  the moment it lands. A run that did it per message spent a whole index commit
+  on each document and asked every open view to reload thousands of times, and
+  kept the All Mail cache re-warming itself for as long as it worked; between
+  them that was most of what a large move cost everything else the reader was
+  doing. Reconciliation removes its documents in one call for the same reason —
+  emptying a Trash folder passes through it with everything the server confirmed
+  gone.
+- **A long operation reports on a pace, and reporting never costs more than the
+  work.** Three separate things used to be spent per message and are now spent
+  per interval or per batch, and each must stay that way:
+  - The `sync_runs` progress row (`syncProgressReporter.step`, shared by the
+    ordinary fetch, the sparse repair, and a move run). A folder being mirrored
+    or repaired walks thousands of messages and steps over most of them, and a
+    row write per step costs more than the step. The tally is still counted per
+    message and never approximated; only publishing it is paced. Every boundary
+    that ends a turn or a folder **commits** regardless of the pace, so what was
+    mirrored is durable alongside the checkpoint proving it, and `FinishSyncRun`
+    writes the full tally at the end whatever the pace withheld.
+  - The chrome event stream (`syncEventMinInterval` in `apiEvents`). Each signal
+    rebuilds the entire chrome snapshot — the folder list with its counts, the
+    categories, the archive mapping — once per connected tab, against the same
+    database the operation is competing with. Signals are lossy and the payload
+    is a fresh snapshot either way, so a burst collapses into one rebuild per
+    interval. The first signal after a quiet moment must still go out at once:
+    something is waiting on it.
+  - Reconnecting. A batch of moves and the batches of one Trash purge each hold
+    a single login for their whole run (`MoveSession`, `ExpungeSession`); a
+    handshake, TLS negotiation and LOGIN per batch is most of what those cost
+    and is what mail hosts throttle. Each batch still selects its folder and
+    proves its generation, so reuse costs nothing in safety — only the login is
+    saved.
+- Anything in the frontend waiting on work the server will announce waits on the
+  announcement, not on a timer: `waitForChromeEvent` (`chromeEvents.ts`) is that
+  wait, and the interval passed to it is the fallback for the announcement that
+  never comes. A queued move that slept its full interval regardless kept rows
+  hidden for seconds after the move they were hidden for had already finished.
+  It also takes a floor, and a waiter that polls the server needs one: the work
+  announces itself *while* it runs, not only when it finishes, so waking on
+  every announcement turns a five-second poll into several a second for as long
+  as the work lasts — against the database the work is competing with, which is
+  the cost this whole area exists to remove.
+- Settling a claimed message transfer outlives the context that failed it
+  (`context.WithoutCancel`), on the failure path as much as the success path.
+  A batch is claimed before it is dispatched, so one cancelled request strands
+  every claim in it, and a dispatch this process owns but never finished is not
+  reconcilable by anything short of a restart — the messages behind it refuse
+  every later move until then.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,

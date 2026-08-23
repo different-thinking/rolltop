@@ -5,6 +5,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
+import { waitForChromeEvent } from "../../chromeEvents";
 import type { AccountMailboxChoice, Bootstrap, Conversation, MailCategorySummary, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
@@ -1319,6 +1320,12 @@ const keepaliveMoveChunkBudget = 6;
 // The run is polled rather than assumed: a failed or interrupted run has to give
 // the rows back. The limit only bounds the hiding, not the run itself.
 const queuedMoveWatchIntervalMS = 5000;
+// A run reports while it works, not only when it finishes, so the watcher would
+// wake on every one of those reports. It waits out this floor first: long enough
+// that a run of any length is polled a handful of times rather than hundreds,
+// short enough that a finished move settles its rows while the click still feels
+// like the cause.
+const queuedMoveWatchFloorMS = 750;
 const queuedMoveWatchLimitMS = 10 * 60 * 1000;
 
 const messageSwipeMaxDistance = 112;
@@ -2099,7 +2106,11 @@ function MessageList({
     }
     const deadline = Date.now() + queuedMoveWatchLimitMS;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, queuedMoveWatchIntervalMS));
+      // A finished run announces itself on the event stream, so that is what
+      // ends the wait; the interval is only the fallback for the announcement
+      // that never arrives. Sleeping the interval regardless left rows hidden
+      // for seconds after the move they were hidden for had already finished.
+      await waitForChromeEvent(queuedMoveWatchIntervalMS, queuedMoveWatchFloorMS);
       if (unmounted.current) return;
       let runs: SyncRun[];
       try {
