@@ -286,10 +286,6 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 	}
 	announce := s.moveAnnouncer(userID, false)
 	defer announce.settle(ctx)
-	// Folders the server proved no longer hold a message this walk was asked to
-	// move out of them. Each is reconciled once the walk is done, which is what
-	// takes the stale rows out of the mirror.
-	goneSources := map[int64]moveSourceRef{}
 	batch := make([]*preparedMove, 0, batchSize)
 	batchUIDs := make(map[uint32]struct{}, batchSize)
 	batchBytes := 0
@@ -313,9 +309,7 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 			prepared := dispatched[i]
 			result := s.moveResultFor(ctx, userID, prepared.messageID, prepared.msg.UID, failure)
 			if result.SourceGone {
-				log.Printf("move source no longer holds message user_id=%d message_id=%d mailbox=%q uid=%d",
-					userID, prepared.messageID, prepared.source.Name, prepared.msg.UID)
-				goneSources[prepared.source.ID] = moveSourceRef{account: prepared.account, mailbox: prepared.source}
+				s.noteMoveSourceLostMessage(userID, prepared.messageID, prepared.source, prepared.msg.UID)
 			}
 			if !record(result) {
 				keepGoing = false
@@ -332,7 +326,6 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		select {
 		case <-ctx.Done():
 			flush()
-			s.reconcileMoveSourcesProvenGone(ctx, userID, goneSources)
 			return nil
 		default:
 		}
@@ -363,42 +356,31 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		}
 	}
 	flush()
-	s.reconcileMoveSourcesProvenGone(ctx, userID, goneSources)
 	return nil
 }
 
-// moveSourceRef is a folder a walk has to reconcile, with the account it is
-// reached through.
-type moveSourceRef struct {
-	account store.MailAccount
-	mailbox store.Mailbox
-}
-
-// reconcileMoveSourcesProvenGone brings the mirror in line with a folder that
-// turned out not to hold messages it was asked to move out.
+// noteMoveSourceLostMessage records that a folder no longer holds mail the
+// mirror still has a row for, so the next sync turn of that folder reconciles
+// it instead of waiting out the large-folder pace. The refresh a move queues
+// for its source folder is what then clears the stale rows.
 //
-// It reconciles the folder rather than dropping the named rows, so there is
-// still one definition of "this message is no longer on the server" and one
-// piece of evidence behind it: reconciliation lists the folder itself, so a UID
-// search that came back short for any other reason takes nothing with it, and
-// every other stale row in that folder goes at the same time.
-//
-// The move is over either way. A folder that cannot be reconciled now is
-// reconciled by the next sync turn, so this is logged rather than returned.
-func (s *Service) reconcileMoveSourcesProvenGone(ctx context.Context, userID int64, sources map[int64]moveSourceRef) {
-	if len(sources) == 0 {
+// The move deliberately does not list the folder itself. It is holding one
+// connection for the whole run, and a second concurrent login to the same
+// account is exactly what holding it exists to avoid; a foreground move would
+// also have to keep the tenant's turn — and the browser request — for a
+// full-folder UID listing that can span tens of thousands of messages. The sync
+// turn already has a connection selected on that folder and one definition of
+// what "no longer on the server" removes, so this only takes away the reason it
+// would skip reconciling.
+func (s *Service) noteMoveSourceLostMessage(userID, messageID int64, source store.Mailbox, uid uint32) {
+	log.Printf("move source no longer holds message user_id=%d message_id=%d mailbox=%q uid=%d",
+		userID, messageID, source.Name, uid)
+	if s == nil {
 		return
 	}
-	// Settling outlives the request that asked for the move, the same way a
-	// dispatched move does: a closed tab must not leave the mirror claiming mail
-	// the server has already told this process is gone.
-	settleCtx := context.WithoutCancel(ctx)
-	for _, source := range sources {
-		if err := s.reconcileMailboxUIDs(settleCtx, userID, source.account, source.mailbox); err != nil {
-			log.Printf("reconcile move source user_id=%d mailbox_id=%d mailbox=%q: %v",
-				userID, source.mailbox.ID, source.mailbox.Name, err)
-		}
-	}
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	delete(s.lastReconciled, mailboxReconcileKey{userID: userID, mailboxID: source.ID})
 }
 
 // groupMessageIDsBySourceMailbox reorders a selection so messages leaving the
@@ -704,7 +686,16 @@ func (s *Service) moveMessageVia(ctx context.Context, userID, messageID, destMai
 	}
 	receipt, moveErr := dispatcher.MoveMessageWithReceipt(ctx, prepared.account, prepared.source.Name,
 		prepared.dest.Name, prepared.msg.UID, prepared.sourceUIDValidity)
-	return s.applyMoveOutcome(ctx, userID, prepared, receipt, moveErr, notifyMove, announce)
+	err = s.applyMoveOutcome(ctx, userID, prepared, receipt, moveErr, notifyMove, announce)
+	if IsSourceUIDGone(err) {
+		// The same answer the batched path treats as handled. A lone move must
+		// not mean something different: this is the drag of a single message,
+		// and returning the failure left the caller retrying a move with nothing
+		// left to do against a row only reconciliation can remove.
+		s.noteMoveSourceLostMessage(userID, messageID, prepared.source, prepared.msg.UID)
+		return nil
+	}
+	return err
 }
 
 // moveDispatcher resolves what will issue the remote command: a caller-owned

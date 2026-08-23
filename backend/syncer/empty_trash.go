@@ -157,6 +157,8 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	// fetcher can; the session is nil otherwise, which connects per batch rather
 	// than failing the purge.
 	session := s.openExpungeSession(ctx, userID, account)
+	// Closed again below before anything else logs in to this account, and here
+	// as well so an early return cannot leave the connection held.
 	defer session.close()
 	deleted := 0
 	failedInARow := 0
@@ -193,6 +195,31 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 			return deleted, err
 		}
 	}
+	// Give the connection back before the folder is listed again: a second
+	// concurrent login to the same account is what holding one exists to avoid.
+	session.close()
+	if batchErr != nil {
+		// What the batches confirmed is no longer the whole story. A batch that
+		// failed after flagging its messages leaves them carrying \Deleted, and
+		// on a server without UIDPLUS the only expunge available removes
+		// everything so flagged — so a later batch may well have taken a failed
+		// one with it, unverified and uncounted. Ask the folder what it still
+		// holds rather than reporting the sum of the batches, which would tell a
+		// user that messages the server did delete could not be deleted.
+		//
+		// A failed batch may also be left carrying \Deleted with nothing to
+		// remove it. That is accepted here and nowhere else: those messages are
+		// the ones the user asked to delete, in the folder they asked to empty,
+		// and the next purge flags and expunges them again. What must not be
+		// accepted is reporting them wrongly, which is what this recount is for.
+		if kept, err := s.trashMessagesStillHeld(ctx, account, mailbox, uids, uidValidity); err != nil {
+			log.Printf("recount emptied trash user_id=%d run_id=%d mailbox_id=%d: %v", userID, runID, mailbox.ID, err)
+		} else {
+			deleted = len(uids) - kept
+			progress.MessagesStored = deleted
+			progress.MessagesSkipped = progress.MessagesSeen - deleted
+		}
+	}
 	if deleted < len(uids) {
 		if batchErr != nil {
 			return deleted, fmt.Errorf("%d of %d messages in %s could not be deleted: %w",
@@ -201,6 +228,36 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 		return deleted, fmt.Errorf("the server kept %d of %d messages in %s", len(uids)-deleted, len(uids), mailbox.Name)
 	}
 	return deleted, nil
+}
+
+// trashMessagesStillHeld counts how many of the messages a purge set out to
+// delete the folder still holds. It is the truthful answer where the per-batch
+// confirmations are not: batches are only independent of one another on a
+// server with UIDPLUS.
+//
+// A folder that has been recreated since the purge started answers nothing
+// about those UIDs, so it is an error rather than a count of zero.
+func (s *Service) trashMessagesStillHeld(ctx context.Context, account store.MailAccount, mailbox store.Mailbox,
+	uids []uint32, uidValidity uint32) (int, error) {
+	current, currentValidity, err := s.trashSnapshot(ctx, account, mailbox)
+	if err != nil {
+		return 0, err
+	}
+	if currentValidity != uidValidity {
+		return 0, fmt.Errorf("%s is now generation %d, not the %d this purge deleted from",
+			mailbox.Name, currentValidity, uidValidity)
+	}
+	held := make(map[uint32]struct{}, len(current))
+	for _, uid := range current {
+		held[uid] = struct{}{}
+	}
+	kept := 0
+	for _, uid := range uids {
+		if _, still := held[uid]; still {
+			kept++
+		}
+	}
+	return kept, nil
 }
 
 // expungeTrashBatch deletes one batch, trying again on a fresh login when the

@@ -49,6 +49,20 @@ func (f *goneSourceMoveFetcher) SnapshotMailboxUIDs(_ context.Context, _ store.M
 	}, nil
 }
 
+// MoveMessageWithReceipt is the path a lone move takes: no held connection, so
+// the fetcher itself answers.
+func (f *goneSourceMoveFetcher) MoveMessageWithReceipt(_ context.Context, account store.MailAccount,
+	source, destination string, uid uint32, _ uint32) (*MoveReceipt, error) {
+	f.singleMoves++
+	if !f.holds(uid) {
+		return nil, SourceUIDGone(fmt.Errorf("source mailbox %q no longer contains UID %d; refresh before moving", source, uid))
+	}
+	f.take(uid)
+	f.moveCalls = append(f.moveCalls,
+		moveTestCall{account: account, source: source, destination: destination, uid: uid})
+	return nil, nil
+}
+
 func (f *goneSourceMoveFetcher) OpenMoveSession(_ context.Context, account store.MailAccount) (MoveSession, error) {
 	return &goneSourceMoveSession{fetcher: f, account: account}, nil
 }
@@ -118,6 +132,19 @@ func newGoneSourceFixture(t *testing.T, uids []uint32, stillOnServer []uint32) (
 	return fixture, fetcher, ids
 }
 
+// pacedSourcePlan is a source folder large enough that reconciliation is paced
+// rather than run on every turn, which is the case a stale row survives.
+func pacedSourcePlan(fixture moveTestFixture) MailboxPlan {
+	return MailboxPlan{Name: fixture.source.Name, Status: MailboxStatus{Messages: inlineMetadataSyncLimit + 1}}
+}
+
+// requireSourceReconcileDue reports whether the next sync turn of the source
+// folder will reconcile it rather than wait out the large-folder pace.
+func sourceReconcileDue(fixture moveTestFixture) bool {
+	_, due := fixture.service.mailboxReconcileDue(fixture.userID, fixture.source, pacedSourcePlan(fixture))
+	return due
+}
+
 // A message the source folder no longer holds is not a move that failed: there
 // is nothing there to move. The run finishes clean rather than leaving a notice
 // the user cannot act on.
@@ -142,17 +169,30 @@ func TestRunMoveMessagesTreatsAGoneSourceUIDAsHandled(t *testing.T) {
 	}
 }
 
-// The mirror is what was out of date, so the move leaves it agreeing with the
-// server: the rows for mail that folder no longer holds are gone, and the next
-// attempt has nothing stale to trip over.
-func TestRunMoveMessagesReconcilesASourceThatLostTheMessages(t *testing.T) {
+// The mirror is what was out of date, so the move makes sure it is put right:
+// the source folder becomes due for reconciliation, which is what removes the
+// rows for mail it no longer holds.
+//
+// The move does not list the folder itself. It is holding one connection for
+// the run, and a foreground move would keep the browser waiting on a
+// full-folder listing; the refresh a move already queues has a connection for
+// that folder, and this only takes away the reason it would skip.
+func TestRunMoveMessagesMakesTheSourceDueForReconciliation(t *testing.T) {
 	fixture, fetcher, ids := newGoneSourceFixture(t, []uint32{43, 44, 45}, []uint32{43})
-	ctx := context.Background()
+	// The folder was reconciled a moment ago, so its pace would otherwise skip
+	// it for the next half hour.
+	fixture.service.recordMailboxReconciled(fixture.userID, fixture.source)
+	if sourceReconcileDue(fixture) {
+		t.Fatal("the source folder was already due before the move, so this proves nothing")
+	}
 
 	waitForMoveRun(t, fixture, ids)
 
-	if fetcher.snapshots == 0 {
-		t.Fatal("the source folder was never listed, so its stale rows were never removed")
+	if !sourceReconcileDue(fixture) {
+		t.Fatal("the source folder is still waiting out its pace, so its stale rows survive the move")
+	}
+	if fetcher.snapshots != 0 {
+		t.Fatalf("mailbox listings = %d, want the move not to open a second connection of its own", fetcher.snapshots)
 	}
 	// Only the message the folder really held was moved on the server.
 	movedUIDs := make([]uint32, 0, len(fetcher.moveCalls))
@@ -162,17 +202,21 @@ func TestRunMoveMessagesReconcilesASourceThatLostTheMessages(t *testing.T) {
 	if !slices.Equal(movedUIDs, []uint32{43}) {
 		t.Fatalf("moved UIDs = %v, want only the one the folder still held", movedUIDs)
 	}
-	// Every row in the selection is out of the source folder now: the one that
-	// moved because it moved, the two the server no longer had because the
-	// mirror was the thing that was wrong about them.
-	for _, id := range ids {
-		if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, id); !store.IsNotFound(err) {
-			t.Fatalf("local row %d still claims to be in the source folder: %v", id, err)
-		}
+}
+
+// A move that leaves the folder alone leaves its pace alone too, so an ordinary
+// move does not make every large folder pay for a UID listing.
+func TestRunMoveMessagesLeavesTheSourcePaceAloneWhenNothingIsStale(t *testing.T) {
+	fixture, _, ids := newGoneSourceFixture(t, []uint32{43, 44}, []uint32{43, 44})
+	fixture.service.recordMailboxReconciled(fixture.userID, fixture.source)
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if finished.Status != "ok" || finished.MessagesStored != 2 {
+		t.Fatalf("run status=%q stored=%d, want both messages moved", finished.Status, finished.MessagesStored)
 	}
-	// A message the folder does still hold is untouched by the reconciliation.
-	if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, fixture.message.ID); err != nil {
-		t.Fatalf("unrelated message in the source folder was removed: %v", err)
+	if sourceReconcileDue(fixture) {
+		t.Fatal("a move that found nothing stale still forced the source folder to be reconciled")
 	}
 }
 
@@ -195,11 +239,10 @@ func TestRunMoveMessagesStillReportsARefusedMove(t *testing.T) {
 	}
 }
 
-// The single-message path answers the same way as the batched one: the same
-// server answer must not mean two different things depending on how the move
-// happened to be dispatched.
+// The bulk path an inline move takes answers the same way as a background run.
 func TestMoveMessagesTreatsAGoneSourceUIDAsHandled(t *testing.T) {
 	fixture, fetcher, ids := newGoneSourceFixture(t, []uint32{43}, nil)
+	fixture.service.recordMailboxReconciled(fixture.userID, fixture.source)
 	ctx := context.Background()
 
 	moved, err := fixture.service.MoveMessages(ctx, fixture.userID, ids, fixture.destination.ID)
@@ -212,7 +255,38 @@ func TestMoveMessagesTreatsAGoneSourceUIDAsHandled(t *testing.T) {
 	if fetcher.singleMoves != 1 {
 		t.Fatalf("single moves = %d, want one attempt", fetcher.singleMoves)
 	}
-	if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, ids[0]); !store.IsNotFound(err) {
-		t.Fatalf("stale local row survived the move: %v", err)
+	if !sourceReconcileDue(fixture) {
+		t.Fatal("the source folder is still waiting out its pace, so its stale row survives the move")
+	}
+}
+
+// Dragging one message takes its own path, and the same server answer must not
+// mean something different there: it used to come back as HTTP 502 for as long
+// as the stale row existed, which is for as long as nothing reconciled it.
+func TestMoveMessageTreatsAGoneSourceUIDAsHandled(t *testing.T) {
+	fixture, fetcher, ids := newGoneSourceFixture(t, []uint32{43}, nil)
+	fixture.service.recordMailboxReconciled(fixture.userID, fixture.source)
+	ctx := context.Background()
+
+	if err := fixture.service.MoveMessage(ctx, fixture.userID, ids[0], fixture.destination.ID); err != nil {
+		t.Fatalf("single move of a message the folder no longer holds = %v, want it handled", err)
+	}
+	if fetcher.singleMoves != 1 {
+		t.Fatalf("single moves = %d, want one attempt", fetcher.singleMoves)
+	}
+	if !sourceReconcileDue(fixture) {
+		t.Fatal("the source folder is still waiting out its pace, so its stale row survives the move")
+	}
+}
+
+// A single move the server actually refuses is still an error the caller sees.
+func TestMoveMessageStillReportsARefusedMove(t *testing.T) {
+	fixture := newMoveTestFixture(t)
+	fixture.fetcher.moveErr = errors.New("server refused the move")
+	ctx := context.Background()
+
+	err := fixture.service.MoveMessage(ctx, fixture.userID, fixture.message.ID, fixture.destination.ID)
+	if err == nil || !strings.Contains(err.Error(), "server refused the move") {
+		t.Fatalf("single move error = %v, want a refused move still reported", err)
 	}
 }

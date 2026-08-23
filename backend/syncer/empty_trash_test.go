@@ -270,9 +270,11 @@ func TestEmptyTrashLeavesTheMirrorAloneWhenNothingWasDeleted(t *testing.T) {
 		t.Fatalf("local row after a failed expunge = %v, want it untouched", err)
 	}
 	// A failed delete must not reconcile: the local mirror is the only remaining
-	// copy of mail that is still on the server.
-	if fixture.fetcher.snapshots != 1 {
-		t.Fatalf("snapshots = %d, want only the listing taken before the expunge", fixture.fetcher.snapshots)
+	// copy of mail that is still on the server. The two listings are the one
+	// taken before the expunge and the recount of what the folder still holds.
+	if fixture.fetcher.snapshots != 2 {
+		t.Fatalf("snapshots = %d, want the listing before the expunge and the recount after it, and no reconciliation",
+			fixture.fetcher.snapshots)
 	}
 }
 

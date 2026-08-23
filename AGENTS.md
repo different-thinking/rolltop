@@ -34,8 +34,13 @@ site and in review.
   that exhausts its attempts does not stop the batches behind it. Only
   `emptyTrashBatchGiveUp` batches failing in a row end the purge, so a
   connection that is dead for good is not logged into once per remaining batch.
-  Whatever did go is still reconciled locally, and the run reports how many of
-  how many are left.
+  Whatever did go is still reconciled locally. What the run reports is then read
+  back from the folder rather than added up from the batches
+  (`trashMessagesStillHeld`): a batch that failed after flagging its messages
+  leaves them carrying `\Deleted`, and without UIDPLUS the only expunge
+  available removes everything so flagged, so a later batch may have taken a
+  failed one with it — uncounted, and otherwise reported to the user as mail
+  that could not be deleted.
 - **A move refused because the source folder no longer holds the message is the
   mirror's problem, not the move's.** The server, having selected the folder
   under the UIDVALIDITY the move proved, is giving the same evidence
@@ -45,11 +50,16 @@ site and in review.
   "Move did not finish" notice (`unfinishedMoveRun`, up to
   `unfinishedMoveRunMaxAge` and with nothing to dismiss it) kept being renewed
   by the retry meant to clear it. So `syncer.IsSourceUIDGone` counts as handled
-  rather than failed, alongside a row that was already gone, and the walk
-  reconciles that folder once it ends. It reconciles rather than dropping the
-  named rows on purpose: reconciliation lists the folder itself, so one short
-  UID search cannot take mail with it, and the folder's other stale rows go at
-  the same time.
+  rather than failed, alongside a row that was already gone — on the batched
+  path and the lone-message one alike, or a drag of one message means something
+  different from a drag of two. The move then marks that folder due for
+  reconciliation (`noteMoveSourceLostMessage`) instead of listing it: the move
+  is holding one connection for its whole run and must not open a second login
+  to the same account, and a foreground move would otherwise keep the tenant's
+  turn — and the browser request — for a full-folder UID listing. The refresh a
+  move already queues for its source folder is what then removes the stale rows,
+  through the one definition of "no longer on the server" that everything else
+  uses.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
 - A move of many messages is one IMAP command, not one per message. Each message
   used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
