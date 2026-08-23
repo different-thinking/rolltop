@@ -137,6 +137,35 @@ site and in review.
   of a thread restores exactly what stayed, and a set of runs that did not all
   end the same way settles each run's own messages, or a dismissal that outlives
   its mutation hides mail that never went anywhere.
+- A conversation row can span accounts, and filing it means filing all of it. A
+  thread carries copies of the same mail whenever several of the accounts were
+  addressed, or none of them was - Bcc, a mailing list - which is exactly when
+  duplicate detection refuses to hide one behind another. Delete, Archive and
+  Report spam name a role, not a folder, and every account has its own folder
+  for that role, so such a row is split by account and moved once per account;
+  the server refuses a move into another account's folder, so never send one set
+  of IDs to one mailbox. Refusing the row instead - the old "conversation
+  containing messages from multiple accounts" error - leaves mail the reader
+  deleted sitting in another account. The row says which account each of its
+  messages is in: `conversationView.MessageAccountIDs` is parallel to
+  `MessageIDs`, not the distinct set of accounts, and the two are built together
+  so nothing can shift them out of step. Each destination reports on its own,
+  the way per-run outcomes already do above. Split filing brings two traps the
+  single-folder version never had. A dismissal may cover only the messages that
+  are really going: a row whose own account's copy is already in the
+  destination, or was skipped for any other reason, stays on the list that holds
+  it, and hiding it there hides it for good, because a dismissal lapses only
+  when the list stops returning the message and this list never will. And
+  "already there" is answered per account for the same reason - the row's
+  mailbox speaks for its own copy alone, so it drops that copy from the move
+  instead of refusing the whole row, and a row is refused only when no account
+  has anything left to move. Every gate that greys out one of these actions
+  (`rowSpamState` and anything added beside it) has to answer the same question
+  the action does, or the button refuses what the swipe beside it would do. The
+  keepalive request budget is the page's, not each move's: destinations share
+  `keepaliveMoveChunkBudget` through `keepaliveChunkBudgets`, which hands the
+  ones past it nothing rather than a rounded-up share, because a truncated
+  background commit must under-claim rather than over-send.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick

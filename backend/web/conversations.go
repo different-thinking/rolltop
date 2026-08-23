@@ -405,8 +405,7 @@ func mergeFields(existing []string, next []string) []string {
 }
 
 func summarizeConversation(thread []store.MessageRecord, own map[string]bool) conversationView {
-	messageIDs := conversationMessageIDs(thread)
-	accountIDs := conversationAccountIDs(thread)
+	messageIDs, accountIDs := conversationTransferIDs(thread)
 	thread = dedupeConversationMessages(thread)
 	latest := thread[0]
 	starred := false
@@ -448,30 +447,27 @@ func summarizeConversation(thread []store.MessageRecord, own map[string]bool) co
 	}
 }
 
-func conversationMessageIDs(messages []store.MessageRecord) []int64 {
+// conversationTransferIDs lists the thread's message IDs and, at the same
+// index, the account each of those messages belongs to. The two slices are
+// parallel rather than the distinct account set they used to be, because a
+// thread can hold copies of the same mail in several accounts and a folder
+// belongs to exactly one of them: filing such a row means splitting it, and a
+// distinct set says how many accounts are involved without saying which
+// message sits in which. Every message row carries a non-null account, so the
+// account slice never has a hole a caller would have to guess at.
+func conversationTransferIDs(messages []store.MessageRecord) ([]int64, []int64) {
 	seen := map[int64]bool{}
-	out := make([]int64, 0, len(messages))
+	ids := make([]int64, 0, len(messages))
+	accountIDs := make([]int64, 0, len(messages))
 	for _, msg := range messages {
 		if msg.ID <= 0 || seen[msg.ID] {
 			continue
 		}
 		seen[msg.ID] = true
-		out = append(out, msg.ID)
+		ids = append(ids, msg.ID)
+		accountIDs = append(accountIDs, msg.AccountID)
 	}
-	return out
-}
-
-func conversationAccountIDs(messages []store.MessageRecord) []int64 {
-	seen := map[int64]bool{}
-	out := make([]int64, 0, len(messages))
-	for _, msg := range messages {
-		if msg.AccountID <= 0 || seen[msg.AccountID] {
-			continue
-		}
-		seen[msg.AccountID] = true
-		out = append(out, msg.AccountID)
-	}
-	return out
+	return ids, accountIDs
 }
 
 func (s *Server) conversationAttachmentNames(ctx context.Context, userID int64, messages []store.MessageRecord, limit int) []string {
