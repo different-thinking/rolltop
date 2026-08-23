@@ -142,11 +142,16 @@ type MailSender interface {
 // Runner decides when work starts, then Service performs one account/mailbox sync
 // against Store, Blob, Search, and Fetcher dependencies.
 type Service struct {
-	Store   *store.Store
-	Blobs   *blob.Store
-	Search  *search.Service
-	Fetcher Fetcher
-	Sender  MailSender
+	Store  *store.Store
+	Blobs  *blob.Store
+	Search *search.Service
+
+	// reconcileMu guards lastReconciled, the paced clock for folders too large
+	// to reconcile on every turn.
+	reconcileMu    sync.Mutex
+	lastReconciled map[mailboxReconcileKey]time.Time
+	Fetcher        Fetcher
+	Sender         MailSender
 
 	BlobRetention                    time.Duration
 	Notify                           func(userID int64)
@@ -194,7 +199,12 @@ type Service struct {
 }
 
 const (
-	inlineMetadataSyncLimit               = 10000
+	inlineMetadataSyncLimit = 10000
+	// largeMailboxReconcileInterval bounds how often a folder above that limit
+	// pays for a full UID listing. It is a pace, not a gate: the folder is always
+	// reconciled eventually, which is what stops mail deleted elsewhere from
+	// living on in the mirror.
+	largeMailboxReconcileInterval         = 30 * time.Minute
 	mailboxGenerationBlobCleanupBatchSize = 25
 )
 
@@ -1116,18 +1126,35 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		if options.deferOrdinaryMaintenanceNow() {
 			log.Printf("defer mailbox metadata reconciliation user_id=%d account_id=%d mailbox=%q reason=mailbox-generation-recovery",
 				userID, account.ID, mailboxName)
-		} else if s.shouldSyncInlineMetadata(planned) {
-			if err := s.syncMailboxReadFlags(ctx, userID, account, mailbox); err != nil {
-				log.Printf("sync seen flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
-			if err := s.syncMailboxStarFlags(ctx, userID, account, mailbox); err != nil {
-				log.Printf("sync flagged flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
-			if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
-				log.Printf("reconcile mailbox user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
 		} else {
-			log.Printf("defer large-folder metadata reconciliation user_id=%d mailbox=%s messages=%d threshold=%d", userID, mailboxName, planned.Status.Messages, inlineMetadataSyncLimit)
+			// Flag sync is what the size limit is actually about: it searches the
+			// whole folder twice and then writes a flag for every local message
+			// outside each answer.
+			if s.shouldSyncInlineMetadata(planned) {
+				if err := s.syncMailboxReadFlags(ctx, userID, account, mailbox); err != nil {
+					log.Printf("sync seen flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				}
+				if err := s.syncMailboxStarFlags(ctx, userID, account, mailbox); err != nil {
+					log.Printf("sync flagged flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				}
+			} else {
+				log.Printf("defer large-folder flag sync user_id=%d mailbox=%s messages=%d threshold=%d",
+					userID, mailboxName, planned.Status.Messages, inlineMetadataSyncLimit)
+			}
+			// Reconciliation is not deferred with it. Skipping a flag sync leaves a
+			// read mark stale; skipping this leaves mail the server no longer has on
+			// the reader's screen, and nothing else ever removes it — a large folder
+			// used to keep every message deleted elsewhere, forever.
+			if since, due := s.mailboxReconcileDue(userID, mailbox, planned); due {
+				if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
+					log.Printf("reconcile mailbox user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				} else {
+					s.recordMailboxReconciled(userID, mailbox)
+				}
+			} else {
+				log.Printf("skip mailbox reconciliation user_id=%d mailbox=%s messages=%d reconciled_ago=%s interval=%s",
+					userID, mailboxName, planned.Status.Messages, since.Round(time.Second), largeMailboxReconcileInterval)
+			}
 		}
 		if planned.Status.UIDValidity > 0 {
 			if err := s.Store.FinalizeMailboxGenerationRebuild(ctx, userID, account.ID, mailbox.ID, planned.Status.UIDValidity); err != nil {
@@ -1588,10 +1615,47 @@ func (s *Service) recordMailboxStatus(ctx context.Context, userID int64, mailbox
 	}
 }
 
-// shouldSyncInlineMetadata avoids expensive full-mailbox flag and UID searches on
-// very large folders; those folders still get new-message fetches incrementally.
+// mailboxReconcileKey identifies one tenant's folder in the reconciliation clock.
+type mailboxReconcileKey struct {
+	userID    int64
+	mailboxID int64
+}
+
+// shouldSyncInlineMetadata avoids the expensive full-mailbox flag searches on
+// very large folders; those folders still get new-message fetches incrementally,
+// and they are still reconciled — see mailboxReconcileDue.
 func (s *Service) shouldSyncInlineMetadata(plan MailboxPlan) bool {
 	return plan.Status.Messages == 0 || plan.Status.Messages <= inlineMetadataSyncLimit
+}
+
+// mailboxReconcileDue decides whether this turn pays for the folder's UID
+// listing. A folder small enough for inline metadata pays it every turn, as it
+// always has. A larger one pays it on an interval instead: the listing is one
+// command, but it returns every UID the folder holds and is compared against
+// every row the mirror holds, which is not something to repeat on every poll of
+// a fifty-thousand-message folder. The second result is how long ago it last
+// ran, for the log line that says why this turn skipped it.
+func (s *Service) mailboxReconcileDue(userID int64, mailbox store.Mailbox, plan MailboxPlan) (time.Duration, bool) {
+	if s.shouldSyncInlineMetadata(plan) {
+		return 0, true
+	}
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	last, seen := s.lastReconciled[mailboxReconcileKey{userID: userID, mailboxID: mailbox.ID}]
+	if !seen {
+		return 0, true
+	}
+	since := time.Since(last)
+	return since, since >= largeMailboxReconcileInterval
+}
+
+func (s *Service) recordMailboxReconciled(userID int64, mailbox store.Mailbox) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	if s.lastReconciled == nil {
+		s.lastReconciled = map[mailboxReconcileKey]time.Time{}
+	}
+	s.lastReconciled[mailboxReconcileKey{userID: userID, mailboxID: mailbox.ID}] = time.Now()
 }
 func (s *Service) notify(userID int64) {
 	if s.Notify != nil {
