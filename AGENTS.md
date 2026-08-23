@@ -366,6 +366,21 @@ site and in review.
   bodies as soon as they are stored. The process also installs a soft heap
   ceiling at startup (`ROLLTOP_MEMORY_LIMIT`, `backend/memlimit`); it is a
   backstop for the unbounded case, not a licence to add one.
+- In `plugins/mail_filters`, `older_than:` is the one query term that is not a
+  search. It says when a rule may act, not what to look for, and the message's
+  own date already answers it - so it is taken out of the query and compared
+  there, and what remains decides the match. Three things follow, and all three
+  were once wrong. A message that matches the rest but is still too young is
+  recorded as `scheduled` in **whichever phase saw it**: restricting that to
+  newly arrived mail meant a rule saved today never reached the mail already in
+  the mailbox, which is the only mail an age rule was created for. A rule whose
+  only term is the age matches everything its scope reaches, because the age was
+  the whole condition - handing the empty string that remains to the search
+  index answers no for every message instead. And exactly one scheduled row may
+  wait per rule and message, or a second backfill queues the same move again and
+  runs it against a message already sitting in Trash. Deleting still means what
+  it means everywhere else here: the move is to the source account's Trash, and
+  only emptying Trash touches the server.
 
 ## Checks
 
