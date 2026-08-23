@@ -293,9 +293,19 @@ site and in review.
   holder from an abandoned one, and without it the takeover would hand a live
   server's database to a second one. Only a marked, silent holder is taken over;
   anything else is named in the error, and `ROLLTOP_BREAK_INSTANCE_LOCK` is the
-  operator's one-start override for it. A stop signal during the wait is
-  reported as a stop, wrapping `context.Canceled` so `stoppedDuringStartup`
-  keeps it out of the crash report — never as the second-server message.
+  operator's one-start override for it — which `instanceLockHolder.answering`
+  refuses to apply to a holder that pinged inside the window, so an override
+  left set in the environment cannot take a running server's database on the
+  next overlapping deploy. A stop signal during the wait is reported as a stop,
+  wrapping `context.Canceled` so `stoppedDuringStartup` keeps it out of the
+  crash report — never as the second-server message; every failure inside the
+  claim goes through `stoppedWaiting` first for that reason.
+- The holder lookup must stay scoped to the current database. Advisory locks are
+  per database and `pg_locks` is per cluster, so an unscoped query can read
+  another deployment's session as this database's holder and terminate it. Its
+  nullable columns are coalesced so that "not known" reads as answering, never
+  as abandoned: a role that cannot see another session's row must make the start
+  refuse, not make it end a session it cannot inspect.
 - The schema is `backend/store/pgschema/baseline.sql`, applied to an empty
   database and recorded as one row in `schema_migrations` under a checksum over
   its text. It was derived once from the SQLite schema that preceded it; that

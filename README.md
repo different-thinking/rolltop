@@ -575,8 +575,18 @@ name — an older Rolltop, or anything else that took the same key — might be 
 running server whose liveness cannot be read this way, so it is reported rather
 than ended. If you have established that nothing else is running, set
 `ROLLTOP_BREAK_INSTANCE_LOCK=true` for one start to take the lock from it, and
-unset it again afterwards. Leaving it on turns the guard off, and what it
-guards against does not announce itself.
+unset it again afterwards.
+
+The override will not take a lock from a session that is still answering — one
+that carries the marker and pinged within the last 75 seconds is a running
+server, and it is refused with that said in the log. That is what keeps an
+override left set in the environment from handing a healthy server's database
+to the next deployment that overlaps it. It is still not a setting to leave on:
+against anything the guard cannot read it does exactly what it says.
+
+Advisory locks are scoped to a database, so several Rolltop deployments can
+share one PostgreSQL cluster as long as each has its own database. They do not
+see each other's locks.
 
 ### Backups
 

@@ -121,12 +121,16 @@ func (e *errInstanceLockHeld) Error() string {
 	msg := "another rolltop server is already running against this database. " +
 		"One database serves one server: two of them stamp each other's sync runs interrupted " +
 		"and fetch every mailbox twice. Stop the other server, or give this one its own database"
-	if e.holder == nil {
-		return msg
+	if e.holder != nil {
+		msg += ". It is held by " + e.holder.describe()
 	}
-	return msg + ". It is held by " + e.holder.describe() +
-		". If that session belongs to a server that no longer exists, set " +
-		"ROLLTOP_BREAK_INSTANCE_LOCK=true for one start to take the lock from it"
+	// The hint goes on every one of these, including the ones with no holder to
+	// describe. Failing to read the catalogs is the case where the automatic
+	// recovery cannot run at all, so it is the last case that should be missing
+	// the manual one.
+	return msg + ". If no server is running any more - the lock outlives a container " +
+		"that was killed without closing its connection - set ROLLTOP_BREAK_INSTANCE_LOCK=true " +
+		"for one start to take the lock from it"
 }
 
 // instanceLockHolder is the session holding the lock, as pg_stat_activity
@@ -156,6 +160,20 @@ func (h *instanceLockHolder) marked() bool { return h != nil && h.appName == ins
 // state this code cannot read, and the keepalives end it soon enough anyway.
 func (h *instanceLockHolder) staleAfter(d time.Duration) bool {
 	return h.marked() && h.state == "idle" && h.idleFor > d
+}
+
+// answering reports the opposite finding, and it is not the negation of the one
+// above: a marked holder that did something within d has a process behind it.
+//
+// It exists so the operator's override cannot be aimed at a running server.
+// "Take the lock from whatever holds it" is a reasonable thing to ask for a
+// lock left behind by a container that is gone, and never a reasonable thing to
+// do to a server that is still syncing — an override left set in the
+// environment would otherwise take a healthy server's database away on the next
+// slow rolling deploy, which is the two-server state this guard exists to
+// prevent, arrived at through the guard's own recovery path.
+func (h *instanceLockHolder) answering(d time.Duration) bool {
+	return h.marked() && h.idleFor <= d
 }
 
 // describe names the holding session the way an operator would have to look it
@@ -214,6 +232,10 @@ func (o instanceLockOptions) stale() time.Duration {
 type instanceLock struct {
 	db   *sql.DB
 	conn *sql.Conn
+	// pid is the backend behind conn, read once while the session is being
+	// prepared. It is what the next server would see in pg_stat_activity, so
+	// naming it in the log is what connects the two sides of a handover.
+	pid int
 
 	pingEvery  time.Duration
 	staleAfter time.Duration
@@ -222,6 +244,9 @@ type instanceLock struct {
 	// database/sql does not allow two callers on a *sql.Conn at once.
 	mu     sync.Mutex
 	closed bool
+	// pingFailed is the last thing ping reported, so it reports changes rather
+	// than repeating itself.
+	pingFailed bool
 
 	stopPing context.CancelFunc
 	pingDone chan struct{}
@@ -258,13 +283,14 @@ func acquireInstanceLock(ctx context.Context, dsnName string, opts instanceLockO
 		return nil, err
 	}
 	lock := &instanceLock{db: db, conn: conn, pingEvery: opts.ping(), staleAfter: opts.stale()}
-	if err := prepareInstanceSession(ctx, conn); err != nil {
+	if lock.pid, err = prepareInstanceSession(ctx, conn); err != nil {
 		lock.release()
 		return nil, err
 	}
 
 	deadline := time.Now().Add(opts.wait)
 	attempts := 0
+	var lastHolder *instanceLockHolder
 	for {
 		var acquired bool
 		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, instanceAdvisoryLock).Scan(&acquired); err != nil {
@@ -273,6 +299,7 @@ func acquireInstanceLock(ctx context.Context, dsnName string, opts instanceLockO
 		}
 		if acquired {
 			lock.startPing()
+			log.Printf("instance lock: held by backend pid %d, pinged every %s", lock.pid, lock.pingEvery)
 			return lock, nil
 		}
 		if !time.Now().Before(deadline) {
@@ -286,10 +313,16 @@ func acquireInstanceLock(ctx context.Context, dsnName string, opts instanceLockO
 			// and one to spare.
 			if attempts++; attempts > instanceClaimAttempts {
 				lock.release()
-				return nil, &errInstanceLockHeld{}
+				// lastHolder rather than nothing: the repeated-failure case is
+				// the one where the operator most needs the session named.
+				return nil, &errInstanceLockHeld{holder: lastHolder}
 			}
 
-			if err := lock.claimFromHolder(ctx, opts.breakHeld); err != nil {
+			holder, err := lock.claimFromHolder(ctx, opts.breakHeld)
+			if holder != nil {
+				lastHolder = holder
+			}
+			if err != nil {
 				lock.release()
 				return nil, err
 			}
@@ -305,7 +338,7 @@ func acquireInstanceLock(ctx context.Context, dsnName string, opts instanceLockO
 			// Being told to stop while waiting is not the misconfiguration this
 			// guard exists to name, and reporting it as one sends whoever reads
 			// the log looking for a second server that was never there.
-			return nil, fmt.Errorf("stopped while waiting for another server to release this database: %w", ctx.Err())
+			return nil, stoppedWaiting(ctx)
 		case <-timer.C:
 		}
 	}
@@ -319,7 +352,7 @@ func acquireInstanceLock(ctx context.Context, dsnName string, opts instanceLockO
 // Both have to be in place before the lock is taken, not after. A process
 // killed in the window between would leave exactly the unmarked, unprobed
 // holder this whole file exists to avoid.
-func prepareInstanceSession(ctx context.Context, conn *sql.Conn) error {
+func prepareInstanceSession(ctx context.Context, conn *sql.Conn) (int, error) {
 	settings := []string{
 		fmt.Sprintf(`SET application_name = '%s'`, instanceLockAppName),
 		fmt.Sprintf(`SET tcp_keepalives_idle = %d`, instanceKeepaliveIdle),
@@ -328,10 +361,14 @@ func prepareInstanceSession(ctx context.Context, conn *sql.Conn) error {
 	}
 	for _, stmt := range settings {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("prepare the instance lock session: %w", err)
+			return 0, fmt.Errorf("prepare the instance lock session: %w", err)
 		}
 	}
-	return nil
+	var pid int
+	if err := conn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		return 0, fmt.Errorf("prepare the instance lock session: %w", err)
+	}
+	return pid, nil
 }
 
 // claimFromHolder clears the way for one more try at a lock that is still held
@@ -342,37 +379,68 @@ func prepareInstanceSession(ctx context.Context, conn *sql.Conn) error {
 // pinging, so the process is gone and its backend is terminated; or something
 // this code cannot vouch for holds it, which is an error naming that session —
 // unless the operator has said to take it anyway.
-func (l *instanceLock) claimFromHolder(ctx context.Context, breakHeld bool) error {
+func (l *instanceLock) claimFromHolder(ctx context.Context, breakHeld bool) (*instanceLockHolder, error) {
 	holder, err := l.lookupHolder(ctx)
 	if err != nil {
+		if stopped := stoppedWaiting(ctx); stopped != nil {
+			return nil, stopped
+		}
 		// Not fatal in its own right. Failing to read the catalogs costs the
 		// detail in the message and the chance to recover automatically; what
 		// the operator has to be told either way is that the lock is held, and
 		// replacing that with a catalog error would bury it.
 		log.Printf("instance lock: %v", err)
-		return &errInstanceLockHeld{}
+		return nil, &errInstanceLockHeld{}
 	}
 	switch {
 	case holder == nil:
 		// Released between the failed try and this lookup. The retry takes it.
-		return nil
+		return nil, nil
 	case holder.staleAfter(l.staleAfter):
 		log.Printf("instance lock: taking it from pid %d, a rolltop lock session silent for %s "+
 			"(its process is gone; a running one pings every %s)",
 			holder.pid, holder.idleFor.Round(time.Second), l.pingEvery)
+	case holder.answering(l.staleAfter):
+		// Ahead of breakHeld on purpose: this holder answered within the last
+		// window, so there is a server behind it and the override is being
+		// pointed at the wrong thing.
+		if breakHeld {
+			log.Printf("instance lock: ROLLTOP_BREAK_INSTANCE_LOCK is set but ignored - %s is a running server, "+
+				"not an abandoned session. Stop it, or give this server its own database", holder.describe())
+		}
+		return holder, &errInstanceLockHeld{holder: holder}
 	case breakHeld:
 		log.Printf("instance lock: ROLLTOP_BREAK_INSTANCE_LOCK is set, taking it from %s", holder.describe())
 	default:
-		return &errInstanceLockHeld{holder: holder}
+		return holder, &errInstanceLockHeld{holder: holder}
 	}
 	// Terminating is the last word: from here the lock is either free or about
 	// to be, and the caller retries.
 	if err := l.terminateHolder(ctx, holder.pid); err != nil {
-		// A refused termination — a role that may not signal that backend —
+		if stopped := stoppedWaiting(ctx); stopped != nil {
+			return holder, stopped
+		}
+		// A refused termination - a role that may not signal that backend -
 		// leaves the lock exactly where it was, so the answer is the message
 		// that names it, with the reason the recovery did not happen alongside.
 		log.Printf("instance lock: %v", err)
-		return &errInstanceLockHeld{holder: holder}
+		return holder, &errInstanceLockHeld{holder: holder}
+	}
+	return holder, nil
+}
+
+// stoppedWaiting turns a cancelled startup into the error that says so, and
+// nil into nil so callers can use it as a guard.
+//
+// Every failure inside the claim has to pass through this first. A cancelled
+// context makes catalog reads and terminations fail like anything else, and
+// reporting one of those as "another rolltop server is already running" sends
+// whoever reads the log hunting for a second server that was never there -
+// while cmd/rolltop, which recognises a stopped startup by the wrapped
+// context.Canceled, files the stop as a crash.
+func stoppedWaiting(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("stopped while waiting for another server to release this database: %w", err)
 	}
 	return nil
 }
@@ -383,6 +451,19 @@ func (l *instanceLock) claimFromHolder(ctx context.Context, breakHeld bool) erro
 // in classid, the low half in objid, with objsubid 1 marking it as the
 // single-argument form. Reassembling it in SQL keeps the encoding in one place
 // and out of Go's signed integers.
+//
+// The database filter is load-bearing, not tidiness. Advisory locks are scoped
+// to a database — two servers on one cluster with a database each both hold
+// this key quite legitimately — while pg_locks lists the whole cluster. Without
+// it a start could read the other database's session as its own holder, report
+// the wrong server, and, if that one happened to look abandoned, terminate a
+// lock belonging to a deployment it has nothing to do with.
+//
+// The nullable columns are coalesced because pg_stat_activity hides most of a
+// row from a role that does not own the session. Their fallbacks all say "not
+// known", and "not known" must never read as "abandoned": an unknown idle time
+// becomes zero, which makes the holder answering rather than stale, so the
+// start refuses and names it instead of ending a session it cannot see.
 func (l *instanceLock) lookupHolder(ctx context.Context) (*instanceLockHolder, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -393,9 +474,9 @@ func (l *instanceLock) lookupHolder(ctx context.Context) (*instanceLockHolder, e
 		SELECT a.pid,
 		       COALESCE(a.application_name, ''),
 		       COALESCE(host(a.client_addr), ''),
-		       a.backend_start,
+		       COALESCE(a.backend_start, now()),
 		       COALESCE(a.state, ''),
-		       EXTRACT(EPOCH FROM (now() - COALESCE(a.state_change, a.backend_start)))::double precision
+		       COALESCE(EXTRACT(EPOCH FROM (now() - a.state_change)), 0)::double precision
 		  FROM pg_locks l
 		  JOIN pg_stat_activity a ON a.pid = l.pid
 		 WHERE l.locktype = 'advisory'
@@ -403,6 +484,7 @@ func (l *instanceLock) lookupHolder(ctx context.Context) (*instanceLockHolder, e
 		   AND l.objsubid = 1
 		   AND l.classid = (($1::bigint >> 32) & 4294967295)::bigint::oid
 		   AND l.objid = ($1::bigint & 4294967295)::bigint::oid
+		   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
 		   AND a.pid <> pg_backend_pid()
 		 ORDER BY a.backend_start
 		 LIMIT 1`
@@ -486,12 +568,22 @@ func (l *instanceLock) ping(ctx context.Context) {
 	pingCtx, cancel := context.WithTimeout(ctx, l.pingEvery)
 	defer cancel()
 	var one int
-	if err := l.conn.QueryRowContext(pingCtx, `SELECT 1`).Scan(&one); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
+	err := l.conn.QueryRowContext(pingCtx, `SELECT 1`).Scan(&one)
+	if err != nil && ctx.Err() != nil {
+		return
+	}
+	// Once per transition, not once per tick. A connection that stays broken
+	// would otherwise write this line every pingEvery for as long as the server
+	// runs — thousands a day, all identical — and bury the line that says when
+	// it came back.
+	switch {
+	case err != nil && !l.pingFailed:
+		l.pingFailed = true
 		log.Printf("instance lock: this server can no longer reach the session holding it (%v); "+
-			"the single-server guard is not protecting this database until the next restart", err)
+			"the single-server guard is not protecting this database until it recovers", err)
+	case err == nil && l.pingFailed:
+		l.pingFailed = false
+		log.Print("instance lock: the session holding it is reachable again")
 	}
 }
 

@@ -271,9 +271,137 @@ func TestExclusiveInstanceWillNotTakeOverALiveHolder(t *testing.T) {
 	if !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("the refusal does not say what is wrong: %v", err)
 	}
-	// The live holder must still be able to use the connection it kept.
-	if err := live.conn.PingContext(ctx); err != nil {
-		t.Fatalf("the running server's lock session did not survive: %v", err)
+	// The live holder must still have the session it kept - asked from outside,
+	// because that connection belongs to its ping goroutine.
+	if !instanceSessionExists(t, dsn, live.pid) {
+		t.Fatal("the running server's lock session was terminated")
+	}
+}
+
+// TestInstanceLockOverrideWillNotTakeALiveServer keeps the escape hatch from
+// becoming the failure it exists to recover from. An override left set in the
+// environment meets a healthy server on the next slow rolling deploy, and
+// honouring it there would start the second server this guard is for - by way
+// of the guard's own recovery path.
+func TestInstanceLockOverrideWillNotTakeALiveServer(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtestdb.NewFromTemplate(t, SchemaTag(), buildTestTemplate)
+
+	live, err := acquireInstanceLock(ctx, dsn, instanceLockOptions{
+		pingEvery: 50 * time.Millisecond, staleAfter: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.release()
+	time.Sleep(300 * time.Millisecond)
+
+	second, err := acquireInstanceLock(ctx, dsn, instanceLockOptions{
+		wait: 0, breakHeld: true, pingEvery: 50 * time.Millisecond, staleAfter: 500 * time.Millisecond,
+	})
+	if err == nil {
+		second.release()
+		t.Fatal("the override took the database from a server that was still answering")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("the refusal does not say what is wrong: %v", err)
+	}
+	if !instanceSessionExists(t, dsn, live.pid) {
+		t.Fatal("the override terminated a running server's lock session")
+	}
+}
+
+// TestInstanceLockIgnoresAHolderInAnotherDatabase covers the difference between
+// where the lock lives and where the catalog that lists it lives. Advisory
+// locks are scoped to a database, so two deployments sharing a cluster hold
+// this key at once quite legitimately - but pg_locks lists the whole cluster,
+// and a lookup that does not say which database it means can pick the other
+// deployment's session.
+//
+// Both directions are wrong and both are checked: the neighbour must not be
+// terminated, and it must not stand in the way of a recovery that is this
+// database's to make.
+func TestInstanceLockIgnoresAHolderInAnotherDatabase(t *testing.T) {
+	ctx := context.Background()
+	// Two databases on one cluster, which is the whole point, so neither comes
+	// from NewFromTemplate: that memoises one database per test. Empty ones do,
+	// because the lock reads catalogs and takes an advisory lock and touches no
+	// table of ours. The neighbour is created first so it is the older backend,
+	// which is the one an unscoped lookup would settle on.
+	neighbour := pgtestdb.New(t)
+	mine := pgtestdb.New(t)
+
+	// A neighbour that looks abandoned, next to a live holder of this database.
+	// Unscoped, the neighbour is what the lookup finds and terminates.
+	neighbourPID := abandonInstanceLockSession(t, neighbour, instanceLockAppName)
+	live, err := acquireInstanceLock(ctx, mine, instanceLockOptions{
+		pingEvery: 50 * time.Millisecond, staleAfter: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	second, err := acquireInstanceLock(ctx, mine, instanceLockOptions{
+		wait: 0, pingEvery: 50 * time.Millisecond, staleAfter: 200 * time.Millisecond,
+	})
+	if err == nil {
+		second.release()
+		t.Fatal("a lock this database's own server was holding was taken anyway")
+	}
+	if !instanceSessionExists(t, neighbour, neighbourPID) {
+		t.Fatal("a lock session belonging to another database was terminated")
+	}
+	live.release()
+
+	// The other direction: this database's own holder is the abandoned one, and
+	// the neighbour's is live. Unscoped, the live neighbour is what the lookup
+	// finds, and the recovery this database is owed never happens.
+	neighbourLive, err := acquireInstanceLock(ctx, neighbour, instanceLockOptions{
+		pingEvery: 50 * time.Millisecond, staleAfter: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer neighbourLive.release()
+	abandoned := abandonInstanceLockSession(t, mine, instanceLockAppName)
+	time.Sleep(400 * time.Millisecond)
+
+	recovered, err := acquireInstanceLock(ctx, mine, instanceLockOptions{
+		wait: time.Second, pingEvery: 50 * time.Millisecond, staleAfter: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("an abandoned lock in this database was not recovered: %v", err)
+	}
+	defer recovered.release()
+	if instanceSessionExists(t, mine, abandoned) {
+		t.Fatal("the abandoned session was left holding the lock")
+	}
+	if !instanceSessionExists(t, neighbour, neighbourLive.pid) {
+		t.Fatal("the neighbour's running lock session was terminated")
+	}
+}
+
+// TestInstanceLockRefusalAlwaysSaysHowToRecover pins the one line an operator
+// acts on. It has to survive the case where the catalogs cannot be read at all,
+// which is exactly when the automatic recovery cannot run and the manual one is
+// all that is left.
+func TestInstanceLockRefusalAlwaysSaysHowToRecover(t *testing.T) {
+	withHolder := (&errInstanceLockHeld{holder: &instanceLockHolder{
+		pid: 41, appName: instanceLockAppName, state: "idle",
+	}}).Error()
+	withoutHolder := (&errInstanceLockHeld{}).Error()
+
+	for _, msg := range []string{withHolder, withoutHolder} {
+		if !strings.Contains(msg, "already running") {
+			t.Fatalf("the refusal does not say what is wrong: %s", msg)
+		}
+		if !strings.Contains(msg, "ROLLTOP_BREAK_INSTANCE_LOCK") {
+			t.Fatalf("the refusal does not say how to recover from it: %s", msg)
+		}
+	}
+	if !strings.Contains(withHolder, "pid 41") {
+		t.Fatalf("the refusal does not name the session it read: %s", withHolder)
 	}
 }
 
