@@ -11,6 +11,7 @@ import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
+import { mailRouteView } from "./lib/routes";
 import type { RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
@@ -99,29 +100,37 @@ export function RouteView({
       />
     );
   }
-  if (location.path === "/compose") {
-    return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
-  }
-  if (location.path === "/calendar" || location.path.startsWith("/calendar/")) {
-    return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
-  }
-  if (location.path === "/contacts") {
-    return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
-  }
-  if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
-    return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} replaceRoute={replaceRoute} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;
-  }
-  if (location.path === "/admin/users" && user.is_admin) {
-    return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
-  }
-  if (location.path === "/admin/database" && user.is_admin) {
-    return <AdminDatabaseView csrf={csrf} datePrefs={user} />;
-  }
-  if (location.path === "/activity") {
-    return <ActivityView csrf={csrf} datePrefs={user} activeSyncRuns={activeSyncRuns} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
-  }
-  if (location.path.startsWith("/sync-runs/")) {
-    return <SyncRunView csrf={csrf} location={location} navigate={navigate} datePrefs={user} />;
+  // Everything below is a route that is not mail, so it is reached only when
+  // mailRouteView agrees - including whether this reader may open the admin
+  // screens, which is why those branches no longer test it a second time. The
+  // shell asks that same function which views take the reading measure; deciding
+  // the branch by it rather than beside it is what keeps a route from being mail
+  // to one of them and not to the other.
+  if (!mailRouteView(location.path, Boolean(user.is_admin))) {
+    if (location.path === "/compose") {
+      return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
+    }
+    if (location.path === "/calendar" || location.path.startsWith("/calendar/")) {
+      return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
+    }
+    if (location.path === "/contacts") {
+      return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
+    }
+    if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
+      return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} replaceRoute={replaceRoute} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;
+    }
+    if (location.path === "/admin/users") {
+      return <AdminUsersView csrf={csrf} refreshChrome={refreshChrome} addToast={addToast} />;
+    }
+    if (location.path === "/admin/database") {
+      return <AdminDatabaseView csrf={csrf} datePrefs={user} />;
+    }
+    if (location.path === "/activity") {
+      return <ActivityView csrf={csrf} datePrefs={user} activeSyncRuns={activeSyncRuns} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
+    }
+    if (location.path.startsWith("/sync-runs/")) {
+      return <SyncRunView csrf={csrf} location={location} navigate={navigate} datePrefs={user} />;
+    }
   }
   return (
     <MailView

@@ -95,6 +95,30 @@ export function mailURL(mailboxID: string | number | null, page = 1, view: MailV
   return view ? `/mail/${view}${suffix}` : `/mail${suffix}`;
 }
 
+/**
+ * mailRouteView reports whether a path reaches mail to read - a conversation
+ * list or a thread. It is the authority on that question rather than a summary
+ * of one: RouteView tests it before considering any of its own special routes,
+ * so the two cannot answer differently, and the shell reads it to decide which
+ * views take the reading measure.
+ *
+ * It has to name the special routes exactly as RouteView guards them, not by
+ * their prefix. RouteView claims `/settings/account`, not all of `/settings`,
+ * and it claims the admin screens only for an admin - so a stale `/admin/users`
+ * a reader can no longer open, and `/settings` on its own, both end on the mail
+ * list, and a prefix test would leave those lists unmeasured.
+ */
+export function mailRouteView(path: string, isAdmin: boolean): boolean {
+  const claimed = path === "/compose"
+    || path === "/calendar" || path.startsWith("/calendar/")
+    || path === "/contacts"
+    || path === "/settings/account" || path.startsWith("/settings/account/")
+    || ((path === "/admin/users" || path === "/admin/database") && isAdmin)
+    || path === "/activity"
+    || path.startsWith("/sync-runs/");
+  return !claimed;
+}
+
 /** Parse /search/q/:query/pN slugs into search state. */
 export function searchRoute(path: string): { query: string; page: number } {
   const parts = path.split("/").filter(Boolean);

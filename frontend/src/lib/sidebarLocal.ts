@@ -1,10 +1,16 @@
-// File overview: User-scoped persistence for which sidebar account groups are collapsed.
-// Storage is best-effort; a missing or corrupt entry means every account stays expanded.
+// File overview: User-scoped persistence for the sidebar's own state - which account groups are
+// collapsed, and whether the sidebar is hidden altogether. Storage is best-effort; a missing or
+// corrupt entry means every account stays expanded and the sidebar stays visible.
 
 const collapsedAccountsPrefix = "rolltop.sidebar.collapsedAccounts.v1.";
+const hiddenSidebarPrefix = "rolltop.sidebar.hidden.v1.";
 
 function collapsedAccountsStorageKey(userID: number): string {
   return `${collapsedAccountsPrefix}${userID}`;
+}
+
+function hiddenSidebarStorageKey(userID: number): string {
+  return `${hiddenSidebarPrefix}${userID}`;
 }
 
 function positiveUserID(userID: number): boolean {
@@ -35,14 +41,50 @@ export function saveCollapsedAccounts(userID: number, collapsed: Set<string>): v
   }
 }
 
-/** clearOtherCollapsedAccounts drops sidebar state belonging to other users on a shared browser. */
-export function clearOtherCollapsedAccounts(userID: number): void {
-  const keep = positiveUserID(userID) ? collapsedAccountsStorageKey(userID) : "";
+/**
+ * loadSidebarHidden reports whether this reader hid the sidebar. Only an explicit
+ * "true" hides it, so an unreadable or absent entry opens the app with the
+ * folders in view rather than with a shell the reader has to discover a button
+ * to fill.
+ */
+export function loadSidebarHidden(userID: number): boolean {
+  if (!positiveUserID(userID)) return false;
+  try {
+    return localStorage.getItem(hiddenSidebarStorageKey(userID)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function saveSidebarHidden(userID: number, hidden: boolean): void {
+  if (!positiveUserID(userID)) return;
+  try {
+    if (!hidden) {
+      localStorage.removeItem(hiddenSidebarStorageKey(userID));
+      return;
+    }
+    localStorage.setItem(hiddenSidebarStorageKey(userID), "true");
+  } catch {
+    // Quota or privacy-mode failures leave the sidebar working without persistence.
+  }
+}
+
+/**
+ * clearOtherSidebarState drops sidebar state belonging to other users on a
+ * shared browser. Without a user there is no "other" to drop: a logged-out
+ * bootstrap names user 0, and sweeping on that would delete the state of the
+ * reader who is about to log back in - their own hidden sidebar and collapsed
+ * accounts, cleared by the act of signing out.
+ */
+export function clearOtherSidebarState(userID: number): void {
+  if (!positiveUserID(userID)) return;
+  const keep = [collapsedAccountsStorageKey(userID), hiddenSidebarStorageKey(userID)];
   try {
     const stale: string[] = [];
     for (let index = 0; index < localStorage.length; index++) {
       const key = localStorage.key(index);
-      if (key && key.startsWith(collapsedAccountsPrefix) && key !== keep) stale.push(key);
+      const owned = key && (key.startsWith(collapsedAccountsPrefix) || key.startsWith(hiddenSidebarPrefix));
+      if (owned && !keep.includes(key)) stale.push(key);
     }
     stale.forEach((key) => localStorage.removeItem(key));
   } catch {
