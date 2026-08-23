@@ -7,9 +7,30 @@ $mail-measure: 1100px;
 .mobile-menu-button,
 .sidebar-mobile-head,
 .mobile-sidebar-scrim,
-.mobile-compose-fab,
+.compose-fab,
 .sidebar-toggle {
   display: none;
+}
+
+// Compose lives in the sidebar, so every layout that takes the sidebar away has
+// to put it back: the phone drawer did that with this button, and hiding the
+// folders on a desktop needs it for the same reason. Only its appearance is
+// here - each layout turns it on where the rule that hid the sidebar lives.
+.compose-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 24;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  border-radius: 999px;
+  padding: 0 18px;
+  border: 1px solid var(--action);
+  background: var(--action);
+  color: var(--on-action);
+  box-shadow: var(--shadow-raised);
+  font-weight: 800;
 }
 
 .app {
@@ -104,7 +125,9 @@ $mail-measure: 1100px;
 @media (min-width: 761px) {
   // The toggle sits where the sidebar it hides begins, and the brand gives up
   // exactly the room it takes: 36 + 16 + 170 is the 222px the brand held alone,
-  // so the search field still starts on the content column's left edge.
+  // so adding the button leaves every other topbar column where it already was.
+  // The topbar is deliberately not measured with the mail: it spans the window,
+  // and the mail column moves under it as the sidebar comes and goes.
   .topbar {
     display: grid;
     grid-template-columns: 36px minmax(0, 170px) minmax(160px, 940px) minmax(0, 1fr) max-content;
@@ -145,6 +168,13 @@ $mail-measure: 1100px;
     > .sidebar {
       display: none;
     }
+  }
+
+  // Compose is a sidebar link and has no other home on a desktop - no topbar
+  // entry, no shortcut - so hiding the folders has to offer it somewhere. It
+  // stays out while a drag reveals the folders, which brings the real one back.
+  .app.sidebar-hidden:not(.message-drag-active) ~ .compose-fab {
+    display: inline-flex;
   }
 }
 

@@ -1,6 +1,6 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar and the
-// control that hides it, mobile drawer, drag-to-folder handling, sync status, and the mobile
-// compose affordance.
+// control that hides it, mobile drawer, drag-to-folder handling, sync status, and the floating
+// compose affordance every layout without a sidebar falls back on.
 
 import { Fragment, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
@@ -12,7 +12,7 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { mailReadingRoute, mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailRoute, mailRouteView, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
@@ -410,7 +410,9 @@ export function AppShell({
     setMobileSidebarOpen(false);
   }
 
-  function composeFromMobile() {
+  // The floating Compose button stands in for the sidebar's own wherever the
+  // sidebar is not on the page - the phone drawer, and a desktop that hid it.
+  function composeFromFab() {
     closeMobileSidebar();
     openCompose("");
   }
@@ -473,7 +475,7 @@ export function AppShell({
           touchRevealedAccounts={touchRevealedAccounts}
           onClose={closeMobileSidebar}
         />
-        <main className={`content ${mailReadingRoute(location.path) ? "measured" : ""}`}>
+        <main className={`content ${mailRouteView(location.path, Boolean(user.is_admin)) ? "measured" : ""}`}>
           {databaseUnavailable ? <DatabaseUnavailableBanner isAdmin={Boolean(user.is_admin)} navigate={navigate} /> : null}
           {accountNeedsPassword ? <AccountCredentialBanner notice={accountNotice} navigate={navigate} /> : null}
           {children}
@@ -489,7 +491,7 @@ export function AppShell({
           </div>
         ) : null}
       </div>
-      <button className="mobile-compose-fab" type="button" onClick={composeFromMobile} aria-label="Compose">
+      <button className="compose-fab" type="button" onClick={composeFromFab} aria-label="Compose">
         <Icon name="edit" weight="bold" />
         <span>Compose</span>
       </button>
@@ -801,7 +803,6 @@ function Topbar({
         type="button"
         title={sidebarHidden ? "Show folders" : "Hide folders"}
         aria-label={sidebarHidden ? "Show folders" : "Hide folders"}
-        aria-pressed={sidebarHidden}
         onClick={onToggleSidebar}
       >
         <Icon name="sidebar" />

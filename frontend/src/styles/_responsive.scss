@@ -212,22 +212,10 @@
     gap: 1px;
   }
 
-  .mobile-compose-fab {
-    position: fixed;
-    right: 16px;
-    bottom: 16px;
-    z-index: 24;
+  // The drawer takes the sidebar off the page at every width here, so Compose
+  // needs its button the whole time; the look of it lives in _layout.scss.
+  .compose-fab {
     display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 46px;
-    border-radius: 999px;
-    padding: 0 18px;
-    border: 1px solid var(--action);
-    background: var(--action);
-    color: var(--on-action);
-    box-shadow: var(--shadow-raised);
-    font-weight: 800;
   }
 
   .content {

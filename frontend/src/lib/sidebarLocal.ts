@@ -69,11 +69,16 @@ export function saveSidebarHidden(userID: number, hidden: boolean): void {
   }
 }
 
-/** clearOtherSidebarState drops sidebar state belonging to other users on a shared browser. */
+/**
+ * clearOtherSidebarState drops sidebar state belonging to other users on a
+ * shared browser. Without a user there is no "other" to drop: a logged-out
+ * bootstrap names user 0, and sweeping on that would delete the state of the
+ * reader who is about to log back in - their own hidden sidebar and collapsed
+ * accounts, cleared by the act of signing out.
+ */
 export function clearOtherSidebarState(userID: number): void {
-  const keep = positiveUserID(userID)
-    ? [collapsedAccountsStorageKey(userID), hiddenSidebarStorageKey(userID)]
-    : [];
+  if (!positiveUserID(userID)) return;
+  const keep = [collapsedAccountsStorageKey(userID), hiddenSidebarStorageKey(userID)];
   try {
     const stale: string[] = [];
     for (let index = 0; index < localStorage.length; index++) {
