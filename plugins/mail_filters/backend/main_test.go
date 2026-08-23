@@ -63,27 +63,28 @@ func TestOlderThanClauseStripsAgeOperator(t *testing.T) {
 func TestEvaluationListsSeparateManagementFromMessageAudit(t *testing.T) {
 	st := openFilterStore(t)
 	db := st.DB()
+	ctx := context.Background()
 	// The tables are part of the baseline the test database carries; only the
 	// rows this test reasons about are set up here.
 	user, account, mailbox := mailFilterFixture(t, st, "filters@example.test")
 	now := time.Now().UTC().Unix()
-	blob, err := st.CreateBlob(context.Background(), store.BlobRecord{
+	blob, err := st.CreateBlob(ctx, store.BlobRecord{
 		UserID: user.ID, Kind: "message", Path: "users/x/message.eml", SHA256: "sha", Size: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at) VALUES (10, ?, 'Yoga cleanup', 'older_than:7d yoga', 1, 'all_accounts', '{}', 0, ?, ?)`, user.ID, now, now); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at) VALUES (10, ?, 'Yoga cleanup', 'older_than:7d yoga', 1, 'all_accounts', '{}', 0, ?, ?)`, user.ID, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO messages (id, user_id, account_id, mailbox_id, blob_id, blob_path,
+	if _, err := db.ExecContext(ctx, `INSERT INTO messages (id, user_id, account_id, mailbox_id, blob_id, blob_path,
 		message_id_header, in_reply_to, references_header, thread_key, subject, from_addr, to_addr, cc_addr,
 		body_text, body_html, date_unix, internal_date_unix, uid, size, created_at, updated_at)
 		VALUES (100, ?, ?, ?, ?, '', '', '', '', '', 'Yoga booking', 'studio@example.test', '', '',
 		'', '', ?, ?, 1, 10, ?, ?)`, user.ID, account.ID, mailbox.ID, blob.ID, now, now, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_evaluations
+	if _, err := db.ExecContext(ctx, `INSERT INTO plugin_mail_filter_evaluations
 		(id, user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
 		VALUES
 		(1, ?, 10, 100, ?, ?, 'backfill', 'not_matched', 0, 0, ?, '[]', '[]', '{}', '', ?),
@@ -91,7 +92,6 @@ func TestEvaluationListsSeparateManagementFromMessageAudit(t *testing.T) {
 		user.ID, account.ID, mailbox.ID, now-1, now-1, user.ID, account.ID, mailbox.ID, now, now); err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
 	recent, err := listRecentEvaluations(ctx, db, 1, 20)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestRepeatedSchedulingKeepsOneWaitingRow(t *testing.T) {
 	}
 
 	var waiting int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_mail_filter_evaluations WHERE user_id = ? AND rule_id = ? AND message_id = ? AND status = ?`,
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_mail_filter_evaluations WHERE user_id = ? AND rule_id = ? AND message_id = ? AND status = ?`,
 		user.ID, rule.ID, msg.MessageID, statusScheduled).Scan(&waiting); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestBackfillWalksOldestFirstAndReportsWhereItStopped(t *testing.T) {
 		t.Fatalf("cursor = %+v, want the newest message of the page", cursor)
 	}
 
-	rows, err := db.Query(`SELECT message_id FROM plugin_mail_filter_evaluations WHERE user_id = ? ORDER BY id`, user.ID)
+	rows, err := db.QueryContext(ctx, `SELECT message_id FROM plugin_mail_filter_evaluations WHERE user_id = ? ORDER BY id`, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func insertMessage(t *testing.T, st *store.Store, db *sql.DB, userID, accountID,
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Unix()
-	if _, err := db.Exec(`INSERT INTO messages (id, user_id, account_id, mailbox_id, blob_id, blob_path,
+	if _, err := db.ExecContext(ctx, `INSERT INTO messages (id, user_id, account_id, mailbox_id, blob_id, blob_path,
 		message_id_header, in_reply_to, references_header, thread_key, subject, from_addr, to_addr, cc_addr,
 		body_text, body_html, date_unix, internal_date_unix, uid, size, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, '', '', '', '', '', 'Reservation', 'studio@example.test', '', '',
@@ -401,7 +401,7 @@ func evaluationState(t *testing.T, db *sql.DB, userID, ruleID, messageID int64) 
 	t.Helper()
 	var status string
 	var dueAt int64
-	if err := db.QueryRow(`SELECT status, due_at FROM plugin_mail_filter_evaluations
+	if err := db.QueryRowContext(context.Background(), `SELECT status, due_at FROM plugin_mail_filter_evaluations
 		WHERE user_id = ? AND rule_id = ? AND message_id = ? ORDER BY id DESC LIMIT 1`,
 		userID, ruleID, messageID).Scan(&status, &dueAt); err != nil {
 		t.Fatal(err)
@@ -421,7 +421,7 @@ func TestQueryWithNoConditionMatchesNothing(t *testing.T) {
 	// saveRule refuses this, so the row is written the way a hand-edited
 	// database or an older release could leave one behind.
 	now := time.Now().UTC().Unix()
-	if _, err := db.Exec(`INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at)
+	if _, err := db.ExecContext(ctx, `INSERT INTO plugin_mail_filter_rules (id, user_id, name, query, enabled, scope_mode, actions_json, position, created_at, updated_at)
 		VALUES (900, ?, 'Empty', '   ', 1, 'all_accounts', '{"move_role":"trash"}', 0, ?, ?)`, user.ID, now, now); err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestRepeatedBackfillDoesNotActTwice(t *testing.T) {
 		t.Fatalf("forwards = %v, want the message forwarded once", host.forwards)
 	}
 	var rowCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_mail_filter_evaluations WHERE user_id = ? AND rule_id = ?`, user.ID, rule.ID).Scan(&rowCount); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_mail_filter_evaluations WHERE user_id = ? AND rule_id = ?`, user.ID, rule.ID).Scan(&rowCount); err != nil {
 		t.Fatal(err)
 	}
 	if rowCount != 1 {
@@ -495,7 +495,7 @@ func TestEditingARulePutsDecidedMailBackInFrontOfIt(t *testing.T) {
 
 	// saveRule stamps updated_at from the wall clock, which has the same second
 	// resolution as evaluated_at; move it forward so the edit is observable.
-	if _, err := db.Exec(`UPDATE plugin_mail_filter_rules SET query = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_mail_filter_rules SET query = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
 		"from:other@example.test", time.Now().UTC().Add(time.Minute).Unix(), user.ID, rule.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func TestFiltersDoNotReachMailTheAccountListsHide(t *testing.T) {
 		t.Fatalf("processed = %d, want only the inbox message", n)
 	}
 	var seen int64
-	if err := db.QueryRow(`SELECT message_id FROM plugin_mail_filter_evaluations WHERE user_id = ?`, user.ID).Scan(&seen); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT message_id FROM plugin_mail_filter_evaluations WHERE user_id = ?`, user.ID).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 330 {
@@ -593,7 +593,7 @@ func TestPurgeClearsWaitsWhoseMessageIsGone(t *testing.T) {
 	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DELETE FROM messages WHERE user_id = ? AND id = ?`, user.ID, 340); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, user.ID, 340); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,4 +638,36 @@ type failingSearchHost struct{ fakeFilterHost }
 
 func (h *failingSearchHost) MatchMessageSearch(context.Context, int64, int64, string) (plugins.SearchMatchResult, error) {
 	return plugins.SearchMatchResult{}, errors.New("search is not configured")
+}
+
+// Retention now rides entirely on the scheduled pass: the import hook used to
+// sweep as well, once per stored message, which is why it no longer does. This
+// pins the pass that is left as the one that actually sweeps.
+func TestScheduledPassSweepsRetention(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "sweep@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{})
+	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 360, time.Now().UTC().Add(-24*time.Hour))
+	stale := time.Now().UTC().Add(-retentionWindow - 24*time.Hour).Unix()
+	if _, err := db.ExecContext(ctx, `INSERT INTO plugin_mail_filter_evaluations
+		(user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
+		VALUES (?, ?, 360, ?, ?, 'backfill', ?, 1, 0, ?, '[]', '[]', '{}', '', ?)`,
+		user.ID, rule.ID, account.ID, mailbox.ID, statusMatched, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runScheduled(ctx, host, db, user.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	var remaining int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_mail_filter_evaluations WHERE user_id = ?`, user.ID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("evaluation rows = %d, want the stale row swept", remaining)
+	}
 }

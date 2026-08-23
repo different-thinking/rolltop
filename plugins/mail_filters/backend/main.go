@@ -138,9 +138,11 @@ func (p *mailFiltersBackend) ImportStoredMessage(ctx context.Context, host plugi
 	if err != nil {
 		return err
 	}
-	if err := purgeOldEvaluations(ctx, db, msg.UserID); err != nil {
-		return err
-	}
+	// The retention sweep does not belong on this path. It runs once per stored
+	// message, so mirroring a mailbox for the first time paid two DELETEs and an
+	// anti-join against `messages` per message -- for a window that moves by one
+	// day per day. The scheduled worker already sweeps every user every fifteen
+	// minutes, which is often enough for a thirty-day window.
 	inScope, err := messageInFilterScope(ctx, db, msg)
 	if err != nil {
 		return err
