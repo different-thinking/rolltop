@@ -38,6 +38,27 @@ type generationRecoveryActivity struct {
 // sync creates a durable generation marker. The epoch prevents an older store
 // snapshot from reopening a gate that was signaled while that query ran.
 func (r *Runner) SignalMailboxGenerationRecovery(userID int64) {
+	r.signalMailboxGenerationRecoveryExcluding(userID, nil)
+}
+
+// signalMailboxGenerationRecoveryFromContext is the Service reset hook. It
+// closes the gate like SignalMailboxGenerationRecovery, but leaves the calling
+// sync job running: the caller discovered the reset and still owes durable
+// bookkeeping — the STATUS snapshot, run progress, its own clean hand-off to
+// the recovery worker — and cancelling its context turned that hand-off into a
+// failed run and skipped work nothing retried.
+func (r *Runner) signalMailboxGenerationRecoveryFromContext(ctx context.Context, userID int64) {
+	var exclude map[string]bool
+	if keys := ordinaryMailboxContextKeys(ctx); len(keys) > 0 {
+		exclude = make(map[string]bool, len(keys))
+		for _, key := range keys {
+			exclude[key] = true
+		}
+	}
+	r.signalMailboxGenerationRecoveryExcluding(userID, exclude)
+}
+
+func (r *Runner) signalMailboxGenerationRecoveryExcluding(userID int64, exclude map[string]bool) {
 	if r == nil || userID <= 0 || r.context().Err() != nil {
 		return
 	}
@@ -48,7 +69,7 @@ func (r *Runner) SignalMailboxGenerationRecovery(userID int64) {
 	delete(r.generationRecoveryTargets, userID)
 	delete(r.generationRecoveryKnown, userID)
 	r.activateGenerationRecoveryLocked(userID)
-	r.cancelOrdinaryMailboxWorkLocked(userID)
+	r.cancelOrdinaryMailboxWorkExceptLocked(userID, exclude)
 	r.mu.Unlock()
 	r.wakeMailboxGenerationRebuildRecovery()
 }

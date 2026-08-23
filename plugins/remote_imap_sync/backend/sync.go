@@ -54,7 +54,16 @@ type routineManager struct {
 }
 
 func newRoutineManager(host plugins.BackendStartHost, st *store.Store, fetcher *imapclient.Fetcher) *routineManager {
-	ctx, cancel := context.WithCancel(context.Background())
+	// Derive from the host's process lifetime when it offers one, so a server
+	// shutdown interrupts routine workers before the database closes under
+	// them; Stop() still cancels explicitly for plugin disable/reload.
+	base := context.Background()
+	if lifecycle, ok := host.(plugins.LifecycleHost); ok {
+		if lifetime := lifecycle.Lifetime(); lifetime != nil {
+			base = lifetime
+		}
+	}
+	ctx, cancel := context.WithCancel(base)
 	return &routineManager{
 		host: host, store: st, fetcher: fetcher, ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), workers: make(map[workerKey]*routineWorker),

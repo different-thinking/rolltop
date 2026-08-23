@@ -153,12 +153,28 @@ type Service struct {
 	Fetcher        Fetcher
 	Sender         MailSender
 
+	// Lifetime is the process-scoped context background runs — moves, copies,
+	// Trash purges — derive from, so shutdown interrupts them instead of
+	// leaving them racing the closing database. Nil means context.Background,
+	// which keeps tests and direct callers working unchanged.
+	Lifetime context.Context
+
+	// RegisterRunCancel and UnregisterRunCancel let the Runner track a
+	// cancellation for Service-owned background runs, so the sync-run cancel
+	// API actually stops the worker instead of only stamping the row.
+	RegisterRunCancel   func(userID, runID int64, cancel context.CancelFunc)
+	UnregisterRunCancel func(runID int64)
+
 	BlobRetention                    time.Duration
 	Notify                           func(userID int64)
 	NotifyProgress                   func(userID int64)
 	ScheduleInboxArrival             func(userID, accountID int64, due time.Time)
-	NotifyRestoredState              func(userID int64)
-	MailboxGenerationRecoveryStarted func(userID int64)
+	NotifyRestoredState func(userID int64)
+	// MailboxGenerationRecoveryStarted closes the tenant's recovery gate. The
+	// context identifies the sync job that discovered the reset so the gate can
+	// cancel the tenant's other ordinary work without cancelling the caller,
+	// which still owes durable bookkeeping before it defers to recovery.
+	MailboxGenerationRecoveryStarted func(ctx context.Context, userID int64)
 	// DeferMailboxGenerationRebuilds makes ordinary Runner-scheduled syncs
 	// yield newly discovered generation markers to the serialized recovery
 	// worker. Direct Service callers retain the synchronous behavior used by
@@ -212,6 +228,29 @@ const (
 	largeMailboxReconcileInterval         = 30 * time.Minute
 	mailboxGenerationBlobCleanupBatchSize = 25
 )
+
+// backgroundContext is the parent for Service-owned background runs.
+func (s *Service) backgroundContext() context.Context {
+	if s != nil && s.Lifetime != nil {
+		return s.Lifetime
+	}
+	return context.Background()
+}
+
+// beginRunCancellation wraps one background run's context so the sync-run
+// cancel API can stop the worker, not only stamp the row. The returned finish
+// must be called when the run ends.
+func (s *Service) beginRunCancellation(ctx context.Context, userID, runID int64) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	if s.RegisterRunCancel == nil || s.UnregisterRunCancel == nil {
+		return ctx, cancel
+	}
+	s.RegisterRunCancel(userID, runID, cancel)
+	return ctx, func() {
+		s.UnregisterRunCancel(runID)
+		cancel()
+	}
+}
 
 func (s *Service) initBackendPlugins() error {
 	if s == nil {
@@ -417,16 +456,29 @@ func (s *Service) syncUserWithOptions(ctx context.Context, userID int64, request
 		return store.SyncRun{}, store.ErrNotFound
 	}
 	var first store.SyncRun
+	var accountErrs []error
 	for _, account := range accounts {
 		run, err := s.syncAccount(ctx, userID, account, requestedMailboxes, options)
 		if first.ID == 0 {
 			first = run
 		}
-		if err != nil {
+		if err == nil {
+			continue
+		}
+		// A paused turn or a dead context gets nothing out of visiting the
+		// remaining accounts now; everything else is one account's problem.
+		// Returning on the first failure let a single unreachable server block
+		// the same mailbox job on every other account the user has.
+		if errors.Is(err, ErrSyncTurnPaused) || ctx.Err() != nil {
+			if len(accountErrs) > 0 {
+				log.Printf("sync user_id=%d: earlier account failures before pause/cancel: %v",
+					userID, errors.Join(accountErrs...))
+			}
 			return first, err
 		}
+		accountErrs = append(accountErrs, fmt.Errorf("account %d (%s): %w", account.ID, account.Host, err))
 	}
-	return first, nil
+	return first, errors.Join(accountErrs...)
 }
 
 // syncAccount is the main incremental sync pipeline:
@@ -515,7 +567,16 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		return run, err
 	}
 	generationRecoveryPhase(ctx, "imap-mailbox-status", "")
-	plan, planErr := s.planMailboxes(ctx, account, mailboxNames, lastUIDs)
+	// Planning issues one remote STATUS per folder with no other progress
+	// writes, so a slow server could leave the run row silent long enough for
+	// the stale-run reconciler to stamp it interrupted. The heartbeat keeps
+	// updated_at moving at the reporter's own pace.
+	plan, planErr := s.planMailboxes(ctx, account, mailboxNames, lastUIDs, func(name string) {
+		progress.CurrentMailbox = name
+		if err := reportProgress.step(ctx); err != nil {
+			log.Printf("sync planning heartbeat user_id=%d account_id=%d mailbox=%q: %v", userID, account.ID, name, err)
+		}
+	})
 	requestedSet := requestedMailboxSet(requestedMailboxes)
 	progress.MailboxesTotal = len(plan)
 	for _, item := range plan {
@@ -529,15 +590,25 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 	} else if options.deferPendingFlags || deferOrdinaryMaintenance {
 		log.Printf("sync user_id=%d account_id=%d phase=defer-pending-flags reason=mailbox-generation-recovery", userID, account.ID)
 	} else {
+		// A stuck flag write is one message's problem, not the account's:
+		// failing the turn here blocked body fetching for as long as the STORE
+		// kept failing, and the flag stays queued either way — the next turn
+		// retries it. Only a dead context still ends the turn.
 		if err := s.PushPendingReadState(ctx, userID, 500); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
+			if ctx.Err() != nil {
+				status = "failed"
+				errText = err.Error()
+				return run, err
+			}
+			log.Printf("push pending read state user_id=%d account_id=%d: %v", userID, account.ID, err)
 		}
 		if err := s.PushPendingStarState(ctx, userID, 500); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return run, err
+			if ctx.Err() != nil {
+				status = "failed"
+				errText = err.Error()
+				return run, err
+			}
+			log.Printf("push pending star state user_id=%d account_id=%d: %v", userID, account.ID, err)
 		}
 	}
 	if planErr != nil {
@@ -642,7 +713,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 			// ResetMailboxGenerationIfNeeded already signals for a fresh marker.
 			// A marker restored from disk still needs to wake the worker.
 			if !generationReset && s.MailboxGenerationRecoveryStarted != nil {
-				s.MailboxGenerationRecoveryStarted(userID)
+				s.MailboxGenerationRecoveryStarted(ctx, userID)
 			}
 			return run, nil
 		}
@@ -1521,9 +1592,12 @@ func maxUID(uids []uint32) uint32 {
 // planMailboxes makes progress meaningful before the first message arrives.
 // IMAP STATUS is cheap compared with fetching bodies, and UIDNEXT lets us
 // estimate remaining work per folder without mutating the remote mailbox.
-func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32) ([]MailboxPlan, error) {
+func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32, heartbeat func(string)) ([]MailboxPlan, error) {
 	plans := make([]MailboxPlan, 0, len(names))
 	for _, name := range names {
+		if heartbeat != nil {
+			heartbeat(name)
+		}
 		status, err := s.Fetcher.MailboxStatus(ctx, account, name)
 		if err != nil {
 			plans = append(plans, MailboxPlan{Name: name, LastUID: lastUIDs[name]})

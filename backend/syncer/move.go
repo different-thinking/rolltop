@@ -122,11 +122,13 @@ func (s *Service) StartMoveMessages(ctx context.Context, userID int64, messageID
 	// executor is nil otherwise, which moves the run back to connecting per
 	// message rather than failing it.
 	executor := s.openMoveSessionExecutor(userID, dest.AccountID)
-	go s.runMoveMessages(context.Background(), userID, ids, destMailboxID, dest.Name, run.ID, progress, executor, onDone)
+	go s.runMoveMessages(s.backgroundContext(), userID, ids, destMailboxID, dest.Name, run.ID, progress, executor, onDone)
 	return run, nil
 }
 
 func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, executor *moveSessionExecutor, onDone func()) {
+	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
+	defer finishRun()
 	status := "ok"
 	errText := ""
 	defer func() {
@@ -191,6 +193,12 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	}
 	walkErr := s.moveMessagesInBatches(ctx, userID, ids, destMailboxID, s.observeMessageMove, executor.dispatcher(),
 		func(result moveMessageResult) bool {
+			if result.NotAttempted {
+				// The walk was cancelled before this message's command went out.
+				// It is neither moved nor failed, and counting it either way
+				// misreports a run the user only interrupted.
+				return false
+			}
 			progress.MessagesSeen++
 			if result.Vanished || result.SourceGone {
 				// Nothing moved and nothing was left behind, so this costs no
@@ -251,7 +259,11 @@ type moveMessageResult struct {
 	// failed — there is nothing in that folder left to move — and the walk
 	// reconciles the folder afterwards so the mirror stops claiming otherwise.
 	SourceGone bool
-	Err        error
+	// NotAttempted is a message whose command was never sent because the walk
+	// was cancelled first. Its claim has been released; the message is exactly
+	// where it was and must not be counted as moved or as failed.
+	NotAttempted bool
+	Err          error
 }
 
 // moveMessagesInBatches walks message IDs in order, gathers the ones leaving the
@@ -436,6 +448,9 @@ func (s *Service) moveResultFor(ctx context.Context, userID, messageID int64, ui
 		// user cannot ever complete: the row stays, the next attempt asks the
 		// same question, and the notice about it does not go away.
 		return moveMessageResult{MessageID: messageID, UID: uid, SourceGone: true}
+	}
+	if IsMoveNotAttempted(failure) {
+		return moveMessageResult{MessageID: messageID, UID: uid, NotAttempted: true, Err: failure}
 	}
 	if !store.IsNotFound(failure) {
 		return result
@@ -819,7 +834,7 @@ func (s *Service) prepareMessageMove(ctx context.Context, userID, messageID, des
 			return nil, s.completeMovedMessageLocally(ctx, userID, msg, dest, transfer.ID, announce)
 		}
 		reopened, reopenErr := s.Store.ReopenMessageTransferDispatchAfterProof(ctx, userID, transfer.ID,
-			messageTransferClaim(transfer), processMessageTransferOwner)
+			messageTransferClaim(transfer), processMessageTransferOwner, messageTransferStaleClaimCutoff())
 		if reopenErr != nil {
 			return nil, reopenErr
 		}
@@ -861,12 +876,23 @@ func (s *Service) applyMoveOutcome(ctx context.Context, userID int64, prepared *
 	// remote existence check per message to find that out.
 	settleCtx := context.WithoutCancel(ctx)
 	if moveErr != nil {
-		if !IsMoveOutcomeUnknown(moveErr) {
+		switch {
+		case IsMoveNotAttempted(moveErr):
+			// Nothing reached the wire, so the claim is released outright: the
+			// next attempt dispatches directly instead of paying a per-message
+			// remote reconciliation for a command that was never sent.
+			if _, releaseErr := s.Store.ReleaseUnattemptedMessageTransferDispatch(settleCtx, userID,
+				prepared.transfer.ID, prepared.claim); releaseErr != nil {
+				return errors.Join(moveErr, releaseErr)
+			}
+		case !IsMoveOutcomeUnknown(moveErr):
 			if markErr := s.Store.MarkMessageTransferFailed(settleCtx, userID, prepared.transfer.ID); markErr != nil {
 				return errors.Join(moveErr, markErr)
 			}
-		} else if finishErr := s.Store.FinishMessageTransferDispatch(settleCtx, userID, prepared.transfer.ID, prepared.claim); finishErr != nil {
-			return errors.Join(moveErr, finishErr)
+		default:
+			if finishErr := s.Store.FinishMessageTransferDispatch(settleCtx, userID, prepared.transfer.ID, prepared.claim); finishErr != nil {
+				return errors.Join(moveErr, finishErr)
+			}
 		}
 		return moveErr
 	}

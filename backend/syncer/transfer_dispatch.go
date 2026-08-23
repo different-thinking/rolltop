@@ -22,11 +22,28 @@ func newMessageTransferOwner() string {
 	return fmt.Sprintf("process-%d-%d", os.Getpid(), time.Now().UnixNano())
 }
 
+// messageTransferStaleClaimAge is how long a same-process dispatch claim may
+// stay unsettled before reconciliation may take it over. A legitimate dispatch
+// never holds a claim this long — every command it can issue is socket-bounded
+// far below it — so a claim this old belongs to a goroutine that died without
+// settling. Without the escape, such a claim refused every retry of that
+// message until the process restarted.
+const messageTransferStaleClaimAge = 10 * time.Minute
+
 func messageTransferCanReconcile(transfer store.MessageTransfer) bool {
 	if transfer.DispatchedAt.IsZero() {
 		return false
 	}
-	return !transfer.DispatchFinishedAt.IsZero() || transfer.DispatchOwner != processMessageTransferOwner
+	if !transfer.DispatchFinishedAt.IsZero() || transfer.DispatchOwner != processMessageTransferOwner {
+		return true
+	}
+	return time.Since(transfer.DispatchedAt) >= messageTransferStaleClaimAge
+}
+
+// messageTransferStaleClaimCutoff is the dispatch age boundary handed to the
+// store's reopen guard, matching messageTransferCanReconcile's escape.
+func messageTransferStaleClaimCutoff() time.Time {
+	return time.Now().Add(-messageTransferStaleClaimAge)
 }
 
 func messageTransferClaim(transfer store.MessageTransfer) store.MessageTransferDispatchClaim {

@@ -30,7 +30,9 @@ var _ syncer.BatchMoveSession = (*MoveSession)(nil)
 func (s *MoveSession) MoveMessagesWithReceipts(ctx context.Context, sourceMailbox, destMailbox string,
 	uids []uint32, expectedSourceUIDValidity uint32) ([]syncer.MoveOutcome, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		// Nothing was sent yet: a cancelled batch must not be recorded as a
+		// failed move for every message it never attempted.
+		return nil, syncer.MoveNotAttempted(err)
 	}
 	if s == nil || s.client == nil {
 		return nil, errors.New("move session is closed")
@@ -65,7 +67,9 @@ func moveMessagesWithReceipts(ctx context.Context, c moveCommandClient, sourceMa
 		return nil, fmt.Errorf("search source mailbox %q for %d UIDs before move: %w", sourceMailbox, len(uids), err)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		// The MOVE has not been issued: this abort leaves every message exactly
+		// where it was, and must not read as a failed or unknown move.
+		return nil, syncer.MoveNotAttempted(err)
 	}
 	ok, err := c.Support("MOVE")
 	if err != nil {
@@ -138,9 +142,11 @@ func refusedMoveOutcomes(ctx context.Context, c moveCommandClient, outcomes []sy
 		// reconciliation rather than recorded as moved or as left behind.
 		return nil, syncer.MoveOutcomeUnknown(errors.Join(moveErr, err))
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+	// The verification search answered, so the outcomes are built from it even
+	// when the context has since been cancelled. Discarding the answer here
+	// returned a bare cancellation, which the caller recorded as a failed move
+	// for every message — including the ones the server demonstrably applied —
+	// and threw their destination receipts away.
 	stillThere := make(map[uint32]struct{}, len(remaining))
 	for _, uid := range remaining {
 		stillThere[uid] = struct{}{}
@@ -159,7 +165,7 @@ func refusedMoveOutcomes(ctx context.Context, c moveCommandClient, outcomes []sy
 
 func validateMoveBatchRequest(ctx context.Context, sourceMailbox, destMailbox string, uids []uint32, expectedSourceUIDValidity uint32) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return syncer.MoveNotAttempted(err)
 	}
 	if strings.TrimSpace(sourceMailbox) == "" || strings.TrimSpace(destMailbox) == "" || expectedSourceUIDValidity == 0 {
 		return errors.New("move messages requires source mailbox, destination mailbox, and source UIDVALIDITY")

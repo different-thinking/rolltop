@@ -53,11 +53,13 @@ func (s *Service) StartCopyMessages(ctx context.Context, userID int64, messageID
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
-	go s.runCopyMessages(context.Background(), userID, ids, destMailboxID, dest.Name, run.ID, progress, onDone)
+	go s.runCopyMessages(s.backgroundContext(), userID, ids, destMailboxID, dest.Name, run.ID, progress, onDone)
 	return run, nil
 }
 
 func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, onDone func()) {
+	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
+	defer finishRun()
 	status := "ok"
 	errText := ""
 	defer func() {
@@ -217,7 +219,7 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 			}
 		}
 		reopened, reopenErr := s.Store.ReopenMessageTransferDispatchAfterProof(ctx, userID, transfer.ID,
-			messageTransferClaim(transfer), processMessageTransferOwner)
+			messageTransferClaim(transfer), processMessageTransferOwner, messageTransferStaleClaimCutoff())
 		if reopenErr != nil {
 			return reopenErr
 		}

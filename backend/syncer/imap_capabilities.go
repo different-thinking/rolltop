@@ -47,6 +47,37 @@ func IsMoveOutcomeUnknown(err error) bool {
 	return errors.As(err, &unknown)
 }
 
+type moveNotAttemptedError struct {
+	err error
+}
+
+func (e *moveNotAttemptedError) Error() string {
+	return "IMAP move was not attempted: " + e.err.Error()
+}
+
+func (e *moveNotAttemptedError) Unwrap() error {
+	return e.err
+}
+
+// MoveNotAttempted marks an abort observed before the MOVE command reached the
+// wire — a cancellation during validation or between the pre-move search and
+// the dispatch. Nothing moved and nothing failed remotely, so the claim can be
+// released outright instead of being recorded as a failed move or left for
+// remote reconciliation.
+func MoveNotAttempted(err error) error {
+	if err == nil || IsMoveNotAttempted(err) {
+		return err
+	}
+	return &moveNotAttemptedError{err: err}
+}
+
+// IsMoveNotAttempted reports whether a move abort provably preceded its
+// command being sent.
+func IsMoveNotAttempted(err error) bool {
+	var notAttempted *moveNotAttemptedError
+	return errors.As(err, &notAttempted)
+}
+
 func (e *sourceUIDGoneError) Error() string {
 	return e.err.Error()
 }

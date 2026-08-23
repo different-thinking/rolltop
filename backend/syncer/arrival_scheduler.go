@@ -4,6 +4,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -152,6 +153,7 @@ func (r *Runner) startPendingMailboxGenerationRebuild(rebuild store.PendingMailb
 	}
 	go func() {
 		succeeded := false
+		paused := false
 		defer func() {
 			r.releaseGenerationRecoveryMailbox(rebuild.UserID, keys)
 			if r.context().Err() != nil {
@@ -159,6 +161,14 @@ func (r *Runner) startPendingMailboxGenerationRebuild(rebuild store.PendingMailb
 			}
 			if succeeded {
 				r.refreshGenerationRecoveryGateForUser(r.context(), rebuild.UserID)
+				return
+			}
+			if paused {
+				// The turn stopped on its own budget with a durable checkpoint.
+				// Every paused turn made progress, so waking the loop at once
+				// cannot hot-loop; waiting out the poll interval would add it
+				// to every batch of a large recovery.
+				r.wakeMailboxGenerationRebuildRecovery()
 				return
 			}
 			// The recovery loop already polls durable markers. Do not turn a
@@ -171,6 +181,12 @@ func (r *Runner) startPendingMailboxGenerationRebuild(rebuild store.PendingMailb
 		}
 		turnCtx, cancel := context.WithTimeout(r.context(), timeout)
 		defer cancel()
+		// The cooperative turn budget lets the recovery fetch stop at a safe
+		// point and commit its batches on a detached context. Without it the
+		// deadline fired inside an IMAP command: the failure branch dropped the
+		// in-flight search batch while the UID checkpoint had already advanced
+		// past those messages, so they were stored but never indexed.
+		turnCtx = withSyncTurnBudget(turnCtx)
 		r.registerGenerationRecoveryCancellation(rebuild.UserID, cancel)
 		diagnostics := r.generationRecoveryDiagnosticsForUser(rebuild.UserID)
 		turnCtx = withGenerationRecoveryDiagnostics(turnCtx, diagnostics)
@@ -185,6 +201,12 @@ func (r *Runner) startPendingMailboxGenerationRebuild(rebuild store.PendingMailb
 			rebuild.UserID, rebuild.AccountID, rebuild.MailboxName, timeout)
 		if _, err := r.Service.RecoverUserAccountMailboxGeneration(turnCtx, rebuild.UserID, rebuild.AccountID,
 			rebuild.MailboxName); err != nil {
+			if errors.Is(err, ErrSyncTurnPaused) {
+				paused = true
+				log.Printf("recover mailbox generation turn paused user_id=%d account_id=%d mailbox=%q elapsed=%s",
+					rebuild.UserID, rebuild.AccountID, rebuild.MailboxName, time.Since(startedAt).Round(time.Millisecond))
+				return
+			}
 			log.Printf("recover mailbox generation user_id=%d account_id=%d mailbox=%q: %v",
 				rebuild.UserID, rebuild.AccountID, rebuild.MailboxName, err)
 			return

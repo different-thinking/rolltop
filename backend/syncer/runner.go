@@ -170,7 +170,9 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 	if service != nil {
 		service.DeferMailboxGenerationRebuilds = true
 		service.ScheduleInboxArrival = runner.ScheduleInboxArrival
-		service.MailboxGenerationRecoveryStarted = runner.SignalMailboxGenerationRecovery
+		service.MailboxGenerationRecoveryStarted = runner.signalMailboxGenerationRecoveryFromContext
+		service.RegisterRunCancel = runner.registerSyncRunCancel
+		service.UnregisterRunCancel = runner.unregisterSyncRunControl
 	}
 	if done := ctx.Done(); done != nil {
 		go func() {
@@ -193,7 +195,17 @@ func (r *Runner) context() context.Context {
 // race where a new refresh could otherwise start between waiting and reserving
 // a mailbox writer.
 func (r *Runner) lockAfterSenderStats(userID int64) bool {
-	for r.context().Err() == nil {
+	return r.lockAfterSenderStatsCtx(r.context(), userID)
+}
+
+// lockAfterSenderStatsCtx is lockAfterSenderStats bounded by a caller-supplied
+// wait context, so an HTTP request or a per-tenant scheduler budget stops
+// waiting without the whole runner having to stop.
+func (r *Runner) lockAfterSenderStatsCtx(waitCtx context.Context, userID int64) bool {
+	if waitCtx == nil {
+		waitCtx = r.context()
+	}
+	for r.context().Err() == nil && waitCtx.Err() == nil {
 		r.mu.Lock()
 		if !r.senderStatsRunning[userID] {
 			return true
@@ -205,6 +217,8 @@ func (r *Runner) lockAfterSenderStats(userID int64) bool {
 		}
 		select {
 		case <-done:
+		case <-waitCtx.Done():
+			return false
 		case <-r.context().Done():
 			return false
 		}
@@ -213,8 +227,15 @@ func (r *Runner) lockAfterSenderStats(userID int64) bool {
 }
 
 func (r *Runner) lockAfterExclusiveWriters(userID int64) bool {
-	for r.context().Err() == nil {
-		if !r.lockAfterSenderStats(userID) {
+	return r.lockAfterExclusiveWritersCtx(r.context(), userID)
+}
+
+func (r *Runner) lockAfterExclusiveWritersCtx(waitCtx context.Context, userID int64) bool {
+	if waitCtx == nil {
+		waitCtx = r.context()
+	}
+	for r.context().Err() == nil && waitCtx.Err() == nil {
+		if !r.lockAfterSenderStatsCtx(waitCtx, userID) {
 			return false
 		}
 		if r.foregroundRunning[userID] == 0 {
@@ -227,6 +248,8 @@ func (r *Runner) lockAfterExclusiveWriters(userID int64) bool {
 		}
 		select {
 		case <-done:
+		case <-waitCtx.Done():
+			return false
 		case <-r.context().Done():
 			return false
 		}
@@ -238,11 +261,20 @@ func (r *Runner) lockAfterExclusiveWriters(userID int64) bool {
 // It plans folders first, then runs them serially as mailbox jobs so per-folder
 // progress and priority reruns stay visible.
 func (r *Runner) Start(userID int64) bool {
+	return r.StartWithinContext(r.context(), userID)
+}
+
+// StartWithinContext is Start with the admission wait bounded by waitCtx. The
+// spawned sync itself still runs on the runner's own context: waitCtx only
+// stops this caller from blocking on the tenant's exclusive writers — an HTTP
+// request handler, or the scheduler visiting many tenants, must not hang for
+// as long as one tenant's foreground operation runs.
+func (r *Runner) StartWithinContext(waitCtx context.Context, userID int64) bool {
 	ctx := r.context()
 	if ctx.Err() != nil {
 		return false
 	}
-	if !r.lockAfterExclusiveWriters(userID) {
+	if !r.lockAfterExclusiveWritersCtx(waitCtx, userID) {
 		return false
 	}
 	if r.generationRecoveryGatedLocked(userID) {
@@ -578,11 +610,23 @@ func (r *Runner) startAccountMaintenance(userID int64, account store.MailAccount
 
 func (r *Runner) runReservedMailboxMaintenance(userID, accountID int64, mailboxes []string, keys []string, runID int64, progress store.SyncProgress, fn func(context.Context, int64, *store.SyncProgress) error) {
 	ctx, finishContext := r.ordinaryMailboxContext(userID, keys, false)
+	ctx, cancel := context.WithCancel(ctx)
+	r.registerSyncRunCancel(userID, runID, cancel)
+	defer r.unregisterSyncRunControl(runID)
+	defer cancel()
 	r.runReservedMailboxMaintenanceWithContext(ctx, finishContext, userID, accountID, mailboxes, keys, runID, progress, fn)
 }
 
 func (r *Runner) runReservedCommittedMailboxMaintenance(userID, accountID int64, mailboxes []string, keys []string, runID int64, progress store.SyncProgress, fn func(context.Context, int64, *store.SyncProgress) error) {
+	// Run-to-completion maintenance stays out of mailboxCancels on purpose —
+	// generation recovery must not preempt it — but the user's own cancel
+	// request still has to reach it, so the run registers its cancellation
+	// under its run id like every other cancellable run.
 	ctx, finishContext := context.WithCancel(r.context())
+	ctx, cancel := context.WithCancel(ctx)
+	r.registerSyncRunCancel(userID, runID, cancel)
+	defer r.unregisterSyncRunControl(runID)
+	defer cancel()
 	r.runReservedMailboxMaintenanceWithContext(ctx, finishContext, userID, accountID, mailboxes, keys, runID, progress, fn)
 }
 

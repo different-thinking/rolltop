@@ -137,8 +137,22 @@ func (r *Runner) finishMailboxWorkActivitiesLocked(keys []string) {
 	}
 }
 
+// ordinaryMailboxKeysKey carries a sync job's own reservation keys in its
+// context, so a recovery signal raised from inside the job can cancel the
+// tenant's other ordinary work without cancelling the job that raised it.
+type ordinaryMailboxKeysKey struct{}
+
+func ordinaryMailboxContextKeys(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	keys, _ := ctx.Value(ordinaryMailboxKeysKey{}).([]string)
+	return keys
+}
+
 func (r *Runner) ordinaryMailboxContext(userID int64, keys []string, allowPendingRecovery bool) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(r.context())
+	ctx = context.WithValue(ctx, ordinaryMailboxKeysKey{}, append([]string(nil), keys...))
 	r.mu.Lock()
 	if r.mailboxCancels == nil {
 		r.mailboxCancels = map[string]runnerMailboxCancellation{}
@@ -162,6 +176,15 @@ func (r *Runner) ordinaryMailboxContext(userID int64, keys []string, allowPendin
 }
 
 func (r *Runner) cancelOrdinaryMailboxWorkLocked(userID int64) {
+	r.cancelOrdinaryMailboxWorkExceptLocked(userID, nil)
+}
+
+// cancelOrdinaryMailboxWorkExceptLocked cancels a tenant's ordinary sync work,
+// leaving out the reservation keys named in exclude. The exclusion exists for
+// the job that discovered a mailbox generation reset: it still owes durable
+// bookkeeping before deferring to recovery, and cancelling its own context
+// turned that hand-off into a failed run.
+func (r *Runner) cancelOrdinaryMailboxWorkExceptLocked(userID int64, exclude map[string]bool) {
 	if cancel := r.autoCancels[userID]; cancel != nil {
 		cancel()
 	}
@@ -169,7 +192,7 @@ func (r *Runner) cancelOrdinaryMailboxWorkLocked(userID int64) {
 		cancel()
 	}
 	for key, work := range r.mailboxCancels {
-		if work.userID != userID || work.cancel == nil {
+		if work.userID != userID || work.cancel == nil || exclude[key] {
 			continue
 		}
 		if activityKey := runnerMailboxWorkActivityKey(key); r.workActivities[activityKey].userID == userID {

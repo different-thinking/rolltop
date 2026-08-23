@@ -945,6 +945,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		BlobRetention: cfg.BlobRetention,
 		PluginDir:     cfg.PluginDir,
 		MasterKey:     cfg.MasterKey,
+		Lifetime:      ctx,
 	}
 	syncRunner := syncer.NewRunnerWithContext(ctx, syncSvc)
 	webServer, err := web.New(web.Options{
@@ -966,6 +967,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		GoogleAuth:       googleAuth,
 		GoogleContacts:   googleContacts,
 		GoogleCalendar:   googleCalendar,
+		Lifetime:         ctx,
 	})
 	if err != nil {
 		return nil, err
@@ -985,7 +987,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	for _, user := range users {
 		syncRunner.StartAttachmentIndex(user.ID)
 	}
-	go reconcileStaleSyncRuns(ctx, db, 5*time.Minute)
+	go reconcileStaleSyncRuns(ctx, db, 15*time.Minute)
 	if cfg.InboxPollInterval > 0 {
 		// IMAP IDLE is the primary low-latency path. A separate minute-by-minute
 		// poll used to queue the same INBOX work while the IDLE watcher was healthy,
@@ -1428,8 +1430,13 @@ func scheduledSync(ctx context.Context, db *store.Store, runner *syncer.Runner, 
 				continue
 			}
 			for _, userID := range userIDs {
-				if !runner.Start(userID) {
-					log.Printf("scheduled sync user_id=%d skipped: already running", userID)
+				// Bound each tenant's admission wait so one tenant wedged behind
+				// a foreground operation cannot stall the scheduler for everyone.
+				userCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				started := runner.StartWithinContext(userCtx, userID)
+				cancel()
+				if !started {
+					log.Printf("scheduled sync user_id=%d skipped: already running or blocked", userID)
 				}
 			}
 		}

@@ -40,7 +40,7 @@ func TestMessageTransferReopenProofIsAttemptScopedAndAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, reopenErr := db.ReopenMessageTransferDispatchAfterProof(ctx, user.ID, transfer.ID, claim, "same-process")
+			ok, reopenErr := db.ReopenMessageTransferDispatchAfterProof(ctx, user.ID, transfer.ID, claim, "same-process", time.Time{})
 			if reopenErr != nil {
 				t.Errorf("reopen: %v", reopenErr)
 				return
@@ -58,7 +58,7 @@ func TestMessageTransferReopenProofIsAttemptScopedAndAtomic(t *testing.T) {
 	if err != nil || !claimed || newClaim.Attempt != claim.Attempt+1 {
 		t.Fatalf("new claim=%+v claimed=%v err=%v", newClaim, claimed, err)
 	}
-	if ok, err := db.ReopenMessageTransferDispatchAfterProof(ctx, user.ID, transfer.ID, claim, "other-process"); err != nil || ok {
+	if ok, err := db.ReopenMessageTransferDispatchAfterProof(ctx, user.ID, transfer.ID, claim, "other-process", time.Time{}); err != nil || ok {
 		t.Fatalf("stale proof reopened newer claim ok=%v err=%v", ok, err)
 	}
 }
