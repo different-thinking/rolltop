@@ -156,23 +156,27 @@ type apiMessageAnnotation struct {
 }
 
 type apiConversation struct {
-	Message                  apiMessage `json:"message"`
-	MessageIDs               []int64    `json:"message_ids,omitempty"`
-	MessageAccountIDs        []int64    `json:"message_account_ids,omitempty"`
-	StarredMessageID         int64      `json:"starred_message_id"`
-	Participants             string     `json:"participants"`
-	RecipientParticipants    string     `json:"recipient_participants"`
-	Count                    int        `json:"count"`
-	IsRead                   bool       `json:"is_read"`
-	HasAttachments           bool       `json:"has_attachments"`
-	AttachmentNames          []string   `json:"attachment_names,omitempty"`
-	AttachmentMatches        []string   `json:"attachment_matches,omitempty"`
-	AttachmentContentMatched bool       `json:"attachment_content_matched,omitempty"`
-	Snippet                  string     `json:"snippet"`
-	MatchTerms               []string   `json:"match_terms,omitempty"`
-	MatchQueryTerms          []string   `json:"match_query_terms,omitempty"`
-	SnoozedUntil             string     `json:"snoozed_until,omitempty"`
-	ListDate                 string     `json:"list_date,omitempty"`
+	Message    apiMessage `json:"message"`
+	MessageIDs []int64    `json:"message_ids,omitempty"`
+	// MessageAccountIDs is parallel to MessageIDs: entry i names the account
+	// holding message i. A thread can carry copies of one mail in several
+	// accounts, and a folder belongs to a single account, so filing the row
+	// means moving each account's own messages into that account's folder.
+	MessageAccountIDs        []int64  `json:"message_account_ids,omitempty"`
+	StarredMessageID         int64    `json:"starred_message_id"`
+	Participants             string   `json:"participants"`
+	RecipientParticipants    string   `json:"recipient_participants"`
+	Count                    int      `json:"count"`
+	IsRead                   bool     `json:"is_read"`
+	HasAttachments           bool     `json:"has_attachments"`
+	AttachmentNames          []string `json:"attachment_names,omitempty"`
+	AttachmentMatches        []string `json:"attachment_matches,omitempty"`
+	AttachmentContentMatched bool     `json:"attachment_content_matched,omitempty"`
+	Snippet                  string   `json:"snippet"`
+	MatchTerms               []string `json:"match_terms,omitempty"`
+	MatchQueryTerms          []string `json:"match_query_terms,omitempty"`
+	SnoozedUntil             string   `json:"snoozed_until,omitempty"`
+	ListDate                 string   `json:"list_date,omitempty"`
 }
 
 type apiAttachment struct {

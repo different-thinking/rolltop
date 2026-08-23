@@ -68,6 +68,21 @@ site and in review.
   of a thread restores exactly what stayed, and a set of runs that did not all
   end the same way settles each run's own messages, or a dismissal that outlives
   its mutation hides mail that never went anywhere.
+- A conversation row can span accounts, and filing it means filing all of it. A
+  thread carries copies of the same mail whenever several of the accounts were
+  addressed, or none of them was - Bcc, a mailing list - which is exactly when
+  duplicate detection refuses to hide one behind another. Delete, Archive and
+  Report spam name a role, not a folder, and every account has its own folder
+  for that role, so such a row is split by account and moved once per account;
+  the server refuses a move into another account's folder, so never send one set
+  of IDs to one mailbox. Refusing the row instead - the old "conversation
+  containing messages from multiple accounts" error - leaves mail the reader
+  deleted sitting in another account. The row says which account each of its
+  messages is in: `conversationView.MessageAccountIDs` is parallel to
+  `MessageIDs`, not the distinct set of accounts, and the two are built together
+  so nothing can shift them out of step. Each destination reports on its own,
+  the way per-run outcomes already do above, and shares the keepalive request
+  budget rather than spending all of it.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick

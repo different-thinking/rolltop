@@ -206,8 +206,11 @@ type threadMessageView struct {
 }
 
 type conversationView struct {
-	Message                  store.MessageRecord
-	MessageIDs               []int64
+	Message    store.MessageRecord
+	MessageIDs []int64
+	// MessageAccountIDs is parallel to MessageIDs: entry i names the account
+	// holding message i, so a row spanning accounts can be filed one account's
+	// folder at a time.
 	MessageAccountIDs        []int64
 	StarredMessageID         int64
 	Participants             string
