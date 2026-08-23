@@ -81,8 +81,22 @@ site and in review.
   messages is in: `conversationView.MessageAccountIDs` is parallel to
   `MessageIDs`, not the distinct set of accounts, and the two are built together
   so nothing can shift them out of step. Each destination reports on its own,
-  the way per-run outcomes already do above, and shares the keepalive request
-  budget rather than spending all of it.
+  the way per-run outcomes already do above. Split filing brings two traps the
+  single-folder version never had. A dismissal may cover only the messages that
+  are really going: a row whose own account's copy is already in the
+  destination, or was skipped for any other reason, stays on the list that holds
+  it, and hiding it there hides it for good, because a dismissal lapses only
+  when the list stops returning the message and this list never will. And
+  "already there" is answered per account for the same reason - the row's
+  mailbox speaks for its own copy alone, so it drops that copy from the move
+  instead of refusing the whole row, and a row is refused only when no account
+  has anything left to move. Every gate that greys out one of these actions
+  (`rowSpamState` and anything added beside it) has to answer the same question
+  the action does, or the button refuses what the swipe beside it would do. The
+  keepalive request budget is the page's, not each move's: destinations share
+  `keepaliveMoveChunkBudget` through `keepaliveChunkBudgets`, which hands the
+  ones past it nothing rather than a rounded-up share, because a truncated
+  background commit must under-claim rather than over-send.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick

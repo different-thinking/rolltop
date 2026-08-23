@@ -5,12 +5,19 @@ import type { Conversation, MailListResponse, Message } from "../types";
 import { defaultMailSortOrder, mailSortOrder } from "./mailSort";
 import type { MailSortOrder } from "./mailSort";
 
-const snapshotVersion = 2;
+const snapshotVersion = 3;
 const maxSnapshotBytes = 900_000;
 const maxStoredSnapshotBytes = 2_400_000;
 const maxStoredSnapshots = 6;
 const maxSnapshotConversations = 200;
 const snapshotPrefix = `rolltop.mail.list.v${snapshotVersion}.`;
+// Snapshot formats this build can no longer read. A row's `message_account_ids`
+// changed meaning in v3: it now names the account of each of the row's messages
+// rather than the distinct set of accounts they are spread over. A v2 page
+// cannot be told apart from a v3 one field by field, and read as v3 it answers
+// "which account is this message in" wrongly - so the version is what rejects
+// it, and these keys are dropped rather than left sitting in storage.
+const supersededSnapshotPrefixes = ["rolltop.mail.list.v2."];
 const legacyAllMailPrefix = "rolltop.mail.all.v1.";
 
 type MailSnapshot = {
@@ -89,6 +96,7 @@ export function saveMailSnapshot(userID: number, mailboxID: string | null, pageN
 
 export function clearMailSnapshots(userID: number) {
   if (!positiveInteger(userID)) return;
+  dropSupersededSnapshots();
   try {
     const currentPrefix = `${snapshotPrefix}${userID}.`;
     const legacyKey = `${legacyAllMailPrefix}${userID}`;
@@ -100,6 +108,7 @@ export function clearMailSnapshots(userID: number) {
 }
 
 export function clearOtherMailSnapshots(keepUserID: number) {
+  dropSupersededSnapshots();
   try {
     const keepPrefix = `${snapshotPrefix}${keepUserID}.`;
     const keepLegacy = `${legacyAllMailPrefix}${keepUserID}`;
@@ -154,7 +163,20 @@ function storeWithQuotaRecovery(key: string, serialized: string, userID: number,
   }
 }
 
+// dropSupersededSnapshots clears pages written in a format this build cannot
+// read. They are dead weight against the storage budget the prune below spends,
+// and no user's copy is worth keeping, so every one of them goes.
+function dropSupersededSnapshots() {
+  try {
+    storageKeys().filter((key) => supersededSnapshotPrefixes.some((prefix) => key.startsWith(prefix)))
+      .forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // Storage may be unavailable in private or locked-down browser contexts.
+  }
+}
+
 function pruneMailSnapshots(userID: number, order: MailSortOrder) {
+  dropSupersededSnapshots();
   const pinned = mailSnapshotStorageKey(userID, null, 1, order);
   const entries = snapshotEntries(userID).sort((left, right) => {
     if (left.key === pinned) return -1;

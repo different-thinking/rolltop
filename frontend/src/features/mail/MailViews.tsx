@@ -1378,6 +1378,28 @@ const inlineMoveMessageLimit = 5;
 // anything beyond the quota would be rejected by the browser anyway.
 const keepaliveMoveChunkBudget = 6;
 
+/**
+ * keepaliveChunkBudgets splits that quota across the destinations one commit
+ * spans. The quota belongs to the page, not to a move, so handing every
+ * destination the whole budget would dispatch a multiple of it and the browser
+ * would reject the bodies past it. Sharing it out cannot round up either: with
+ * more destinations than chunks, a floor of one each spends the budget several
+ * times over, so the destinations past it are given nothing and their messages
+ * are reported as what they are - not moved. A background commit is a truncated
+ * best effort whichever way it is cut; what it does not send must not be
+ * counted as sent.
+ */
+function keepaliveChunkBudgets(count: number): number[] {
+  if (count <= 0) return [];
+  const base = Math.floor(keepaliveMoveChunkBudget / count);
+  let remainder = keepaliveMoveChunkBudget % count;
+  return Array.from({ length: count }, () => {
+    const extra = remainder > 0 ? 1 : 0;
+    remainder -= extra;
+    return base + extra;
+  });
+}
+
 // A queued move hides its rows until the background run has actually moved them.
 // The run is polled rather than assumed: a failed or interrupted run has to give
 // the rows back. The limit only bounds the hiding, not the run itself.
@@ -1951,10 +1973,15 @@ function MessageList({
     const entries = Array.from(groups.values());
     for (const entry of entries) entry.messageIDs = uniquePositiveIDs(entry.messageIDs);
     const destLabel = entries.length === 1 ? entries[0].target.name : "Trash";
-    const rowIDs = entries.flatMap((entry) => entry.items.map((item) => item.rowID));
-    // Dismiss every thread message ID too, so sibling rows of the same thread
-    // are hidden and locked during the undo window, matching the swipe path.
-    const dismissIDs = uniquePositiveIDs([...rowIDs, ...entries.flatMap((entry) => entry.messageIDs)]);
+    const rowIDs = uniquePositiveIDs(entries.flatMap((entry) => entry.items.map((item) => item.rowID)));
+    // Every message this delete moves is dismissed, which hides sibling rows of
+    // the same thread and locks them for the undo window, matching the swipe
+    // path. Only those: a row whose own message stays where it is - its account's
+    // copy was already in Trash, so only another account's copy is going - is a
+    // row this list still holds, and hiding it would hide it for good. A
+    // dismissal lapses when the list stops returning the message, and the list
+    // goes on returning this one.
+    const dismissIDs = uniquePositiveIDs(entries.flatMap((entry) => entry.messageIDs));
     const totalMessages = entries.reduce((sum, entry) => sum + entry.messageIDs.length, 0);
     const registered = deferSwipeMutation(
       rowIDs[0],
@@ -1978,8 +2005,12 @@ function MessageList({
     // before any await, or the unload cancels them; deleting a snoozed message
     // includes dismissing its reminder, so this does not wait for the moves.
     if (snoozedView && keepalive) {
-      void Promise.allSettled(entries.flatMap((entry) =>
-        entry.items.map((item) => api.unsnoozeMessage(csrf, item.rowID, { keepalive: true }))));
+      // One reminder per row, however many accounts the row is being filed
+      // into: a conversation split across accounts is an item in each of their
+      // groups, and the same row asked to unsnooze once per account would spend
+      // the unload's request budget on repeats of a request it already made.
+      const snoozedRowIDs = uniquePositiveIDs(entries.flatMap((entry) => entry.items.map((item) => item.rowID)));
+      void Promise.allSettled(snoozedRowIDs.map((rowID) => api.unsnoozeMessage(csrf, rowID, { keepalive: true })));
     }
     const movedMessageIDs: number[] = [];
     const stillQueuedIDs = new Set<number>();
@@ -1992,10 +2023,10 @@ function MessageList({
     setTrashOps((count) => count + 1);
     // The keepalive request quota belongs to the browser, so the destinations
     // this delete spans split it rather than each spending the whole budget.
-    const chunkBudget = Math.max(1, Math.floor(keepaliveMoveChunkBudget / Math.max(1, entries.length)));
+    const chunkBudgets = keepaliveChunkBudgets(entries.length);
     try {
-      await Promise.all(entries.map(async (entry) => {
-        const { movedIDs, queuedIDs, queuedGroups: groups, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudget);
+      await Promise.all(entries.map(async (entry, index) => {
+        const { movedIDs, queuedIDs, queuedGroups: groups, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudgets[index]);
         if (error !== undefined && firstError === undefined) firstError = error;
         queuedIDs.forEach((id) => stillQueuedIDs.add(id));
         queuedGroups.push(...groups);
@@ -2020,7 +2051,7 @@ function MessageList({
       setTrashOps((count) => Math.max(0, count - 1));
     }
     if (snoozedView && !keepalive && movedRowIDs.length > 0) {
-      void Promise.allSettled(movedRowIDs.map((rowID) => api.unsnoozeMessage(csrf, rowID)));
+      void Promise.allSettled(uniquePositiveIDs(movedRowIDs).map((rowID) => api.unsnoozeMessage(csrf, rowID)));
     }
     // A queued move is only accepted, not done: its messages still sit in the
     // source folder until the background run reaches them, so only the messages
@@ -2467,21 +2498,29 @@ function MessageList({
       }
       targeted.push({ target, messageIDs: group.messageIDs });
     }
-    // A row whose whole conversation lives in one account keeps the plain
-    // "already there" answer. Once it spans accounts the row's own mailbox only
-    // speaks for its own account's copy, and the copies in the others still
-    // have somewhere to go, so the move goes ahead: a message the server finds
-    // already in the destination folder is left where it is.
-    if (targeted.length === 1 && conversation.message.mailbox_id === targeted[0].target.id) {
-      addToast(`This conversation is already in ${targeted[0].target.name}.`);
+    // The row's own mailbox speaks for its own account's copy and no other, so
+    // "already there" is answered per account: that copy is dropped from the
+    // move, the copies in the other accounts still go, and only a conversation
+    // with nothing left to move is refused - which is every single-account row
+    // the check used to refuse, answered the same way it always was.
+    const settled = targeted.find((entry) =>
+      entry.messageIDs.includes(conversation.message.id) && conversation.message.mailbox_id === entry.target.id);
+    const moving = settled ? targeted.filter((entry) => entry !== settled) : targeted;
+    if (moving.length === 0) {
+      addToast(`This conversation is already in ${(settled || targeted[0]).target.name}.`);
       return false;
     }
-    const messageIDs = uniquePositiveIDs(targeted.flatMap((entry) => entry.messageIDs));
-    const destLabel = targeted.length === 1 ? targeted[0].target.name : rowMoveFolderLabel(action);
+    const messageIDs = uniquePositiveIDs(moving.flatMap((entry) => entry.messageIDs));
+    const destLabel = moving.length === 1 ? moving[0].target.name : rowMoveFolderLabel(action);
     // Each destination gets its own share of the keepalive request budget, so a
     // conversation split across accounts cannot dispatch a multiple of the
     // quota the browser would start rejecting bodies at.
-    const chunkBudget = Math.max(1, Math.floor(keepaliveMoveChunkBudget / targeted.length));
+    const chunkBudgets = keepaliveChunkBudgets(moving.length);
+    // The row stands for its own message. It is dismissed with the rest only
+    // when that message is one of the ones moving: a row whose copy stays here
+    // while another account's goes is a row this list still holds, and hiding
+    // it would hide it past the reload, because the list keeps returning it.
+    const rowMoves = messageIDs.includes(conversation.message.id);
     const dismissedIDs = messageIDs;
     const registered = deferSwipeMutation(
       conversation.message.id,
@@ -2499,13 +2538,15 @@ function MessageList({
         // Trash and spam end a conversation, so they dismiss its snooze reminder
         // too; archive only files it away, and a reminder there still makes sense.
         const unsnooze = snoozedView && action !== "archive";
-        const keepaliveMoveComplete = targeted.every((entry) => entry.messageIDs.length <= bulkMessageIDLimit * chunkBudget);
-        if (unsnooze && keepalive && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
+        const keepaliveMoveComplete = moving.every((entry, index) => entry.messageIDs.length <= bulkMessageIDLimit * chunkBudgets[index]);
+        // The reminder belongs to the row's own message, so it only goes when
+        // that message is one this move is taking.
+        if (unsnooze && keepalive && rowMoves && keepaliveMoveComplete) void api.unsnoozeMessage(csrf, conversation.message.id, { keepalive: true }).catch(() => undefined);
         // One move per destination, each reported on its own: the accounts do
         // not have to answer the same way, and a failure in one must not take
         // the messages another one really moved down with it.
-        const results = await Promise.all(targeted.map((entry) =>
-          executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudget)));
+        const results = await Promise.all(moving.map((entry, index) =>
+          executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudgets[index])));
         const movedIDs = results.flatMap((result) => result.movedIDs);
         const queuedIDs = results.flatMap((result) => result.queuedIDs);
         const queuedGroups = results.flatMap((result) => result.queuedGroups);
@@ -2541,9 +2582,12 @@ function MessageList({
     );
     if (!registered) return false;
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissedIDs]));
-    if (direction) beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
+    // The row slides out only when its own message is one of the ones going.
+    // A row whose copy stays here keeps its place and reports no dismissal, so
+    // a swipe springs it back rather than sliding out a row that never left.
+    if (rowMoves && direction) beginSwipeDismiss(conversation.message.id, dismissedIDs, direction);
     else optimisticallyDismiss(dismissedIDs);
-    return true;
+    return rowMoves;
   }
 
   async function executeSwipeAction(
@@ -2874,13 +2918,24 @@ function MessageList({
         const movingOut = hiddenMessageIDs.has(msg.id);
         const rowActionsDisabled = selectionBusy || scopeSelected || movingOut || pendingSwipeActionIDs.current.has(msg.id);
         // Report spam stays visible with its reason in the tooltip when it
-        // cannot run, rather than appearing on some rows and not others.
+        // cannot run, rather than appearing on some rows and not others. The
+        // button has to answer for the whole conversation the click would file,
+        // the way moveConversation does: a thread with a copy in another account
+        // still has that copy to report, so the row's own mailbox only settles
+        // the question while the row is the one account's alone.
+        const rowSpamAccountIDs = conversationTransferAccountIDs(conversation);
         const rowJunkMailbox = junkMailboxForAccount(mailboxes, msg.account_id);
-        const rowSpamState = !rowJunkMailbox
-          ? { disabled: true, title: "This account has no Junk folder to report spam into" }
-          : msg.mailbox_id === rowJunkMailbox.id
+        const rowJunkMissing = rowSpamAccountIDs.some((accountID) => !junkMailboxForAccount(mailboxes, accountID));
+        const rowSpamState = rowJunkMissing
+          ? {
+              disabled: true,
+              title: rowSpamAccountIDs.length > 1
+                ? "Every account in this conversation needs a Junk folder to report spam into"
+                : "This account has no Junk folder to report spam into"
+            }
+          : rowJunkMailbox && rowSpamAccountIDs.length === 1 && msg.mailbox_id === rowJunkMailbox.id
             ? { disabled: true, title: `Already in ${rowJunkMailbox.name}` }
-            : { disabled: rowActionsDisabled, title: `Report spam (${rowJunkMailbox.name})` };
+            : { disabled: rowActionsDisabled, title: rowJunkMailbox && rowSpamAccountIDs.length === 1 ? `Report spam (${rowJunkMailbox.name})` : "Report spam" };
         const activeSwipe = swipeState?.id === msg.id ? swipeState : null;
         const swipeDelta = activeSwipe?.deltaX || 0;
         const swipeReady = Boolean(activeSwipe?.committed || (activeSwipe && Math.abs(activeSwipe.visualDeltaX) >= messageSwipeCommitDistance));
