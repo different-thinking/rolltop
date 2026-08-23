@@ -79,6 +79,8 @@ type Conditions = {
 const blankConditions: Conditions = { from: "", subject: "", olderThanDays: "", rest: "" };
 
 type BackfillResult = {
+  ok?: boolean;
+  error?: string;
   processed: number;
   done: boolean;
   cursor: { date_unix: number; id: number };
@@ -138,10 +140,28 @@ function buildQuery(conditions: Conditions) {
   const parts: string[] = [];
   if (conditions.from.trim()) parts.push(`from:${quoteValue(conditions.from)}`);
   if (conditions.subject.trim()) parts.push(`subject:${quoteValue(conditions.subject)}`);
-  const days = Number(conditions.olderThanDays);
-  if (Number.isFinite(days) && days > 0) parts.push(`older_than:${Math.floor(days)}d`);
+  const days = olderThanDays(conditions);
+  if (days > 0) parts.push(`older_than:${days}d`);
   if (conditions.rest.trim()) parts.push(conditions.rest.trim());
   return parts.join(" ");
+}
+
+// olderThanDays reads the age field the way the engine reads the term it
+// composes: whole days, at least one. Both parseAgeDuration and the search's
+// own relative-date parser reject anything else, so a value the field accepts
+// but they do not would drop the age out of the query silently -- turning
+// "trash this in 30 days" into "trash this now". A rejected value returns 0 and
+// olderThanInvalid below blocks the save rather than letting that happen.
+function olderThanDays(conditions: Conditions) {
+  const raw = conditions.olderThanDays.trim();
+  if (!raw) return 0;
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 1) return 0;
+  return days;
+}
+
+function olderThanInvalid(conditions: Conditions) {
+  return conditions.olderThanDays.trim() !== "" && olderThanDays(conditions) === 0;
 }
 
 function unquote(value: string) {
@@ -191,6 +211,8 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
   // the composed string on every keystroke. Every place that replaces the whole
   // draft re-reads them from that draft's query, which stays the stored truth.
   const [conditions, setConditions] = useState<Conditions>(blankConditions);
+  const ageInvalid = olderThanInvalid(conditions);
+  const ageDaysValue = olderThanDays(conditions);
 
   const accounts = useMemo(() => {
     const seen = new Map<number, string>();
@@ -287,6 +309,9 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
       for (;;) {
         const data = await postJSON<BackfillResult>(`/api/plugins/mail_filters/rules/${rule.id}/backfill`, csrf, cursor);
         processed += data.processed || 0;
+        // A page that failed part way still committed what it evaluated, so the
+        // count is reported rather than thrown away with the error.
+        if (data.ok === false) throw new Error(`${data.error || "Backfill stopped early."} Checked ${processed} so far.`);
         // A cursor that did not move would ask for the same page forever, so
         // the loop stops on it rather than trusting "done" alone.
         if (data.done || !data.cursor || (data.cursor.date_unix === cursor.date_unix && data.cursor.id === cursor.id)) break;
@@ -377,7 +402,8 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
             </label>
             <label>
               <span className="settings-field-label">Older than</span>
-              <input type="number" min={0} step={1} value={conditions.olderThanDays} onChange={(event) => setCondition({ olderThanDays: event.target.value })} placeholder="days" />
+              <input type="number" min={1} step={1} value={conditions.olderThanDays} onChange={(event) => setCondition({ olderThanDays: event.target.value })} placeholder="days" />
+              {ageInvalid ? <small className="error-text">Whole days, one or more. Anything else would drop the age and let the rule act at once.</small> : null}
             </label>
           </div>
           <p className="muted mail-filter-query-preview">
@@ -414,9 +440,9 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
             </select>
           </label>
         </div>
-        {conditions.olderThanDays && draft.actions.move_role === "trash" ? (
+        {ageDaysValue > 0 && draft.actions.move_role === "trash" ? (
           <p className="muted">
-            Matching mail moves to Trash {conditions.olderThanDays} {conditions.olderThanDays === "1" ? "day" : "days"} after it was sent. Until then it waits in the queue below.
+            Matching mail moves to Trash {ageDaysValue} {ageDaysValue === 1 ? "day" : "days"} after it was sent. Until then it waits in the queue below.
           </p>
         ) : null}
         {draft.scope_mode === "selected_accounts" ? (
@@ -438,7 +464,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
           </label>
         </div>
         <div className="form-actions">
-          <button disabled={busy || !draft.query.trim()}><Icon name="label" />Save filter</button>
+          <button disabled={busy || ageInvalid || !draft.query.trim()}><Icon name="label" />Save filter</button>
         </div>
       </form>
       <section className="panel">
@@ -601,11 +627,16 @@ function statusLabel(status: string) {
 }
 
 function evaluationDetail(ev: Evaluation, datePrefs: DatePrefs) {
+  // A scheduled row is recorded with matched = false because its rule has not
+  // acted yet, not because the message failed to match -- it matched everything
+  // but the age, which is why it is waiting at all. Saying "did not match" next
+  // to a queued deletion reads as the opposite of what is about to happen.
+  const outcome = ev.status === "scheduled" ? "waiting on age" : ev.matched ? "matched" : "did not match";
   const parts = [
     ev.phase ? statusLabel(ev.phase) : "",
     ev.evaluated_at ? `evaluated ${displayDateTime(new Date(ev.evaluated_at * 1000).toISOString(), datePrefs)}` : "",
     ev.due_at ? `due ${displayDateTime(new Date(ev.due_at * 1000).toISOString(), datePrefs)}` : "",
-    ev.matched ? "matched" : "did not match"
+    outcome
   ].filter(Boolean);
   return parts.join(" · ");
 }

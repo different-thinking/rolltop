@@ -23,6 +23,12 @@ from:studio@example.com subject:Reservation older_than:7d
 
 Actions can star, move to a folder or source-account Trash, and forward through the user's configured SMTP identity. Forwarded mail receives an opaque `X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message that already has the same marker.
 
+Filters read the mail the whole-account lists show -- folders that opt into All
+Mail, never Junk, never a hidden cross-account duplicate -- so Sent, Drafts and
+Trash are out of reach of a rule by default. That is what keeps an age rule from
+emptying the reader's own Sent folder. What a rule may *write* is unaffected: any
+mailbox is a valid move destination.
+
 "Delete mail from this sender after N days" is the sender condition, an age of N
 days, and a move to the source account's Trash. Deletion means the same thing it
 means everywhere else in Rolltop: the message lands in Trash, and only emptying
@@ -57,10 +63,20 @@ its scope reaches. A lightweight plugin worker processes due scheduled rows
 every 15 minutes while the backend plugin is enabled, and `Run due` on the
 settings page does the same pass on demand.
 
-Only one scheduled row may wait for a given rule and message, so re-running a
-backfill re-dates the wait instead of queueing the same action twice.
+Only one scheduled row may wait for a given rule and message. A partial unique
+index says so (`migrations/user/002`), not just the code that inserts, because a
+concurrent arrival and backfill would otherwise pass each other between a lookup
+and an insert and queue the same move twice.
 
 Backfill walks stored mail oldest first, one page per request, and returns the
 cursor to continue from; the settings page follows that cursor to the end. The
 mail an age rule exists to clean up is the oldest in the mailbox, which a single
-newest-first page left out.
+newest-first page left out. The walk skips what the rule already decided on
+since its last edit: a rule acts where it matches, so a second Backfill over the
+same message would forward it a second time. Saving an edited rule puts every
+message back in front of it. A page that fails part way reports what it
+evaluated and where it stopped, because those rows are already committed.
+
+A wait whose message has since been deleted is purged rather than left in the
+queue: it can never resolve, and its due date is in the past, so it would sort
+to the front of the pending list for good.
