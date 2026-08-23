@@ -281,6 +281,21 @@ site and in review.
   both servers start, each start's `MarkRunningSyncRunsInterrupted` stamps the
   other's live sync runs interrupted, and every mailbox is fetched twice. Tests
   leave it off on purpose: they open several stores against one database.
+- That lock has to be able to **expire**, and three things make it. A container
+  killed without closing its connection — an OOM kill, an evicted pod — leaves
+  the backend `idle` and holding the lock, and the operating system's default
+  keepalives leave it there for over two hours, during which no start succeeds.
+  So the lock session sets its own keepalives (about a minute to notice), the
+  holder pings it every `instancePingEvery` so its silence means something, and
+  a start whose wait has run out reads `pg_locks`/`pg_stat_activity` and ends a
+  session that carries `instanceLockAppName` and has been silent for
+  `instanceStaleAfter`. Keep all three: the ping is what distinguishes a running
+  holder from an abandoned one, and without it the takeover would hand a live
+  server's database to a second one. Only a marked, silent holder is taken over;
+  anything else is named in the error, and `ROLLTOP_BREAK_INSTANCE_LOCK` is the
+  operator's one-start override for it. A stop signal during the wait is
+  reported as a stop, wrapping `context.Canceled` so `stoppedDuringStartup`
+  keeps it out of the crash report — never as the second-server message.
 - The schema is `backend/store/pgschema/baseline.sql`, applied to an empty
   database and recorded as one row in `schema_migrations` under a checksum over
   its text. It was derived once from the SQLite schema that preceded it; that

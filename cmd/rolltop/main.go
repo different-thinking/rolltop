@@ -791,6 +791,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		// uses, so an overlapping restart is not a failure.
 		ExclusiveInstance: true,
 		InstanceLockWait:  cfg.StartupLockWait,
+		BreakInstanceLock: cfg.BreakInstanceLock,
 	})
 	if err != nil {
 		return nil, err

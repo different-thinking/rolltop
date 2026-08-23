@@ -64,6 +64,7 @@ export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_MEMORY_LIMIT="80%"
 export ROLLTOP_STARTUP_LOCK_WAIT="2m"
+export ROLLTOP_BREAK_INSTANCE_LOCK="false"
 export ROLLTOP_SHUTDOWN_TIMEOUT="10s"
 export ROLLTOP_SQLITE_ACCESS="auto"
 ```
@@ -529,6 +530,53 @@ Two notes on what this does and does not protect:
   a network filesystem as SQLite was.
 - The lock only works if `flock` works on the volume. If the log shows two
   processes serving the same directory at once, that is what to check first.
+
+### One Server Per Database
+
+The directory lock above is per volume, so it does not catch the case where two
+deployments have their own `/data` and point at one `ROLLTOP_DATABASE_URL`.
+That is caught separately, by a PostgreSQL advisory lock a serving process
+holds for as long as it is running. Without it both servers come up and neither
+says so: each start stamps the other's in-flight sync runs interrupted, and
+both runners then fetch every mailbox and push every flag change twice.
+
+A start that cannot take it waits out `ROLLTOP_STARTUP_LOCK_WAIT`, the same as
+for the directory, and then refuses with the session that holds it:
+
+```text
+postgres: claim this database: another rolltop server is already running against this
+database. [...] It is held by backend pid 214 (rolltop-instance-lock) from 10.42.0.9,
+connected since 2026-08-23T10:11:02Z, idle for 4s
+```
+
+The lock ends with the session that holds it, so an ordinary stop, a crash and a
+`SIGKILL` all release it. The case that needs more than that is a container
+killed without its connection being closed — an out-of-memory kill, an evicted
+pod, a lost node. Nothing tells PostgreSQL the client is gone, so the backend
+stays `idle` holding the lock, and with the operating system's default TCP
+keepalives it stays that way for over two hours. Every start in that window
+refuses, naming a server that no longer exists.
+
+Two things keep that from being an outage. The lock session sets its own
+keepalives, so PostgreSQL notices the dead peer in about a minute rather than in
+two hours; and the process holding the lock pings it every 15 seconds, so a
+starting server can tell a running holder from an abandoned one. A holder that
+carries the `rolltop-instance-lock` name and has not pinged for 75 seconds is a
+process that no longer exists, and the starting server ends that session and
+takes the lock:
+
+```text
+instance lock: taking it from pid 214, a rolltop lock session silent for 2m14s
+(its process is gone; a running one pings every 15s)
+```
+
+That recovery is deliberately narrow. A session that does **not** carry that
+name — an older Rolltop, or anything else that took the same key — might be a
+running server whose liveness cannot be read this way, so it is reported rather
+than ended. If you have established that nothing else is running, set
+`ROLLTOP_BREAK_INSTANCE_LOCK=true` for one start to take the lock from it, and
+unset it again afterwards. Leaving it on turns the guard off, and what it
+guards against does not announce itself.
 
 ### Backups
 
