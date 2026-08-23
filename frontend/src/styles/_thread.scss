@@ -1,18 +1,5 @@
 @use "mixins/components" as *;
 
-// The reading view keeps one measure on every screen. A message body stretched
-// across a desktop-wide window is unreadable, so the header, its status blocks
-// and the conversation itself share a single column that stops growing at
-// $thread-measure and simply takes the width it is given on anything narrower.
-$thread-measure: 1100px;
-
-.thread-head,
-.thread-status,
-.thread-shell {
-  width: 100%;
-  max-width: $thread-measure;
-}
-
 // The detail header carries the same commands the list offers on row hover, so
 // the toolbar is built from the same small icon buttons rather than a second
 // visual language. It never collapses on touch: a thread has no row to swipe.

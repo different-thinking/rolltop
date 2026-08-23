@@ -1,5 +1,6 @@
-// File overview: Authenticated application chrome: top bar, search entry, folder sidebar, mobile
-// drawer, drag-to-folder handling, sync status, and the mobile compose affordance.
+// File overview: Authenticated application chrome: top bar, search entry, folder sidebar and the
+// control that hides it, mobile drawer, drag-to-folder handling, sync status, and the mobile
+// compose affordance.
 
 import { Fragment, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
@@ -11,9 +12,9 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailReadingRoute, mailRoute, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
-import { loadCollapsedAccounts, saveCollapsedAccounts } from "../../lib/sidebarLocal";
+import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
 
@@ -58,6 +59,7 @@ export function AppShell({
   children
 }: AppShellProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(() => loadSidebarHidden(user.id));
   const [messageDragActive, setMessageDragActive] = useState(false);
   const [touchDragPreview, setTouchDragPreview] = useState<TouchDragPreview | null>(null);
   const [touchDrop, setTouchDrop] = useState<TouchDropTarget | null>(null);
@@ -354,6 +356,19 @@ export function AppShell({
     nativeDragActivationTimer.current = null;
   }
 
+  // The shell outlives a login change, so the stored preference is re-read when
+  // the user does. Without this the next reader inherits whatever the previous
+  // one left on screen, under their own storage key.
+  useEffect(() => {
+    setSidebarHidden(loadSidebarHidden(user.id));
+  }, [user.id]);
+
+  function toggleSidebar() {
+    const next = !sidebarHidden;
+    setSidebarHidden(next);
+    saveSidebarHidden(user.id, next);
+  }
+
   function openMobileSidebar() {
     clearNativeDragActivationTimer();
     dragOpenedSidebar.current = false;
@@ -417,10 +432,12 @@ export function AppShell({
         lockSecurity={lockSecurity}
         logout={logout}
         onMenu={openMobileSidebar}
+        sidebarHidden={sidebarHidden}
+        onToggleSidebar={toggleSidebar}
       />
       <div
         ref={appRef}
-        className={`app ${messageDragActive ? "message-drag-active" : ""}`}
+        className={`app ${sidebarHidden ? "sidebar-hidden" : ""} ${messageDragActive ? "message-drag-active" : ""}`}
         onDragStart={beginMessageDrag}
         onDragEnd={endMessageDrag}
       >
@@ -456,7 +473,7 @@ export function AppShell({
           touchRevealedAccounts={touchRevealedAccounts}
           onClose={closeMobileSidebar}
         />
-        <main className="content">
+        <main className={`content ${mailReadingRoute(location.path) ? "measured" : ""}`}>
           {databaseUnavailable ? <DatabaseUnavailableBanner isAdmin={Boolean(user.is_admin)} navigate={navigate} /> : null}
           {accountNeedsPassword ? <AccountCredentialBanner notice={accountNotice} navigate={navigate} /> : null}
           {children}
@@ -690,7 +707,9 @@ function Topbar({
   openSecurityUnlock,
   lockSecurity,
   logout,
-  onMenu
+  onMenu,
+  sidebarHidden,
+  onToggleSidebar
 }: {
   user: User;
   mailboxes: Mailbox[];
@@ -707,6 +726,8 @@ function Topbar({
   lockSecurity: () => void;
   logout: () => Promise<void>;
   onMenu: () => void;
+  sidebarHidden: boolean;
+  onToggleSidebar: () => void;
 }) {
   const [query, setQuery] = useState(() => searchRoute(currentLocation().path).query);
   const [focused, setFocused] = useState(false);
@@ -774,6 +795,16 @@ function Topbar({
     <header className="topbar">
       <button className="ghost mobile-menu-button" type="button" title="Folders" aria-label="Folders" onClick={onMenu}>
         <Icon name="menu" />
+      </button>
+      <button
+        className="ghost sidebar-toggle"
+        type="button"
+        title={sidebarHidden ? "Show folders" : "Hide folders"}
+        aria-label={sidebarHidden ? "Show folders" : "Hide folders"}
+        aria-pressed={sidebarHidden}
+        onClick={onToggleSidebar}
+      >
+        <Icon name="sidebar" />
       </button>
       <a
         href="/mail"

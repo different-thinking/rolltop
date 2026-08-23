@@ -1913,8 +1913,8 @@ export function ThreadView({
           </div>
         ) : null}
       </div>
-      {error ? <div className="error thread-status">{error}</div> : null}
-      {loading ? <div className="panel muted thread-status">Loading conversation...</div> : null}
+      {error ? <div className="error">{error}</div> : null}
+      {loading ? <div className="panel muted">Loading conversation...</div> : null}
       {loadStatus ? (
         <div className="fetch-status-backdrop" role="presentation">
           <section className="fetch-status-dialog" role="status" aria-live="polite" aria-label={loadStatusTitle(loadStatus)}>

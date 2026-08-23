@@ -1,10 +1,14 @@
 @use "mixins/components" as *;
 
+// The mail views hold one measure on every screen: a list row or a message body
+// stretched across a desktop-wide window is unreadable.
+$mail-measure: 1100px;
 
 .mobile-menu-button,
 .sidebar-mobile-head,
 .mobile-sidebar-scrim,
-.mobile-compose-fab {
+.mobile-compose-fab,
+.sidebar-toggle {
   display: none;
 }
 
@@ -12,6 +16,19 @@
   display: grid;
   grid-template-columns: 256px minmax(0, 1fr);
   min-height: calc(100vh - 64px);
+}
+
+// The toggle is a topbar control rather than a sidebar one: a control that lives
+// inside the panel it hides cannot bring it back.
+.topbar .sidebar-toggle {
+  width: 36px;
+  padding: 0;
+  color: var(--muted);
+
+  &:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
 }
 
 .topbar {
@@ -85,19 +102,28 @@
 }
 
 @media (min-width: 761px) {
+  // The toggle sits where the sidebar it hides begins, and the brand gives up
+  // exactly the room it takes: 36 + 16 + 170 is the 222px the brand held alone,
+  // so the search field still starts on the content column's left edge.
   .topbar {
     display: grid;
-    grid-template-columns: 222px minmax(160px, 940px) minmax(0, 1fr) max-content;
+    grid-template-columns: 36px minmax(0, 170px) minmax(160px, 940px) minmax(0, 1fr) max-content;
     column-gap: 16px;
   }
 
-  .brand {
+  .sidebar-toggle {
     grid-column: 1;
+    display: inline-flex;
+    justify-self: start;
+  }
+
+  .brand {
+    grid-column: 2;
     min-width: 0;
   }
 
   .top-search {
-    grid-column: 2;
+    grid-column: 3;
     flex: initial;
     max-width: none;
     min-width: 0;
@@ -105,9 +131,20 @@
   }
 
   .top-actions {
-    grid-column: 4;
+    grid-column: 5;
     justify-self: end;
     margin-left: 0;
+  }
+
+  // Hiding the folders gives their width back to the mail. A drag is the one
+  // moment the folders are needed while hidden, so a message drag brings them
+  // back for as long as it lasts rather than leaving the drag no target.
+  .app.sidebar-hidden:not(.message-drag-active) {
+    grid-template-columns: minmax(0, 1fr);
+
+    > .sidebar {
+      display: none;
+    }
   }
 }
 
@@ -611,6 +648,16 @@
 .content {
   min-width: 0;
   padding: 18px 22px 42px;
+}
+
+// Only the mail views take the measure. Settings, calendar, contacts and the
+// admin screens lay out their own widths and use the window they are given.
+// Centring rather than left-aligning is what makes hiding the sidebar useful:
+// the mail recentres in the wider space instead of just sliding left.
+.content.measured {
+  width: 100%;
+  max-width: $mail-measure;
+  margin-inline: auto;
 }
 
 .content-head {

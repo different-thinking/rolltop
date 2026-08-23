@@ -95,6 +95,25 @@ export function mailURL(mailboxID: string | number | null, page = 1, view: MailV
   return view ? `/mail/${view}${suffix}` : `/mail${suffix}`;
 }
 
+/**
+ * nonMailRoutes names every path prefix RouteView hands to something other than
+ * a mail view. RouteView itself has no such list: it tests the special routes in
+ * turn and falls through to the mail list, so this is the same set spelled the
+ * other way round. A new non-mail route added there belongs here too, or the
+ * shell will hold it to the reading measure that only the mail views want.
+ */
+const nonMailRoutes = ["/compose", "/calendar", "/contacts", "/settings", "/admin", "/activity", "/sync-runs"];
+
+/**
+ * mailReadingRoute reports whether a path renders mail to read - a conversation
+ * list or a thread. Those are the views the shell keeps at a fixed measure; the
+ * settings, calendar, contacts and admin screens lay out their own widths and
+ * use the whole window.
+ */
+export function mailReadingRoute(path: string): boolean {
+  return !nonMailRoutes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
 /** Parse /search/q/:query/pN slugs into search state. */
 export function searchRoute(path: string): { query: string; page: number } {
   const parts = path.split("/").filter(Boolean);

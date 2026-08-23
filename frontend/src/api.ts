@@ -42,7 +42,7 @@ import { clearMailSnapshots, clearOtherMailSnapshots, loadMailSnapshot, saveMail
 import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
 import type { MailSortOrder } from "./lib/mailSort";
 import type { MailView } from "./lib/routes";
-import { clearOtherCollapsedAccounts } from "./lib/sidebarLocal";
+import { clearOtherSidebarState } from "./lib/sidebarLocal";
 
 /** Error thrown for non-2xx API responses after the JSON error payload is decoded. */
 export class ApiError extends Error {
@@ -313,7 +313,7 @@ function retainMailCacheForUser(userID: number) {
   }
   clearOtherMailSnapshots(userID);
   clearOtherMailSortOrders(userID);
-  clearOtherCollapsedAccounts(userID);
+  clearOtherSidebarState(userID);
 }
 
 
