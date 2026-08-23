@@ -368,7 +368,7 @@ var errForegroundBusy = errors.New("foreground operation unavailable")
 func (s *Server) startMovePlan(ctx context.Context, userID int64, plan scopeMovePlan) ([]map[string]any, int, error) {
 	finishForeground := func() {}
 	if s.syncRunner != nil {
-		reserved, err := s.beginMoveForegroundOperation(ctx, userID)
+		reserved, err := s.beginMailForegroundOperation(ctx, userID)
 		if err != nil {
 			return nil, 0, fmt.Errorf("%w: %w", errForegroundBusy, err)
 		}
