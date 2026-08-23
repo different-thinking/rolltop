@@ -145,6 +145,28 @@ site and in review.
   list, and read/star sync marks every local message outside the returned set as
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
+- **Reconciliation is never switched off, only paced.** It is the one thing that
+  removes local mail the server no longer has, it has exactly two callers — the
+  sync turn and emptying Trash — and nothing anywhere retries what it skips. So
+  a folder that stops being reconciled keeps every message deleted elsewhere,
+  permanently, while still receiving new mail: the mirror silently stops being a
+  mirror. It used to sit behind `shouldSyncInlineMetadata` together with the flag
+  sync, which meant exactly that for every folder over `inlineMetadataSyncLimit`.
+  Those two belong apart. The size limit is about the flag sync, which searches
+  the whole folder twice and then writes a flag for every local message outside
+  each answer; a skipped flag sync leaves a read mark stale, which is recoverable
+  and invisible. Reconciliation is one `UID SEARCH`, and a large folder pays for
+  it on `largeMailboxReconcileInterval` rather than every poll
+  (`mailboxReconcileDue`) — a pace, never a gate. Anything that would skip it
+  must say so in a log line naming the folder and the reason, and must arrange
+  for it to happen later. The one silent skip left is the store's
+  `UIDVALIDITY` mismatch guard, which is deliberate: a folder whose generation
+  moved is not one to delete from.
+- Reconciliation reads every row the folder holds, so it reads them **narrow**.
+  `ExpungedMessage` exists for that: it carries the id, UID and blob locator the
+  callers act on and nothing else. Selecting whole `MessageRecord`s there pulled
+  every body and HTML part of a fifty-thousand-message folder into memory to
+  answer a question about UIDs.
 - Google is the leading system for the contacts it owns. A local write to a
   contact whose `source` is `google` must reach Google before the local row
   changes, or the next sync silently undoes it. On an etag conflict, adopt

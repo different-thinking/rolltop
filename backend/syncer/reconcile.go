@@ -14,7 +14,7 @@ import (
 // local message/search row disappears too, and the raw blob is removed when safe.
 func (s *Service) reconcileMailboxUIDs(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox) error {
 	var (
-		stale []store.MessageRecord
+		stale []store.ExpungedMessage
 		err   error
 	)
 	if snapshotFetcher, ok := s.Fetcher.(MailboxUIDSnapshotFetcher); ok {
