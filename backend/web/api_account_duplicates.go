@@ -1,8 +1,11 @@
 // File overview: Cross-account duplicate copy reporting and cleanup. An account
 // that aggregates other mailboxes hands the mirror a second row for a delivery
 // the original account already holds. The store hides those rows; these routes
-// let the user see how many there are and move them to the aggregating
-// account's Trash so the server stops sending them.
+// let the user see how many there are and move the fetched ones to the
+// aggregating account's Trash so the server stops sending them. Hidden and
+// sweepable are not the same set - a copy the holding account was addressed in
+// is hidden but never swept - so the count these routes report is of hidden
+// copies and the cleanup reports separately how many it actually queued.
 
 package web
 
@@ -103,8 +106,11 @@ func (s *Server) apiAccountDuplicatesRescan(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, payload)
 }
 
-// apiAccountDuplicatesTrash moves every hidden copy into the Trash folder of the
-// account holding it. Nothing is deleted remotely: the copies land in the
+// apiAccountDuplicatesTrash moves the fetched hidden copies into the Trash folder
+// of the account holding them. A hidden copy of a message that named that
+// account itself is left alone: hiding it was a display decision, but that
+// server was sent the mail in its own right, so there is nothing for the Trash
+// to stop. Nothing is deleted remotely either: the copies land in the
 // aggregating account's Trash, reconciliation drops the local rows once the
 // server stops listing them in their old folder, and the original account's mail
 // is never touched.
@@ -147,8 +153,10 @@ func (s *Server) apiAccountDuplicatesTrash(w http.ResponseWriter, r *http.Reques
 
 // duplicateScanOutcomes renders the store's per-group decisions as plain JSON
 // keys. The counts are of groups, not of messages: one group is one Message-ID
-// several accounts hold, and what the view reports is how many of those
-// detection declined to act on and why.
+// several accounts hold, and what the view reports is what detection decided
+// about each of them - both the groups it declined to act on and the ones it
+// resolved from folder placement, because a scan that hides mail owes the reader
+// the grounds as much as one that hides none.
 func duplicateScanOutcomes(stats store.DuplicateScanStats) map[string]int {
 	out := map[string]int{}
 	for outcome, count := range stats.Outcomes {
