@@ -11,6 +11,10 @@ type moveOutcomeUnknownError struct {
 	err error
 }
 
+type sourceUIDGoneError struct {
+	err error
+}
+
 type appendAppliedError struct {
 	err error
 }
@@ -41,6 +45,33 @@ func MoveOutcomeUnknown(err error) error {
 func IsMoveOutcomeUnknown(err error) bool {
 	var unknown *moveOutcomeUnknownError
 	return errors.As(err, &unknown)
+}
+
+func (e *sourceUIDGoneError) Error() string {
+	return e.err.Error()
+}
+
+func (e *sourceUIDGoneError) Unwrap() error {
+	return e.err
+}
+
+// SourceUIDGone marks a move refused because the source mailbox, selected under
+// the UIDVALIDITY the move proved, no longer holds the UID. That is the same
+// evidence reconciliation acts on: the message has left that folder, so there
+// is nothing there to move and the mirror is the thing that is out of date.
+func SourceUIDGone(err error) error {
+	if err == nil || IsSourceUIDGone(err) {
+		return err
+	}
+	return &sourceUIDGoneError{err: err}
+}
+
+// IsSourceUIDGone reports whether a move failed because the message is no
+// longer in the folder it was to be moved out of, rather than because the move
+// itself could not be carried out.
+func IsSourceUIDGone(err error) bool {
+	var gone *sourceUIDGoneError
+	return errors.As(err, &gone)
 }
 
 func (e *appendAppliedError) Error() string {

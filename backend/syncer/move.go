@@ -79,7 +79,7 @@ func (s *Service) MoveMessages(ctx context.Context, userID int64, messageIDs []i
 				}
 				return false
 			}
-			if !result.Vanished {
+			if !result.Vanished && !result.SourceGone {
 				moved++
 			}
 			return true
@@ -192,10 +192,14 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	walkErr := s.moveMessagesInBatches(ctx, userID, ids, destMailboxID, s.observeMessageMove, executor.dispatcher(),
 		func(result moveMessageResult) bool {
 			progress.MessagesSeen++
-			if result.Vanished {
-				// Nothing was attempted, so this costs no progress write: a re-run
-				// over thousands of stale IDs would otherwise report every message
-				// it steps over, and none of them moved.
+			if result.Vanished || result.SourceGone {
+				// Nothing moved and nothing was left behind, so this costs no
+				// progress write: a re-run over thousands of stale IDs would
+				// otherwise report every message it steps over, and none of them
+				// moved. A message the source folder no longer holds counts here
+				// rather than as a failure — failing the run for it left a notice
+				// the user could neither act on nor get rid of, about a move that
+				// had nothing left to do.
 				return consecutiveFailures < moveRunConsecutiveFailureLimit
 			}
 			if result.UID > 0 {
@@ -242,7 +246,12 @@ type moveMessageResult struct {
 	MessageID int64
 	UID       uint32
 	Vanished  bool
-	Err       error
+	// SourceGone is a message the server proved is no longer in the folder it
+	// was to be moved out of. Like a vanished row it is handled rather than
+	// failed — there is nothing in that folder left to move — and the walk
+	// reconciles the folder afterwards so the mirror stops claiming otherwise.
+	SourceGone bool
+	Err        error
 }
 
 // moveMessagesInBatches walks message IDs in order, gathers the ones leaving the
@@ -277,6 +286,10 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 	}
 	announce := s.moveAnnouncer(userID, false)
 	defer announce.settle(ctx)
+	// Folders the server proved no longer hold a message this walk was asked to
+	// move out of them. Each is reconciled once the walk is done, which is what
+	// takes the stale rows out of the mirror.
+	goneSources := map[int64]moveSourceRef{}
 	batch := make([]*preparedMove, 0, batchSize)
 	batchUIDs := make(map[uint32]struct{}, batchSize)
 	batchBytes := 0
@@ -298,7 +311,13 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		batchBytes = 0
 		for i, failure := range s.dispatchPreparedMoves(ctx, userID, dispatcher, dispatched, notifyMove, announce) {
 			prepared := dispatched[i]
-			if !record(s.moveResultFor(ctx, userID, prepared.messageID, prepared.msg.UID, failure)) {
+			result := s.moveResultFor(ctx, userID, prepared.messageID, prepared.msg.UID, failure)
+			if result.SourceGone {
+				log.Printf("move source no longer holds message user_id=%d message_id=%d mailbox=%q uid=%d",
+					userID, prepared.messageID, prepared.source.Name, prepared.msg.UID)
+				goneSources[prepared.source.ID] = moveSourceRef{account: prepared.account, mailbox: prepared.source}
+			}
+			if !record(result) {
 				keepGoing = false
 			}
 		}
@@ -313,6 +332,7 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		select {
 		case <-ctx.Done():
 			flush()
+			s.reconcileMoveSourcesProvenGone(ctx, userID, goneSources)
 			return nil
 		default:
 		}
@@ -343,7 +363,42 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		}
 	}
 	flush()
+	s.reconcileMoveSourcesProvenGone(ctx, userID, goneSources)
 	return nil
+}
+
+// moveSourceRef is a folder a walk has to reconcile, with the account it is
+// reached through.
+type moveSourceRef struct {
+	account store.MailAccount
+	mailbox store.Mailbox
+}
+
+// reconcileMoveSourcesProvenGone brings the mirror in line with a folder that
+// turned out not to hold messages it was asked to move out.
+//
+// It reconciles the folder rather than dropping the named rows, so there is
+// still one definition of "this message is no longer on the server" and one
+// piece of evidence behind it: reconciliation lists the folder itself, so a UID
+// search that came back short for any other reason takes nothing with it, and
+// every other stale row in that folder goes at the same time.
+//
+// The move is over either way. A folder that cannot be reconciled now is
+// reconciled by the next sync turn, so this is logged rather than returned.
+func (s *Service) reconcileMoveSourcesProvenGone(ctx context.Context, userID int64, sources map[int64]moveSourceRef) {
+	if len(sources) == 0 {
+		return
+	}
+	// Settling outlives the request that asked for the move, the same way a
+	// dispatched move does: a closed tab must not leave the mirror claiming mail
+	// the server has already told this process is gone.
+	settleCtx := context.WithoutCancel(ctx)
+	for _, source := range sources {
+		if err := s.reconcileMailboxUIDs(settleCtx, userID, source.account, source.mailbox); err != nil {
+			log.Printf("reconcile move source user_id=%d mailbox_id=%d mailbox=%q: %v",
+				userID, source.mailbox.ID, source.mailbox.Name, err)
+		}
+	}
 }
 
 // groupMessageIDsBySourceMailbox reorders a selection so messages leaving the
@@ -390,7 +445,17 @@ func (s *Service) groupMessageIDsBySourceMailbox(ctx context.Context, userID int
 // is only checked for a failure that says the row was missing.
 func (s *Service) moveResultFor(ctx context.Context, userID, messageID int64, uid uint32, failure error) moveMessageResult {
 	result := moveMessageResult{MessageID: messageID, UID: uid, Err: failure}
-	if failure == nil || !store.IsNotFound(failure) {
+	if failure == nil {
+		return result
+	}
+	if IsSourceUIDGone(failure) {
+		// The server, under the generation this move proved, says the message is
+		// not in that folder. Reporting that as a failed move made a move the
+		// user cannot ever complete: the row stays, the next attempt asks the
+		// same question, and the notice about it does not go away.
+		return moveMessageResult{MessageID: messageID, UID: uid, SourceGone: true}
+	}
+	if !store.IsNotFound(failure) {
 		return result
 	}
 	if _, recheck := s.Store.GetMessageForUser(ctx, userID, messageID); store.IsNotFound(recheck) {

@@ -36,6 +36,20 @@ site and in review.
   connection that is dead for good is not logged into once per remaining batch.
   Whatever did go is still reconciled locally, and the run reports how many of
   how many are left.
+- **A move refused because the source folder no longer holds the message is the
+  mirror's problem, not the move's.** The server, having selected the folder
+  under the UIDVALIDITY the move proved, is giving the same evidence
+  reconciliation acts on: the message has left that folder. Reporting it as a
+  failed move produced a move the user could never complete — the stale row
+  stayed, every retry asked the same question and got the same answer, and the
+  "Move did not finish" notice (`unfinishedMoveRun`, up to
+  `unfinishedMoveRunMaxAge` and with nothing to dismiss it) kept being renewed
+  by the retry meant to clear it. So `syncer.IsSourceUIDGone` counts as handled
+  rather than failed, alongside a row that was already gone, and the walk
+  reconciles that folder once it ends. It reconciles rather than dropping the
+  named rows on purpose: reconciliation lists the folder itself, so one short
+  UID search cannot take mail with it, and the folder's other stale rows go at
+  the same time.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
 - A move of many messages is one IMAP command, not one per message. Each message
   used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
