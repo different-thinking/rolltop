@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/mail"
+	"sort"
 	"strings"
 )
 
@@ -41,17 +42,21 @@ func duplicateHideableRole(role string) bool {
 	return true
 }
 
-// duplicateOriginalEligible reports whether a row can be the copy everything
-// else hides behind. Being hideable is not enough: the row also has to sit in a
-// folder the reader actually reads, or the message would be reachable only from
-// that account's Spam list - which is exactly the "hid the only copy" failure
-// this rule exists to prevent.
+// duplicateCopyShowsInLists reports whether a row is one the whole-account lists
+// actually read. It answers both halves of the decision, and deliberately the
+// same way: a row that does not show in the lists may not stand in as the
+// original, because the message would then be reachable only from that
+// account's Spam list - and it may not be hidden either, because hiding takes a
+// row out of its own folder's list too, and a folder is where the user put that
+// copy. Nothing is gained by hiding a row the lists never showed, and the
+// message the user filed in an excluded folder or reported as spam would
+// disappear from the one place they would go looking for it.
 //
 // Junk is named rather than left to show_in_all_mail because that flag is the
 // user's to set: the whole-account lists drop Junk whatever it says, so a Junk
 // row switched back into All Mail would pass this check and still be invisible
 // everywhere it was meant to stand in.
-func duplicateOriginalEligible(item DuplicateCopy) bool {
+func duplicateCopyShowsInLists(item DuplicateCopy) bool {
 	if normalizeMailboxRole(item.MailboxRole) == "junk" {
 		return false
 	}
@@ -437,20 +442,23 @@ func (s *Store) applyDuplicatePointers(ctx context.Context, db *sql.DB, userID i
 // result stay visible.
 //
 // One Message-ID held by two accounts is one message: that header is the
-// identity the sender gave it, and no second delivery reuses it. So the group
-// is resolved whenever a copy exists that can stand in for the others - a row
-// in a folder the lists actually read - and the only question left is which
-// copy that is. Recipients answer it when they can: an account named in To or
-// Cc holds the delivery the rest were fetched from. When they cannot - Bcc,
-// mailing-list mail, or a message addressed to several of the user's accounts
-// at once - placement answers instead, and the copy that stays is the one a
-// reader is most likely to look for: an Inbox copy, then the oldest row.
+// identity the sender gave it, and every copy carrying it is a copy of the same
+// mail - whether the second account fetched it or the sender addressed both.
+// The reader wants to see it once either way, so the group is resolved whenever
+// a copy exists that the lists show, and the only question left is which copy
+// stays. Recipients answer it when they can: an account named in To or Cc holds
+// a delivery of its own, and an account that named none merely fetched the
+// mail. When no name decides it - Bcc, mailing-list mail, or several of the
+// user's accounts named at once - placement answers instead, and the copy that
+// stays is the one the group already settled on, then an Inbox copy, then the
+// oldest row.
 //
-// What the rule still refuses is the failure that cannot be undone. A copy is
-// never hidden behind a row the lists do not show, never hidden out of Sent,
-// Drafts, or Trash, and never hidden behind a row of its own account - so the
-// message keeps exactly one place it can be read, and the copies one account
-// files twice stay a matter for that account.
+// What the rule refuses is the failure that cannot be undone. Only a row the
+// lists show is ever hidden, and only behind a row of another account that the
+// lists also show - so the message keeps exactly one place it can be read, mail
+// filed in Sent, Drafts, Trash, Spam, or a folder taken out of All Mail stays
+// where the user put it, and the copies one account files twice stay a matter
+// for that account.
 func resolveDuplicateGroup(copies []DuplicateCopy, addresses map[int64]map[string]bool) map[int64]int64 {
 	resolved, _ := resolveDuplicateGroupWithOutcome(copies, addresses)
 	return resolved
@@ -465,11 +473,16 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 	}
 	accounts := map[int64]bool{}
 	addressed := map[int64]bool{}
-	// candidates are the rows that could stand in as the original. A row that
-	// only Spam or Trash holds is not one of them: hiding the others behind it
-	// would take the message out of every list it belongs in.
-	candidates := make([]DuplicateCopy, 0, len(copies))
-	hideable := 0
+	// settled holds the rows other copies already point at. Which copy stays is
+	// otherwise decided from folder placement, and placement is the one thing
+	// the reader keeps changing: archiving the copy they just read would hand
+	// the original role to the other account's Inbox row, and the message would
+	// come back unread in an account they were not even looking at. So a row the
+	// group already settled on keeps the role while it can still hold it.
+	settled := map[int64]bool{}
+	// visible are the rows the lists show. They are the only rows that may stand
+	// in as the original, and the only rows worth hiding.
+	visible := make([]DuplicateCopy, 0, len(copies))
 	for _, item := range copies {
 		accounts[item.AccountID] = true
 		if item.DuplicateOf == item.ID {
@@ -477,13 +490,13 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 			// as unresolvable rather than trusting the stored pointer.
 			return nil, DuplicateGroupUndecidable
 		}
-		if duplicateHideableRole(item.MailboxRole) {
-			hideable++
+		if item.DuplicateOf != 0 {
+			settled[item.DuplicateOf] = true
 		}
-		if !duplicateOriginalEligible(item) {
+		if !duplicateCopyShowsInLists(item) {
 			continue
 		}
-		candidates = append(candidates, item)
+		visible = append(visible, item)
 		if messageAddressesAccount(item, addresses[item.AccountID]) {
 			addressed[item.AccountID] = true
 		}
@@ -491,37 +504,34 @@ func resolveDuplicateGroupWithOutcome(copies []DuplicateCopy, addresses map[int6
 	if len(accounts) < 2 {
 		return nil, DuplicateGroupUndecidable
 	}
-	if len(candidates) == 0 {
-		if hideable == 0 {
-			// Every copy is Sent, Drafts, or Trash. Nothing was eligible and
-			// nothing would have been hidden either way, so this is the settled
-			// case rather than a refusal.
-			return nil, DuplicateGroupNothingToHide
-		}
+	if len(visible) == 0 {
+		// Every copy sits where the lists do not show it. Nothing could stand in
+		// for the others, and nothing would have been hidden either way.
 		return nil, DuplicateGroupOriginalNotVisible
 	}
 	outcome := DuplicateGroupResolved
 	if len(addressed) != 1 {
 		outcome = DuplicateGroupResolvedByPlacement
 	}
+	candidates := visible
 	if len(addressed) > 0 {
 		// A named account holds a delivery in its own right; an account that
-		// merely fetched the mail does not. So the survivor comes from the named
-		// ones whenever there are any - whether that is the single account the
-		// rule was built around or several of them - and placement then only
-		// decides between deliveries rather than between a delivery and a copy
-		// of it.
+		// named none merely fetched the mail. So the copy that stays comes from
+		// the named accounts whenever there are any - whether that is the single
+		// account the rule was built around or several of them - and placement
+		// then only decides between deliveries rather than between a delivery
+		// and a copy of it.
 		candidates = duplicateCopiesInAccounts(candidates, addressed)
 	}
 	original := candidates[0]
 	for _, item := range candidates[1:] {
-		if preferredDuplicateOriginal(item, original) {
+		if preferredDuplicateOriginal(item, original, settled) {
 			original = item
 		}
 	}
 	out := map[int64]int64{}
-	for _, item := range copies {
-		if item.AccountID == original.AccountID || !duplicateHideableRole(item.MailboxRole) {
+	for _, item := range visible {
+		if item.AccountID == original.AccountID {
 			continue
 		}
 		out[item.ID] = original.ID
@@ -546,9 +556,15 @@ func duplicateCopiesInAccounts(candidates []DuplicateCopy, accounts map[int64]bo
 }
 
 // preferredDuplicateOriginal picks the copy that represents the delivery best.
-// An Inbox copy outranks any other folder, and the lowest id breaks the tie so
-// repeated scans settle on the same row.
-func preferredDuplicateOriginal(candidate, current DuplicateCopy) bool {
+// The row the group already settled on outranks everything: it is the copy the
+// reader has been looking at, and moving the role off it for a folder change
+// pushes a message they have already dealt with back into another account's
+// Inbox. Failing that an Inbox copy outranks any other folder, and the lowest
+// id breaks the tie so repeated scans settle on the same row.
+func preferredDuplicateOriginal(candidate, current DuplicateCopy, settled map[int64]bool) bool {
+	if settled[candidate.ID] != settled[current.ID] {
+		return settled[candidate.ID]
+	}
 	candidateInbox := normalizeMailboxRole(candidate.MailboxRole) == "inbox"
 	currentInbox := normalizeMailboxRole(current.MailboxRole) == "inbox"
 	if candidateInbox != currentInbox {
@@ -734,6 +750,14 @@ func (s *Store) DuplicateCopyIDsForUser(ctx context.Context, userID int64, ids [
 
 // ListHiddenDuplicateCopiesForUser resolves the hidden copies into the selection
 // shape the move machinery consumes.
+//
+// A copy whose own account is named in To or Cc is left out. Hiding it was a
+// display decision - the reader wants one message, not two - but that server
+// was sent the mail in its own right rather than fetching a copy of somebody
+// else's delivery, so moving it into that account's Trash would take away mail
+// nothing is going to send again. The cleanup only sweeps what an account
+// fetched, which is the one thing "stops the server from sending them again" is
+// true of.
 func (s *Store) ListHiddenDuplicateCopiesForUser(ctx context.Context, userID int64, limit int) ([]ScopeMessage, error) {
 	if userID <= 0 {
 		return nil, nil
@@ -742,15 +766,56 @@ func (s *Store) ListHiddenDuplicateCopiesForUser(ctx context.Context, userID int
 	if err != nil {
 		return nil, err
 	}
+	addresses, err := s.accountAddressesForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	filter, filterArgs := duplicateFetchedCopyFilter(addresses)
+	args := make([]any, 0, len(filterArgs)+2)
+	args = append(args, userID)
+	args = append(args, filterArgs...)
+	args = append(args, scopeMessageLimit(limit))
 	rows, err := db.QueryContext(ctx, `SELECT id, account_id, mailbox_id FROM messages
-		WHERE user_id = ? AND duplicate_of_message_id <> 0
+		WHERE user_id = ? AND duplicate_of_message_id <> 0`+filter+`
 		ORDER BY date_unix DESC, id DESC
-		LIMIT ?`, userID, scopeMessageLimit(limit))
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanScopeMessages(rows)
+}
+
+// duplicateFetchedCopyFilter renders the SQL that keeps a copy the account
+// holding it was addressed in out of the cleanup, along with its arguments.
+//
+// The address is matched as a substring rather than parsed. The header the
+// parser reads and the text stored here are the same string, so the only
+// disagreement a substring test can produce is a match where a parse would find
+// none - an address inside a longer one, or inside a display name - and that
+// direction leaves a copy where it is instead of moving mail that should have
+// stayed. The accounts and their addresses are walked in a fixed order so the
+// statement text is stable across calls rather than changing with map order.
+func duplicateFetchedCopyFilter(addresses map[int64]map[string]bool) (string, []any) {
+	accountIDs := make([]int64, 0, len(addresses))
+	for accountID := range addresses {
+		accountIDs = append(accountIDs, accountID)
+	}
+	sort.Slice(accountIDs, func(a, b int) bool { return accountIDs[a] < accountIDs[b] })
+	var filter strings.Builder
+	args := make([]any, 0, len(accountIDs)*3)
+	for _, accountID := range accountIDs {
+		owned := make([]string, 0, len(addresses[accountID]))
+		for address := range addresses[accountID] {
+			owned = append(owned, address)
+		}
+		sort.Strings(owned)
+		for _, address := range owned {
+			filter.WriteString(` AND NOT (account_id = ? AND (strpos(lower(to_addr), ?) > 0 OR strpos(lower(cc_addr), ?) > 0))`)
+			args = append(args, accountID, address, address)
+		}
+	}
+	return filter.String(), args
 }
 
 // messageIsDuplicateCopyTx reports whether one row is currently hidden behind an

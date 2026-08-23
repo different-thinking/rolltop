@@ -257,16 +257,12 @@ func TestDuplicateScanReportsWhyItLeftCopiesVisible(t *testing.T) {
 	aggregateJunk := f.junkMailbox(t, f.aggregate, "Spam")
 	f.storeMessage(t, f.original, originalJunk, 2, "<junked@partner.test>", "info@firma.test")
 	f.storeMessage(t, f.aggregate, aggregateJunk, 2, "<junked@partner.test>", "info@firma.test")
-	originalSent, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Sent")
-	if err != nil {
-		t.Fatal(err)
-	}
 	aggregateSent, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.aggregate, "Sent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.storeMessage(t, f.original, originalSent.ID, 3, "<written@partner.test>", "partner@partner.test")
-	f.storeMessage(t, f.aggregate, aggregateSent.ID, 3, "<written@partner.test>", "partner@partner.test")
+	f.storeMessage(t, f.original, f.originalInbox, 3, "<written@partner.test>", "info@firma.test")
+	f.storeMessage(t, f.aggregate, aggregateSent.ID, 3, "<written@partner.test>", "info@firma.test")
 
 	stats, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, "")
 	if err != nil {
@@ -485,11 +481,12 @@ func TestHiddenDuplicateCopyProducesNoNewMailEvent(t *testing.T) {
 	}
 }
 
-// A Spam-filed row cannot stand in as the original even when it is the addressed
-// account's: junk folders are forced out of All Mail, so hiding the other copy
-// behind it would leave the message reachable only from that Spam list. The copy
-// a reader can actually see is the one that stays, whichever account holds it.
-func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
+// A Spam-filed row is out of the decision in both directions. It cannot stand in
+// as the original, because junk folders are forced out of All Mail and hiding
+// the other copy behind it would leave the message reachable only from that Spam
+// list - and it is not hidden either, because a hidden row is gone from its own
+// folder's list too, and Spam is where the user or their server put that copy.
+func TestDuplicateScanLeavesAJunkFiledCopyOutOfTheDecision(t *testing.T) {
 	f := newDuplicateFixture(t)
 	junk := f.junkMailbox(t, f.original, "Spam")
 	filed := f.storeMessage(t, f.original, junk, 10, "<spam@partner.test>", "info@firma.test")
@@ -502,14 +499,11 @@ func TestDuplicateScanNeverHidesBehindAJunkFolderOriginal(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
 	}
-	if pointer := f.duplicatePointer(t, filed.ID); pointer != fetched.ID {
-		t.Fatalf("the Spam copy points at %d, want it hidden behind the visible copy %d", pointer, fetched.ID)
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != 0 {
+		t.Fatalf("the Spam copy points at %d, want it left in Spam where it was filed", pointer)
 	}
-	// No recipient could decide this one - the addressed account's only copy is
-	// the one that cannot stand in - so placement did, and the report has to say
-	// that rather than claim an address was missing.
-	if got := stats.Outcomes[DuplicateGroupResolvedByPlacement]; got != 1 {
-		t.Fatalf("placement-resolved groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
+	if got := stats.Outcomes[DuplicateGroupNothingToHide]; got != 1 {
+		t.Fatalf("nothing-to-hide groups=%d, want 1 (outcomes=%v)", got, stats.Outcomes)
 	}
 	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
 	if err != nil {
@@ -548,6 +542,107 @@ func TestIncrementalRefreshReleasesAGroupItNoLongerResolves(t *testing.T) {
 	}
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy still points at %d after the group stopped resolving", pointer)
+	}
+}
+
+// Which copy stays is decided from folder placement whenever no recipient can
+// decide it, and placement is the one thing the reader keeps changing. Archiving
+// the copy they just read must not hand the role to the other account's Inbox
+// row: read state lives on the row, so the message would come back unread in an
+// account they were not even looking at.
+func TestArchivingTheVisibleCopyDoesNotMoveTheOriginalToAnotherAccount(t *testing.T) {
+	f := newDuplicateFixture(t)
+	const header = "<listed@partner.test>"
+	visible := f.storeMessage(t, f.original, f.originalInbox, 40, header, "members@list.test")
+	other := f.storeMessage(t, f.aggregate, f.aggregateInbox, 40, header, "members@list.test")
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, other.ID); pointer != visible.ID {
+		t.Fatalf("second copy points at %d, want it hidden behind %d to start with", pointer, visible.ID)
+	}
+
+	archive, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := f.db.dataDB(f.ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(f.ctx, `UPDATE messages SET mailbox_id = ? WHERE user_id = ? AND id = ?`,
+		archive.ID, f.userID, visible.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RefreshDuplicateCopiesForMessageID(f.ctx, f.userID, header); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, visible.ID); pointer != 0 {
+		t.Fatalf("the archived copy now points at %d, want it kept as the original", pointer)
+	}
+	if pointer := f.duplicatePointer(t, other.ID); pointer != visible.ID {
+		t.Fatalf("second copy points at %d after the archive, want it still hidden behind %d", pointer, visible.ID)
+	}
+}
+
+// A folder the user took out of All Mail is a folder they still open. Hiding a
+// copy filed there would take it out of that folder's own list too, so the one
+// place they would go looking for it is where it stops being.
+func TestDuplicateScanNeverHidesACopyOutOfAFolderTakenOutOfAllMail(t *testing.T) {
+	f := newDuplicateFixture(t)
+	kept, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.aggregate, "Newsletters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.userID, kept.ID, MailboxSettings{
+		SyncMode: "auto", ShowInSidebar: true, ShowInAllMail: false, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.storeMessage(t, f.original, f.originalInbox, 41, "<filed-away@partner.test>", "info@firma.test")
+	filed := f.storeMessage(t, f.aggregate, kept.ID, 41, "<filed-away@partner.test>", "info@firma.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != 0 {
+		t.Fatalf("the filed copy points at %d, want it left in the folder it was filed in", pointer)
+	}
+}
+
+// The cleanup moves copies into the Trash of the account holding them, which is
+// only a safe thing to do to mail that account fetched. A copy of a message that
+// named the account itself is a delivery that server made in its own right -
+// hidden so the reader sees one message, not offered up for deletion.
+func TestTrashCleanupSkipsACopyItsOwnAccountWasAddressedIn(t *testing.T) {
+	f := newDuplicateFixture(t)
+	f.storeMessage(t, f.original, f.originalInbox, 42, "<fetched@partner.test>", "info@firma.test")
+	fetched := f.storeMessage(t, f.aggregate, f.aggregateInbox, 42, "<fetched@partner.test>", "info@firma.test")
+	both := "info@firma.test, owner@gmail.test"
+	f.storeMessage(t, f.original, f.originalInbox, 43, "<delivered@partner.test>", both)
+	delivered := f.storeMessage(t, f.aggregate, f.aggregateInbox, 43, "<delivered@partner.test>", both)
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{fetched.ID, delivered.ID} {
+		if pointer := f.duplicatePointer(t, id); pointer == 0 {
+			t.Fatalf("copy %d is not hidden, so this test is not testing what it means to", id)
+		}
+	}
+	copies, err := f.db.ListHiddenDuplicateCopiesForUser(f.ctx, f.userID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := map[int64]bool{}
+	for _, item := range copies {
+		selected[item.ID] = true
+	}
+	if !selected[fetched.ID] {
+		t.Fatalf("cleanup selection %v leaves out the fetched copy %d", selected, fetched.ID)
+	}
+	if selected[delivered.ID] {
+		t.Fatalf("cleanup selection %v takes copy %d, which its own account was addressed in", selected, delivered.ID)
 	}
 }
 
@@ -602,15 +697,15 @@ func TestChangingAFolderOutOfAllMailReleasesItsHiddenCopies(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy still points at %d after its original left All Mail", pointer)
 	}
-	// Releasing is not the end of it: the row that left All Mail cannot stand in
-	// any more, so the copy that can now does, and the message keeps exactly one
-	// place the lists show it.
-	all, err := f.db.ListLatestThreadMessagesForUser(f.ctx, f.userID, 50, 0, ThreadListNewestFirst)
+	// The row that left All Mail cannot stand in as the original any more, and it
+	// is not hidden behind the other copy either: the user took that folder out
+	// of the lists, which is not the same as asking for its mail to disappear.
+	messages, err := f.db.ListMessagesForUser(f.ctx, f.userID, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 || all[0].ID != fetched.ID {
-		t.Fatalf("all mail = %v, want only the copy still in All Mail (%d)", messageIDsOf(all), fetched.ID)
+	if len(messages) != 2 {
+		t.Fatalf("list returned %d messages, want both copies visible again", len(messages))
 	}
 }
 
@@ -670,8 +765,8 @@ func TestDuplicateScanNeverHidesBehindJunkThatOptedIntoAllMail(t *testing.T) {
 	if pointer := f.duplicatePointer(t, fetched.ID); pointer != 0 {
 		t.Fatalf("copy points at a junk-filed original %d, want it left visible", pointer)
 	}
-	if pointer := f.duplicatePointer(t, filed.ID); pointer != fetched.ID {
-		t.Fatalf("the Spam copy points at %d, want it hidden behind the visible copy %d", pointer, fetched.ID)
+	if pointer := f.duplicatePointer(t, filed.ID); pointer != 0 {
+		t.Fatalf("the Spam copy points at %d, want it left in Spam where it was filed", pointer)
 	}
 	// The whole-account list is where the failure would show: the junk row is
 	// excluded by role, so hiding this row too would leave nothing.

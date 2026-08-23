@@ -1686,7 +1686,7 @@ export function SettingsView({
       lines.push(`${messages(outcome("original_not_visible"))} are kept only where your lists do not show them - Spam, Trash, Sent, Drafts, or a folder you took out of All Mail - so no copy could stand in for the others and hiding any of them would take the message out of view entirely.`);
     }
     if (outcome("nothing_to_hide") > 0) {
-      lines.push(`${messages(outcome("nothing_to_hide"))} have their other copies in Sent, Drafts, or Trash, which are never hidden.`);
+      lines.push(`${messages(outcome("nothing_to_hide"))} have one copy your lists show and no second one: the other copies sit in Sent, Drafts, Trash, Spam, or a folder you took out of All Mail, which are left where you filed them.`);
     }
     if (outcome("undecidable") > 0) {
       lines.push(`${messages(outcome("undecidable"))} carry duplicate links that contradict themselves - a copy pointing at itself - so the scan changed nothing about them and left every copy visible.`);
@@ -1701,11 +1701,11 @@ export function SettingsView({
     const hidden = report?.hidden || 0;
     const accounts = (report?.accounts || []).map((account) => `${account.label || account.email}: ${account.hidden.toLocaleString()}`);
     return [
-      `Move ${hidden.toLocaleString()} duplicate ${hidden === 1 ? "copy" : "copies"} to Trash?`,
+      `Move the fetched copies of ${hidden.toLocaleString()} hidden duplicate ${hidden === 1 ? "copy" : "copies"} to Trash?`,
       "",
       ...(accounts.length > 0 ? [...accounts, ""] : []),
       "Each copy is moved into the Trash folder of the account currently holding it.",
-      "The copy that stays visible is not touched.",
+      "The copy that stays visible is not touched, and neither is a copy of a message that named the account holding it: that server was sent the mail in its own right rather than fetching it, so fewer copies may move than are hidden.",
       "Nothing is deleted outright, so anything moved by mistake can be moved back from Trash."
     ].join("\n");
   }
@@ -2688,7 +2688,7 @@ export function SettingsView({
       const moved = result.queued_messages || 0;
       setDuplicateNotice(result.queued
         ? `Moving ${moved.toLocaleString()} ${moved === 1 ? "copy" : "copies"} to Trash.${result.truncated ? " More remain; run the cleanup again once this pass finishes." : ""}${result.partial_error ? ` ${result.partial_error}` : ""}`
-        : "Nothing to move: every hidden copy already sits in its account's Trash.");
+        : "Nothing to move: every hidden copy either already sits in its account's Trash or names the account holding it, which leaves it on that server.");
       await loadDuplicates();
     } catch (err) {
       setDuplicateError(messageFromError(err));
@@ -2708,10 +2708,11 @@ export function SettingsView({
           forward - delivers a second copy of a message another of your accounts already holds. One
           copy stays visible and the rest are hidden from lists, threads, and unread counts. The one
           that stays is the copy in the account the message was addressed to, or - when no recipient
-          says which account that is - the copy in a folder your lists show. Moving the hidden ones
-          to their own account's Trash stops those servers from sending them again; the copy you can
-          see is never touched. Both actions below cover every IMAP server on this Rolltop account,
-          not only this one.
+          says which account that is - the copy your lists already showed. Mail in Sent, Drafts,
+          Trash, Spam, or a folder you took out of All Mail is never hidden. Moving copies to Trash
+          takes only the ones an account fetched, so a message that named that account itself stays
+          on its server. Both actions below cover every IMAP server on this Rolltop account, not
+          only this one.
         </p>
         {hidden > 0 ? (
           <ul className="duplicate-account-list">
