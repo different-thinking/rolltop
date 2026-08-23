@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,7 +24,8 @@ const (
 	apiPath          = "plugins/mail_filters"
 	retentionWindow  = 30 * 24 * time.Hour
 	scheduledBatch   = 100
-	backfillBatch    = 2000
+	backfillBatch    = 500
+	historyLimit     = 100
 	forwarderHeader  = "X-Rolltop-Forwarded-By"
 	statusScheduled  = "scheduled"
 	statusMatched    = "matched"
@@ -32,7 +34,20 @@ const (
 	statusFailed     = "action_failed"
 	statusLoop       = "loop_prevented"
 	pluginID         = "mail_filters"
+	// zeroDateUnix is what a message with no parseable Date is stored as:
+	// store.CreateMessage writes m.Date.UTC().Unix(), and Go's zero time is
+	// this. It is not 0, so a cursor or a guard that tests for 0 misses it.
+	zeroDateUnix = -62135596800
 )
+
+// filterScope is the mail a filter may act on, and it is the same mail the
+// whole-account lists show (store.inPlayMailScope): folders that opt into All
+// Mail, never Junk, never a hidden cross-account duplicate. Sent, Drafts and
+// Trash default out of All Mail, which is what keeps "older than 30 days ->
+// Trash" from emptying the reader's own Sent folder the first time they press
+// Backfill. A rule that names a mailbox to move mail into is unaffected; this
+// decides only what a rule reads.
+const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0`
 
 type mailFiltersBackend struct {
 	mu     sync.Mutex
@@ -123,8 +138,17 @@ func (p *mailFiltersBackend) ImportStoredMessage(ctx context.Context, host plugi
 	if err != nil {
 		return err
 	}
-	if err := purgeOldEvaluations(ctx, db); err != nil {
+	// The retention sweep does not belong on this path. It runs once per stored
+	// message, so mirroring a mailbox for the first time paid two DELETEs and an
+	// anti-join against `messages` per message -- for a window that moves by one
+	// day per day. The scheduled worker already sweeps every user every fifteen
+	// minutes, which is often enough for a thirty-day window.
+	inScope, err := messageInFilterScope(ctx, db, msg)
+	if err != nil {
 		return err
+	}
+	if !inScope {
+		return nil
 	}
 	rules, err := listRules(ctx, db, msg.UserID, true)
 	if err != nil {
@@ -162,6 +186,8 @@ func (p *mailFiltersBackend) handleAPI(host plugins.APIHost, path string, w http
 		p.apiRuleAction(host, db, cu.UserID, rest, w, r)
 	case strings.HasPrefix(rest, "messages/"):
 		p.apiMessageAction(host, db, cu.UserID, rest, w, r)
+	case rest == "history" && r.Method == http.MethodGet:
+		p.apiHistory(host, db, cu.UserID, w, r)
 	case rest == "scheduled/run" && r.Method == http.MethodPost:
 		if !host.VerifyCSRF(w, r) {
 			return
@@ -207,6 +233,24 @@ func (p *mailFiltersBackend) apiSaveRule(host plugins.APIHost, db *sql.DB, userI
 	host.WriteJSON(w, map[string]any{"ok": true, "rule": rule})
 }
 
+// apiHistory answers with both halves of what a rule did: the actions it has
+// already taken, and the ones it is still waiting to take. The waiting half is
+// the one a reader needs before a rule that moves mail to Trash comes due,
+// which is why it is not left to the per-message audit panel to discover.
+func (p *mailFiltersBackend) apiHistory(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+	recent, err := listRecentEvaluations(r.Context(), db, userID, historyLimit)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	pending, err := listScheduledEvaluations(r.Context(), db, userID, historyLimit)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	host.WriteJSON(w, map[string]any{"recent": recent, "pending": pending})
+}
+
 func (p *mailFiltersBackend) apiRuleAction(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 {
@@ -243,12 +287,24 @@ func (p *mailFiltersBackend) apiRuleAction(host plugins.APIHost, db *sql.DB, use
 			host.WriteAPIError(w, http.StatusServiceUnavailable, "mail filter actions are not available")
 			return
 		}
-		n, err := backfillRule(r.Context(), filterHost, db, rule)
-		if err != nil {
+		var from backfillCursor
+		if !host.DecodeJSON(w, r, &from) {
+			return
+		}
+		n, next, done, err := backfillRule(r.Context(), filterHost, db, rule, from)
+		if err != nil && n == 0 {
 			host.ServerError(w, err)
 			return
 		}
-		host.WriteJSON(w, map[string]any{"ok": true, "processed": n})
+		if err != nil {
+			// The messages before the failure were evaluated and their rows
+			// committed, so this is a partial result rather than a failed
+			// request. Reporting the cursor with it lets the walk resume where
+			// it stopped instead of starting the mailbox again.
+			host.WriteJSON(w, map[string]any{"ok": false, "processed": n, "done": false, "cursor": next, "error": err.Error()})
+			return
+		}
+		host.WriteJSON(w, map[string]any{"ok": true, "processed": n, "done": done, "cursor": next})
 		return
 	}
 	host.WriteAPIError(w, http.StatusNotFound, "mail filter rule route not found")
@@ -468,29 +524,44 @@ func deleteRule(ctx context.Context, db *sql.DB, userID, id int64) error {
 	return err
 }
 
+// evaluateRule decides one rule against one message and, when it matches,
+// carries out the rule's actions.
+//
+// An `older_than:` term is the one term that is not a search: it names the
+// moment the rule may act rather than something to look for in the message, and
+// the message's own date already answers it. So the term is taken out of the
+// query and compared against that date here, and what is left decides whether
+// the rule matches at all. Two things follow. A message that matches the rest
+// of the query but is still too young is recorded as scheduled and re-evaluated
+// once it is old enough, in whichever phase it was first seen -- a rule created
+// today has to reach the mail already in the mailbox, which is the whole point
+// of an age rule and what restricting this to newly arrived mail used to
+// prevent. And a rule whose only term is the age matches every message its
+// scope reaches, because the age was the entire condition; asking the search
+// index for the empty string that remains would answer no to all of them.
 func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, phase string, evalID int64) (bool, error) {
 	if rule.ScopeMode == "selected_accounts" && !containsID(rule.AccountIDs, msg.AccountID) {
 		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusSkipped, false, time.Time{}, nil, nil, "{}", "")
 	}
 	query := rule.Query
-	if age, ok := olderThanClause(query); ok && phase == "inbound" && !msg.Date.IsZero() {
-		dueAt := msg.Date.Add(age.Duration)
-		if time.Now().UTC().Before(dueAt) {
-			matchQuery := strings.TrimSpace(age.QueryWithoutClause)
-			if matchQuery == "" {
-				matchQuery = ""
-			}
-			result, err := host.MatchMessageSearch(ctx, msg.UserID, msg.MessageID, matchQuery)
+	aged := false
+	// A message with no date of its own cannot be aged here, so the age term
+	// stays in the query and the search index answers it from the stored date.
+	if age, ok := olderThanClause(query); ok && !msg.Date.IsZero() {
+		query = strings.TrimSpace(age.QueryWithoutClause)
+		aged = true
+		if dueAt := msg.Date.Add(age.Duration); time.Now().UTC().Before(dueAt) {
+			result, err := matchMessage(ctx, host, msg, query, aged)
 			if err != nil {
 				return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
 			}
-			if result.Matched {
-				return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusScheduled, false, dueAt, result.Terms, result.Fields, "{}", "")
+			if !result.Matched {
+				return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
 			}
-			return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
+			return false, scheduleEvaluation(ctx, db, evalID, rule, msg, phase, dueAt, result)
 		}
 	}
-	result, err := host.MatchMessageSearch(ctx, msg.UserID, msg.MessageID, query)
+	result, err := matchMessage(ctx, host, msg, query, aged)
 	if err != nil {
 		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
 	}
@@ -508,6 +579,60 @@ func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		return moved, err
 	}
 	return moved, nil
+}
+
+// messageInFilterScope reports whether a newly stored message is mail a filter
+// may act on at all. It asks the same question filterScope asks of the backfill
+// walk, one message at a time, so an arrival in Sent or Junk is left alone by
+// both paths rather than only by one of them.
+func messageInFilterScope(ctx context.Context, db *sql.DB, msg plugins.StoredMessageContext) (bool, error) {
+	var found int64
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND m.id = ?`+filterScope, msg.UserID, msg.MessageID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// matchMessage answers what is left of a rule's query. When an age term was
+// taken out of it, an empty remainder is not a search: the age was the whole
+// condition, so every message the rule's scope reaches satisfies it. An empty
+// query that no age term emptied is a rule with no condition at all -- the
+// editor refuses to save one -- and it matches nothing rather than everything,
+// because the alternative is a malformed rule moving a whole mailbox to Trash.
+func matchMessage(ctx context.Context, host plugins.StoredMessageHost, msg plugins.StoredMessageContext, query string, aged bool) (plugins.SearchMatchResult, error) {
+	if aged && strings.TrimSpace(query) == "" {
+		return plugins.SearchMatchResult{Matched: true}, nil
+	}
+	return host.MatchMessageSearch(ctx, msg.UserID, msg.MessageID, query)
+}
+
+// scheduleEvaluation records that a rule is waiting for a message to grow old
+// enough. Exactly one row may wait per rule and message: the same message
+// reaches this from an arrival and from a backfill, and two rows would run the
+// rule's move twice, the second time against a message already in Trash. The
+// insert says so to the database rather than only to itself -- a lookup first
+// would still let a concurrent arrival and worker pass each other between the
+// SELECT and the INSERT.
+func scheduleEvaluation(ctx context.Context, db *sql.DB, evalID int64, rule Rule, msg plugins.StoredMessageContext, phase string, dueAt time.Time, result plugins.SearchMatchResult) error {
+	if evalID > 0 {
+		return recordEvaluation(ctx, db, evalID, rule, msg, phase, statusScheduled, false, dueAt, result.Terms, result.Fields, "{}", "")
+	}
+	now := time.Now().UTC().Unix()
+	_, err := db.ExecContext(ctx, `INSERT INTO plugin_mail_filter_evaluations
+		(user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, '{}', '', ?)
+		ON CONFLICT (user_id, rule_id, message_id) WHERE status = 'scheduled'
+		DO UPDATE SET phase = EXCLUDED.phase, due_at = EXCLUDED.due_at, evaluated_at = EXCLUDED.evaluated_at,
+			terms_json = EXCLUDED.terms_json, fields_json = EXCLUDED.fields_json, error = ''`,
+		msg.UserID, rule.ID, msg.MessageID, msg.AccountID, msg.MailboxID, phase, statusScheduled,
+		unixOrZero(dueAt), now, mustJSON(result.Terms), mustJSON(result.Fields), now)
+	return err
 }
 
 func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext) (string, bool, string, string) {
@@ -571,8 +696,8 @@ func listRecentEvaluations(ctx context.Context, db *sql.DB, userID int64, limit 
 		FROM plugin_mail_filter_evaluations e
 		JOIN plugin_mail_filter_rules r ON r.id = e.rule_id AND r.user_id = e.user_id
 		LEFT JOIN messages m ON m.id = e.message_id AND m.user_id = e.user_id
-		WHERE e.user_id = ? AND e.matched = 1
-		ORDER BY e.id DESC LIMIT ?`, userID, limit)
+		WHERE e.user_id = ? AND (e.matched = 1 OR e.status IN (?, ?))
+		ORDER BY e.id DESC LIMIT ?`, userID, statusFailed, statusLoop, limit)
 	return scanEvaluations(rows, err)
 }
 
@@ -583,6 +708,18 @@ func listMessageEvaluations(ctx context.Context, db *sql.DB, userID, messageID i
 		LEFT JOIN messages m ON m.id = e.message_id AND m.user_id = e.user_id
 		WHERE e.user_id = ? AND e.message_id = ?
 		ORDER BY e.evaluated_at DESC, e.id DESC LIMIT ?`, userID, messageID, limit)
+	return scanEvaluations(rows, err)
+}
+
+// listScheduledEvaluations returns the rules still waiting on a message's age,
+// soonest first, so the queue can be read before it acts rather than after.
+func listScheduledEvaluations(ctx context.Context, db *sql.DB, userID int64, limit int) ([]Evaluation, error) {
+	rows, err := db.QueryContext(ctx, `SELECT e.id, e.user_id, e.rule_id, e.message_id, e.account_id, e.mailbox_id, e.phase, e.status, e.matched, e.due_at, e.evaluated_at, e.terms_json, e.fields_json, e.actions_json, e.error, e.created_at, r.name, COALESCE(m.subject, ''), COALESCE(m.from_addr, '')
+		FROM plugin_mail_filter_evaluations e
+		JOIN plugin_mail_filter_rules r ON r.id = e.rule_id AND r.user_id = e.user_id
+		LEFT JOIN messages m ON m.id = e.message_id AND m.user_id = e.user_id
+		WHERE e.user_id = ? AND e.status = ? AND e.due_at > 0 AND r.enabled = 1
+		ORDER BY e.due_at, e.id LIMIT ?`, userID, statusScheduled, limit)
 	return scanEvaluations(rows, err)
 }
 
@@ -607,10 +744,72 @@ func scanEvaluations(rows *sql.Rows, err error) ([]Evaluation, error) {
 	return out, rows.Err()
 }
 
-func backfillRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule) (int, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, subject, from_addr, to_addr, cc_addr, date_unix, uid, is_read, is_starred FROM messages WHERE user_id = ? ORDER BY date_unix DESC, id DESC LIMIT ?`, rule.UserID, backfillBatch)
+// backfillCursor is a position in the user's mail ordered oldest first. Date
+// and id together, because two messages can carry the same date and a cursor
+// that cannot separate them either repeats a page or skips one.
+type backfillCursor struct {
+	DateUnix int64 `json:"date_unix"`
+	ID       int64 `json:"id"`
+}
+
+// before renders the position the first page starts from. A zero cursor means
+// "before everything", which is not (0, 0): a message with no parseable Date is
+// stored with a large negative date_unix, so starting at zero walked past every
+// dateless message in the mailbox. Message ids are positive, so a zero id is an
+// unambiguous marker for the start.
+func (c backfillCursor) before() (int64, int64) {
+	if c.ID <= 0 {
+		return math.MinInt64, 0
+	}
+	return c.DateUnix, c.ID
+}
+
+// backfillRule applies one rule to one page of the mail that is already stored,
+// oldest first, and returns where to continue. Two things decide that shape.
+// The messages an age rule exists to clean up are the oldest ones, which a
+// newest-first page of two thousand left out entirely on any mailbox larger
+// than that; and matching is one search per message, so a walk long enough to
+// cover a real mailbox cannot be a single request. The caller presses on with
+// the returned cursor until the walk reports itself done.
+func backfillRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, from backfillCursor) (int, backfillCursor, bool, error) {
+	messages, err := backfillPage(ctx, db, rule, from)
 	if err != nil {
-		return 0, err
+		return 0, from, false, err
+	}
+	if len(messages) == 0 {
+		return 0, from, true, nil
+	}
+	processed := 0
+	next := from
+	for _, msg := range messages {
+		if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+			return processed, next, false, err
+		}
+		processed++
+		next = backfillCursor{DateUnix: storedDateUnix(msg.Date), ID: msg.MessageID}
+	}
+	return processed, next, len(messages) < backfillBatch, nil
+}
+
+// backfillPage reads the next page of mail this rule has not decided on yet.
+// Skipping what it already decided is not an optimization: a rule's actions are
+// carried out where it matches, so a second Backfill over the same message
+// forwarded it a second time and wrote a second audit row. `evaluated_at` is
+// compared against the rule's own `updated_at`, so editing a rule still puts
+// every message back in front of it.
+func backfillPage(ctx context.Context, db *sql.DB, rule Rule, from backfillCursor) ([]plugins.StoredMessageContext, error) {
+	dateUnix, id := from.before()
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.user_id, m.account_id, m.mailbox_id, m.subject, m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.uid, m.is_read, m.is_starred
+		FROM messages m
+		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
+		WHERE m.user_id = ? AND (m.date_unix, m.id) > (?, ?)`+filterScope+`
+		AND NOT EXISTS (
+			SELECT 1 FROM plugin_mail_filter_evaluations e
+			WHERE e.user_id = m.user_id AND e.rule_id = ? AND e.message_id = m.id AND e.evaluated_at >= ?
+		)
+		ORDER BY m.date_unix, m.id LIMIT ?`, rule.UserID, dateUnix, id, rule.ID, rule.UpdatedAt, backfillBatch)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	var messages []plugins.StoredMessageContext
@@ -619,28 +818,28 @@ func backfillRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		var dateUnix int64
 		var read, starred int
 		if err := rows.Scan(&msg.MessageID, &msg.UserID, &msg.AccountID, &msg.MailboxID, &msg.Subject, &msg.From, &msg.To, &msg.CC, &dateUnix, &msg.UID, &read, &starred); err != nil {
-			return 0, err
+			return nil, err
 		}
-		msg.Date = time.Unix(dateUnix, 0).UTC()
+		// A message the mirror stored without a date keeps the zero time, so
+		// evaluateRule leaves its age to the search index instead of reading it
+		// as 1970 and acting at once.
+		if dateUnix != zeroDateUnix {
+			msg.Date = time.Unix(dateUnix, 0).UTC()
+		}
 		msg.IsRead = read != 0
 		msg.IsStarred = starred != 0
 		messages = append(messages, msg)
 	}
-	if err := rows.Err(); err != nil {
-		return 0, err
+	return messages, rows.Err()
+}
+
+// storedDateUnix is the inverse of the read above: it returns the date_unix the
+// message was read from, so the cursor lands back on the same row.
+func storedDateUnix(date time.Time) int64 {
+	if date.IsZero() {
+		return zeroDateUnix
 	}
-	processed := 0
-	for _, msg := range messages {
-		moved, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0)
-		if err != nil {
-			return processed, err
-		}
-		processed++
-		if moved {
-			continue
-		}
-	}
-	return processed, nil
+	return date.UTC().Unix()
 }
 
 func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, userID int64, now time.Time) (int, error) {
@@ -667,7 +866,9 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		if err := rows.Scan(&item.evalID, &item.ruleID, &item.msg.MessageID, &item.msg.UserID, &item.msg.AccountID, &item.msg.MailboxID, &item.msg.Subject, &item.msg.From, &item.msg.To, &item.msg.CC, &dateUnix, &item.msg.UID, &read, &starred); err != nil {
 			return 0, err
 		}
-		item.msg.Date = time.Unix(dateUnix, 0).UTC()
+		if dateUnix > 0 {
+			item.msg.Date = time.Unix(dateUnix, 0).UTC()
+		}
 		item.msg.IsRead = read != 0
 		item.msg.IsStarred = starred != 0
 		dueRows = append(dueRows, item)
@@ -686,12 +887,25 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		}
 		processed++
 	}
-	return processed, purgeOldEvaluations(ctx, db)
+	return processed, purgeOldEvaluations(ctx, db, userID)
 }
 
-func purgeOldEvaluations(ctx context.Context, db *sql.DB) error {
+// purgeOldEvaluations drops what the audit no longer owes anyone: decided rows
+// past the retention window, and waits whose message has since been deleted.
+// A wait is a promise to act on a message, so once the message is gone the row
+// can never resolve -- runScheduled joins `messages` and finds nothing -- and
+// the retention sweep skips waits by design, which left them in the pending
+// queue for good, sorted to the front by a due date long past.
+func purgeOldEvaluations(ctx context.Context, db *sql.DB, userID int64) error {
 	cutoff := time.Now().UTC().Add(-retentionWindow).Unix()
-	_, err := db.ExecContext(ctx, `DELETE FROM plugin_mail_filter_evaluations WHERE status <> ? AND evaluated_at > 0 AND evaluated_at < ?`, statusScheduled, cutoff)
+	if _, err := db.ExecContext(ctx, `DELETE FROM plugin_mail_filter_evaluations
+		WHERE user_id = ? AND status <> ? AND evaluated_at > 0 AND evaluated_at < ?`, userID, statusScheduled, cutoff); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `DELETE FROM plugin_mail_filter_evaluations e
+		WHERE e.user_id = ? AND e.status = ?
+		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = e.message_id AND m.user_id = e.user_id)`,
+		userID, statusScheduled)
 	return err
 }
 

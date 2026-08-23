@@ -486,6 +486,32 @@ site and in review.
   bodies as soon as they are stored. The process also installs a soft heap
   ceiling at startup (`ROLLTOP_MEMORY_LIMIT`, `backend/memlimit`); it is a
   backstop for the unbounded case, not a licence to add one.
+- In `plugins/mail_filters`, `older_than:` is the one query term that is not a
+  search. It says when a rule may act, not what to look for, and the message's
+  own date already answers it - so it is taken out of the query and compared
+  there, and what remains decides the match. Three things follow, and all three
+  were once wrong. A message that matches the rest but is still too young is
+  recorded as `scheduled` in **whichever phase saw it**: restricting that to
+  newly arrived mail meant a rule saved today never reached the mail already in
+  the mailbox, which is the only mail an age rule was created for. A rule whose
+  only term is the age matches everything its scope reaches, because the age was
+  the whole condition - handing the empty string that remains to the search
+  index answers no for every message instead. And exactly one scheduled row may
+  wait per rule and message, enforced by a partial unique index rather than by a
+  lookup the next arrival can race. Deleting still means what it means everywhere
+  else here: the move is to the source account's Trash, and only emptying Trash
+  touches the server.
+- What a filter may **read** is the mail the whole-account lists show -
+  `show_in_all_mail`, never Junk, never a hidden duplicate - and both the
+  arrival hook and the backfill walk ask that question, or one of them answers
+  it differently from the other. Sent and Drafts default out of All Mail, which
+  is the only thing standing between "older than 30 days -> Trash" and the
+  reader's own Sent folder the first time they press Backfill. What a filter may
+  **write** is not scoped this way: any mailbox is a valid destination.
+- A filter's actions happen where it matches, so evaluating a message twice
+  forwards it twice. The backfill walk skips what the rule already decided on
+  since the rule's own `updated_at`, which also keeps one audit row per message
+  rather than one per run, and still reconsiders everything after an edit.
 
 ## Checks
 
