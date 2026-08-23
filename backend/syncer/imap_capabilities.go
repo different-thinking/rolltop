@@ -174,6 +174,23 @@ type ExpungeFetcher interface {
 	ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
 }
 
+// ExpungeSession deletes several batches out of one folder over one held
+// connection. Emptying a full Trash folder is tens of batches, and a fresh TCP
+// handshake, TLS negotiation and LOGIN for each of them is most of what the
+// purge costs — and is what mail hosts throttle. Methods must be called
+// sequentially, and the session is bound to its account at open time.
+type ExpungeSession interface {
+	ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+	Close() error
+}
+
+// ExpungeSessionFetcher is an optional Fetcher capability that lets the batches
+// of one purge share a login. A fetcher without it still works: the purge falls
+// back to connecting for every batch.
+type ExpungeSessionFetcher interface {
+	OpenExpungeSession(ctx context.Context, account store.MailAccount) (ExpungeSession, error)
+}
+
 // MailboxUIDSnapshot binds a mailbox UID listing to UIDVALIDITY and UIDNEXT from
 // the same read-only SELECT. UIDNext is an exclusive upper bound: local rows at
 // or above it may have been inserted after the UID search and cannot be reconciled.

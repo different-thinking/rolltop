@@ -43,12 +43,45 @@ site and in review.
   claim nobody settles is a transfer the next attempt has to reconcile against
   the server. The gathering is bounded in bytes as well as in count, like every
   other batch that holds message content.
-- What a move changed locally is announced once per batch, not once per message.
-  `moveAnnouncer` owns that: a lone move still announces immediately, but a run
-  that announced per message asked every open view to reload thousands of times
-  and kept the All Mail cache re-warming itself for as long as it worked, which
-  is most of what a large move cost everything else the reader was doing. The
-  run's progress row is written on an interval for the same reason.
+- What a move changed locally is settled once per batch, not once per message.
+  `moveAnnouncer` owns both halves of that — the search documents the moved
+  messages leave behind and telling the reader. A lone move still settles both
+  the moment it lands. A run that did it per message spent a whole index commit
+  on each document and asked every open view to reload thousands of times, and
+  kept the All Mail cache re-warming itself for as long as it worked; between
+  them that was most of what a large move cost everything else the reader was
+  doing. Reconciliation removes its documents in one call for the same reason —
+  emptying a Trash folder passes through it with everything the server confirmed
+  gone.
+- **A long operation reports on a pace, and reporting never costs more than the
+  work.** Three separate things used to be spent per message and are now spent
+  per interval or per batch, and each must stay that way:
+  - The `sync_runs` progress row (`syncProgressReporter.step`, shared by the
+    ordinary fetch, the sparse repair, and a move run). A folder being mirrored
+    or repaired walks thousands of messages and steps over most of them, and a
+    row write per step costs more than the step. The tally is still counted per
+    message and never approximated; only publishing it is paced. Every boundary
+    that ends a turn or a folder **commits** regardless of the pace, so what was
+    mirrored is durable alongside the checkpoint proving it, and `FinishSyncRun`
+    writes the full tally at the end whatever the pace withheld.
+  - The chrome event stream (`syncEventMinInterval` in `apiEvents`). Each signal
+    rebuilds the entire chrome snapshot — the folder list with its counts, the
+    categories, the archive mapping — once per connected tab, against the same
+    database the operation is competing with. Signals are lossy and the payload
+    is a fresh snapshot either way, so a burst collapses into one rebuild per
+    interval. The first signal after a quiet moment must still go out at once:
+    something is waiting on it.
+  - Reconnecting. A batch of moves and the batches of one Trash purge each hold
+    a single login for their whole run (`MoveSession`, `ExpungeSession`); a
+    handshake, TLS negotiation and LOGIN per batch is most of what those cost
+    and is what mail hosts throttle. Each batch still selects its folder and
+    proves its generation, so reuse costs nothing in safety — only the login is
+    saved.
+- Anything in the frontend waiting on work the server will announce waits on the
+  announcement, not on a timer: `waitForChromeEvent` (`chromeEvents.ts`) is that
+  wait, and the interval passed to it is the fallback for the announcement that
+  never comes. A queued move that slept its full interval regardless kept rows
+  hidden for seconds after the move they were hidden for had already finished.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,

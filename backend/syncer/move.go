@@ -37,12 +37,6 @@ const moveRunBatchSize = 250
 // how much memory a move needs.
 const moveRunBatchBytes = 8 << 20
 
-// moveRunProgressInterval bounds how often a run writes its progress. A move
-// that used to cost a database write and a broadcast per message now reports on
-// a clock instead, so the indicators still move without the reporting outlasting
-// the moves it reports.
-const moveRunProgressInterval = 500 * time.Millisecond
-
 type messageMoveNotifier func(context.Context, plugins.MessageMoveContext)
 
 func uniqueMessageIDs(ids []int64) []int64 {
@@ -178,7 +172,7 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 	progressWriteFailed := false
 	lastPublished := time.Now()
 	publish := func(force bool) bool {
-		if !unpublished || (!force && time.Since(lastPublished) < moveRunProgressInterval) {
+		if !unpublished || (!force && time.Since(lastPublished) < syncRunProgressInterval) {
 			return true
 		}
 		unpublished = false
@@ -282,7 +276,7 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		ids = s.groupMessageIDsBySourceMailbox(ctx, userID, ids)
 	}
 	announce := s.moveAnnouncer(userID, false)
-	defer announce.flush()
+	defer announce.flush(ctx)
 	batch := make([]*preparedMove, 0, batchSize)
 	batchUIDs := make(map[uint32]struct{}, batchSize)
 	batchBytes := 0
@@ -305,9 +299,9 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 				keepGoing = false
 			}
 		}
-		// One announcement for the batch, after every one of its messages has
-		// been settled locally.
-		announce.flush()
+		// One index commit and one announcement for the batch, after every one of
+		// its messages has been settled locally.
+		announce.flush(ctx)
 	}
 	for _, id := range ids {
 		if !keepGoing {
@@ -920,51 +914,61 @@ func (s *Service) cleanupMovedMessage(ctx context.Context, userID int64, msg sto
 		log.Printf("cleanup moved message user_id=%d message_id=%d: %v", userID, msg.ID, err)
 		return err
 	}
-	if s.Search != nil {
-		if err := s.Search.DeleteMessage(ctx, msg.UserID, msg.ID); err != nil {
-			log.Printf("cleanup moved search document user_id=%d message_id=%d: %v", userID, msg.ID, err)
-		}
-	}
 	if _, err := s.deleteUnreferencedBlob(ctx, userID, msg.BlobID, msg.BlobPath); err != nil {
 		log.Printf("cleanup moved blob record user_id=%d message_id=%d: %v", userID, msg.ID, err)
 	}
-	announce.changed()
+	announce.moved(ctx, msg.ID)
 	return nil
 }
 
-// moveAnnouncer decides when the local changes a move made are announced. A
-// lone move announces its own the moment it lands. A run announces once per
-// batch instead: announcing per message asks every open browser to reload, and
-// keeps the All Mail cache re-warming itself for as long as the run works —
-// which is the load a large move used to put on everything else the reader was
-// doing.
+// moveAnnouncer owns what a move still owes the local mirror once its messages
+// are gone from the database: their search documents, and telling the reader.
+// A lone move settles both the moment it lands. A run settles them once per
+// batch instead — a search document removed on its own is a whole index commit,
+// and announcing per message asks every open view to reload and keeps the All
+// Mail cache re-warming itself for as long as the run works. Between them that
+// was most of what a large move cost everything else the reader was doing.
 type moveAnnouncer struct {
 	service    *Service
 	userID     int64
 	perMessage bool
 	pending    bool
+	indexed    []int64
 }
 
 func (s *Service) moveAnnouncer(userID int64, perMessage bool) *moveAnnouncer {
 	return &moveAnnouncer{service: s, userID: userID, perMessage: perMessage}
 }
 
-// changed records that this user's mail moved.
-func (a *moveAnnouncer) changed() {
+// moved records that one message has left this user's mirror.
+func (a *moveAnnouncer) moved(ctx context.Context, messageID int64) {
 	if a == nil {
 		return
 	}
 	a.pending = true
+	if messageID > 0 {
+		a.indexed = append(a.indexed, messageID)
+	}
 	if a.perMessage {
-		a.flush()
+		a.flush(ctx)
 	}
 }
 
-// flush announces whatever has changed since the last announcement.
-func (a *moveAnnouncer) flush() {
+// flush removes the search documents the moves left behind and announces them.
+func (a *moveAnnouncer) flush(ctx context.Context) {
 	if a == nil || !a.pending {
 		return
 	}
 	a.pending = false
+	messageIDs := a.indexed
+	a.indexed = nil
+	if a.service.Search != nil && len(messageIDs) > 0 {
+		// The index is derived state and must never hold the mail hostage: the
+		// messages are already gone from the database, and a document left behind
+		// is a stale search hit the next rebuild clears.
+		if err := a.service.Search.DeleteMessages(ctx, a.userID, messageIDs); err != nil {
+			log.Printf("cleanup moved search documents user_id=%d messages=%d: %v", a.userID, len(messageIDs), err)
+		}
+	}
 	a.service.notify(a.userID)
 }

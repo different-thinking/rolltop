@@ -28,6 +28,11 @@ type emptyTrashExpungeCall struct {
 // server would really have left.
 type emptyTrashFetcher struct {
 	uids []uint32
+	// highestUID is the largest UID this folder has ever reported. UIDNEXT never
+	// decreases on a real server, so an emptied folder still refuses to place
+	// new mail at the UIDs it just deleted — and reconciliation depends on that:
+	// a local row at or above UIDNEXT is one it must not remove.
+	highestUID uint32
 	// keep names UIDs the server refuses to remove, so a partial delete can be
 	// distinguished from a finished one.
 	keep         []uint32
@@ -82,12 +87,12 @@ func (f *emptyTrashFetcher) MoveMessage(context.Context, store.MailAccount, stri
 
 func (f *emptyTrashFetcher) SnapshotMailboxUIDs(context.Context, store.MailAccount, string) (MailboxUIDSnapshot, error) {
 	f.snapshots++
-	next := uint32(1)
 	for _, uid := range f.uids {
-		if uid >= next {
-			next = uid + 1
+		if uid > f.highestUID {
+			f.highestUID = uid
 		}
 	}
+	next := f.highestUID + 1
 	return MailboxUIDSnapshot{UIDs: slices.Clone(f.uids), UIDValidity: emptyTrashUIDValidity, UIDNext: next + 100}, nil
 }
 

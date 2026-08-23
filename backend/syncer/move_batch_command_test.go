@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"rolltop/backend/search"
 	"rolltop/backend/store"
 )
 
@@ -364,5 +366,52 @@ func TestMoveMessageStillAnnouncesImmediately(t *testing.T) {
 
 	if announcements != 1 {
 		t.Fatalf("announcements = %d, want exactly one for one move", announcements)
+	}
+}
+
+// A moved message's search document has to go with it. It used to go one index
+// commit at a time, which for a folder's worth of mail is a folder's worth of
+// commits; the batch now hands them over together. What must not change is that
+// none of them are left behind.
+func TestRunMoveMessagesClearsTheSearchDocumentsOfAWholeBatch(t *testing.T) {
+	fixture, _ := newBatchMoveFixture(t)
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchService.Close()
+	fixture.service.Search = searchService
+	ctx := context.Background()
+	ids := []int64{fixture.message.ID}
+	messages := []store.MessageRecord{fixture.message}
+	for uid := uint32(43); uid <= 48; uid++ {
+		message := addMoveTestMessage(t, fixture, uid)
+		ids = append(ids, message.ID)
+		messages = append(messages, message)
+	}
+	for _, message := range messages {
+		if err := searchService.IndexMessage(ctx, message, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	indexed, err := searchService.CountMailboxMessages(ctx, fixture.userID, fixture.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed != len(messages) {
+		t.Fatalf("indexed %d of %d messages before the move", indexed, len(messages))
+	}
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if finished.Status != "ok" || finished.MessagesStored != len(messages) {
+		t.Fatalf("run status=%q stored=%d, want every message moved", finished.Status, finished.MessagesStored)
+	}
+	remaining, err := searchService.CountMailboxMessages(ctx, fixture.userID, fixture.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("%d search documents survived the batch that moved their messages", remaining)
 	}
 }

@@ -833,6 +833,23 @@ func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, mess
 	return names, nil
 }
 
+// bulkMoveForegroundReservationWait bounds how long one bulk move waits for the
+// tenant's foreground turn. A selection larger than one request arrives as
+// several, and each one's turn lasts until the run it starts has finished, so
+// the later requests do wait — but a wait that never ends is a browser
+// connection held open on a reservation something else has stopped releasing,
+// and that is worth reporting rather than hanging on.
+const bulkMoveForegroundReservationWait = 2 * time.Minute
+
+func (s *Server) beginMoveForegroundOperation(ctx context.Context, userID int64) (func(), error) {
+	if s.syncRunner == nil {
+		return func() {}, nil
+	}
+	reservationCtx, cancel := context.WithTimeout(ctx, bulkMoveForegroundReservationWait)
+	defer cancel()
+	return s.syncRunner.BeginForegroundOperation(reservationCtx, userID)
+}
+
 func (s *Server) startMoveRefresh(userID, accountID int64, mailboxes []string) {
 	if s.syncRunner == nil {
 		return
@@ -889,7 +906,7 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 	if len(in.MessageIDs) > 5 {
 		finishForeground := func() {}
 		if s.syncRunner != nil {
-			finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
+			finishForeground, err = s.beginMoveForegroundOperation(r.Context(), cu.User.ID)
 			if err != nil {
 				s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk move", err)
 				return

@@ -131,13 +131,19 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	if err := s.updateSyncProgress(ctx, userID, runID, *progress); err != nil {
 		return 0, err
 	}
+	// A full Trash folder is tens of batches, and reconnecting for each one is
+	// most of what the purge costs. Hold one login for all of them when the
+	// fetcher can; the session is nil otherwise, which connects per batch rather
+	// than failing the purge.
+	session := s.openExpungeSession(ctx, userID, account)
+	defer session.close()
 	deleted := 0
 	for start := 0; start < len(uids); start += emptyTrashBatchSize {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
 		end := min(start+emptyTrashBatchSize, len(uids))
-		gone, err := expunger.ExpungeMessages(ctx, account, mailbox.Name, uids[start:end], uidValidity)
+		gone, err := session.expunge(ctx, expunger, account, mailbox.Name, uids[start:end], uidValidity)
 		deleted += len(gone)
 		progress.MessagesSeen += end - start
 		progress.MessagesStored = deleted
@@ -148,12 +154,70 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 		if err := s.updateSyncProgress(ctx, userID, runID, *progress); err != nil {
 			return deleted, err
 		}
-		s.notifyProgress(userID)
 	}
 	if deleted < len(uids) {
 		return deleted, fmt.Errorf("the server kept %d of %d messages in %s", len(uids)-deleted, len(uids), mailbox.Name)
 	}
 	return deleted, nil
+}
+
+// expungeSessionHolder keeps the connection one purge deletes over, opening it
+// on first use and giving it back when the purge ends.
+type expungeSessionHolder struct {
+	service *Service
+	userID  int64
+	account store.MailAccount
+	session ExpungeSession
+}
+
+// openExpungeSession returns the holder a purge deletes through, or nil when
+// this deployment's fetcher cannot hold a connection open.
+func (s *Service) openExpungeSession(ctx context.Context, userID int64, account store.MailAccount) *expungeSessionHolder {
+	if s == nil || s.Fetcher == nil || ctx.Err() != nil {
+		return nil
+	}
+	if _, ok := s.Fetcher.(ExpungeSessionFetcher); !ok {
+		return nil
+	}
+	return &expungeSessionHolder{service: s, userID: userID, account: account}
+}
+
+// expunge deletes one batch, over the held connection when there is one and
+// through the fetcher's own connection otherwise.
+func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetcher, account store.MailAccount,
+	mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+	if h == nil {
+		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+	}
+	if h.session == nil {
+		opener, ok := h.service.Fetcher.(ExpungeSessionFetcher)
+		if !ok {
+			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+		}
+		session, err := opener.OpenExpungeSession(ctx, h.account)
+		if err != nil {
+			return nil, err
+		}
+		h.session = session
+	}
+	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity)
+	if err != nil {
+		// The held connection may itself be why this failed. Drop it so a retry
+		// of this purge starts from a fresh login rather than a dead socket.
+		h.close()
+	}
+	return gone, err
+}
+
+func (h *expungeSessionHolder) close() {
+	if h == nil || h.session == nil {
+		return
+	}
+	session := h.session
+	h.session = nil
+	if err := session.Close(); err != nil {
+		log.Printf("close expunge session user_id=%d account_id=%d: %v", h.userID, h.account.ID, err)
+	}
 }
 
 // trashSnapshot lists what the folder currently holds, bound to the mailbox

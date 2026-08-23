@@ -5,6 +5,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
+import { waitForChromeEvent } from "../../chromeEvents";
 import type { AccountMailboxChoice, Bootstrap, Conversation, MailCategorySummary, Mailbox, SwipeAction, SwipePreferences, SyncRun } from "../../types";
 import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
@@ -2099,7 +2100,11 @@ function MessageList({
     }
     const deadline = Date.now() + queuedMoveWatchLimitMS;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, queuedMoveWatchIntervalMS));
+      // A finished run announces itself on the event stream, so that is what
+      // ends the wait; the interval is only the fallback for the announcement
+      // that never arrives. Sleeping the interval regardless left rows hidden
+      // for seconds after the move they were hidden for had already finished.
+      await waitForChromeEvent(queuedMoveWatchIntervalMS);
       if (unmounted.current) return;
       let runs: SyncRun[];
       try {
