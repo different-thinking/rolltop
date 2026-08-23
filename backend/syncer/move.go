@@ -276,7 +276,7 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		ids = s.groupMessageIDsBySourceMailbox(ctx, userID, ids)
 	}
 	announce := s.moveAnnouncer(userID, false)
-	defer announce.flush(ctx)
+	defer announce.settle(ctx)
 	batch := make([]*preparedMove, 0, batchSize)
 	batchUIDs := make(map[uint32]struct{}, batchSize)
 	batchBytes := 0
@@ -287,6 +287,9 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 	// transfer the next attempt has to reconcile against the server.
 	flush := func() {
 		if len(batch) == 0 {
+			// Nothing was gathered, but preparing the messages that got here may
+			// still have settled some of them locally.
+			announce.flush(ctx)
 			return
 		}
 		dispatched := batch
@@ -301,7 +304,7 @@ func (s *Service) moveMessagesInBatches(ctx context.Context, userID int64, ids [
 		}
 		// One index commit and one announcement for the batch, after every one of
 		// its messages has been settled locally.
-		announce.flush(ctx)
+		announce.settle(ctx)
 	}
 	for _, id := range ids {
 		if !keepGoing {
@@ -792,11 +795,18 @@ func (s *Service) prepareMessageMove(ctx context.Context, userID, messageID, des
 func (s *Service) applyMoveOutcome(ctx context.Context, userID int64, prepared *preparedMove,
 	receipt *MoveReceipt, moveErr error, notifyMove messageMoveNotifier, announce *moveAnnouncer) error {
 	if moveErr != nil {
+		// Settling a claimed dispatch outlives the context that failed it, the
+		// same way the success path below does. A cancelled request is the most
+		// ordinary way to reach here — a batch is claimed before it is
+		// dispatched, so a cancellation strands every claim in it — and a claim
+		// this process owns but never finished cannot be reconciled by anything
+		// short of a restart.
+		settleCtx := context.WithoutCancel(ctx)
 		if !IsMoveOutcomeUnknown(moveErr) {
-			if markErr := s.Store.MarkMessageTransferFailed(ctx, userID, prepared.transfer.ID); markErr != nil {
+			if markErr := s.Store.MarkMessageTransferFailed(settleCtx, userID, prepared.transfer.ID); markErr != nil {
 				return errors.Join(moveErr, markErr)
 			}
-		} else if finishErr := s.Store.FinishMessageTransferDispatch(ctx, userID, prepared.transfer.ID, prepared.claim); finishErr != nil {
+		} else if finishErr := s.Store.FinishMessageTransferDispatch(settleCtx, userID, prepared.transfer.ID, prepared.claim); finishErr != nil {
 			return errors.Join(moveErr, finishErr)
 		}
 		return moveErr
@@ -934,10 +944,11 @@ type moveAnnouncer struct {
 	perMessage bool
 	pending    bool
 	indexed    []int64
+	last       time.Time
 }
 
 func (s *Service) moveAnnouncer(userID int64, perMessage bool) *moveAnnouncer {
-	return &moveAnnouncer{service: s, userID: userID, perMessage: perMessage}
+	return &moveAnnouncer{service: s, userID: userID, perMessage: perMessage, last: time.Now()}
 }
 
 // moved records that one message has left this user's mirror.
@@ -950,16 +961,29 @@ func (a *moveAnnouncer) moved(ctx context.Context, messageID int64) {
 		a.indexed = append(a.indexed, messageID)
 	}
 	if a.perMessage {
-		a.flush(ctx)
+		a.settle(ctx)
 	}
 }
 
-// flush removes the search documents the moves left behind and announces them.
+// flush settles what a batch changed, on the same pace the run's progress keeps.
+// A walk over ids that are already settled — a re-run whose messages an earlier
+// attempt moved — has no batches to end, and would otherwise say nothing until
+// the whole walk did.
 func (a *moveAnnouncer) flush(ctx context.Context) {
+	if a == nil || !a.pending || time.Since(a.last) < syncRunProgressInterval {
+		return
+	}
+	a.settle(ctx)
+}
+
+// settle removes the search documents the moves left behind and announces them,
+// whatever the pace says.
+func (a *moveAnnouncer) settle(ctx context.Context) {
 	if a == nil || !a.pending {
 		return
 	}
 	a.pending = false
+	a.last = time.Now()
 	messageIDs := a.indexed
 	a.indexed = nil
 	if a.service.Search != nil && len(messageIDs) > 0 {

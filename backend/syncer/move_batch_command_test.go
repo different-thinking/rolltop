@@ -37,6 +37,9 @@ type batchSessionMoveFetcher struct {
 	failUIDs map[uint32]error
 	// failBatch refuses whole commands that carry more than one UID.
 	failBatch error
+	// onCommand runs while a command is in flight, which is where a client
+	// disconnecting cancels the context a batch was claimed under.
+	onCommand func()
 }
 
 func (f *batchSessionMoveFetcher) OpenMoveSession(_ context.Context, account store.MailAccount) (MoveSession, error) {
@@ -70,6 +73,9 @@ func (s *fakeBatchMoveSession) MoveMessagesWithReceipts(ctx context.Context, sou
 	s.fetcher.commands = append(s.fetcher.commands, batchMoveCommand{
 		source: source, destination: destination, uids: append([]uint32(nil), uids...),
 	})
+	if s.fetcher.onCommand != nil {
+		s.fetcher.onCommand()
+	}
 	if s.fetcher.failBatch != nil && len(uids) > 1 {
 		return nil, s.fetcher.failBatch
 	}
@@ -413,5 +419,109 @@ func TestRunMoveMessagesClearsTheSearchDocumentsOfAWholeBatch(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("%d search documents survived the batch that moved their messages", remaining)
+	}
+}
+
+// A batch is claimed before it is dispatched, so a context cancelled while it is
+// in flight strands every claim in it. Settling those claims has to outlive the
+// context that failed them: a dispatch this process owns but never finished
+// cannot be reconciled by anything short of a restart, and the messages behind
+// it refuse every later move until then.
+func TestMoveMessagesSettlesClaimedDispatchesAfterCancellation(t *testing.T) {
+	fixture, fetcher := newBatchMoveFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The reader closed the tab while the command was in flight.
+	fetcher.onCommand = cancel
+	fetcher.failBatch = context.Canceled
+	ids := []int64{fixture.message.ID}
+	for uid := uint32(43); uid <= 45; uid++ {
+		ids = append(ids, addMoveTestMessage(t, fixture, uid).ID)
+	}
+
+	if _, err := fixture.service.MoveMessages(ctx, fixture.userID, ids, fixture.destination.ID); err == nil {
+		t.Fatal("a move cancelled mid-command reported success")
+	}
+
+	if len(fetcher.commands) == 0 {
+		t.Fatal("the test cancelled before anything was claimed, so it proves nothing")
+	}
+	// Every claim is settled, so the same messages can be moved again. A claim
+	// left open reports itself as awaiting reconciliation instead.
+	for _, id := range ids {
+		transfer, err := fixture.store.StageMessageTransfer(context.Background(), fixture.userID, id,
+			fixture.destination.ID, "move", "")
+		if err != nil {
+			t.Fatalf("message %d could not be staged again: %v", id, err)
+		}
+		if transfer.DispatchedAt.IsZero() {
+			continue
+		}
+		if !messageTransferCanReconcile(transfer) {
+			t.Fatalf("message %d is stranded on a dispatch this process owns and never finished", id)
+		}
+	}
+}
+
+// A walk can settle messages without dispatching anything: an earlier attempt
+// already moved them remotely, and preparing them is what finishes the local
+// half. That walk has no batch boundary, so what it settled has to reach the
+// reader — and its search documents have to go — on the strength of the walk
+// ending alone.
+func TestRunMoveMessagesSettlesMessagesItNeverDispatches(t *testing.T) {
+	fixture, fetcher := newBatchMoveFixture(t)
+	searchService, err := search.Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchService.Close()
+	fixture.service.Search = searchService
+	ctx := context.Background()
+	ids := []int64{fixture.message.ID}
+	messages := []store.MessageRecord{fixture.message}
+	for uid := uint32(43); uid <= 45; uid++ {
+		message := addMoveTestMessage(t, fixture, uid)
+		ids = append(ids, message.ID)
+		messages = append(messages, message)
+	}
+	// Every message already has a transfer the server accepted, which is what an
+	// interrupted run leaves behind.
+	for _, message := range messages {
+		if err := searchService.IndexMessage(ctx, message, nil); err != nil {
+			t.Fatal(err)
+		}
+		transfer, err := fixture.store.StageMessageTransfer(ctx, fixture.userID, message.ID, fixture.destination.ID, "move", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.store.MarkMessageTransferSucceeded(ctx, fixture.userID, transfer.ID, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	announcements := 0
+	fixture.service.Notify = func(int64) { announcements++ }
+
+	finished := waitForMoveRun(t, fixture, ids)
+
+	if len(fetcher.commands) != 0 {
+		t.Fatalf("the run issued %d remote commands for messages the server had already moved", len(fetcher.commands))
+	}
+	if finished.Status != "ok" || finished.MessagesStored != len(messages) {
+		t.Fatalf("run status=%q stored=%d, want every message settled", finished.Status, finished.MessagesStored)
+	}
+	for _, message := range messages {
+		if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, message.ID); !store.IsNotFound(err) {
+			t.Fatalf("message %d was left in the mirror: %v", message.ID, err)
+		}
+	}
+	remaining, err := searchService.CountMailboxMessages(ctx, fixture.userID, fixture.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("%d search documents survived a run that settled their messages without dispatching", remaining)
+	}
+	if announcements == 0 {
+		t.Fatal("a run that settled its messages without dispatching announced nothing")
 	}
 }

@@ -82,6 +82,17 @@ site and in review.
   wait, and the interval passed to it is the fallback for the announcement that
   never comes. A queued move that slept its full interval regardless kept rows
   hidden for seconds after the move they were hidden for had already finished.
+  It also takes a floor, and a waiter that polls the server needs one: the work
+  announces itself *while* it runs, not only when it finishes, so waking on
+  every announcement turns a five-second poll into several a second for as long
+  as the work lasts — against the database the work is competing with, which is
+  the cost this whole area exists to remove.
+- Settling a claimed message transfer outlives the context that failed it
+  (`context.WithoutCancel`), on the failure path as much as the success path.
+  A batch is claimed before it is dispatched, so one cancelled request strands
+  every claim in it, and a dispatch this process owns but never finished is not
+  reconcilable by anything short of a restart — the messages behind it refuse
+  every later move until then.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,

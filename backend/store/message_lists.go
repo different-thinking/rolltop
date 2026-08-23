@@ -461,8 +461,6 @@ func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int
 	return scanScopeMessages(rows)
 }
 
-// int64ListPlaceholders renders an IN list for a caller-owned set of IDs. Only
-// values the store itself resolved are ever passed here, never request input.
 // ListMessageSourceMailboxesForUser reports which mailbox each of the named
 // messages sits in. It exists for the move runner, which has to group thousands
 // of messages by the folder they leave before it can move a folder's worth of
@@ -503,6 +501,8 @@ func (s *Store) ListMessageSourceMailboxesForUser(ctx context.Context, userID in
 	return mailboxes, nil
 }
 
+// int64ListPlaceholders renders an IN list for a caller-owned set of IDs. Only
+// values the store itself resolved are ever passed here, never request input.
 func int64ListPlaceholders(values []int64) (string, []any) {
 	marks := make([]string, len(values))
 	args := make([]any, 0, len(values))
