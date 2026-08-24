@@ -535,7 +535,11 @@ func (f *Fetcher) MailboxStatus(ctx context.Context, account store.MailAccount, 
 	defer release()
 	status, err := c.Status(mailbox, []imap.StatusItem{imap.StatusMessages, imap.StatusUnseen, imap.StatusUidNext, imap.StatusUidValidity})
 	if err != nil {
-		return syncer.MailboxStatus{}, fmt.Errorf("status mailbox %q: %w", mailbox, err)
+		statusErr := fmt.Errorf("status mailbox %q: %w", mailbox, err)
+		if mailboxMissing(err) {
+			return syncer.MailboxStatus{}, syncer.MailboxGone(statusErr)
+		}
+		return syncer.MailboxStatus{}, statusErr
 	}
 	return syncer.MailboxStatus{Messages: status.Messages, Unseen: status.Unseen, UIDNext: status.UidNext, UIDValidity: status.UidValidity}, nil
 }

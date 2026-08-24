@@ -288,6 +288,82 @@ func (s *Store) GetOrCreateMailboxFromDiscovery(ctx context.Context, userID, acc
 	return s.GetMailbox(ctx, userID, accountID, name)
 }
 
+// MailboxNamesForAccount lists the folder names one account holds locally.
+// Callers that only need to know which folders an account has use this instead
+// of the folder summary, which aggregates per-folder message counts.
+func (s *Store) MailboxNamesForAccount(ctx context.Context, userID, accountID int64) ([]string, error) {
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx,
+		`SELECT name FROM mailboxes WHERE user_id = ? AND account_id = ? ORDER BY lower(name)`, userID, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteUnsyncedMailbox removes the local row for a folder the server has said
+// the account does not have. Folder rows are otherwise never deleted, and this
+// one stays that narrow: it drops a row only while it has no message of its own
+// and its remote status has never been read, which is the signature of a row
+// that was created for a name and never answered for by a server. A folder that
+// ever really existed has one of the two and is left alone, so a server that
+// answers "no such folder" wrongly for one turn costs nothing.
+//
+// The identity pointers go with it: a Sent or Drafts default may have landed on
+// the row from its name alone, and a pointer to a deleted folder is how compose
+// loses track of where it files a sent message.
+func (s *Store) DeleteUnsyncedMailbox(ctx context.Context, userID, accountID int64, name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var mailboxID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM mailboxes
+		WHERE user_id = ? AND account_id = ? AND name = ?
+			AND status_checked_at = 0 AND last_uid = 0
+			AND NOT EXISTS (SELECT 1 FROM messages WHERE user_id = ? AND mailbox_id = mailboxes.id)`,
+		userID, accountID, name, userID).Scan(&mailboxID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	ts := nowUnix()
+	if _, err := tx.ExecContext(ctx, `UPDATE mail_identities
+		SET sent_mailbox_id = CASE WHEN sent_mailbox_id = ? THEN 0 ELSE sent_mailbox_id END,
+			drafts_mailbox_id = CASE WHEN drafts_mailbox_id = ? THEN 0 ELSE drafts_mailbox_id END,
+			archive_mailbox_id = CASE WHEN archive_mailbox_id = ? THEN 0 ELSE archive_mailbox_id END,
+			updated_at = ?
+		WHERE user_id = ? AND ? IN (sent_mailbox_id, drafts_mailbox_id, archive_mailbox_id)`,
+		mailboxID, mailboxID, mailboxID, ts, userID, mailboxID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mailboxes WHERE user_id = ? AND id = ?`, userID, mailboxID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // NextUIDForMailbox returns the next UID that should be fetched after the mailbox's last stored UID.
 func (s *Store) NextUIDForMailbox(ctx context.Context, userID, mailboxID int64) (uint32, error) {
 	var next uint32

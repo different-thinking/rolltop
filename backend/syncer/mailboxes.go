@@ -44,6 +44,10 @@ func (s *Service) mailboxesToSync(ctx context.Context, account store.MailAccount
 }
 
 func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAccount, requested []string) ([]string, error) {
+	known, err := s.Store.MailboxNamesForAccount(ctx, account.UserID, account.ID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(requested))
 	seen := map[string]bool{}
 	for _, raw := range requested {
@@ -53,6 +57,10 @@ func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAcco
 			continue
 		}
 		seen[key] = true
+		name, ok := accountMailboxName(known, name)
+		if !ok {
+			continue
+		}
 		mb, err := s.Store.GetOrCreateMailbox(ctx, account.UserID, account.ID, name)
 		if err != nil {
 			return nil, err
@@ -73,6 +81,41 @@ func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAcco
 		out = append(out, mb.Name)
 	}
 	return prioritizeInbox(out), nil
+}
+
+// accountMailboxName resolves a requested folder to the name this account has
+// for it. Folder jobs are scheduled by name across every account, so each
+// account is asked for names that only its siblings have; creating a row for one
+// of those gave the account a folder in the sidebar that no server would ever
+// answer for.
+//
+// The match falls back to a case-insensitive one because that is how the name
+// arrived: the union feeding these jobs keeps one spelling per name folded to
+// lower case, so an account whose own folder differs only in case would
+// otherwise never be asked for a folder it really has. Its own spelling is what
+// goes back, since that is what its server answers to, and an exact match is
+// preferred so an account holding both spellings keeps them apart.
+//
+// An account that has not been discovered yet knows no names at all, and
+// filtering it down to nothing would leave a new account unable to make its
+// first pass -- there, the name is tried as before and planning drops it if the
+// server has no such folder. INBOX is always allowed for the same reason: every
+// account has one, whatever the mirror has recorded so far.
+func accountMailboxName(known []string, name string) (string, bool) {
+	for _, candidate := range known {
+		if candidate == name {
+			return candidate, true
+		}
+	}
+	for _, candidate := range known {
+		if strings.EqualFold(candidate, name) {
+			return candidate, true
+		}
+	}
+	if len(known) == 0 || strings.EqualFold(name, "INBOX") {
+		return name, true
+	}
+	return "", false
 }
 
 func prioritizeInbox(mailboxes []string) []string {
