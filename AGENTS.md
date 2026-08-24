@@ -70,16 +70,26 @@ site and in review.
   its **whole** run on the STATUS refusal — every poll, forever, for a folder it
   was never going to have, with the folders behind it in the plan left unvisited.
   Two things keep that from happening and both must stay: an account only accepts
-  a requested name it already has (`accountHasMailbox`, bypassed while an account
-  knows no folders at all, so a first sync still works), and a STATUS refused
-  because the folder does not exist (`syncer.IsMailboxGone`, recognized from the
-  server's wording in `imapclient.mailboxMissing` because go-imap drops the
-  NONEXISTENT response code) skips that folder instead of failing the run. The
-  skip also drops the local row the name left behind, which is the only place
-  folder rows are ever deleted and stays that narrow: `DeleteUnsyncedMailbox`
-  removes a row only while it holds no message and no status has ever been read
-  for it, so a folder that ever really existed survives a server that answers
-  wrongly once.
+  a requested name it already has (`accountMailboxName`, bypassed while an
+  account knows no folders at all, so a first sync still works), and a STATUS
+  refused because the folder does not exist (`syncer.IsMailboxGone`, recognized
+  from the server's wording in `imapclient.mailboxMissing` because go-imap drops
+  the NONEXISTENT response code) skips that folder instead of failing the run.
+  That name match falls back to a case-insensitive one and returns the account's
+  own spelling, because the union folds names to one spelling per name and an
+  account whose folder differs only in case would otherwise be skipped forever
+  over a folder it really has.
+- **The skip drops the local row the name left behind, and says so when it
+  cannot.** `DeleteUnsyncedMailbox` is the only place folder rows are ever
+  deleted and stays narrow enough to be safe: a row goes only while it holds no
+  message and no status has ever been read for it, which is the signature of a
+  row created from a name nobody answered for. A row that survives that check is
+  a folder this account really had and the server no longer has — mail is still
+  mirrored under it — and skipping that silently would leave it stale forever
+  with nothing said. So the run states it (`These folders are no longer on the
+  server`) instead of returning it: a returned error puts the account into
+  `RecordAccountSyncOutcome`'s backoff and reports it broken, which is what one
+  deleted folder used to cost every other folder on that account.
 - A move of many messages is one IMAP command, not one per message. Each message
   used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
   trips against a server that also rate limits them — which is why a

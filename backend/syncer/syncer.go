@@ -593,12 +593,24 @@ func (s *Service) syncAccountTurn(ctx context.Context, userID int64, account sto
 	// writes, so a slow server could leave the run row silent long enough for
 	// the stale-run reconciler to stamp it interrupted. The heartbeat keeps
 	// updated_at moving at the reporter's own pace.
-	plan, planErr := s.planMailboxes(ctx, account, mailboxNames, lastUIDs, func(name string) {
+	plan, missingMailboxes, planErr := s.planMailboxes(ctx, account, mailboxNames, lastUIDs, func(name string) {
 		progress.CurrentMailbox = name
 		if err := reportProgress.step(ctx); err != nil {
 			log.Printf("sync planning heartbeat user_id=%d account_id=%d mailbox=%q: %v", userID, account.ID, name, err)
 		}
 	})
+	if len(missingMailboxes) > 0 {
+		// Said on the run rather than returned. The account is not failing --
+		// everything it does have is still being synced -- and a returned error
+		// would report it broken and put it in backoff, which is what a folder
+		// deleted on the server used to cost every other folder on the account.
+		// What is left is a folder the mirror still holds mail for that the
+		// server no longer has, which only the user can settle, so it is stated
+		// where they can see it, once per run and per account. A later failure
+		// in the same run overwrites this, because that is the more urgent of
+		// the two answers.
+		errText = fmt.Sprintf("These folders are no longer on the server: %s.", strings.Join(missingMailboxes, ", "))
+	}
 	requestedSet := requestedMailboxSet(requestedMailboxes)
 	progress.MailboxesTotal = len(plan)
 	for _, item := range plan {
@@ -1614,8 +1626,9 @@ func maxUID(uids []uint32) uint32 {
 // planMailboxes makes progress meaningful before the first message arrives.
 // IMAP STATUS is cheap compared with fetching bodies, and UIDNEXT lets us
 // estimate remaining work per folder without mutating the remote mailbox.
-func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32, heartbeat func(string)) ([]MailboxPlan, error) {
+func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, names []string, lastUIDs map[string]uint32, heartbeat func(string)) ([]MailboxPlan, []string, error) {
 	plans := make([]MailboxPlan, 0, len(names))
+	var kept []string
 	for _, name := range names {
 		if heartbeat != nil {
 			heartbeat(name)
@@ -1631,11 +1644,13 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 				// were never going to have; and the folders behind it in the
 				// plan were not visited at all. So the account skips what it
 				// does not have and syncs what it does.
-				s.forgetMissingMailbox(ctx, account, name)
+				if !s.forgetMissingMailbox(ctx, account, name) {
+					kept = append(kept, name)
+				}
 				continue
 			}
 			plans = append(plans, MailboxPlan{Name: name, LastUID: lastUIDs[name]})
-			return plans, fmt.Errorf("read IMAP status for mailbox %q: %w", name, err)
+			return plans, kept, fmt.Errorf("read IMAP status for mailbox %q: %w", name, err)
 		}
 		pending := 0
 		if status.UIDNext > 0 {
@@ -1646,7 +1661,7 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 		}
 		plans = append(plans, MailboxPlan{Name: name, Status: status, LastUID: lastUIDs[name], Pending: pending})
 	}
-	return plans, nil
+	return plans, kept, nil
 }
 
 // forgetMissingMailbox drops the local row a skipped folder left behind. The
@@ -1656,15 +1671,36 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 // message and never had a status read survives that check, so nothing a server
 // once answered for is removed; a folder still on its own account keeps its row
 // there, because this only runs for the account that was refused.
-func (s *Service) forgetMissingMailbox(ctx context.Context, account store.MailAccount, name string) {
+//
+// It reports whether the folder left nothing behind here, which is what tells
+// the two reasons for a refusal apart: a name that was never this account's
+// leaves no row and is nobody's problem, while a row that survives held mail or
+// had a status read for it once, so this account really did have the folder and
+// the server no longer does. Only the second is worth telling the user about.
+func (s *Service) forgetMissingMailbox(ctx context.Context, account store.MailAccount, name string) bool {
 	deleted, err := s.Store.DeleteUnsyncedMailbox(ctx, account.UserID, account.ID, name)
 	if err != nil {
+		// Which of the two this is would have come from the statement that just
+		// failed, so it is logged and nothing is claimed about the folder.
 		log.Printf("forget missing mailbox user_id=%d account_id=%d mailbox=%q: %v",
 			account.UserID, account.ID, name, err)
-		return
+		return true
 	}
-	log.Printf("skip mailbox user_id=%d account_id=%d mailbox=%q reason=not-on-server row_removed=%t",
-		account.UserID, account.ID, name, deleted)
+	if deleted {
+		log.Printf("skip mailbox user_id=%d account_id=%d mailbox=%q reason=not-on-server row_removed=true",
+			account.UserID, account.ID, name)
+		return true
+	}
+	if _, err := s.Store.GetMailbox(ctx, account.UserID, account.ID, name); err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("read skipped mailbox user_id=%d account_id=%d mailbox=%q: %v",
+				account.UserID, account.ID, name, err)
+		}
+		return true
+	}
+	log.Printf("skip mailbox user_id=%d account_id=%d mailbox=%q reason=not-on-server row_kept=true",
+		account.UserID, account.ID, name)
+	return false
 }
 
 // syncRunProgressInterval bounds how often a run publishes the tally it keeps
