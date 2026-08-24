@@ -423,10 +423,24 @@ func (s *Store) PurgeMailboxMessageBatch(ctx context.Context, userID, accountID,
 	return messages, nil
 }
 
+// ExpungedMessage is a local row reconciliation removed because the server no
+// longer has its UID. It is deliberately not a MessageRecord: reconciling a
+// folder reads every row that folder holds, and a folder large enough for that
+// to matter cannot afford to carry message bodies through the comparison just
+// to learn a UID. These four fields are everything the callers need — the row
+// to forget, and the blob and search document to forget with it.
+type ExpungedMessage struct {
+	ID       int64
+	UserID   int64
+	UID      uint32
+	BlobID   int64
+	BlobPath string
+}
+
 // DeleteMessagesMissingUIDs removes local messages no longer present in a remote mailbox UID set.
 // It intentionally does not create expunge evidence because the UID list is not
 // bound to a verified mailbox generation.
-func (s *Store) DeleteMessagesMissingUIDs(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32) ([]MessageRecord, error) {
+func (s *Store) DeleteMessagesMissingUIDs(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32) ([]ExpungedMessage, error) {
 	return s.deleteMessagesMissingUIDs(ctx, userID, accountID, mailboxID, remoteUIDs, 0, 0, nil, false)
 }
 
@@ -438,14 +452,14 @@ func (s *Store) DeleteMessagesMissingUIDs(ctx context.Context, userID, accountID
 // missing snapshot bound is a safe no-op. Callers may supply canonical digests
 // loaded from retained raw blobs; exact and metadata matches are still recorded
 // when a canonical digest is unavailable.
-func (s *Store) DeleteMessagesMissingUIDsAndRecordExpunges(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32, remoteUIDValidity, remoteUIDNext uint32, canonicalByMessageID map[int64]string) ([]MessageRecord, error) {
+func (s *Store) DeleteMessagesMissingUIDsAndRecordExpunges(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32, remoteUIDValidity, remoteUIDNext uint32, canonicalByMessageID map[int64]string) ([]ExpungedMessage, error) {
 	if remoteUIDValidity == 0 || remoteUIDNext == 0 {
 		return nil, nil
 	}
 	return s.deleteMessagesMissingUIDs(ctx, userID, accountID, mailboxID, remoteUIDs, int64(remoteUIDValidity), remoteUIDNext, canonicalByMessageID, true)
 }
 
-func (s *Store) deleteMessagesMissingUIDs(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32, remoteUIDValidity int64, remoteUIDNext uint32, canonicalByMessageID map[int64]string, recordExpunges bool) ([]MessageRecord, error) {
+func (s *Store) deleteMessagesMissingUIDs(ctx context.Context, userID, accountID, mailboxID int64, remoteUIDs []uint32, remoteUIDValidity int64, remoteUIDNext uint32, canonicalByMessageID map[int64]string, recordExpunges bool) ([]ExpungedMessage, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -473,28 +487,34 @@ func (s *Store) deleteMessagesMissingUIDs(ctx context.Context, userID, accountID
 			return nil, nil
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, user_id, account_id, mailbox_id, blob_id, message_id_header, in_reply_to, references_header, thread_key, subject, language_code, from_addr, to_addr, cc_addr,
-			date_unix, internal_date_unix, uid, size, blob_path, body_text, body_html, is_read, read_sync_pending, is_starred, star_sync_pending, has_attachments, is_encrypted, is_signed, attachment_indexed_at, created_at, updated_at, category
+	// Only the columns the callers act on. This reads the whole folder, so a
+	// mailbox with tens of thousands of messages would otherwise pull every body
+	// and every HTML part into memory to answer a question about UIDs.
+	rows, err := tx.QueryContext(ctx, `SELECT id, user_id, uid, blob_id, blob_path
 		FROM messages WHERE user_id = ? AND account_id = ? AND mailbox_id = ?`, userID, accountID, mailboxID)
 	if err != nil {
 		return nil, err
 	}
-	local, err := scanMessages(rows)
-	if err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	var stale []MessageRecord
-	for _, msg := range local {
+	var stale []ExpungedMessage
+	for rows.Next() {
+		var msg ExpungedMessage
+		if err := rows.Scan(&msg.ID, &msg.UserID, &msg.UID, &msg.BlobID, &msg.BlobPath); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
 		if recordExpunges && msg.UID >= remoteUIDNext {
 			continue
 		}
 		if !remote[msg.UID] {
 			stale = append(stale, msg)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	if len(stale) == 0 {
 		return nil, nil

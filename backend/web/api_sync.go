@@ -73,16 +73,49 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	if !writeEvent() {
 		return
 	}
+	lastEvent := time.Now()
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
+	// Producers signal far faster than a reader can use. A sync mirroring a
+	// mailbox and a move working through a folder both report per message, and
+	// every signal rebuilds the whole chrome payload — the folder list with its
+	// counts, categories, archive mapping — once per connected tab. That is the
+	// load a long-running operation used to put on the database it was competing
+	// with. The signal is lossy by design and the payload is a fresh snapshot
+	// either way, so a burst is collapsed into one rebuild per interval; the
+	// first signal after a quiet moment still goes out at once.
+	coalesce := time.NewTimer(time.Hour)
+	if !coalesce.Stop() {
+		<-coalesce.C
+	}
+	defer coalesce.Stop()
+	coalescing := false
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case _, ok := <-ch:
-			if !ok || !writeEvent() {
+			if !ok {
 				return
 			}
+			if coalescing {
+				continue
+			}
+			if wait := syncEventMinInterval - time.Since(lastEvent); wait > 0 {
+				coalescing = true
+				coalesce.Reset(wait)
+				continue
+			}
+			if !writeEvent() {
+				return
+			}
+			lastEvent = time.Now()
+		case <-coalesce.C:
+			coalescing = false
+			if !writeEvent() {
+				return
+			}
+			lastEvent = time.Now()
 		case <-heartbeat.C:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return
@@ -91,6 +124,12 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// syncEventMinInterval bounds how often one stream rebuilds and sends the chrome
+// snapshot. It is short enough that a finished move or a newly arrived message
+// still lands immediately to the eye, and long enough that a run reporting
+// thousands of times cannot turn one reader's open tabs into a query storm.
+const syncEventMinInterval = 250 * time.Millisecond
 
 func (s *Server) syncEventPayload(ctx context.Context, userID int64) (map[string]any, error) {
 	var data viewData

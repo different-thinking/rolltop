@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"rolltop/backend/store"
 )
@@ -21,6 +22,26 @@ const EmptyTrashSyncRunMarker = "rolltop:empty-trash"
 // client's own per-request ceiling so a full Trash folder is emptied in steps
 // the server will accept, and so progress moves while it happens.
 const emptyTrashBatchSize = 250
+
+// emptyTrashBatchAttempts bounds how often one batch is tried when the
+// connection it deletes over dies. A full Trash folder is tens of batches over
+// many minutes, and a mail host dropping that connection partway through is
+// ordinary rather than exceptional. Repeating a batch is safe: it names the
+// same UIDs, and a UID the server has already removed reads back as gone rather
+// than as a failure.
+const emptyTrashBatchAttempts = 3
+
+// emptyTrashBatchGiveUp is how many batches in a row may exhaust their attempts
+// before the purge stops. One batch the server will not take must not strand
+// the thousands of messages behind it; a connection that is dead for good must
+// not be logged into again once per remaining batch.
+const emptyTrashBatchGiveUp = 2
+
+// defaultEmptyTrashRetryDelay is the wait before the second attempt on a batch,
+// doubling for the one after it. A host that closed the connection because the
+// purge was going too fast for it must not be met with an immediate reconnect,
+// and a throttle that lasts a few seconds must not end the purge.
+const defaultEmptyTrashRetryDelay = 2 * time.Second
 
 // ErrEmptyTrashUnsupported reports that this deployment's IMAP client cannot
 // delete remote mail, which is a capability question rather than a failure of
@@ -131,29 +152,217 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	if err := s.updateSyncProgress(ctx, userID, runID, *progress); err != nil {
 		return 0, err
 	}
+	// A full Trash folder is tens of batches, and reconnecting for each one is
+	// most of what the purge costs. Hold one login for all of them when the
+	// fetcher can; the session is nil otherwise, which connects per batch rather
+	// than failing the purge.
+	session := s.openExpungeSession(ctx, userID, account)
+	// Closed again below before anything else logs in to this account, and here
+	// as well so an early return cannot leave the connection held.
+	defer session.close()
 	deleted := 0
+	failedInARow := 0
+	var batchErr error
 	for start := 0; start < len(uids); start += emptyTrashBatchSize {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
 		end := min(start+emptyTrashBatchSize, len(uids))
-		gone, err := expunger.ExpungeMessages(ctx, account, mailbox.Name, uids[start:end], uidValidity)
+		gone, err := s.expungeTrashBatch(ctx, session, expunger, userID, account, mailbox.Name, uids[start:end], uidValidity)
 		deleted += len(gone)
 		progress.MessagesSeen += end - start
 		progress.MessagesStored = deleted
 		progress.MessagesSkipped = progress.MessagesSeen - deleted
 		if err != nil {
-			return deleted, err
+			if ctx.Err() != nil {
+				return deleted, err
+			}
+			// One batch the server would not take is not the whole folder. Carry
+			// on so the rest is still emptied, and stop only once nothing is
+			// getting through any more: giving up on the first dropped
+			// connection leaves most of a large Trash folder behind.
+			batchErr = err
+			failedInARow++
+			log.Printf("empty trash batch failed user_id=%d run_id=%d mailbox_id=%d uids=%d-%d of %d: %v",
+				userID, runID, mailbox.ID, start+1, end, len(uids), err)
+			if failedInARow >= emptyTrashBatchGiveUp {
+				break
+			}
+			continue
 		}
+		failedInARow = 0
 		if err := s.updateSyncProgress(ctx, userID, runID, *progress); err != nil {
 			return deleted, err
 		}
-		s.notifyProgress(userID)
+	}
+	// Give the connection back before the folder is listed again: a second
+	// concurrent login to the same account is what holding one exists to avoid.
+	session.close()
+	if batchErr != nil {
+		// What the batches confirmed is no longer the whole story. A batch that
+		// failed after flagging its messages leaves them carrying \Deleted, and
+		// on a server without UIDPLUS the only expunge available removes
+		// everything so flagged — so a later batch may well have taken a failed
+		// one with it, unverified and uncounted. Ask the folder what it still
+		// holds rather than reporting the sum of the batches, which would tell a
+		// user that messages the server did delete could not be deleted.
+		//
+		// A failed batch may also be left carrying \Deleted with nothing to
+		// remove it. That is accepted here and nowhere else: those messages are
+		// the ones the user asked to delete, in the folder they asked to empty,
+		// and the next purge flags and expunges them again. What must not be
+		// accepted is reporting them wrongly, which is what this recount is for.
+		if kept, err := s.trashMessagesStillHeld(ctx, account, mailbox, uids, uidValidity); err != nil {
+			log.Printf("recount emptied trash user_id=%d run_id=%d mailbox_id=%d: %v", userID, runID, mailbox.ID, err)
+		} else {
+			deleted = len(uids) - kept
+			progress.MessagesStored = deleted
+			progress.MessagesSkipped = progress.MessagesSeen - deleted
+		}
 	}
 	if deleted < len(uids) {
+		if batchErr != nil {
+			return deleted, fmt.Errorf("%d of %d messages in %s could not be deleted: %w",
+				len(uids)-deleted, len(uids), mailbox.Name, batchErr)
+		}
 		return deleted, fmt.Errorf("the server kept %d of %d messages in %s", len(uids)-deleted, len(uids), mailbox.Name)
 	}
 	return deleted, nil
+}
+
+// trashMessagesStillHeld counts how many of the messages a purge set out to
+// delete the folder still holds. It is the truthful answer where the per-batch
+// confirmations are not: batches are only independent of one another on a
+// server with UIDPLUS.
+//
+// A folder that has been recreated since the purge started answers nothing
+// about those UIDs, so it is an error rather than a count of zero.
+func (s *Service) trashMessagesStillHeld(ctx context.Context, account store.MailAccount, mailbox store.Mailbox,
+	uids []uint32, uidValidity uint32) (int, error) {
+	current, currentValidity, err := s.trashSnapshot(ctx, account, mailbox)
+	if err != nil {
+		return 0, err
+	}
+	if currentValidity != uidValidity {
+		return 0, fmt.Errorf("%s is now generation %d, not the %d this purge deleted from",
+			mailbox.Name, currentValidity, uidValidity)
+	}
+	held := make(map[uint32]struct{}, len(current))
+	for _, uid := range current {
+		held[uid] = struct{}{}
+	}
+	kept := 0
+	for _, uid := range uids {
+		if _, still := held[uid]; still {
+			kept++
+		}
+	}
+	return kept, nil
+}
+
+// expungeTrashBatch deletes one batch, trying again on a fresh login when the
+// connection it was deleting over died. The held connection is dropped by the
+// failing attempt itself, so the next one starts from a new login rather than a
+// dead socket.
+func (s *Service) expungeTrashBatch(ctx context.Context, session *expungeSessionHolder, expunger ExpungeFetcher,
+	userID int64, account store.MailAccount, mailbox string, uids []uint32, uidValidity uint32) ([]uint32, error) {
+	var lastErr error
+	for attempt := 1; attempt <= emptyTrashBatchAttempts; attempt++ {
+		gone, err := session.expunge(ctx, expunger, account, mailbox, uids, uidValidity)
+		if err == nil {
+			return gone, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == emptyTrashBatchAttempts {
+			return nil, lastErr
+		}
+		log.Printf("retry empty trash batch user_id=%d account_id=%d mailbox=%q messages=%d attempt=%d/%d: %v",
+			userID, account.ID, mailbox, len(uids), attempt, emptyTrashBatchAttempts, err)
+		if err := s.pauseBeforeEmptyTrashRetry(ctx, attempt); err != nil {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
+}
+
+// pauseBeforeEmptyTrashRetry waits between the attempts on one batch, backing
+// off further each time, and reports the caller's cancellation rather than
+// sleeping through it.
+func (s *Service) pauseBeforeEmptyTrashRetry(ctx context.Context, attempt int) error {
+	delay := defaultEmptyTrashRetryDelay
+	if s != nil && s.emptyTrashRetryDelay > 0 {
+		delay = s.emptyTrashRetryDelay
+	}
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// expungeSessionHolder keeps the connection one purge deletes over, opening it
+// on first use and giving it back when the purge ends.
+type expungeSessionHolder struct {
+	service *Service
+	userID  int64
+	account store.MailAccount
+	session ExpungeSession
+}
+
+// openExpungeSession returns the holder a purge deletes through, or nil when
+// this deployment's fetcher cannot hold a connection open.
+func (s *Service) openExpungeSession(ctx context.Context, userID int64, account store.MailAccount) *expungeSessionHolder {
+	if s == nil || s.Fetcher == nil || ctx.Err() != nil {
+		return nil
+	}
+	if _, ok := s.Fetcher.(ExpungeSessionFetcher); !ok {
+		return nil
+	}
+	return &expungeSessionHolder{service: s, userID: userID, account: account}
+}
+
+// expunge deletes one batch, over the held connection when there is one and
+// through the fetcher's own connection otherwise.
+func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetcher, account store.MailAccount,
+	mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+	if h == nil {
+		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+	}
+	if h.session == nil {
+		opener, ok := h.service.Fetcher.(ExpungeSessionFetcher)
+		if !ok {
+			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+		}
+		session, err := opener.OpenExpungeSession(ctx, h.account)
+		if err != nil {
+			return nil, err
+		}
+		h.session = session
+	}
+	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity)
+	if err != nil {
+		// The held connection may itself be why this failed. Drop it so a retry
+		// of this purge starts from a fresh login rather than a dead socket.
+		h.close()
+	}
+	return gone, err
+}
+
+func (h *expungeSessionHolder) close() {
+	if h == nil || h.session == nil {
+		return
+	}
+	session := h.session
+	h.session = nil
+	if err := session.Close(); err != nil {
+		log.Printf("close expunge session user_id=%d account_id=%d: %v", h.userID, h.account.ID, err)
+	}
 }
 
 // trashSnapshot lists what the folder currently holds, bound to the mailbox

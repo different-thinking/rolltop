@@ -11,6 +11,10 @@ type moveOutcomeUnknownError struct {
 	err error
 }
 
+type sourceUIDGoneError struct {
+	err error
+}
+
 type appendAppliedError struct {
 	err error
 }
@@ -41,6 +45,33 @@ func MoveOutcomeUnknown(err error) error {
 func IsMoveOutcomeUnknown(err error) bool {
 	var unknown *moveOutcomeUnknownError
 	return errors.As(err, &unknown)
+}
+
+func (e *sourceUIDGoneError) Error() string {
+	return e.err.Error()
+}
+
+func (e *sourceUIDGoneError) Unwrap() error {
+	return e.err
+}
+
+// SourceUIDGone marks a move refused because the source mailbox, selected under
+// the UIDVALIDITY the move proved, no longer holds the UID. That is the same
+// evidence reconciliation acts on: the message has left that folder, so there
+// is nothing there to move and the mirror is the thing that is out of date.
+func SourceUIDGone(err error) error {
+	if err == nil || IsSourceUIDGone(err) {
+		return err
+	}
+	return &sourceUIDGoneError{err: err}
+}
+
+// IsSourceUIDGone reports whether a move failed because the message is no
+// longer in the folder it was to be moved out of, rather than because the move
+// itself could not be carried out.
+func IsSourceUIDGone(err error) bool {
+	var gone *sourceUIDGoneError
+	return errors.As(err, &gone)
 }
 
 func (e *appendAppliedError) Error() string {
@@ -113,6 +144,30 @@ type MoveSession interface {
 	Close() error
 }
 
+// MoveOutcome is what one requested UID got out of a batched move. Exactly one
+// of Err and a successful move applies: a nil Err means the server moved that
+// UID, and Receipt is nil when it moved it without usable COPYUID metadata.
+type MoveOutcome struct {
+	UID     uint32
+	Receipt *MoveReceipt
+	Err     error
+}
+
+// BatchMoveSession is an optional MoveSession capability: it moves a whole set
+// of UIDs out of one source mailbox with a single SELECT, UID SEARCH and UID
+// MOVE rather than repeating all three per message. That is the difference
+// between three network round trips per message and three per batch, which is
+// what a whole-filter delete of thousands of messages actually costs.
+//
+// The returned slice covers every requested UID when the error is nil; a
+// non-nil error means the batch as a whole did not run, and the caller decides
+// per message what that means. A session without this capability still works:
+// a batch falls back to one command per message.
+type BatchMoveSession interface {
+	MoveSession
+	MoveMessagesWithReceipts(ctx context.Context, sourceMailbox string, destMailbox string, uids []uint32, expectedSourceUIDValidity uint32) ([]MoveOutcome, error)
+}
+
 // MoveSessionFetcher is an optional Fetcher capability that lets a batch of
 // moves share one login instead of reconnecting for every message. A fetcher
 // without it still works: moves fall back to connecting per message.
@@ -148,6 +203,23 @@ type BatchUIDValidityExistenceFetcher interface {
 // gone. Nothing else in sync may use it.
 type ExpungeFetcher interface {
 	ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+}
+
+// ExpungeSession deletes several batches out of one folder over one held
+// connection. Emptying a full Trash folder is tens of batches, and a fresh TCP
+// handshake, TLS negotiation and LOGIN for each of them is most of what the
+// purge costs — and is what mail hosts throttle. Methods must be called
+// sequentially, and the session is bound to its account at open time.
+type ExpungeSession interface {
+	ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+	Close() error
+}
+
+// ExpungeSessionFetcher is an optional Fetcher capability that lets the batches
+// of one purge share a login. A fetcher without it still works: the purge falls
+// back to connecting for every batch.
+type ExpungeSessionFetcher interface {
+	OpenExpungeSession(ctx context.Context, account store.MailAccount) (ExpungeSession, error)
 }
 
 // MailboxUIDSnapshot binds a mailbox UID listing to UIDVALIDITY and UIDNEXT from

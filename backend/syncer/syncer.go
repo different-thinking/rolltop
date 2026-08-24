@@ -142,11 +142,16 @@ type MailSender interface {
 // Runner decides when work starts, then Service performs one account/mailbox sync
 // against Store, Blob, Search, and Fetcher dependencies.
 type Service struct {
-	Store   *store.Store
-	Blobs   *blob.Store
-	Search  *search.Service
-	Fetcher Fetcher
-	Sender  MailSender
+	Store  *store.Store
+	Blobs  *blob.Store
+	Search *search.Service
+
+	// reconcileMu guards lastReconciled, the paced clock for folders too large
+	// to reconcile on every turn.
+	reconcileMu    sync.Mutex
+	lastReconciled map[mailboxReconcileKey]time.Time
+	Fetcher        Fetcher
+	Sender         MailSender
 
 	BlobRetention                    time.Duration
 	Notify                           func(userID int64)
@@ -177,6 +182,11 @@ type Service struct {
 	droppedSearchIndexMu sync.Mutex
 	droppedSearchIndex   map[int64]*droppedSearchIndexTally
 
+	// emptyTrashRetryDelay spaces the attempts one Trash batch gets when the
+	// connection it deletes over dies. It is overridden only by focused tests,
+	// which must not sleep through the production pause.
+	emptyTrashRetryDelay time.Duration
+
 	attachmentIndexMu         sync.Mutex
 	attachmentIndexCursor     map[int64]int64
 	attachmentIndexRetryAfter map[attachmentIndexRetryKey]time.Time
@@ -194,7 +204,12 @@ type Service struct {
 }
 
 const (
-	inlineMetadataSyncLimit               = 10000
+	inlineMetadataSyncLimit = 10000
+	// largeMailboxReconcileInterval bounds how often a folder above that limit
+	// pays for a full UID listing. It is a pace, not a gate: the folder is always
+	// reconciled eventually, which is what stops mail deleted elsewhere from
+	// living on in the mirror.
+	largeMailboxReconcileInterval         = 30 * time.Minute
 	mailboxGenerationBlobCleanupBatchSize = 25
 )
 
@@ -447,6 +462,12 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 	}
 
 	progress := store.SyncProgress{}
+	// Progress is counted per message and published on a pace. A folder being
+	// repaired or resynced walks thousands of messages and skips most of them,
+	// and every one of those steps used to cost a row write and a broadcast
+	// before the message itself cost anything. Folder boundaries still commit,
+	// so what a turn mirrored is durable alongside the checkpoint that proves it.
+	reportProgress := s.syncProgressReporter(userID, run.ID, &progress)
 	if len(requestedMailboxes) == 1 {
 		progress.CurrentMailbox = strings.TrimSpace(requestedMailboxes[0])
 		if progress.CurrentMailbox != "" {
@@ -827,7 +848,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 					return err
 				}
 			}
-			return s.updateSyncProgress(ctx, userID, run.ID, progress)
+			return reportProgress.step(ctx)
 		}
 		generationRecoverySnapshot := MailboxUIDSnapshot{}
 		if generationRebuildPending {
@@ -845,7 +866,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				if progress.MessagesTotal < progress.MessagesSeen {
 					progress.MessagesTotal = progress.MessagesSeen
 				}
-				return s.updateSyncProgress(ctx, userID, run.ID, progress)
+				return reportProgress.commit(ctx)
 			}
 			generationRecoverySnapshot, prewarmFatalErr, prewarmErr = s.prewarmPendingMailboxGeneration(ctx,
 				userID, account, mailbox, planned.Status.UIDValidity, prewarmHandle, seedRecoveryProgress)
@@ -903,7 +924,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				if !prewarmed {
 					progress.MessagesSkipped++
 				}
-				if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+				if err := reportProgress.step(ctx); err != nil {
 					return err
 				}
 				return pauseSyncTurnIfBudgetSpent(ctx, progress)
@@ -952,7 +973,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 					lastUIDs[mailboxName] = item.UID
 					generationRecoveryCheckpoint(ctx, item.UID)
 				}
-				if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+				if err := reportProgress.step(ctx); err != nil {
 					return err
 				}
 				return pauseSyncTurnIfBudgetSpent(ctx, progress)
@@ -991,7 +1012,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 				pendingImportUID = 0
 				generationRecoveryCheckpoint(ctx, item.UID)
 			}
-			if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+			if err := reportProgress.step(ctx); err != nil {
 				return err
 			}
 			return pauseSyncTurnIfBudgetSpent(ctx, progress)
@@ -1078,7 +1099,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 			}
 			progress.CurrentMailbox = mailboxName
 			progress.CurrentUID = lastUIDs[mailboxName]
-			s.updateSyncProgress(finishCtx, userID, run.ID, progress)
+			reportProgress.commit(finishCtx)
 			cancelFinish()
 			log.Printf("sync user_id=%d account_id=%d mailbox=%q paused on its turn budget: seen=%d stored=%d skipped=%d checkpoint_uid=%d cancelled_mid_fetch=%t",
 				userID, account.ID, mailboxName, progress.MessagesSeen, progress.MessagesStored,
@@ -1096,7 +1117,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 			// next bounded history batch.
 			progress.CurrentMailbox = mailboxName
 			progress.CurrentUID = lastUIDs[mailboxName]
-			if err := s.updateSyncProgress(ctx, userID, run.ID, progress); err != nil {
+			if err := reportProgress.commit(ctx); err != nil {
 				status = "failed"
 				errText = err.Error()
 				return run, err
@@ -1110,18 +1131,35 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		if options.deferOrdinaryMaintenanceNow() {
 			log.Printf("defer mailbox metadata reconciliation user_id=%d account_id=%d mailbox=%q reason=mailbox-generation-recovery",
 				userID, account.ID, mailboxName)
-		} else if s.shouldSyncInlineMetadata(planned) {
-			if err := s.syncMailboxReadFlags(ctx, userID, account, mailbox); err != nil {
-				log.Printf("sync seen flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
-			if err := s.syncMailboxStarFlags(ctx, userID, account, mailbox); err != nil {
-				log.Printf("sync flagged flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
-			if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
-				log.Printf("reconcile mailbox user_id=%d mailbox=%s: %v", userID, mailboxName, err)
-			}
 		} else {
-			log.Printf("defer large-folder metadata reconciliation user_id=%d mailbox=%s messages=%d threshold=%d", userID, mailboxName, planned.Status.Messages, inlineMetadataSyncLimit)
+			// Flag sync is what the size limit is actually about: it searches the
+			// whole folder twice and then writes a flag for every local message
+			// outside each answer.
+			if s.shouldSyncInlineMetadata(planned) {
+				if err := s.syncMailboxReadFlags(ctx, userID, account, mailbox); err != nil {
+					log.Printf("sync seen flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				}
+				if err := s.syncMailboxStarFlags(ctx, userID, account, mailbox); err != nil {
+					log.Printf("sync flagged flags user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				}
+			} else {
+				log.Printf("defer large-folder flag sync user_id=%d mailbox=%s messages=%d threshold=%d",
+					userID, mailboxName, planned.Status.Messages, inlineMetadataSyncLimit)
+			}
+			// Reconciliation is not deferred with it. Skipping a flag sync leaves a
+			// read mark stale; skipping this leaves mail the server no longer has on
+			// the reader's screen, and nothing else ever removes it — a large folder
+			// used to keep every message deleted elsewhere, forever.
+			if since, due := s.mailboxReconcileDue(userID, mailbox, planned); due {
+				if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
+					log.Printf("reconcile mailbox user_id=%d mailbox=%s: %v", userID, mailboxName, err)
+				} else {
+					s.recordMailboxReconciled(userID, mailbox)
+				}
+			} else {
+				log.Printf("skip mailbox reconciliation user_id=%d mailbox=%s messages=%d reconciled_ago=%s interval=%s",
+					userID, mailboxName, planned.Status.Messages, since.Round(time.Second), largeMailboxReconcileInterval)
+			}
 		}
 		if planned.Status.UIDValidity > 0 {
 			if err := s.Store.FinalizeMailboxGenerationRebuild(ctx, userID, account.ID, mailbox.ID, planned.Status.UIDValidity); err != nil {
@@ -1147,7 +1185,7 @@ func (s *Service) syncAccount(ctx context.Context, userID int64, account store.M
 		progress.MailboxesDone++
 		progress.CurrentMailbox = mailboxName
 		progress.CurrentUID = lastUIDs[mailboxName]
-		s.updateSyncProgress(ctx, userID, run.ID, progress)
+		reportProgress.commit(ctx)
 		// Blob cleanup is durable derived maintenance. Drain only a small batch
 		// after current mail and its checkpoint are visible; a large generation
 		// reset must not spend minutes deleting old cache entries before the
@@ -1275,6 +1313,11 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 	// until the repair completes, because it is also the baseline that separates
 	// new arrivals from mirrored history.
 	var repairHandled int
+	// A sparse repair walks every UID the folder is missing and steps over the
+	// ones another turn already mirrored. Reporting each of those steps costs a
+	// row write and a broadcast before the message itself costs anything, so the
+	// tally is paced here the same way the ordinary fetch paces its own.
+	reportRepair := s.syncProgressReporter(userID, runID, progress)
 	storeRepaired := func(item FetchedMessage) error {
 		if item.Mailbox == "" {
 			item.Mailbox = mailbox.Name
@@ -1307,7 +1350,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 					}
 				}
 				progress.MessagesSkipped++
-				return s.updateSyncProgress(ctx, userID, runID, *progress)
+				return reportRepair.step(ctx)
 			}
 			return nil
 		}
@@ -1360,7 +1403,7 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 					return err
 				}
 			}
-			if err := s.updateSyncProgress(ctx, userID, runID, *progress); err != nil {
+			if err := reportRepair.step(ctx); err != nil {
 				return err
 			}
 		}
@@ -1384,7 +1427,15 @@ func (s *Service) repairRequestedIncompleteMailbox(ctx context.Context, userID i
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return completionBatch.Flush(ctx)
+		if err := completionBatch.Flush(ctx); err != nil {
+			return err
+		}
+		// Whatever the pace withheld belongs with the batches this commits: the
+		// messages are mirrored, so the tally that says so has to be durable too.
+		if progress == nil {
+			return nil
+		}
+		return reportRepair.commit(ctx)
 	}
 	// handleRepairFetchError commits what a bounded turn mirrored before it ran
 	// out of time, on a context that outlives the spent budget. Committing the
@@ -1490,6 +1541,42 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 	return plans, nil
 }
 
+// syncRunProgressInterval bounds how often a run publishes the tally it keeps
+// per message. It is short enough that the sidebar and settings indicators still
+// move while a run works, and long enough that reporting the work cannot come to
+// cost more than doing it.
+const syncRunProgressInterval = 500 * time.Millisecond
+
+// syncProgressReporter paces a run's progress writes. It holds the run's own
+// progress value rather than a copy, so a paced step and a committed boundary
+// always publish the same tally.
+type syncProgressReporter struct {
+	service  *Service
+	userID   int64
+	runID    int64
+	progress *store.SyncProgress
+	last     time.Time
+}
+
+func (s *Service) syncProgressReporter(userID, runID int64, progress *store.SyncProgress) *syncProgressReporter {
+	return &syncProgressReporter{service: s, userID: userID, runID: runID, progress: progress, last: time.Now()}
+}
+
+// step publishes one message's worth of progress if the pace allows. What it
+// skips is never lost: the tally is cumulative, and the next write carries it.
+func (r *syncProgressReporter) step(ctx context.Context) error {
+	if time.Since(r.last) < syncRunProgressInterval {
+		return nil
+	}
+	return r.commit(ctx)
+}
+
+// commit publishes the run's progress now, whatever the pace says.
+func (r *syncProgressReporter) commit(ctx context.Context) error {
+	r.last = time.Now()
+	return r.service.updateSyncProgress(ctx, r.userID, r.runID, *r.progress)
+}
+
 // updateSyncProgress persists a progress snapshot and immediately notifies the
 // event hub, which is what drives the sidebar and settings sync indicators.
 func (s *Service) updateSyncProgress(ctx context.Context, userID, runID int64, progress store.SyncProgress) error {
@@ -1533,10 +1620,47 @@ func (s *Service) recordMailboxStatus(ctx context.Context, userID int64, mailbox
 	}
 }
 
-// shouldSyncInlineMetadata avoids expensive full-mailbox flag and UID searches on
-// very large folders; those folders still get new-message fetches incrementally.
+// mailboxReconcileKey identifies one tenant's folder in the reconciliation clock.
+type mailboxReconcileKey struct {
+	userID    int64
+	mailboxID int64
+}
+
+// shouldSyncInlineMetadata avoids the expensive full-mailbox flag searches on
+// very large folders; those folders still get new-message fetches incrementally,
+// and they are still reconciled — see mailboxReconcileDue.
 func (s *Service) shouldSyncInlineMetadata(plan MailboxPlan) bool {
 	return plan.Status.Messages == 0 || plan.Status.Messages <= inlineMetadataSyncLimit
+}
+
+// mailboxReconcileDue decides whether this turn pays for the folder's UID
+// listing. A folder small enough for inline metadata pays it every turn, as it
+// always has. A larger one pays it on an interval instead: the listing is one
+// command, but it returns every UID the folder holds and is compared against
+// every row the mirror holds, which is not something to repeat on every poll of
+// a fifty-thousand-message folder. The second result is how long ago it last
+// ran, for the log line that says why this turn skipped it.
+func (s *Service) mailboxReconcileDue(userID int64, mailbox store.Mailbox, plan MailboxPlan) (time.Duration, bool) {
+	if s.shouldSyncInlineMetadata(plan) {
+		return 0, true
+	}
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	last, seen := s.lastReconciled[mailboxReconcileKey{userID: userID, mailboxID: mailbox.ID}]
+	if !seen {
+		return 0, true
+	}
+	since := time.Since(last)
+	return since, since >= largeMailboxReconcileInterval
+}
+
+func (s *Service) recordMailboxReconciled(userID int64, mailbox store.Mailbox) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	if s.lastReconciled == nil {
+		s.lastReconciled = map[mailboxReconcileKey]time.Time{}
+	}
+	s.lastReconciled[mailboxReconcileKey{userID: userID, mailboxID: mailbox.ID}] = time.Now()
 }
 func (s *Service) notify(userID int64) {
 	if s.Notify != nil {

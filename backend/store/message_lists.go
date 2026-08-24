@@ -461,6 +461,46 @@ func (s *Store) ListRoleMailScopeMessagesForUser(ctx context.Context, userID int
 	return scanScopeMessages(rows)
 }
 
+// ListMessageSourceMailboxesForUser reports which mailbox each of the named
+// messages sits in. It exists for the move runner, which has to group thousands
+// of messages by the folder they leave before it can move a folder's worth of
+// them with one IMAP command, and cannot afford to read a full message record —
+// bodies and all — to learn one column. Ids with no row are simply absent.
+func (s *Store) ListMessageSourceMailboxesForUser(ctx context.Context, userID int64, ids []int64) (map[int64]int64, error) {
+	if userID <= 0 || len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	mailboxes := make(map[int64]int64, len(ids))
+	const window = 1000
+	for start := 0; start < len(ids); start += window {
+		placeholders, idArgs := int64ListPlaceholders(ids[start:min(start+window, len(ids))])
+		args := append([]any{userID}, idArgs...)
+		rows, err := db.QueryContext(ctx, `SELECT id, mailbox_id FROM messages
+			WHERE user_id = ? AND id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, mailboxID int64
+			if err := rows.Scan(&id, &mailboxID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			mailboxes[id] = mailboxID
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return mailboxes, nil
+}
+
 // int64ListPlaceholders renders an IN list for a caller-owned set of IDs. Only
 // values the store itself resolved are ever passed here, never request input.
 func int64ListPlaceholders(values []int64) (string, []any) {

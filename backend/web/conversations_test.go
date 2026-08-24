@@ -215,3 +215,78 @@ func TestSummarizeConversationDedupesMailboxCopies(t *testing.T) {
 		t.Fatalf("starred message id = %d, want 1", conv.StarredMessageID)
 	}
 }
+
+// A thread can hold copies of the same mail in several accounts, and a folder
+// belongs to exactly one account, so the row has to say which account each of
+// its messages is in. A distinct account set only says how many are involved.
+func TestSummarizeConversationPairsEveryMessageWithItsAccount(t *testing.T) {
+	now := time.Now()
+	thread := []store.MessageRecord{
+		{
+			ID:              1,
+			AccountID:       7,
+			MessageIDHeader: "<same@example.test>",
+			Subject:         "Invoice",
+			FromAddr:        "Billing <billing@example.test>",
+			Date:            now,
+		},
+		{
+			ID:              2,
+			AccountID:       9,
+			MessageIDHeader: "<same@example.test>",
+			Subject:         "Invoice",
+			FromAddr:        "Billing <billing@example.test>",
+			Date:            now.Add(time.Second),
+		},
+		{
+			ID:              3,
+			AccountID:       7,
+			MessageIDHeader: "<reply@example.test>",
+			InReplyTo:       "<same@example.test>",
+			Subject:         "Re: Invoice",
+			FromAddr:        "Me <me@example.test>",
+			Date:            now.Add(2 * time.Second),
+		},
+	}
+	conv := summarizeConversation(thread, map[string]bool{"me@example.test": true})
+	if !slices.Equal(conv.MessageIDs, []int64{1, 2, 3}) {
+		t.Fatalf("message ids = %v, want every physical thread message", conv.MessageIDs)
+	}
+	if !slices.Equal(conv.MessageAccountIDs, []int64{7, 9, 7}) {
+		t.Fatalf("account ids = %v, want one entry per message id", conv.MessageAccountIDs)
+	}
+	api := apiConversations([]conversationView{conv})
+	if len(api) != 1 || !slices.Equal(api[0].MessageAccountIDs, []int64{7, 9, 7}) {
+		t.Fatalf("api conversation account ids = %+v", api)
+	}
+}
+
+// A duplicate row the thread lists twice must not shift the accounts out of
+// step with the message IDs they are read alongside.
+func TestSummarizeConversationSkipsRepeatedIDsInBothSlices(t *testing.T) {
+	now := time.Now()
+	message := store.MessageRecord{
+		ID:              4,
+		AccountID:       3,
+		MessageIDHeader: "<one@example.test>",
+		Subject:         "Notice",
+		FromAddr:        "Sender <sender@example.test>",
+		Date:            now,
+	}
+	later := store.MessageRecord{
+		ID:              5,
+		AccountID:       8,
+		MessageIDHeader: "<two@example.test>",
+		InReplyTo:       "<one@example.test>",
+		Subject:         "Re: Notice",
+		FromAddr:        "Sender <sender@example.test>",
+		Date:            now.Add(time.Second),
+	}
+	conv := summarizeConversation([]store.MessageRecord{message, message, later}, map[string]bool{})
+	if !slices.Equal(conv.MessageIDs, []int64{4, 5}) {
+		t.Fatalf("message ids = %v, want the repeat dropped", conv.MessageIDs)
+	}
+	if !slices.Equal(conv.MessageAccountIDs, []int64{3, 8}) {
+		t.Fatalf("account ids = %v, want them to stay parallel to the message ids", conv.MessageAccountIDs)
+	}
+}

@@ -14,7 +14,7 @@ import (
 // local message/search row disappears too, and the raw blob is removed when safe.
 func (s *Service) reconcileMailboxUIDs(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox) error {
 	var (
-		stale []store.MessageRecord
+		stale []store.ExpungedMessage
 		err   error
 	)
 	if snapshotFetcher, ok := s.Fetcher.(MailboxUIDSnapshotFetcher); ok {
@@ -37,12 +37,19 @@ func (s *Service) reconcileMailboxUIDs(ctx context.Context, userID int64, accoun
 	if err != nil {
 		return err
 	}
-	for _, msg := range stale {
-		if s.Search != nil {
-			if err := s.Search.DeleteMessage(ctx, msg.UserID, msg.ID); err != nil {
-				return err
-			}
+	if s.Search != nil && len(stale) > 0 {
+		// One commit for the whole reconciliation. Emptying a Trash folder passes
+		// through here with everything the server confirmed gone, and removing
+		// those documents one at a time is one index commit per message.
+		staleIDs := make([]int64, 0, len(stale))
+		for _, msg := range stale {
+			staleIDs = append(staleIDs, msg.ID)
 		}
+		if err := s.Search.DeleteMessages(ctx, userID, staleIDs); err != nil {
+			return err
+		}
+	}
+	for _, msg := range stale {
 		if _, err := s.deleteUnreferencedBlob(ctx, userID, msg.BlobID, msg.BlobPath); err != nil {
 			return err
 		}

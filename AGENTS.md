@@ -23,7 +23,113 @@ site and in review.
   may flag `\Deleted` or expunge. It lists the folder live rather than trusting
   the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
   the UIDs the server reports gone afterwards. Keep all four properties.
+- **A dropped connection pauses a Trash purge; it never ends one.** Emptying a
+  full Trash folder is tens of thousands of messages over many minutes, and a
+  mail host closing that connection partway through is ordinary — Gmail does it
+  routinely. Failing the run on the first one left the folder with almost
+  everything still in it and made the user start over. A batch is therefore
+  tried again on a fresh login (`emptyTrashBatchAttempts`, backing off between
+  attempts), which is safe because it names the same UIDs and a UID the server
+  has already removed reads back as gone rather than as an error; and one batch
+  that exhausts its attempts does not stop the batches behind it. Only
+  `emptyTrashBatchGiveUp` batches failing in a row end the purge, so a
+  connection that is dead for good is not logged into once per remaining batch.
+  Whatever did go is still reconciled locally. What the run reports is then read
+  back from the folder rather than added up from the batches
+  (`trashMessagesStillHeld`): a batch that failed after flagging its messages
+  leaves them carrying `\Deleted`, and without UIDPLUS the only expunge
+  available removes everything so flagged, so a later batch may have taken a
+  failed one with it — uncounted, and otherwise reported to the user as mail
+  that could not be deleted.
+- **A move refused because the source folder no longer holds the message is the
+  mirror's problem, not the move's.** The server, having selected the folder
+  under the UIDVALIDITY the move proved, is giving the same evidence
+  reconciliation acts on: the message has left that folder. Reporting it as a
+  failed move produced a move the user could never complete — the stale row
+  stayed, every retry asked the same question and got the same answer, and the
+  "Move did not finish" notice (`unfinishedMoveRun`, up to
+  `unfinishedMoveRunMaxAge` and with nothing to dismiss it) kept being renewed
+  by the retry meant to clear it. So `syncer.IsSourceUIDGone` counts as handled
+  rather than failed, alongside a row that was already gone — on the batched
+  path and the lone-message one alike, or a drag of one message means something
+  different from a drag of two. The move then marks that folder due for
+  reconciliation (`noteMoveSourceLostMessage`) instead of listing it: the move
+  is holding one connection for its whole run and must not open a second login
+  to the same account, and a foreground move would otherwise keep the tenant's
+  turn — and the browser request — for a full-folder UID listing. The refresh a
+  move already queues for its source folder is what then removes the stale rows,
+  through the one definition of "no longer on the server" that everything else
+  uses.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
+- A move of many messages is one IMAP command, not one per message. Each message
+  used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
+  trips against a server that also rate limits them — which is why a
+  whole-filter delete took minutes and held the tenant's foreground reservation
+  for all of it. `Service.moveMessagesInBatches` gathers the messages leaving one
+  source mailbox generation and moves them together; three properties make that
+  safe and must survive any change to it. One command names **one** source
+  mailbox under **one** proven `UIDVALIDITY`, and names each UID once — so the
+  walk starts a new gathering whenever either changes, and reorders a selection
+  by source folder first, because a selection made in All Mail interleaves them
+  by date and would otherwise batch nothing. Outcomes are read **per message**:
+  a UID the server no longer has, a UID it refuses, and a UID it moved are three
+  answers inside one command, and a batch the server refuses outright is settled
+  by asking which of its UIDs are still in the source rather than by recording
+  the refusal against all of them. And a message whose dispatch has been claimed
+  is always dispatched and always recorded, even when the run is giving up — a
+  claim nobody settles is a transfer the next attempt has to reconcile against
+  the server. The gathering is bounded in bytes as well as in count, like every
+  other batch that holds message content.
+- What a move changed locally is settled once per batch, not once per message.
+  `moveAnnouncer` owns both halves of that — the search documents the moved
+  messages leave behind and telling the reader. A lone move still settles both
+  the moment it lands. A run that did it per message spent a whole index commit
+  on each document and asked every open view to reload thousands of times, and
+  kept the All Mail cache re-warming itself for as long as it worked; between
+  them that was most of what a large move cost everything else the reader was
+  doing. Reconciliation removes its documents in one call for the same reason —
+  emptying a Trash folder passes through it with everything the server confirmed
+  gone.
+- **A long operation reports on a pace, and reporting never costs more than the
+  work.** Three separate things used to be spent per message and are now spent
+  per interval or per batch, and each must stay that way:
+  - The `sync_runs` progress row (`syncProgressReporter.step`, shared by the
+    ordinary fetch, the sparse repair, and a move run). A folder being mirrored
+    or repaired walks thousands of messages and steps over most of them, and a
+    row write per step costs more than the step. The tally is still counted per
+    message and never approximated; only publishing it is paced. Every boundary
+    that ends a turn or a folder **commits** regardless of the pace, so what was
+    mirrored is durable alongside the checkpoint proving it, and `FinishSyncRun`
+    writes the full tally at the end whatever the pace withheld.
+  - The chrome event stream (`syncEventMinInterval` in `apiEvents`). Each signal
+    rebuilds the entire chrome snapshot — the folder list with its counts, the
+    categories, the archive mapping — once per connected tab, against the same
+    database the operation is competing with. Signals are lossy and the payload
+    is a fresh snapshot either way, so a burst collapses into one rebuild per
+    interval. The first signal after a quiet moment must still go out at once:
+    something is waiting on it.
+  - Reconnecting. A batch of moves and the batches of one Trash purge each hold
+    a single login for their whole run (`MoveSession`, `ExpungeSession`); a
+    handshake, TLS negotiation and LOGIN per batch is most of what those cost
+    and is what mail hosts throttle. Each batch still selects its folder and
+    proves its generation, so reuse costs nothing in safety — only the login is
+    saved.
+- Anything in the frontend waiting on work the server will announce waits on the
+  announcement, not on a timer: `waitForChromeEvent` (`chromeEvents.ts`) is that
+  wait, and the interval passed to it is the fallback for the announcement that
+  never comes. A queued move that slept its full interval regardless kept rows
+  hidden for seconds after the move they were hidden for had already finished.
+  It also takes a floor, and a waiter that polls the server needs one: the work
+  announces itself *while* it runs, not only when it finishes, so waking on
+  every announcement turns a five-second poll into several a second for as long
+  as the work lasts — against the database the work is competing with, which is
+  the cost this whole area exists to remove.
+- Settling a claimed message transfer outlives the context that failed it
+  (`context.WithoutCancel`), on the failure path as much as the success path.
+  A batch is claimed before it is dispatched, so one cancelled request strands
+  every claim in it, and a dispatch this process owns but never finished is not
+  reconcilable by anything short of a restart — the messages behind it refuse
+  every later move until then.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,
@@ -68,6 +174,35 @@ site and in review.
   of a thread restores exactly what stayed, and a set of runs that did not all
   end the same way settles each run's own messages, or a dismissal that outlives
   its mutation hides mail that never went anywhere.
+- A conversation row can span accounts, and filing it means filing all of it. A
+  thread carries copies of the same mail whenever several of the accounts were
+  addressed, or none of them was - Bcc, a mailing list - which is exactly when
+  duplicate detection refuses to hide one behind another. Delete, Archive and
+  Report spam name a role, not a folder, and every account has its own folder
+  for that role, so such a row is split by account and moved once per account;
+  the server refuses a move into another account's folder, so never send one set
+  of IDs to one mailbox. Refusing the row instead - the old "conversation
+  containing messages from multiple accounts" error - leaves mail the reader
+  deleted sitting in another account. The row says which account each of its
+  messages is in: `conversationView.MessageAccountIDs` is parallel to
+  `MessageIDs`, not the distinct set of accounts, and the two are built together
+  so nothing can shift them out of step. Each destination reports on its own,
+  the way per-run outcomes already do above. Split filing brings two traps the
+  single-folder version never had. A dismissal may cover only the messages that
+  are really going: a row whose own account's copy is already in the
+  destination, or was skipped for any other reason, stays on the list that holds
+  it, and hiding it there hides it for good, because a dismissal lapses only
+  when the list stops returning the message and this list never will. And
+  "already there" is answered per account for the same reason - the row's
+  mailbox speaks for its own copy alone, so it drops that copy from the move
+  instead of refusing the whole row, and a row is refused only when no account
+  has anything left to move. Every gate that greys out one of these actions
+  (`rowSpamState` and anything added beside it) has to answer the same question
+  the action does, or the button refuses what the swipe beside it would do. The
+  keepalive request budget is the page's, not each move's: destinations share
+  `keepaliveMoveChunkBudget` through `keepaliveChunkBudgets`, which hands the
+  ones past it nothing rather than a rounded-up share, because a truncated
+  background commit must under-claim rather than over-send.
 - A mailbox's `sync_start_at` belongs in the IMAP search, not in a filter after
   the fetch. Apply it only to searches that decide what to **download** — the
   body fetches and `MailboxUIDSnapshot.FetchableUIDs`, which repair uses to pick
@@ -76,6 +211,28 @@ site and in review.
   list, and read/star sync marks every local message outside the returned set as
   unread or unstarred, so a cutoff-limited list there destroys mail that was
   mirrored before the cutoff existed.
+- **Reconciliation is never switched off, only paced.** It is the one thing that
+  removes local mail the server no longer has, it has exactly two callers — the
+  sync turn and emptying Trash — and nothing anywhere retries what it skips. So
+  a folder that stops being reconciled keeps every message deleted elsewhere,
+  permanently, while still receiving new mail: the mirror silently stops being a
+  mirror. It used to sit behind `shouldSyncInlineMetadata` together with the flag
+  sync, which meant exactly that for every folder over `inlineMetadataSyncLimit`.
+  Those two belong apart. The size limit is about the flag sync, which searches
+  the whole folder twice and then writes a flag for every local message outside
+  each answer; a skipped flag sync leaves a read mark stale, which is recoverable
+  and invisible. Reconciliation is one `UID SEARCH`, and a large folder pays for
+  it on `largeMailboxReconcileInterval` rather than every poll
+  (`mailboxReconcileDue`) — a pace, never a gate. Anything that would skip it
+  must say so in a log line naming the folder and the reason, and must arrange
+  for it to happen later. The one silent skip left is the store's
+  `UIDVALIDITY` mismatch guard, which is deliberate: a folder whose generation
+  moved is not one to delete from.
+- Reconciliation reads every row the folder holds, so it reads them **narrow**.
+  `ExpungedMessage` exists for that: it carries the id, UID and blob locator the
+  callers act on and nothing else. Selecting whole `MessageRecord`s there pulled
+  every body and HTML part of a fifty-thousand-message folder into memory to
+  answer a question about UIDs.
 - Google is the leading system for the contacts it owns. A local write to a
   contact whose `source` is `google` must reach Google before the local row
   changes, or the next sync silently undoes it. On an etag conflict, adopt

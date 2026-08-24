@@ -772,13 +772,10 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 		s.serverError(w, r, err)
 		return
 	}
-	finishForeground := func() {}
-	if s.syncRunner != nil {
-		finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule message move", err)
-			return
-		}
+	finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+	if err != nil {
+		s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule message move", err)
+		return
 	}
 	defer finishForeground()
 	if err := s.syncer.MoveMessage(r.Context(), cu.User.ID, id, in.MailboxID); err != nil {
@@ -831,6 +828,29 @@ func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, mess
 	}
 	add(dest.Name)
 	return names, nil
+}
+
+// mailForegroundReservationWait bounds how long one mail write waits for the
+// tenant's foreground turn. These turns are held for the length of the run they
+// start, so a caller behind one does wait by design — a selection larger than
+// one request arrives as several, and emptying a Trash folder holds its turn for
+// the whole purge. What the bound rules out is the other case: a wait that never
+// ends is a browser connection held open on a reservation something else has
+// stopped releasing, and that is worth reporting rather than hanging on.
+//
+// Every mail write that takes a foreground turn from an HTTP handler goes
+// through here. Composing keeps its own, shorter budget
+// (composeForegroundReservationWait): a reply the reader is waiting on cannot
+// stand behind a purge.
+const mailForegroundReservationWait = 2 * time.Minute
+
+func (s *Server) beginMailForegroundOperation(ctx context.Context, userID int64) (func(), error) {
+	if s.syncRunner == nil {
+		return func() {}, nil
+	}
+	reservationCtx, cancel := context.WithTimeout(ctx, mailForegroundReservationWait)
+	defer cancel()
+	return s.syncRunner.BeginForegroundOperation(reservationCtx, userID)
 }
 
 func (s *Server) startMoveRefresh(userID, accountID int64, mailboxes []string) {
@@ -887,13 +907,10 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(in.MessageIDs) > 5 {
-		finishForeground := func() {}
-		if s.syncRunner != nil {
-			finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-			if err != nil {
-				s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk move", err)
-				return
-			}
+		finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+		if err != nil {
+			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk move", err)
+			return
 		}
 		run, err := s.syncer.StartMoveMessages(r.Context(), cu.User.ID, in.MessageIDs, in.MailboxID, func() {
 			s.startMoveRefresh(cu.User.ID, dest.AccountID, refreshMailboxes)
@@ -911,13 +928,10 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "mailbox": dest.Name})
 		return
 	}
-	finishForeground := func() {}
-	if s.syncRunner != nil {
-		finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk move", err)
-			return
-		}
+	finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+	if err != nil {
+		s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk move", err)
+		return
 	}
 	defer finishForeground()
 	moved, err := s.syncer.MoveMessages(r.Context(), cu.User.ID, in.MessageIDs, in.MailboxID)
@@ -979,13 +993,10 @@ func (s *Server) apiBulkCopyMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(in.MessageIDs) > 5 {
-		finishForeground := func() {}
-		if s.syncRunner != nil {
-			finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-			if err != nil {
-				s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk copy", err)
-				return
-			}
+		finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+		if err != nil {
+			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk copy", err)
+			return
 		}
 		run, err := s.syncer.StartCopyMessages(r.Context(), cu.User.ID, in.MessageIDs, in.MailboxID, func() {
 			defer finishForeground()
@@ -1003,13 +1014,10 @@ func (s *Server) apiBulkCopyMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "mailbox": dest.Name})
 		return
 	}
-	finishForeground := func() {}
-	if s.syncRunner != nil {
-		finishForeground, err = s.syncRunner.BeginForegroundOperation(r.Context(), cu.User.ID)
-		if err != nil {
-			s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk copy", err)
-			return
-		}
+	finishForeground, err := s.beginMailForegroundOperation(r.Context(), cu.User.ID)
+	if err != nil {
+		s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule bulk copy", err)
+		return
 	}
 	defer finishForeground()
 	copied, err := s.syncer.CopyMessages(r.Context(), cu.User.ID, in.MessageIDs, in.MailboxID)

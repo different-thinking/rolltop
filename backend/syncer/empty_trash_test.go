@@ -28,6 +28,11 @@ type emptyTrashExpungeCall struct {
 // server would really have left.
 type emptyTrashFetcher struct {
 	uids []uint32
+	// highestUID is the largest UID this folder has ever reported. UIDNEXT never
+	// decreases on a real server, so an emptied folder still refuses to place
+	// new mail at the UIDs it just deleted — and reconciliation depends on that:
+	// a local row at or above UIDNEXT is one it must not remove.
+	highestUID uint32
 	// keep names UIDs the server refuses to remove, so a partial delete can be
 	// distinguished from a finished one.
 	keep         []uint32
@@ -82,12 +87,12 @@ func (f *emptyTrashFetcher) MoveMessage(context.Context, store.MailAccount, stri
 
 func (f *emptyTrashFetcher) SnapshotMailboxUIDs(context.Context, store.MailAccount, string) (MailboxUIDSnapshot, error) {
 	f.snapshots++
-	next := uint32(1)
 	for _, uid := range f.uids {
-		if uid >= next {
-			next = uid + 1
+		if uid > f.highestUID {
+			f.highestUID = uid
 		}
 	}
+	next := f.highestUID + 1
 	return MailboxUIDSnapshot{UIDs: slices.Clone(f.uids), UIDValidity: emptyTrashUIDValidity, UIDNext: next + 100}, nil
 }
 
@@ -176,8 +181,11 @@ func newEmptyTrashFixture(t *testing.T, uids []uint32) emptyTrashFixture {
 		messages[uid] = message
 	}
 	fetcher := &emptyTrashFetcher{uids: slices.Clone(uids)}
+	// Retries are part of what these tests exercise; the pause between them is
+	// not, and the production one would add seconds to every failing case.
+	service := &Service{Store: db, Fetcher: fetcher, emptyTrashRetryDelay: time.Microsecond}
 	return emptyTrashFixture{
-		store: db, service: &Service{Store: db, Fetcher: fetcher}, fetcher: fetcher,
+		store: db, service: service, fetcher: fetcher,
 		userID: user.ID, account: account, trash: trash, inbox: inbox, messages: messages,
 	}
 }
@@ -262,9 +270,11 @@ func TestEmptyTrashLeavesTheMirrorAloneWhenNothingWasDeleted(t *testing.T) {
 		t.Fatalf("local row after a failed expunge = %v, want it untouched", err)
 	}
 	// A failed delete must not reconcile: the local mirror is the only remaining
-	// copy of mail that is still on the server.
-	if fixture.fetcher.snapshots != 1 {
-		t.Fatalf("snapshots = %d, want only the listing taken before the expunge", fixture.fetcher.snapshots)
+	// copy of mail that is still on the server. The two listings are the one
+	// taken before the expunge and the recount of what the folder still holds.
+	if fixture.fetcher.snapshots != 2 {
+		t.Fatalf("snapshots = %d, want the listing before the expunge and the recount after it, and no reconciliation",
+			fixture.fetcher.snapshots)
 	}
 }
 

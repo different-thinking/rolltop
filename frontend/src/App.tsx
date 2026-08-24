@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { notifyChromeEvent } from "./chromeEvents";
 import type { Bootstrap, ChromeEvent, FrontendPluginDefinition, SyncRun, ThemeDefinition } from "./types";
 import type { LocationState, MailCategoryTarget, MessageTransferAction, MoveTarget, SecurityUnlockState, Toast, ToastCommitReason, ToastUndo } from "./appTypes";
 import { ToastStack } from "./components/common";
@@ -711,6 +712,12 @@ export default function App() {
           }
           lastNotify.current = { id: chrome.latest_sync_run.id, stored: newMessages };
         }
+        // Anything waiting on work the server is doing — a queued move settling
+        // its rows — waits on this rather than on a timer of its own. It says a
+        // snapshot arrived and was applied, so it belongs to the snapshot that
+        // parsed: an unreadable event would otherwise send every waiter back to
+        // the server having learned nothing.
+        notifyChromeEvent();
       } catch {
         // Cached/offline views should stay usable if an event is malformed or missed.
       }
