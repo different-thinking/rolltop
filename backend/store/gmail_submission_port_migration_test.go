@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// The Gmail endpoint is pinned rather than typed, so an outgoing server saved
-// before submission moved to 587 keeps a port its owner cannot correct in the
-// settings. Migration 0003 moves those rows, and only those: a host somebody
-// entered themselves is theirs, whatever port it names.
+// The Gmail endpoint is pinned rather than typed, so an account saved before
+// submission moved to 587 keeps a port its owner cannot correct in the
+// settings. Migration 0003 moves those rows in both tables that hold a
+// submission endpoint, and only those: a host somebody entered themselves is
+// theirs, whatever port it names.
 func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 	db := mustOpenTestStore(t)
 	ctx := context.Background()
@@ -37,6 +38,24 @@ func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 	ownGmail := insert("Gmail with a password", "smtp.gmail.com", 465, "password", 0)
 	alreadyMoved := insert("Google on 587", "smtp.gmail.com", 587, AuthTypeGoogleOAuth, 1)
 
+	// mail_accounts.smtp_* is the second place the pin lands: it is the
+	// endpoint store.MailAccount hands the sender, and the one an outgoing
+	// server is seeded from when an incoming account has none yet.
+	insertMailAccount := func(email, smtpHost string, smtpPort int, authType string) int64 {
+		t.Helper()
+		var id int64
+		err := db.DB().QueryRowContext(ctx, `INSERT INTO mail_accounts
+			(user_id, email, host, port, username, encrypted_password, use_tls, smtp_host, smtp_port, smtp_use_tls, created_at, updated_at, auth_type)
+			VALUES ($1, $2, 'imap.gmail.com', 993, $2, '', 1, $3, $4, 1, 0, 0, $5) RETURNING id`,
+			user.ID, email, smtpHost, smtpPort, authType).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	pinnedIncoming := insertMailAccount("pinned@gmail.example.test", "smtp.gmail.com", 465, AuthTypeGoogleOAuth)
+	passwordIncoming := insertMailAccount("own@gmail.example.test", "smtp.gmail.com", 465, "password")
+
 	migration := migrationByVersion(t, "0003-gmail-submission-port")
 	for _, statement := range migration.Statements {
 		if _, err := db.DB().ExecContext(ctx, statement); err != nil {
@@ -45,21 +64,29 @@ func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 	}
 
 	for _, want := range []struct {
-		id   int64
-		port int
-		why  string
+		table string
+		id    int64
+		port  int
+		why   string
 	}{
-		{pinned, 587, "the pinned Google endpoint moves"},
-		{typedHost, 465, "a host the user typed is left alone"},
-		{ownGmail, 465, "Gmail reached with a password is the user's own setting"},
-		{alreadyMoved, 587, "a row already on the new port is untouched"},
+		{"smtp_accounts", pinned, 587, "the pinned Google endpoint moves"},
+		{"smtp_accounts", typedHost, 465, "a host the user typed is left alone"},
+		{"smtp_accounts", ownGmail, 465, "Gmail reached with a password is the user's own setting"},
+		{"smtp_accounts", alreadyMoved, 587, "a row already on the new port is untouched"},
+		{"mail_accounts", pinnedIncoming, 587, "the endpoint an incoming Google account submits through moves too"},
+		{"mail_accounts", passwordIncoming, 465, "an incoming account with a password keeps what it was given"},
 	} {
+		column := "port"
+		if want.table == "mail_accounts" {
+			column = "smtp_port"
+		}
 		var port int
-		if err := db.DB().QueryRowContext(ctx, `SELECT port FROM smtp_accounts WHERE id = $1`, want.id).Scan(&port); err != nil {
+		query := "SELECT " + column + " FROM " + want.table + " WHERE id = $1"
+		if err := db.DB().QueryRowContext(ctx, query, want.id).Scan(&port); err != nil {
 			t.Fatal(err)
 		}
 		if port != want.port {
-			t.Errorf("account %d is on port %d, want %d: %s", want.id, port, want.port, want.why)
+			t.Errorf("%s row %d is on port %d, want %d: %s", want.table, want.id, port, want.port, want.why)
 		}
 	}
 }

@@ -70,10 +70,20 @@ var postgresMigrations = []postgresMigration{
 		// blocks 465 it fails with a connection that times out. Only rows that
 		// still carry the pinned endpoint are moved: a host somebody typed
 		// themselves is theirs.
+		//
+		// Both tables hold the endpoint. smtp_accounts is the outgoing server
+		// the settings page manages; mail_accounts.smtp_* is the submission
+		// endpoint an incoming account was saved with, which is what
+		// store.MailAccount hands the sender and what seeds a new outgoing
+		// server from an incoming one (seedSMTPAccountsFromMailAccounts).
+		// Moving one without the other would send on the old port, or copy it
+		// back into a freshly seeded row.
 		Version: "0003-gmail-submission-port",
 		Statements: []string{
 			`UPDATE smtp_accounts SET port = 587
 				WHERE auth_type = 'google_oauth' AND host = 'smtp.gmail.com' AND port = 465`,
+			`UPDATE mail_accounts SET smtp_port = 587
+				WHERE auth_type = 'google_oauth' AND smtp_host = 'smtp.gmail.com' AND smtp_port = 465`,
 		},
 	},
 }
