@@ -189,3 +189,54 @@ func TestReplaceAttachmentsForMessageIsTenantScoped(t *testing.T) {
 		t.Fatalf("owner attachment lost its created_at: %+v", kept)
 	}
 }
+
+// TestReplaceAttachmentsForMessageKeepsRowMeaningWhenAPartIsGained is the case
+// position alone gets wrong: a better parse finds an inline picture in front of
+// the attachment already stored, and the row an open view holds a URL for has
+// to keep meaning that attachment.
+func TestReplaceAttachmentsForMessageKeepsRowMeaningWhenAPartIsGained(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	defer db.Close()
+
+	user, err := db.CreateUser(ctx, "attachment-replace-gain@example.test", "Owner", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := createIndexedMessageForResetTest(t, ctx, db, user, "INBOX", true, 1)
+	invoice := Attachment{
+		UserID: user.ID, MessageID: message.ID, BlobID: message.BlobID,
+		Filename: "invoice.pdf", ContentType: "application/pdf", Size: 4096,
+	}
+	before, err := db.ReplaceAttachmentsForMessage(ctx, user.ID, message.ID, []Attachment{invoice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logo := Attachment{
+		UserID: user.ID, MessageID: message.ID, BlobID: message.BlobID,
+		ContentType: "image/png", ContentID: "logo@example.test", IsInline: true, Size: 64,
+	}
+	after, err := db.ReplaceAttachmentsForMessage(ctx, user.ID, message.ID, []Attachment{logo, invoice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("attachments = %+v, want the picture and the invoice", after)
+	}
+	kept, err := db.GetAttachmentForUser(ctx, user.ID, before[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Filename != "invoice.pdf" || kept.ContentType != "application/pdf" {
+		t.Fatalf("row %d now serves a different part: %+v", before[0].ID, kept)
+	}
+	var picture Attachment
+	for _, att := range after {
+		if att.ID != before[0].ID {
+			picture = att
+		}
+	}
+	if picture.ContentID != "logo@example.test" || !picture.IsInline {
+		t.Fatalf("gained part was not stored as the inline picture: %+v", picture)
+	}
+}

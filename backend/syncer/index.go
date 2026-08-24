@@ -218,9 +218,10 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 }
 
 // attachmentRowsForFiles maps parsed MIME parts onto attachment rows in parse
-// order, which is the order ReplaceAttachmentsForMessage matches existing rows
-// in. Bodies are not stored: BlobPath stays empty so the row is served from the
-// raw message the BlobID names.
+// order, which is the order ReplaceAttachmentsForMessage falls back to for the
+// parts it cannot match to a row by Content-ID or filename. Bodies are not
+// stored: BlobPath stays empty so the row is served from the raw message the
+// BlobID names.
 func attachmentRowsForFiles(userID, messageID, blobID int64, files []mailparse.Attachment) []store.Attachment {
 	rows := make([]store.Attachment, 0, len(files))
 	for _, file := range files {

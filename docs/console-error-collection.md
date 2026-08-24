@@ -255,6 +255,20 @@ protokolliert bei jedem 404 den Grund samt Anhang-ID
   `maxSyncAttachmentRepairBytes` bleibt, sonst im Hintergrund mit
   anschließendem Refresh.
 
+Die wahrscheinlichste Ursache für diesen 404 ist inzwischen aber eine
+dritte, die parallel auf `main` behoben wurde: Der Anhang-Index hat beim
+Reindizieren alle Zeilen einer Nachricht gelöscht und neu eingefügt, also
+jedem Anhang eine neue ID gegeben — während die geöffnete Mail die alte
+noch im HTML stehen hatte („Keep attachment row IDs stable across
+reindexing"). Seitdem werden Zeilen aktualisiert statt ersetzt. Diese
+Zuordnung lief nach Position, was voraussetzt, dass dieselbe Rohnachricht
+immer zu denselben Teilen in derselben Reihenfolge parst — genau das ändert
+`isCIDReferencedPart` einmalig: Aus einer Zeile für die Rechnung werden ein
+Bild an erster und die Rechnung an zweiter Stelle, und die alte URL läge
+plötzlich auf dem Bild. Deshalb ordnet `ReplaceAttachmentsForMessage` Teile
+jetzt zuerst über Content-ID und Dateiname ihren Zeilen zu und erst danach
+der Reihe nach.
+
 Offen bleibt der Fall, dass eine Anhangszeile zwar existiert, sich in der
 geparsten Rohnachricht aber nicht wiederfinden lässt. Ob Anhang 48027 einer
 davon war, sagt das Serverlog beim nächsten Auftreten.

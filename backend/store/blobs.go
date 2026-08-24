@@ -2,7 +2,10 @@
 
 package store
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // CreateBlob records blob metadata in the user database after the file has been written to the user blob directory.
 func (s *Store) CreateBlob(ctx context.Context, b BlobRecord) (BlobRecord, error) {
@@ -230,9 +233,79 @@ func (s *Store) ListAttachmentsForMessages(ctx context.Context, userID int64, me
 // raw message parses to the same parts in the same order — so only a message
 // that really gained or lost a part inserts or deletes anything.
 //
+// Position alone is not enough for that, because a parse can gain a part that
+// belongs in front of the ones already stored: mailparse learning to keep an
+// inline image that carries a Content-ID but no filename turns one row for an
+// invoice into a picture in first position and an invoice in second, and every
+// URL an open view holds for that invoice then serves the picture - worse than
+// the 404 above, because it answers. So each part is first matched to the row
+// that already holds it (by Content-ID, then by filename and size), and only
+// what is left over is paired in order, which is what keeps a row whose
+// metadata a better parse genuinely corrected on the ID it already had.
+//
 // An empty files slice removes every row; callers that reparse a message keep
 // what they have instead of calling with one, because a parse that yields no
 // files is the failure case, not an attachment-free message.
+// matchAttachmentRows pairs each parsed part with the index of the existing
+// row that already holds it, or -1 for a part no row holds yet. A part is
+// recognised by its Content-ID first - the one identifier a message body refers
+// to a part by - then by filename and size, and whatever is still unpaired is
+// matched in order, so a reparse that only corrected metadata keeps every row
+// where it was.
+func matchAttachmentRows(files, existing []Attachment) []int {
+	rowForFile := make([]int, len(files))
+	for i := range rowForFile {
+		rowForFile[i] = -1
+	}
+	used := make([]bool, len(existing))
+	match := func(fits func(file, row Attachment) bool) {
+		for i, file := range files {
+			if rowForFile[i] >= 0 {
+				continue
+			}
+			for j, row := range existing {
+				if used[j] || !fits(file, row) {
+					continue
+				}
+				rowForFile[i] = j
+				used[j] = true
+				break
+			}
+		}
+	}
+	match(func(file, row Attachment) bool {
+		id := strings.TrimSpace(strings.Trim(file.ContentID, "<>"))
+		return id != "" && strings.EqualFold(strings.TrimSpace(strings.Trim(row.ContentID, "<>")), id)
+	})
+	match(func(file, row Attachment) bool {
+		name := strings.TrimSpace(file.Filename)
+		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name) && row.Size == file.Size
+	})
+	match(func(file, row Attachment) bool {
+		name := strings.TrimSpace(file.Filename)
+		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name)
+	})
+	// Whatever is left is paired in order. A part the parse describes
+	// differently than the row does - a filename a better parse decoded, a size
+	// that changed with it - is the same part in the same place, and pairing it
+	// keeps its ID rather than trading the row in for a new one.
+	next := 0
+	for i := range files {
+		if rowForFile[i] >= 0 {
+			continue
+		}
+		for next < len(existing) && used[next] {
+			next++
+		}
+		if next >= len(existing) {
+			break
+		}
+		rowForFile[i] = next
+		used[next] = true
+	}
+	return rowForFile
+}
+
 func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messageID int64, files []Attachment) ([]Attachment, error) {
 	existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
 	if err != nil {
@@ -250,13 +323,16 @@ func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messag
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	rowForFile := matchAttachmentRows(files, existing)
+	taken := make(map[int]bool, len(existing))
 	for i, file := range files {
-		if i < len(existing) {
+		if row := rowForFile[i]; row >= 0 {
+			taken[row] = true
 			if _, err := tx.ExecContext(ctx, `UPDATE attachments
 				SET blob_id = ?, filename = ?, content_type = ?, content_id = ?, is_inline = ?, size = ?, blob_path = ?
 				WHERE user_id = ? AND id = ?`,
 				file.BlobID, file.Filename, file.ContentType, file.ContentID, boolInt(file.IsInline), file.Size, file.BlobPath,
-				userID, existing[i].ID); err != nil {
+				userID, existing[row].ID); err != nil {
 				return nil, err
 			}
 			continue
@@ -267,7 +343,10 @@ func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messag
 			return nil, err
 		}
 	}
-	for _, surplus := range existing[min(len(files), len(existing)):] {
+	for i, surplus := range existing {
+		if taken[i] {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM attachments WHERE user_id = ? AND id = ?`, userID, surplus.ID); err != nil {
 			return nil, err
 		}
