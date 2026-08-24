@@ -485,3 +485,99 @@ func TestEmailDocumentRemovesBlockedRemoteImages(t *testing.T) {
 		t.Fatalf("legitimate image was removed: %s", doc)
 	}
 }
+
+func TestEmailDocumentNeutralizesRefsThatResolveAgainstTheApp(t *testing.T) {
+	// about:srcdoc inherits the reader's URL as its base, so each of these would
+	// be fetched from Rolltop itself - refused by the document CSP here, and
+	// answered with the app's own HTML or a 404 once images are allowed.
+	body := `<style>@font-face{font-family:Duplicate;src:url(static/DuplicateSans-Regular-Web.woff2) format("woff2")}@import "mail.css";</style>` +
+		`<img src="images/hero.png" alt="Hero">` +
+		`<img srcset="images/hero.png 1x">` +
+		`<link rel="stylesheet" href="/assets/mail.css">` +
+		`<div style="background-image:url('../tile.png')">Tile</div>`
+	for _, imagesAllowed := range []bool{false, true} {
+		doc := emailDocument(body, "", imagesAllowed)
+		for _, live := range []string{
+			"url(static/DuplicateSans-Regular-Web.woff2)",
+			` src="images/hero.png"`,
+			` srcset="images/hero.png 1x"`,
+			`href="/assets/mail.css"`,
+			"url('../tile.png')",
+			"mail.css",
+		} {
+			if strings.Contains(doc, live) {
+				t.Fatalf("images_allowed=%t kept a reference to the app origin %q: %s", imagesAllowed, live, doc)
+			}
+		}
+		for _, parked := range []string{
+			`data-rolltop-unresolved-src="images/hero.png"`,
+			`data-rolltop-unresolved-srcset="images/hero.png 1x"`,
+		} {
+			if !strings.Contains(doc, parked) {
+				t.Fatalf("images_allowed=%t dropped %q without a record: %s", imagesAllowed, parked, doc)
+			}
+		}
+		if !strings.Contains(doc, `alt="Hero"`) || !strings.Contains(doc, "Tile") {
+			t.Fatalf("images_allowed=%t lost message content: %s", imagesAllowed, doc)
+		}
+	}
+}
+
+func TestEmailDocumentKeepsResolvableRefsWhileNeutralizingRelativeOnes(t *testing.T) {
+	attachments := []store.Attachment{{ID: 7, ContentID: "hero@example.test", IsInline: true, ContentType: "image/png"}}
+	body := `<img src="cid:hero@example.test"><img src="data:image/png;base64,AAAA"><img src="/attachments/7/download">` +
+		`<img src="cid:missing"><a href="#top">Top</a><a href="mailto:sender@example.test">Mail</a>` +
+		`<img src="https://cdn.example.test/hero.png">`
+	doc := emailDocumentWithInlineAttachments(body, "", true, nil, attachments)
+	for _, kept := range []string{
+		`src="/attachments/7/inline"`,
+		`src="data:image/png;base64,AAAA"`,
+		`src="/attachments/7/download"`,
+		`src="cid:missing"`,
+		`href="#top"`,
+		`href="mailto:sender@example.test"`,
+		`src="https://cdn.example.test/hero.png"`,
+	} {
+		if !strings.Contains(doc, kept) {
+			t.Fatalf("%q was neutralized: %s", kept, doc)
+		}
+	}
+	if strings.Contains(doc, "data-rolltop-unresolved-") {
+		t.Fatalf("a resolvable reference was treated as unresolvable: %s", doc)
+	}
+}
+
+func TestEmailDocumentRemovesInlineScripting(t *testing.T) {
+	// Nothing here can run: the frame is sandboxed without allow-scripts and the
+	// document CSP allows no script source. Each one would still cost a
+	// "Blocked script execution in 'about:srcdoc'" line when it fired.
+	body := `<img src="cid:missing" onerror="alert(1)" alt="Hero">` +
+		`<a href="javascript:alert(2)" onclick='alert(3)'>Angebot</a>` +
+		`<body onload="alert(4)"><p ONMOUSEOVER="alert(5)">Text</p>`
+	doc := emailDocument(body, "", false)
+	for _, script := range []string{"alert(1)", "alert(2)", "alert(3)", "alert(4)", "alert(5)", "onerror", "onclick", "onload", "javascript:"} {
+		if strings.Contains(strings.ToLower(doc), strings.ToLower(script)) {
+			t.Fatalf("document kept inline scripting %q: %s", script, doc)
+		}
+	}
+	if !strings.Contains(doc, `alt="Hero"`) || !strings.Contains(doc, "Angebot") || !strings.Contains(doc, "Text") {
+		t.Fatalf("message content was lost: %s", doc)
+	}
+}
+
+func TestEmailDocumentKeepsRelativeRefsUnderADeclaredBase(t *testing.T) {
+	body := `<base href="https://newsletter.example.test/2026/08/"><img src="hero.png" alt="Hero">`
+	allowed := emailDocumentWithBlocklist(body, "", true, nil)
+	if !strings.Contains(allowed, ` src="hero.png"`) {
+		t.Fatalf("relative reference under a declared base was dropped: %s", allowed)
+	}
+	// Without images the same reference is a remote one, which is what this
+	// mode refuses - live or not, it would cost a CSP violation.
+	blocked := emailDocument(body, "", false)
+	if strings.Contains(blocked, ` src="hero.png"`) {
+		t.Fatalf("blocked document kept a reference to the sender's server: %s", blocked)
+	}
+	if !strings.Contains(blocked, `alt="Hero"`) {
+		t.Fatalf("message content was lost: %s", blocked)
+	}
+}

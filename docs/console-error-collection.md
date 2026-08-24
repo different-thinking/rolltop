@@ -1,8 +1,10 @@
 # Gesammelte Browser-Konsolenmeldungen
 
-Reine Sammlung von Meldungen, die beim Benutzen der App in der
-Browser-Konsole auftauchen. Hier wird nichts bewertet und nichts behoben —
-die Einträge liegen hier, bis jemand sie sich vornimmt.
+Sammlung von Meldungen, die beim Benutzen der App in der Browser-Konsole
+auftauchen. Ein Eintrag wird nicht bewertet, wenn er hier landet — er liegt
+hier, bis jemand ihn sich vornimmt. Ist das geschehen, hält der Eintrag fest,
+was geändert wurde, damit die Sammlung nicht als offen liest, was es nicht
+mehr ist.
 
 Format je Eintrag: Datum, Browser, Meldung im Wortlaut, ggf. eine Zeile
 Kontext dazu, wo im Code sie herkommt.
@@ -23,6 +25,10 @@ rendert Nachrichten-HTML in einem iframe mit
 `sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`.
 `allow-scripts` fehlt dort bewusst, damit Skripte aus fremder Mail nicht
 laufen. Die Meldung ist also die Folge einer Absicht, kein Absturz.
+
+Nachgetragen am 24.08.: Die Absicht bleibt, die Meldung nicht. Ausgelöst hat
+sie kein `<script>` (das wird entfernt), sondern Inline-Handler wie das
+`onerror` eines Bildes, das nicht lädt. Siehe den Eintrag vom 24.08.
 
 ## 2026-08-19 — Sync aus den Einstellungen, 409
 
@@ -68,6 +74,9 @@ mehreren Stellen mit 404: Anhang nicht für den Benutzer gefunden, Blob-Datei
 nicht zu öffnen, oder der Anhang lässt sich in der geparsten Rohnachricht
 nicht wiederfinden. Welche der drei es hier war, ist aus der Konsole allein
 nicht zu sehen — dafür bräuchte es das Serverlog zur Anhang-ID 19026.
+
+Nachgetragen am 24.08.: Der Handler protokolliert den Grund jetzt selbst, und
+zwei der drei Ursachen sind behoben. Siehe den Eintrag vom 24.08.
 
 ## 2026-08-19 — Event-Stream bricht ab (ERR_HTTP2_PROTOCOL_ERROR)
 
@@ -176,3 +185,76 @@ Solange der Index weiter wächst, wiederholt sich die Lage.
 Offen: Der 504 beim Massenlöschen und der Abbruch von `/api/events` könnten
 zu genau diesem Neustart gehören — dafür fehlen in der Sammlung die
 Uhrzeiten der beiden Konsolenmeldungen.
+
+## 2026-08-24 — Bilder einer Mail laden nicht
+
+```text
+Loading the font 'https://3703c955.eu-center.hostim.dev/messages/static/
+DuplicateSans-Regular-Web-1610258950.woff2' violates the following Content
+Security Policy directive: "font-src data:". The action has been blocked.
+about:srcdoc:1 Loading the font 'https://3703c955.eu-center.hostim.dev/messages/
+static/DuplicateSans-Regular-Web-606133164.woff' violates the following Content
+Security Policy directive: "font-src data:". The action has been blocked.
+
+5 Blocked script execution in 'about:srcdoc' because the document's frame is
+sandboxed and the 'allow-scripts' permission is not set.
+/attachments/48027/inline:1  Failed to load resource: the server responded with
+a status of 404 ()
+```
+
+Alle drei Meldungen sind vorgenommen worden; was daran geändert wurde, steht
+unten. Der Reihe nach:
+
+**Die Schriften.** Die URL gehört Rolltop, nicht dem Absender: Ein
+`about:srcdoc`-iframe erbt die URL der Leseransicht als Basis, also löst jede
+*relative* Referenz einer Mail gegen die App auf. Die Mail schrieb
+`url(static/DuplicateSans-Regular-Web-1610258950.woff2)`, der Browser fragte
+daraufhin `/messages/static/…` bei Rolltop an — mit blockierten Bildern
+verweigert das die CSP, mit erlaubten Bildern antwortet die App mit ihrem
+eigenen HTML oder einem 404. Reparieren lässt sich so eine Referenz nicht, denn
+die Herkunft steht nirgends in der Nachricht. `neutralizeUnresolvableRefs`
+(`backend/web/email_document.go`) entfernt sie deshalb wie eine blockierte
+Fremdreferenz und parkt sie unter `data-rolltop-unresolved-*` — in beiden
+Modi, denn „Bilder erlauben" erlaubt den Server des Absenders und nicht die
+eigenen Routen. Eine Ausnahme gibt es: Setzt die Mail selbst ein
+`<base href="https://…">`, löst der Browser ihre relativen Verweise gegen den
+Absender auf. Bei erlaubten Bildern bleiben sie dann stehen, bei blockierten
+werden sie entfernt — mit Basis sind sie genau die Fremdreferenzen, die
+dieser Modus ablehnt.
+
+**Die fünf Sandbox-Meldungen.** Die schon am 19.08. gesammelte Meldung, hier
+fünfmal. Skripte laufen nicht — der iframe ist ohne `allow-scripts`
+sandboxed, und die Dokument-CSP erlaubt keine Skriptquelle —, aber ein
+blockierter Versuch ist nicht still: Jedes `onerror` eines Bildes, das nicht
+lädt, kostet eine Zeile. `<script>` wurde schon vorher entfernt; jetzt
+entfernt `removeInlineScripting` zusätzlich Event-Handler-Attribute und
+`javascript:`-URLs, aus demselben Grund.
+
+**Der 404 auf `/attachments/48027/inline`.** Der Anhang, den der Mail-Body
+per `cid:` einbindet, war über die Anhang-Route nicht zu bekommen. Am 19.08.
+stand hier noch, dass aus der Konsole nicht zu sehen ist, welche der drei
+404-Stellen im Handler es war. Das ist jetzt zu sehen: `handleAttachment`
+protokolliert bei jedem 404 den Grund samt Anhang-ID
+(`attachment unavailable … reason=…`). Zwei Ursachen sind zugleich behoben:
+
+- Eine Anhangsdatei, die sich nicht öffnen lässt (Retention hat sie entfernt,
+  oder sie hat die Platte nie erreicht), beendet die Anfrage nicht mehr mit
+  404, sondern fällt auf die Rohnachricht zurück — denselben Weg, den jeder
+  Anhang ohne eigene Datei ohnehin geht.
+- `mailparse` hat Teile ohne Dateinamen und ohne `Content-Disposition`
+  verworfen. Ein eingebettetes Bild wird aber genau so verschickt: nur
+  `Content-Type: image/png` und `Content-ID`. Ohne Anhangszeile zeigte der
+  `cid:`-Verweis im Body ins Leere. `isCIDReferencedPart` nimmt solche Teile
+  jetzt auf (text/-Teile ausgenommen, sonst wandert der HTML-Body eines
+  `multipart/related` in die Anhangsliste). Das allein hätte nur neu
+  indizierte Mail geheilt, deshalb repariert `ensureInlineCIDAttachments`
+  auch schon gespiegelte: Steht im Body einer geöffneten Nachricht ein
+  `cid:`, das keine Anhangszeile beantwortet, und hat die Nachricht
+  überhaupt keine Anhangszeile, werden die Teile einmal aus der
+  Rohnachricht nachgetragen — synchron, solange die Nachricht unter
+  `maxSyncAttachmentRepairBytes` bleibt, sonst im Hintergrund mit
+  anschließendem Refresh.
+
+Offen bleibt der Fall, dass eine Anhangszeile zwar existiert, sich in der
+geparsten Rohnachricht aber nicht wiederfinden lässt. Ob Anhang 48027 einer
+davon war, sagt das Serverlog beim nächsten Auftreten.
