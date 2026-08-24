@@ -44,21 +44,14 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	bodyHTML = removeScriptElements(bodyHTML)
 	bodyHTML = removeInlineScripting(bodyHTML)
 	bodyHTML = replaceInlineCIDRefs(bodyHTML, attachments)
+	bodyHTML = resolveRefsAgainstDeclaredBase(bodyHTML)
 	if allowRemoteImages {
 		bodyHTML = normalizeProtocolRelativeRemoteRefs(bodyHTML)
 		bodyHTML = removeBlockedRemoteImages(bodyHTML, blockedImagePatterns)
-		// A message that carries its own <base href> answers the question the
-		// pass below exists for: its relative references resolve against the
-		// sender's server, which the reader has just agreed to load from.
-		if !declaresRemoteBase(bodyHTML) {
-			bodyHTML = neutralizeUnresolvableRefs(bodyHTML)
-		}
 	} else {
 		bodyHTML = neutralizeRemoteRefs(bodyHTML)
-		// A declared base does not save a relative reference here: it makes it
-		// remote, and remote is what this mode refuses.
-		bodyHTML = neutralizeUnresolvableRefs(bodyHTML)
 	}
+	bodyHTML = neutralizeUnresolvableRefs(bodyHTML)
 	imgSrc := "'self' data: cid:"
 	styleSrc := "'unsafe-inline'"
 	fontSrc := "data:"
@@ -316,25 +309,143 @@ func neutralizeUnresolvableRefs(bodyHTML string) string {
 	return neutralizeRefs(bodyHTML, unresolvableRefFilter)
 }
 
-// declaresRemoteBase reports a message that sets its own document base to an
-// absolute address. The browser resolves the message's relative references
-// against that rather than against the reader's URL, so they name the sender's
-// server after all.
-func declaresRemoteBase(bodyHTML string) bool {
-	if !strings.Contains(strings.ToLower(bodyHTML), "<base") {
-		return false
+// resolveRefsAgainstDeclaredBase applies a message's own <base href> where the
+// browser would, and then takes the element away.
+//
+// A base changes what every reference in the document is measured from - the
+// sender's relative ones, which is why it is there, but also the two absolute
+// paths this renderer writes into the body itself. Leaving it standing sent
+// /remote-images/<hash> and /attachments/<id>/inline to the sender's web
+// server: a broken picture the local cache exists to prevent, and a request to
+// the sender for a file only Rolltop has. Resolving here settles the sender's
+// references where they belong and hands the rest of the pipeline what it
+// already knows how to read: an absolute URL is remote, and remote is decided
+// by whether the reader allowed images. What is left relative afterwards had no
+// base to resolve against and is dropped as unresolvable.
+func resolveRefsAgainstDeclaredBase(bodyHTML string) string {
+	base, ok := declaredBase(bodyHTML)
+	if !ok {
+		return bodyHTML
 	}
-	// A base inside a comment sets nothing - the browser never reads it as an
-	// element - so reading one here would hand a message the exception on the
-	// strength of markup that does not apply, and leave its relative references
-	// live for the app to answer.
-	bodyHTML = htmlCommentRE.ReplaceAllString(bodyHTML, "")
-	for _, tag := range htmlTagRE.FindAllString(bodyHTML, -1) {
-		if strings.EqualFold(tagName(tag), "base") && isRemoteRef(tagAttrValue(tag, "href")) {
-			return true
+	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, func(css string) string {
+		return resolveCSSRefs(css, base)
+	})
+	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
+		if strings.EqualFold(tagName(tag), "base") && strings.TrimSpace(tagAttrValue(tag, "href")) != "" {
+			return ""
 		}
+		return resolveTagRefs(tag, base)
+	})
+}
+
+// declaredBase reads the base the browser would use: the first <base> element
+// carrying an href, and only when that href names an origin of its own. A base
+// inside a comment sets nothing, and a relative one cannot move a reference off
+// this origin, so neither is read here.
+func declaredBase(bodyHTML string) (*url.URL, bool) {
+	if !strings.Contains(strings.ToLower(bodyHTML), "<base") {
+		return nil, false
 	}
-	return false
+	for _, tag := range htmlTagRE.FindAllString(htmlCommentRE.ReplaceAllString(bodyHTML, ""), -1) {
+		if !strings.EqualFold(tagName(tag), "base") {
+			continue
+		}
+		href := strings.TrimSpace(html.UnescapeString(tagAttrValue(tag, "href")))
+		if href == "" {
+			continue
+		}
+		if strings.HasPrefix(href, "//") {
+			href = "https:" + href
+		}
+		parsed, err := url.Parse(href)
+		if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+			return nil, false
+		}
+		return parsed, true
+	}
+	return nil, false
+}
+
+func resolveTagRefs(tag string, base *url.URL) string {
+	elementAttrs := remoteFetchAttrsByTag[strings.ToLower(tagName(tag))]
+	return rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+		lower := strings.ToLower(attrName)
+		value, quote := splitAttrValue(rawValue)
+		switch {
+		case lower == "style":
+			resolved := resolveCSSRefs(value, base)
+			if resolved == value {
+				return "", false
+			}
+			return "style=" + quoteAttrValue(resolved, quote), true
+		case lower == "srcset":
+			resolved, changed := resolvedSrcset(value, base)
+			if !changed {
+				return "", false
+			}
+			return "srcset=" + quoteAttrValue(resolved, quote), true
+		case remoteFetchAttrs[lower] || elementAttrs[lower] || lower == "href":
+			resolved, changed := resolvedRef(value, base)
+			if !changed {
+				return "", false
+			}
+			return attrName + "=" + quoteAttrValue(resolved, quote), true
+		}
+		return "", false
+	})
+}
+
+func resolveCSSRefs(css string, base *url.URL) string {
+	css = cssImportRuleRE.ReplaceAllStringFunc(css, func(rule string) string {
+		raw := attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)
+		resolved, changed := resolvedRef(strings.Trim(raw, `"'`), base)
+		if !changed {
+			return rule
+		}
+		return strings.Replace(rule, strings.Trim(raw, `"'`), resolved, 1)
+	})
+	return cssURLTokenRE.ReplaceAllStringFunc(css, func(token string) string {
+		raw := attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)
+		resolved, changed := resolvedRef(raw, base)
+		if !changed {
+			return token
+		}
+		return "url(" + resolved + ")"
+	})
+}
+
+func resolvedSrcset(value string, base *url.URL) (string, bool) {
+	candidates := parseSrcset(value)
+	if len(candidates) == 0 {
+		return value, false
+	}
+	changed := false
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		resolved, did := resolvedRef(candidate.url, base)
+		changed = changed || did
+		out = append(out, strings.TrimSpace(resolved+" "+candidate.descriptor))
+	}
+	if !changed {
+		return value, false
+	}
+	return strings.Join(out, ", "), true
+}
+
+// resolvedRef resolves the references a base applies to, which are exactly the
+// ones that would otherwise be measured against Rolltop: isUnresolvableRef
+// already names that set, so the two cannot drift apart and leave a reference
+// neither resolved nor dropped.
+func resolvedRef(value string, base *url.URL) (string, bool) {
+	trimmed := strings.TrimSpace(html.UnescapeString(value))
+	if trimmed == "" || !isUnresolvableRef(trimmed) {
+		return value, false
+	}
+	ref, err := url.Parse(trimmed)
+	if err != nil {
+		return value, false
+	}
+	return html.EscapeString(base.ResolveReference(ref).String()), true
 }
 
 func neutralizeRefs(bodyHTML string, filter refFilter) string {
@@ -616,14 +727,27 @@ func removeBlockedRemoteImages(bodyHTML string, patterns []string) string {
 	}
 	return emailImageTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
 		for _, candidate := range imageURLCandidatesFromTag(tag) {
-			for _, blocker := range blockers {
-				if blocker.MatchString(candidate) {
-					return ""
-				}
+			if remoteImageURLBlocked(blockers, candidate) {
+				return ""
 			}
 		}
 		return tag
 	})
+}
+
+// remoteImageURLBlocked answers the blocklist for one URL. The rules are
+// written against the address the sender put in the message, so everything that
+// consults them has to ask before that address is replaced by anything of ours.
+func remoteImageURLBlocked(blockers []*regexp.Regexp, value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	for _, blocker := range blockers {
+		if blocker.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func compileRemoteImageBlockPatterns(patterns []string) []*regexp.Regexp {

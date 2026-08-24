@@ -13,7 +13,14 @@ import (
 	"rolltop/backend/store"
 )
 
-func (s *Server) cachedRemoteImageURLs(ctx context.Context, userID int64, msg store.MessageRecord, bodyHTML string) map[string]string {
+// cachedRemoteImageURLs maps the remote images of a body onto the local cache,
+// for the ones already in it. A blocked image is deliberately left out of that
+// map: the block rules are written against the URL the sender wrote, and
+// removeBlockedRemoteImages recognises the tag to drop by exactly that URL, so
+// an image rewritten to /remote-images/<hash> would survive every rule - among
+// them a rule added after the image was cached, which would then never match
+// again for as long as the cache entry lives.
+func (s *Server) cachedRemoteImageURLs(ctx context.Context, userID int64, msg store.MessageRecord, bodyHTML string, blockRules []string) map[string]string {
 	if s == nil || s.store == nil || s.blobs == nil || strings.TrimSpace(bodyHTML) == "" {
 		return nil
 	}
@@ -21,9 +28,13 @@ func (s *Server) cachedRemoteImageURLs(ctx context.Context, userID int64, msg st
 	if len(candidates) == 0 {
 		return nil
 	}
+	blockers := compileRemoteImageBlockPatterns(blockRules)
 	out := map[string]string{}
 	var missing []remoteimages.Candidate
 	for _, candidate := range candidates {
+		if remoteImageURLBlocked(blockers, candidate.URL) {
+			continue
+		}
 		hash := remoteimages.Hash(candidate.URL)
 		cache, err := s.store.GetRemoteImageCacheByHash(ctx, userID, hash)
 		if err == nil && cache.Status == store.RemoteImageStatusOK && strings.TrimSpace(cache.BlobPath) != "" {
@@ -35,11 +46,13 @@ func (s *Server) cachedRemoteImageURLs(ctx context.Context, userID int64, msg st
 		}
 	}
 	if len(missing) > 0 {
-		s.remoteImageCache().WarmMessageAsync(plugins.RemoteImageFetchRequest{
+		// Warming is handed the candidates this loop kept rather than the body,
+		// so a blocked image is not fetched on the way to being dropped.
+		s.remoteImageCache().WarmCandidatesAsync(plugins.RemoteImageFetchRequest{
 			UserID:    userID,
 			MessageID: msg.MessageIDHeader,
 			Sender:    msg.FromAddr,
-		}, bodyHTML)
+		}, missing)
 	}
 	if len(out) == 0 {
 		return nil

@@ -101,7 +101,14 @@ func Hash(rawURL string) string {
 }
 
 func (c Cache) WarmMessageAsync(req plugins.RemoteImageFetchRequest, bodyHTML string) {
-	candidates := Extract(bodyHTML)
+	c.WarmCandidatesAsync(req, Extract(bodyHTML))
+}
+
+// WarmCandidatesAsync fetches exactly the images the caller decided are worth
+// fetching. A caller that has already read the body knows more about it than a
+// second extraction would - which images are cached, and which ones a block
+// rule means to drop rather than store.
+func (c Cache) WarmCandidatesAsync(req plugins.RemoteImageFetchRequest, candidates []Candidate) {
 	if len(candidates) == 0 || c.Store == nil || c.Blobs == nil {
 		return
 	}

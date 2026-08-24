@@ -566,23 +566,54 @@ func TestEmailDocumentRemovesInlineScripting(t *testing.T) {
 	}
 }
 
-func TestEmailDocumentKeepsRelativeRefsUnderADeclaredBase(t *testing.T) {
-	body := `<base href="https://newsletter.example.test/2026/08/"><img src="hero.png" alt="Hero">`
+func TestEmailDocumentResolvesRelativeRefsAgainstADeclaredBase(t *testing.T) {
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<img src="hero.png" alt="Hero"><a href="offer.html">Angebot</a>` +
+		`<div style="background-image:url(bg.png)">Tile</div>`
 	allowed := emailDocumentWithBlocklist(body, "", true, nil)
-	if !strings.Contains(allowed, ` src="hero.png"`) {
-		t.Fatalf("relative reference under a declared base was dropped: %s", allowed)
+	// The base is applied here rather than left standing, because it also moves
+	// the paths this renderer writes itself.
+	if strings.Contains(allowed, "<base href=") {
+		t.Fatalf("declared base was left in the document: %s", allowed)
 	}
-	// Without images the same reference is a remote one, which is what this
-	// mode refuses - live or not, it would cost a CSP violation.
+	for _, resolved := range []string{
+		`src="https://newsletter.example.test/2026/08/hero.png"`,
+		`href="https://newsletter.example.test/2026/08/offer.html"`,
+		`url(https://newsletter.example.test/2026/08/bg.png)`,
+	} {
+		if !strings.Contains(allowed, resolved) {
+			t.Fatalf("reference was not resolved against the base (%s): %s", resolved, allowed)
+		}
+	}
+	// Resolved, those references are remote, and remote is what a blocked
+	// document refuses - live or not, each would cost a CSP violation.
 	blocked := emailDocument(body, "", false)
-	if strings.Contains(blocked, ` src="hero.png"`) {
-		t.Fatalf("blocked document kept a reference to the sender's server: %s", blocked)
+	if strings.Contains(blocked, ` src="https://newsletter.example.test/2026/08/hero.png"`) {
+		t.Fatalf("blocked document kept a live reference to the sender: %s", blocked)
 	}
-	if !strings.Contains(blocked, `alt="Hero"`) {
+	if !strings.Contains(blocked, `data-rolltop-blocked-src="https://newsletter.example.test/2026/08/hero.png"`) {
+		t.Fatalf("blocked reference was not recorded: %s", blocked)
+	}
+	if !strings.Contains(blocked, `alt="Hero"`) || !strings.Contains(blocked, "Tile") {
 		t.Fatalf("message content was lost: %s", blocked)
 	}
 }
 
+func TestEmailDocumentKeepsItsOwnPathsUnderADeclaredBase(t *testing.T) {
+	// The reason the base is applied and removed: these two paths are Rolltop's
+	// own, and a base would send them to the sender's web server instead - a
+	// broken picture, and a request for a file only Rolltop has.
+	cached := remoteimages.CachedURL("b69b957cbc9cdd98bb64b5b3ab32e2a7fe7ead1bb7a59b07983008e046553be0")
+	attachments := []store.Attachment{{ID: 7, ContentID: "hero@example.test", IsInline: true, ContentType: "image/png"}}
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<img src="` + cached + `"><img src="cid:hero@example.test">`
+	doc := emailDocumentWithInlineAttachments(body, "", true, nil, attachments)
+	for _, kept := range []string{`src="` + cached + `"`, `src="/attachments/7/inline"`} {
+		if !strings.Contains(doc, kept) {
+			t.Fatalf("%q was moved off Rolltop by the declared base: %s", kept, doc)
+		}
+	}
+}
 func TestEmailDocumentIgnoresACommentedOutBase(t *testing.T) {
 	// A base inside a comment sets nothing, so the reference beside it still
 	// resolves against the app and must not be kept alive by it.
