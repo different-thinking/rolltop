@@ -160,36 +160,23 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	attachmentDocs := make([]search.AttachmentDoc, 0, len(parsed.Files))
 	visibleAttachmentCount := 0
 	if len(parsed.Files) > 0 {
-		generationRecoveryPhase(ctx, "sqlite-delete-attachments", "")
-		if err := s.Store.DeleteAttachmentsForMessage(ctx, userID, msg.ID); err != nil {
+		generationRecoveryPhase(ctx, "sqlite-replace-attachments", "")
+		if _, err := s.Store.ReplaceAttachmentsForMessage(ctx, userID, msg.ID, attachmentRowsForFiles(userID, msg.ID, blobRec.ID, parsed.Files)); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
 		}
 	}
 	for _, file := range parsed.Files {
-		generationRecoveryPhase(ctx, "sqlite-create-attachment", "")
-		if _, err := s.Store.CreateAttachment(ctx, store.Attachment{
-			UserID:      userID,
-			MessageID:   msg.ID,
-			BlobID:      blobRec.ID,
-			Filename:    file.Filename,
-			ContentType: file.ContentType,
-			ContentID:   file.ContentID,
-			IsInline:    file.IsInline,
-			Size:        int64(len(file.Data)),
-			BlobPath:    "",
-		}); err != nil {
-			return store.MessageRecord{}, parsed, nil, err
+		if file.IsInline {
+			continue
 		}
-		if !file.IsInline {
-			visibleAttachmentCount++
-			if prepareSearchDocument {
-				generationRecoveryPhase(ctx, "search-extract-attachment", "attachment-text")
-				attachmentDocs = append(attachmentDocs, search.AttachmentDoc{
-					Filename:    file.Filename,
-					ContentType: file.ContentType,
-					Text:        file.SearchableText(),
-				})
-			}
+		visibleAttachmentCount++
+		if prepareSearchDocument {
+			generationRecoveryPhase(ctx, "search-extract-attachment", "attachment-text")
+			attachmentDocs = append(attachmentDocs, search.AttachmentDoc{
+				Filename:    file.Filename,
+				ContentType: file.ContentType,
+				Text:        file.SearchableText(),
+			})
 		}
 	}
 	msg.HasAttachments = visibleAttachmentCount > 0
@@ -217,6 +204,28 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		return store.MessageRecord{}, parsed, nil, err
 	}
 	return msg, parsed, nil, nil
+}
+
+// attachmentRowsForFiles maps parsed MIME parts onto attachment rows in parse
+// order, which is the order ReplaceAttachmentsForMessage matches existing rows
+// in. Bodies are not stored: BlobPath stays empty so the row is served from the
+// raw message the BlobID names.
+func attachmentRowsForFiles(userID, messageID, blobID int64, files []mailparse.Attachment) []store.Attachment {
+	rows := make([]store.Attachment, 0, len(files))
+	for _, file := range files {
+		rows = append(rows, store.Attachment{
+			UserID:      userID,
+			MessageID:   messageID,
+			BlobID:      blobID,
+			Filename:    file.Filename,
+			ContentType: file.ContentType,
+			ContentID:   file.ContentID,
+			IsInline:    file.IsInline,
+			Size:        int64(len(file.Data)),
+			BlobPath:    "",
+		})
+	}
+	return rows
 }
 
 // IndexPendingAttachmentsForUser indexes attachment text from raw message bodies for pending messages.
@@ -591,34 +600,22 @@ func (s *Service) prepareSearchVisibleAttachmentIndexMessageFromRaw(ctx context.
 		return nil, err
 	}
 	if len(parsed.Files) > 0 {
-		if err := s.Store.DeleteAttachmentsForMessage(ctx, msg.UserID, msg.ID); err != nil {
+		if _, err := s.Store.ReplaceAttachmentsForMessage(ctx, msg.UserID, msg.ID, attachmentRowsForFiles(msg.UserID, msg.ID, msg.BlobID, parsed.Files)); err != nil {
 			return nil, err
 		}
 	}
 	attachmentDocs := make([]search.AttachmentDoc, 0, len(parsed.Files))
 	visibleAttachmentCount := 0
 	for _, file := range parsed.Files {
-		if _, err := s.Store.CreateAttachment(ctx, store.Attachment{
-			UserID:      msg.UserID,
-			MessageID:   msg.ID,
-			BlobID:      msg.BlobID,
+		if file.IsInline {
+			continue
+		}
+		visibleAttachmentCount++
+		attachmentDocs = append(attachmentDocs, search.AttachmentDoc{
 			Filename:    file.Filename,
 			ContentType: file.ContentType,
-			ContentID:   file.ContentID,
-			IsInline:    file.IsInline,
-			Size:        int64(len(file.Data)),
-			BlobPath:    "",
-		}); err != nil {
-			return nil, err
-		}
-		if !file.IsInline {
-			visibleAttachmentCount++
-			attachmentDocs = append(attachmentDocs, search.AttachmentDoc{
-				Filename:    file.Filename,
-				ContentType: file.ContentType,
-				Text:        file.SearchableText(),
-			})
-		}
+			Text:        file.SearchableText(),
+		})
 	}
 	msg.HasAttachments = visibleAttachmentCount > 0
 	msg.BodyText = parsed.Text
