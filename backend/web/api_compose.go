@@ -542,7 +542,7 @@ type composeSentIncompleteError struct {
 }
 
 func (e *composeSentIncompleteError) Error() string { return e.err.Error() }
-func (e *composeSentIncompleteError) Unwrap() error  { return e.err }
+func (e *composeSentIncompleteError) Unwrap() error { return e.err }
 
 // archiveRepliedMessage files the message a reply answered, and names the folder
 // it landed in so the browser can say so. It runs after the send, never before:
