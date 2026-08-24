@@ -240,6 +240,14 @@ type StoredMessageHost interface {
 	StarMessage(context.Context, int64, int64, bool) error
 	MoveMessage(context.Context, int64, int64, int64) error
 	ForwardMessage(context.Context, int64, int64, string, []MailHeader) error
+	// ArchiveMailboxID answers where one account files archived mail, for the
+	// user and account given. Archiving has no mailbox role behind it -- the
+	// destination is a choice the reader made, in an identity's setting or in
+	// the swipe mapping -- so a plugin cannot look it up the way it looks up
+	// Trash, and asking the host keeps the answer the same one the rest of the
+	// app archives to. Zero and no error means that account has named no
+	// Archive folder.
+	ArchiveMailboxID(context.Context, int64, int64) (int64, error)
 }
 
 // APIHost adds the HTTP helpers needed by plugin-owned API routes.

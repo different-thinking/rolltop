@@ -88,6 +88,8 @@ type MessageActionContext = {
   activePanel: string;
   openPanel: (panelID: string) => void;
   closePanel: () => void;
+  /** Routes within the app, so a message action can hand the reader to a settings page carrying what the message said. */
+  navigate: (url: string) => void;
   addToast: (message: string, kind?: Toast["kind"]) => number;
 };
 
@@ -162,9 +164,10 @@ function messageActionContext({
   activePanel,
   openPanel,
   closePanel,
+  navigate,
   addToast
 }: MessageActionContext): MessageActionContext {
-  return { csrf, item, datePrefs, activePanel, openPanel, closePanel, addToast };
+  return { csrf, item, datePrefs, activePanel, openPanel, closePanel, navigate, addToast };
 }
 
 function messageMenuActionNodes(plugins: readonly RuntimePlugin[], context: MessageActionContext) {
@@ -2019,6 +2022,7 @@ export function ThreadView({
               activePanel: activeMessagePanel,
               openPanel: (panelID) => openMessagePluginPanel(item.message.id, panelID),
               closePanel: () => closeMessagePluginPanel(item.message.id, activeMessagePanel),
+              navigate,
               addToast
             });
             const annotationNodes = messageAnnotationNodes(messageSecurityPlugins, item);

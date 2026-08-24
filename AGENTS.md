@@ -545,6 +545,17 @@ site and in review.
   is the only thing standing between "older than 30 days -> Trash" and the
   reader's own Sent folder the first time they press Backfill. What a filter may
   **write** is not scoped this way: any mailbox is a valid destination.
+- A filter's move destination is either relative to the message's own account or
+  one exact folder, never both, because a move cannot cross accounts: a rule
+  spanning several accounts has to say "Trash" or "Archive" and let each message
+  resolve its own. Trash resolves from the mailbox role. **Archive has no role**
+  - in Rolltop the Archive folder is a per-account choice, held by an identity's
+  `archive_mailbox_id` or the swipe mapping - so the plugin asks the host
+  (`StoredMessageHost.ArchiveMailboxID`) instead of looking one up, and a filter
+  archives where the header's Archive button archives. A destination that will
+  not resolve records an action failure; resolving it to zero and skipping the
+  move would leave a rule that has never once done what it says, with an audit
+  full of matches to prove it did.
 - A filter's actions happen where it matches, so evaluating a message twice
   forwards it twice. The backfill walk skips what the rule already decided on
   since the rule's own `updated_at`, which also keeps one audit row per message

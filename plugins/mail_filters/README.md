@@ -15,24 +15,52 @@ Adds search-driven filtering for Rolltop mail.
 A rule stores one Rolltop search string. The settings editor writes the three
 common conditions -- sender, subject, and an age in days -- into that string
 through named fields, and still offers the search itself for anything the fields
-do not cover:
+do not cover. An open message can start one too: its action menu offers a filter
+on that sender or on that subject, which opens the editor with the condition
+already written.
 
 ```text
 from:studio@example.com subject:Reservation older_than:7d
 ```
 
-Actions can star, move to a folder or source-account Trash, and forward through the user's configured SMTP identity. Forwarded mail receives an opaque `X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message that already has the same marker.
+A rule then does two things at most: it forwards, and it moves. Forwarding goes
+through the user's configured SMTP identity; forwarded mail receives an opaque
+`X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message
+that already carries the same marker.
+
+A move names its destination in one of two ways, and never both:
+
+- **Delete** (`move_role: "trash"`) and **Archive** (`move_role: "archive"`) are
+  relative to the message's *own* account, resolved per message. One rule over
+  several accounts therefore files each account's mail in that account's own
+  folder.
+- **One folder** (`move_mailbox_id`) is an exact destination, which only fits a
+  rule that stays inside that folder's account: a move cannot cross accounts.
+  The editor says so when a rule's scope reaches further than its destination.
+
+Trash comes from the mailbox role. Archive does not have one -- in Rolltop the
+Archive folder is a choice the reader made, in an identity's settings or in the
+swipe mapping -- so the plugin asks the host for it
+(`StoredMessageHost.ArchiveMailboxID`) rather than looking for a role that does
+not exist. That keeps a filter archiving to the same folder the header's Archive
+button uses. An account with no Trash, or none with an Archive chosen, records
+an action failure; it does not quietly count as a match that moved nothing. A
+failure is terminal for that message until the rule is saved again -- saving is
+what puts already-decided mail back in front of the rule -- and Backfill is what
+walks it; the scheduled worker only picks up rows still waiting on age.
 
 Filters read the mail the whole-account lists show -- folders that opt into All
 Mail, never Junk, never a hidden cross-account duplicate -- so Sent, Drafts and
 Trash are out of reach of a rule by default. That is what keeps an age rule from
-emptying the reader's own Sent folder. What a rule may *write* is unaffected: any
-mailbox is a valid move destination.
+emptying the reader's own Sent folder. What a rule may *write* is unaffected: a
+rule may move mail into any folder, including one the rule itself cannot read.
 
 "Delete mail from this sender after N days" is the sender condition, an age of N
-days, and a move to the source account's Trash. Deletion means the same thing it
-means everywhere else in Rolltop: the message lands in Trash, and only emptying
-Trash removes it from the server.
+days, and Delete. The N days run from the message's own `Date`, not from when
+the rule saw it: mail already older than N goes on the next pass, and the rest
+waits in the pending queue with its due date shown. Deletion means the same
+thing it means everywhere else in Rolltop -- the message lands in Trash, and
+only emptying Trash removes it from the server.
 
 Every rule evaluation is recorded for 30 days, including matches, misses, skipped account scope, scheduled age checks, action failures, and loop prevention. The settings page shows both halves of that record: what the filters have already done, and what they are still waiting to do.
 

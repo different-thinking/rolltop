@@ -189,6 +189,13 @@ h2 {
   color: var(--muted);
 }
 
+// The counterpart to .muted for text that says something is wrong. It was
+// already in use in the thread view and the settings forms without ever being
+// defined, so a validation message read exactly like ordinary body text.
+.error-text {
+  color: var(--danger);
+}
+
 .actions {
   display: flex;
   gap: 10px;

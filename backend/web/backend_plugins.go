@@ -191,6 +191,10 @@ func (s *Server) FetchRawMessage(ctx context.Context, userID, messageID int64) (
 
 var _ plugins.RawMessageFetchHost = (*Server)(nil)
 
+// The plugin side reaches these through a runtime type assertion that degrades
+// to a 503 rather than a build failure, so the compiler is told here instead.
+var _ plugins.StoredMessageHost = (*Server)(nil)
+
 func (s *Server) StarMessage(ctx context.Context, userID, messageID int64, starred bool) error {
 	if s == nil || s.syncer == nil {
 		return errors.New("sync service is not configured")
@@ -215,6 +219,25 @@ func (s *Server) MoveMessage(ctx context.Context, userID, messageID, destMailbox
 	}
 	s.notifyUserChanged(userID)
 	return nil
+}
+
+// ArchiveMailboxID resolves the Archive folder one account files mail into,
+// through the same store lookup the header's Archive button and the Android
+// swipe use, so a filter that archives lands where archiving always lands.
+func (s *Server) ArchiveMailboxID(ctx context.Context, userID, accountID int64) (int64, error) {
+	if s == nil || s.store == nil {
+		return 0, errors.New("message store is not configured")
+	}
+	targets, err := s.store.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	for _, target := range targets {
+		if target.AccountID == accountID {
+			return target.MailboxID, nil
+		}
+	}
+	return 0, nil
 }
 
 func (s *Server) ForwardMessage(ctx context.Context, userID, messageID int64, to string, headers []plugins.MailHeader) error {
