@@ -340,6 +340,26 @@ func TestPausedInboxTurnResumesWithoutWaitingForTheNextPoll(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	// The last message lands inside a turn that then pauses and requeues itself,
+	// and the checkpoint is written by the turn after that one. Between the two
+	// the runner is briefly idle, so waiting on idleness alone read the
+	// checkpoint before anything had written it. Wait for the checkpoint itself:
+	// it is the postcondition this test is about, and reaching it means the
+	// requeued turn has run. Sharing the deadline above keeps the whole wait
+	// inside one waitForEvent.
+	for {
+		lastUIDs, err := db.LastUIDs(ctx, user.ID, account.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lastUIDs[mailbox.Name] == remoteCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("requeued backfill checkpoint=%d, want %d", lastUIDs[mailbox.Name], remoteCount)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	waitForRunnerUserIdle(t, runner, user.ID)
 
 	if fetcher.turns.Load() < 2 {
@@ -353,13 +373,6 @@ func TestPausedInboxTurnResumesWithoutWaitingForTheNextPoll(t *testing.T) {
 		if run.Status != "ok" {
 			t.Fatalf("paused backfill recorded run status=%q error=%q", run.Status, run.Error)
 		}
-	}
-	lastUIDs, err := db.LastUIDs(ctx, user.ID, account.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lastUIDs[mailbox.Name] != remoteCount {
-		t.Fatalf("requeued backfill checkpoint=%d, want %d", lastUIDs[mailbox.Name], remoteCount)
 	}
 }
 
