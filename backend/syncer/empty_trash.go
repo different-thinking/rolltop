@@ -126,7 +126,28 @@ func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store
 	// One reconciliation removes the local rows, search documents, and blobs for
 	// everything the server confirmed gone. Reusing the sync path keeps a single
 	// definition of what "this message is no longer on the server" does locally.
-	if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
+	//
+	// This is its own transaction pair per message, so a large Trash folder can
+	// spend minutes here after every batch has already reported 100% deleted.
+	// Without a heartbeat the run's own progress row goes stale for that whole
+	// stretch: the sidebar looks frozen, and a run stuck past the stale-run
+	// reconciler's window can be torn down out from under a goroutine that is
+	// still working. The label changes so a user watching it can tell this is a
+	// second phase, not the same batch stuck in place.
+	progress.CurrentMailbox = "Cleaning up " + mailbox.Name
+	reporter := s.syncProgressReporter(userID, runID, &progress)
+	if err := reporter.commit(ctx); err != nil {
+		log.Printf("empty trash cleanup progress user_id=%d run_id=%d mailbox_id=%d: %v", userID, runID, mailbox.ID, err)
+	}
+	if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox, func(hbCtx context.Context) error {
+		if stepErr := reporter.step(hbCtx); stepErr != nil {
+			if hbCtx.Err() != nil {
+				return hbCtx.Err()
+			}
+			log.Printf("empty trash cleanup progress user_id=%d run_id=%d mailbox_id=%d: %v", userID, runID, mailbox.ID, stepErr)
+		}
+		return nil
+	}); err != nil {
 		log.Printf("reconcile emptied trash user_id=%d run_id=%d mailbox_id=%d: %v", userID, runID, mailbox.ID, err)
 		if status == "ok" {
 			status = "failed"

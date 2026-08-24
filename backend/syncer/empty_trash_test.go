@@ -234,6 +234,24 @@ func TestEmptyTrashDeletesRemoteMailAndTheLocalMirror(t *testing.T) {
 	}
 }
 
+// TestEmptyTrashReportsACleanupPhaseAfterDeleting guards against a run that
+// looks stuck at 100%: local reconciliation after a large purge is its own
+// per-message transaction pair and can run long after the server confirms
+// everything gone, so the run's own label must move to say so.
+func TestEmptyTrashReportsACleanupPhaseAfterDeleting(t *testing.T) {
+	fixture := newEmptyTrashFixture(t, []uint32{41, 42})
+
+	run := fixture.runEmpty(t)
+
+	if run.Status != "ok" {
+		t.Fatalf("run status = %q (%s), want ok", run.Status, run.Error)
+	}
+	want := "Cleaning up " + fixture.trash.Name
+	if run.CurrentMailbox != want {
+		t.Fatalf("current_mailbox = %q, want %q so local cleanup does not look identical to the batch still running", run.CurrentMailbox, want)
+	}
+}
+
 func TestEmptyTrashKeepsLocalRowsForMailTheServerRefusedToDelete(t *testing.T) {
 	fixture := newEmptyTrashFixture(t, []uint32{21, 22})
 	fixture.fetcher.keep = []uint32{22}
