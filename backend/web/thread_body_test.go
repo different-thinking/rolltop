@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"rolltop/backend/remoteimages"
 	"rolltop/backend/store"
 )
 
@@ -639,5 +640,34 @@ func TestEmailDocumentNeutralizesRemoteRefWrittenWithoutASeparator(t *testing.T)
 	}
 	if !strings.Contains(doc, `data-rolltop-blocked-srcset="https://cdn.example.test/hero.png 2x"`) {
 		t.Fatalf("blocked reference was not recorded: %s", doc)
+	}
+}
+
+func TestEmailDocumentKeepsCachedRemoteImageURLs(t *testing.T) {
+	// With images allowed, remote references are rewritten to the local cache
+	// (remoteimages.ReplaceCached) before the document is built. Those URLs are
+	// Rolltop's own route, not a sender's relative path, and dropping them left
+	// a newsletter with no pictures at all.
+	cached := remoteimages.CachedURL("b69b957cbc9cdd98bb64b5b3ab32e2a7fe7ead1bb7a59b07983008e046553be0")
+	body := `<img src="` + cached + `" height="40">` +
+		`<img srcset="` + cached + ` 2x">` +
+		`<div style="background-image:url(` + cached + `)">Hero</div>` +
+		`<img src="/assets/tracker.gif">`
+	for _, imagesAllowed := range []bool{false, true} {
+		doc := emailDocumentWithInlineAttachments(body, "", imagesAllowed, nil, nil)
+		for _, kept := range []string{
+			`src="` + cached + `"`,
+			`srcset="` + cached + ` 2x"`,
+			`url(` + cached + `)`,
+		} {
+			if !strings.Contains(doc, kept) {
+				t.Fatalf("images_allowed=%t dropped the app's own cached image %q: %s", imagesAllowed, kept, doc)
+			}
+		}
+		// A path the sender wrote still goes: it names their web server, and
+		// resolving it against Rolltop asks this app for a file it never had.
+		if strings.Contains(doc, ` src="/assets/tracker.gif"`) {
+			t.Fatalf("images_allowed=%t kept a sender path pointing at the app: %s", imagesAllowed, doc)
+		}
 	}
 }

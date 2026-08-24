@@ -367,6 +367,12 @@ func ReplaceCached(bodyHTML string, cache map[string]string) string {
 	})
 }
 
+// CachedURLPrefix is the route a cached remote image is served from. It is a
+// constant because the message renderer has to recognise the URLs written here
+// as its own: everything else that is root-relative in a message body was
+// written for the sender's web server and is dropped.
+const CachedURLPrefix = "/remote-images/"
+
 func CachedURL(hash string) string {
-	return "/remote-images/" + hash
+	return CachedURLPrefix + hash
 }

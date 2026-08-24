@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"rolltop/backend/remoteimages"
 	"rolltop/backend/store"
 )
 
@@ -149,6 +150,10 @@ func isScriptURL(value string) bool {
 	return strings.HasPrefix(value, "javascript:") || strings.HasPrefix(value, "vbscript:")
 }
 
+// attachmentRoutePrefix is the route an attachment of the open message is served
+// from, and the second URL the message renderer writes into a body itself.
+const attachmentRoutePrefix = "/attachments/"
+
 var cidURLRE = regexp.MustCompile(`(?i)cid:([^\s"'<>\)]+)`)
 
 func replaceInlineCIDRefs(bodyHTML string, attachments []store.Attachment) string {
@@ -197,7 +202,7 @@ func inlineAttachmentURLsByCID(attachments []store.Attachment) map[string]string
 		if key == "" || att.ID <= 0 {
 			continue
 		}
-		out[key] = "/attachments/" + strconv.FormatInt(att.ID, 10) + "/inline"
+		out[key] = attachmentRoutePrefix + strconv.FormatInt(att.ID, 10) + "/inline"
 	}
 	return out
 }
@@ -554,20 +559,31 @@ func isRemoteRef(value string) bool {
 	return false
 }
 
+// resolvableRefPrefixes are the references a message body may keep. The two
+// paths are the only URLs the renderer writes into a body itself - an inline
+// attachment of this message, and a remote image already fetched into the local
+// cache - and they are named by the constants the routes serving them use, so a
+// route that moves cannot leave this list behind pointing at nothing.
+var resolvableRefPrefixes = []string{
+	"http://", "https://", "//", "data:", "cid:", "mailto:", "tel:",
+	attachmentRoutePrefix, remoteimages.CachedURLPrefix,
+}
+
 // isUnresolvableRef reports a reference the browser would resolve against
 // Rolltop itself. Everything a message body may legitimately load names where
 // it comes from: a data: payload carries it, a cid: part names an attachment of
-// this very message, and an /attachments/ path is one this renderer wrote for
-// exactly that part. A cid: that found no attachment stays: it is a valid
-// scheme the CSP allows and a missing part is worth seeing as a broken image
-// rather than silently dropping. What is left is relative or root-relative -
-// written for the sender's web server and meaningful only there.
+// this very message, and the app's own routes above were written by this
+// renderer for exactly what they point at. A cid: that found no attachment
+// stays: it is a valid scheme the CSP allows and a missing part is worth seeing
+// as a broken image rather than silently dropping. What is left is relative or
+// root-relative - written for the sender's web server and meaningful only
+// there.
 func isUnresolvableRef(value string) bool {
 	value = strings.ToLower(strings.Trim(strings.TrimSpace(html.UnescapeString(value)), `"' `))
 	if value == "" || strings.HasPrefix(value, "#") {
 		return false
 	}
-	for _, prefix := range []string{"http://", "https://", "//", "data:", "cid:", "mailto:", "tel:", "/attachments/"} {
+	for _, prefix := range resolvableRefPrefixes {
 		if strings.HasPrefix(value, prefix) {
 			return false
 		}

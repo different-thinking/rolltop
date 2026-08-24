@@ -77,7 +77,7 @@ func (s *Server) handleRemoteImage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	hash := strings.Trim(strings.TrimPrefix(r.URL.Path, "/remote-images/"), "/")
+	hash := strings.Trim(strings.TrimPrefix(r.URL.Path, remoteimages.CachedURLPrefix), "/")
 	if hash == "" {
 		http.NotFound(w, r)
 		return
