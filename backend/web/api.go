@@ -88,6 +88,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiIMAPAccount(w, r)
 	case strings.HasPrefix(path, "account/imap/"):
 		s.apiIMAPAccountPath(w, r, strings.TrimPrefix(path, "account/imap/"))
+	case path == "smtp-log":
+		s.apiSMTPLog(w, r)
 	case path == "account/smtp":
 		s.apiSMTPAccount(w, r)
 	case strings.HasPrefix(path, "account/smtp/"):

@@ -33,6 +33,7 @@ import (
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
+	"rolltop/backend/smtplog"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
 )
@@ -55,8 +56,12 @@ type Options struct {
 	Syncer     *syncer.Service
 	SyncRunner *syncer.Runner
 	Sender     mailSender
-	MasterKey  []byte
-	DataDir    string
+	// SMTPLog is the tail of SMTP conversations the settings page reads. A nil
+	// one is replaced with a fresh recorder, and the default sender is built
+	// against it.
+	SMTPLog   *smtplog.Recorder
+	MasterKey []byte
+	DataDir   string
 	// DatabaseTarget is the connection summary the admin page shows:
 	// role@host/database. It is derived from the DSN by pgdsn.Describe and
 	// deliberately carries no password.
@@ -98,6 +103,9 @@ type Server struct {
 	ownedSyncRunnerCancel     context.CancelFunc
 	lifetime                  context.Context
 	sender                    mailSender
+	smtpLog                   *smtplog.Recorder
+	smtpTestMu                sync.Mutex
+	smtpTestUntil             map[int64]time.Time
 	masterKey                 []byte
 	dataDir                   string
 	databaseTarget            string
@@ -169,6 +177,10 @@ type currentUser struct {
 
 type mailSender interface {
 	Send(ctx context.Context, account store.MailAccount, msg smtpclient.Message) ([]byte, error)
+	// Verify performs the login half of a send and reports the recorded
+	// session, so the settings page can answer "does this server work" without
+	// asking the reader to send a message to somebody.
+	Verify(ctx context.Context, account store.MailAccount) (int64, error)
 }
 
 type viewData struct {
@@ -320,8 +332,14 @@ func New(opts Options) (*Server, error) {
 	// The sender is built after the manager so a server that owns both shares
 	// one instance; an OAuth account sending through a tokenless sender would
 	// fail with nothing to point the user at.
+	// Every server has a recorder, including one a test built: the SMTP log is
+	// read through the server that owns it, so a shared process-wide tail would
+	// let one tenant's attempts appear in another server's answer.
+	if opts.SMTPLog == nil {
+		opts.SMTPLog = smtplog.NewRecorder()
+	}
 	if opts.Sender == nil && len(opts.MasterKey) == 32 {
-		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey, Tokens: opts.GoogleAuth}
+		opts.Sender = &smtpclient.Sender{MasterKey: opts.MasterKey, Tokens: opts.GoogleAuth, Log: opts.SMTPLog}
 	}
 	if opts.GoogleContacts == nil && opts.GoogleAuth != nil && opts.Store != nil {
 		opts.GoogleContacts = googlepeople.NewSyncer(
@@ -369,6 +387,7 @@ func New(opts Options) (*Server, error) {
 		ownedSyncRunnerCancel: ownedSyncRunnerCancel,
 		lifetime:              opts.Lifetime,
 		sender:                opts.Sender,
+		smtpLog:               opts.SMTPLog,
 		masterKey:             opts.MasterKey,
 		dataDir:               opts.DataDir,
 		databaseTarget:        opts.DatabaseTarget,

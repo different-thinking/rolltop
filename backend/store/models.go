@@ -39,17 +39,22 @@ type Session struct {
 
 // MailAccount is one IMAP server account plus cached SMTP defaults for a user.
 type MailAccount struct {
-	ID                    int64
-	UserID                int64
-	Email                 string
-	Label                 string
-	Host                  string
-	Port                  int
-	Username              string
-	EncryptedPassword     string
-	UseTLS                bool
-	SMTPHost              string
-	SMTPPort              int
+	ID                int64
+	UserID            int64
+	Email             string
+	Label             string
+	Host              string
+	Port              int
+	Username          string
+	EncryptedPassword string
+	UseTLS            bool
+	SMTPHost          string
+	SMTPPort          int
+	// SMTPAccountID names the outgoing server row this envelope was built
+	// from. Nothing about delivery reads it: it is carried so a recorded SMTP
+	// conversation can be shown on the settings page of the server that had
+	// it, rather than in one undifferentiated list.
+	SMTPAccountID         int64
 	SMTPUsername          string
 	EncryptedSMTPPassword string
 	SMTPUseTLS            bool

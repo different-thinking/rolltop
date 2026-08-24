@@ -752,12 +752,13 @@ export function ComposeBox({
       // folder chosen, or a conversation already filed in one, sends the reply
       // and leaves the message where it is.
       //
-      // `warning` means SMTP accepted the mail but the local copy did not get
-      // stored, so the recipient has it and the sender will not find it in
-      // Sent. That is worth saying: a plain "Message sent." left the only
-      // account of it in the server log.
+      // A warning means SMTP accepted the message and something after that did
+      // not: the mail went out, but this account's own copy of it did not get
+      // filed. Reporting it as a plain success is how a user later finds a gap
+      // in Sent with nothing to explain it, so the warning replaces the success
+      // line rather than being dropped for it.
       if (result.warning) {
-        addToast(`Message sent, but it could not be saved locally: ${result.warning}`, "error");
+        addToast(`Message sent, but it could not be filed on the server: ${result.warning}`, "error");
       } else {
         addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
       }

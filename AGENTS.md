@@ -134,6 +134,32 @@ site and in review.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,
   authorization codes, session tokens, or raw message bodies.
+- **The SMTP conversation is recorded and shown to the user whose mail it is**
+  (`backend/smtplog`, the panel on the outgoing-server settings page). A failed
+  send used to exist for that user as one sentence in the composer, with the
+  reply that named the reason -- the `535`, the missing `STARTTLS`, the port
+  that answers nothing -- written only to a container log a hosted operator
+  cannot read. Three properties keep that safe and must survive any change to
+  it. Redaction happens in the recorder, not at its call sites, so no future
+  caller can forget it: an `AUTH` command keeps its mechanism and loses its
+  payload, the base64 blobs of the exchange are recorded as having been sent
+  and never as what they held, and a message payload is recorded as a byte
+  count -- the prohibition above is not relaxed because the text came off the
+  wire. Every read names a user, and a session id belonging to somebody else
+  reads back as a session that does not exist. And the tail is bounded per user
+  and lives only in memory: it is a diagnostic aid, dropped on restart, never a
+  row in the database.
+- `smtpclient` speaks the SMTP exchange itself rather than driving `net/smtp`,
+  and that is the whole reason the transcript exists. `net/smtp` performs the
+  `STARTTLS` upgrade inside itself and hands the plaintext to a connection no
+  wrapper can reach, so everything after the upgrade -- the second EHLO, the
+  `AUTH` result, the reply to `MAIL FROM` and to the message -- is invisible to
+  anything layered under it. The SASL loop still runs against a `net/smtp`
+  `Auth`, so `PlainAuth` and the XOAUTH2 mechanism are unchanged; do not
+  reintroduce `smtp.Client` for the sending path. The connection test
+  (`Sender.Verify`) is that same login stopped before `MAIL FROM`: a test that
+  offers a message would deliver one, and pressing a button in settings must
+  not write to anybody.
 - Keep IMAP credentials and OAuth tokens encrypted with `ROLLTOP_MASTER_KEY`.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
@@ -340,6 +366,23 @@ site and in review.
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- **An attachment row keeps its ID for as long as the message holds that part.**
+  `/attachments/<id>/download`, the inline `cid:` rewrite and the
+  `attachment_preview` route all address an attachment by row ID, and a mail
+  view keeps those URLs for as long as it is open. Reindexing reparses the same
+  MIME parts, so rewriting the rows by deleting and inserting them renumbered
+  attachments nothing about had changed and turned every URL already on screen
+  into a 404 — while the attachment-index worker was running, which is most of a
+  first sync. `Store.ReplaceAttachmentsForMessage` is the only way to write a
+  reparsed message's rows: it matches rows to parts by position, so a reparse
+  updates in place and only a message that really gained or lost a part inserts
+  or deletes anything. Do not reintroduce a bulk delete of a message's
+  attachments ahead of recreating them. Rows follow the parse **down** as well:
+  a reparse that finds no files removes them, because a security plugin that
+  drops attachments (`transform.DropAttachments`) leaves mail stored before it
+  was enabled with rows for parts nothing means to serve any more. Only a parse
+  that *failed* is excluded — it decided nothing, so it must not be read as an
+  attachment-free message.
 - `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
   from stored data only. A pending row means one of two things and only the
   index can tell them apart, so the maintenance worker asks it

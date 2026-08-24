@@ -77,6 +77,7 @@ func (s *Service) ForwardMessage(ctx context.Context, userID, messageID int64, t
 	envelope := store.MailAccount{
 		UserID:                smtpAccount.UserID,
 		Email:                 identity.Email,
+		SMTPAccountID:         smtpAccount.ID,
 		SMTPHost:              smtpAccount.Host,
 		SMTPPort:              smtpAccount.Port,
 		SMTPUsername:          smtpAccount.Username,

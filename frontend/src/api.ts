@@ -26,6 +26,8 @@ import type {
   MessageOriginalSource,
   PluginSetting,
   SMTPAccount,
+  SMTPLogSession,
+  SMTPTestResult,
   ScopeMoveResponse,
   SearchExplanation,
   SearchIndexReport,
@@ -82,6 +84,18 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 type SnoozeListResponse = MailListResponse & { snoozes: MessageSnooze[] };
+
+// A send that SMTP accepted but that could not be filed locally answers ok with
+// a warning rather than an error: the mail is gone and retrying would duplicate
+// it. The field is optional and must stay read by the caller -- dropping it is
+// how a missing Sent copy becomes silent.
+export type ComposeSendResult = {
+  ok: boolean;
+  message_id?: number;
+  sent?: boolean;
+  warning?: string;
+  archived_mailbox?: string;
+};
 
 const getCache = new Map<string, { etag: string; data: unknown }>();
 const getInflight = new Map<string, Promise<unknown>>();
@@ -452,14 +466,10 @@ export const api = {
   // Compose sends pure JSON when possible, then switches to multipart only when
   // there are file bodies. Inline files are represented in the JSON payload by
   // stable form field names and Content-ID metadata.
-  //
-  // `message_id` is optional because one success shape does not carry it: when
-  // SMTP accepted the mail but storing the local copy failed, the server
-  // answers `sent` with a `warning` and no message row exists to name.
   send: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
     if (attachments.length === 0) {
-      return postJSON<{ ok: boolean; message_id?: number; sent?: boolean; warning?: string; archived_mailbox?: string }>("/api/compose", csrf, payload);
+      return postJSON<ComposeSendResult>("/api/compose", csrf, payload);
     }
     const body = new FormData();
     body.append("payload", JSON.stringify({
@@ -474,7 +484,7 @@ export const api = {
       }))
     }));
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
-    return postForm<{ ok: boolean; message_id?: number; sent?: boolean; warning?: string; archived_mailbox?: string }>("/api/compose", csrf, body);
+    return postForm<ComposeSendResult>("/api/compose", csrf, body);
   },
   saveDraft: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
@@ -634,6 +644,14 @@ export const api = {
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/search-index/purge`, csrf),
   purgeFolderLocalReferences: (csrf: string, id: number) =>
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/local-references/purge`, csrf),
+  // The SMTP tail is read while a send is failing, so it answers without an
+  // ETag and every call reaches the server: a revalidated answer would show
+  // the attempt before the one the reader just made.
+  smtpLog: (accountID = 0, limit = 10) =>
+    getJSON<{ sessions: SMTPLogSession[] }>(
+      `/api/smtp-log?limit=${limit}${accountID ? `&account_id=${accountID}` : ""}`),
+  testSMTPAccount: (csrf: string, id: number) =>
+    postJSON<SMTPTestResult>(`/api/account/smtp/${id}/test`, csrf),
   duplicateCopies: () => getJSON<DuplicateCopyReport>("/api/account/duplicates"),
   rescanDuplicateCopies: (csrf: string, after = "") =>
     postJSON<DuplicateScanResult>("/api/account/duplicates/rescan", csrf, { after }),

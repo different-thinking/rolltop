@@ -42,6 +42,12 @@ func (s *captureSender) Send(_ context.Context, _ store.MailAccount, msg smtpcli
 	return raw, err
 }
 
+// Verify is what the settings page's connection test calls. The compose tests
+// never press it, so it reports a session that was never recorded.
+func (s *captureSender) Verify(_ context.Context, _ store.MailAccount) (int64, error) {
+	return 0, nil
+}
+
 func captureExtraHeader(msg smtpclient.Message, name string) string {
 	for _, header := range msg.ExtraHeaders {
 		if strings.EqualFold(header.Name, name) {
