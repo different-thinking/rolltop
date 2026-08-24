@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"rolltop/backend/smtplog"
 	"rolltop/backend/store"
@@ -24,6 +25,24 @@ import (
 // defaultSMTPLogSessions is what the settings page asks for when it does not
 // say. A misconfigured account is diagnosed from its last few attempts.
 const defaultSMTPLogSessions = 10
+
+// Bounds on the connection test. It is the one route where a signed-in user
+// decides what host and port the server connects out to, and it hands back the
+// first thing the peer said -- which for a peer that is not a mail server is
+// its banner. Sending has always been able to reach the same address, but one
+// button that answers in a second is a different tool than composing a message
+// per address, so a user runs one test at a time and pauses between them.
+// smtpTestHold is what a running test reserves, long enough to cover a dial
+// that hangs until it times out; smtpTestMinInterval is the pause after one
+// finishes.
+const (
+	smtpTestHold        = 90 * time.Second
+	smtpTestMinInterval = 5 * time.Second
+	// smtpTestReservationSweep bounds the reservation map, which is keyed by
+	// user. Expired entries are dropped once there are more of them than any
+	// installation is plausibly testing with at once.
+	smtpTestReservationSweep = 64
+)
 
 type apiSMTPLogLine struct {
 	Time      string `json:"time"`
@@ -57,14 +76,10 @@ func (s *Server) apiSMTPLog(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	limit := smtpLogLimitFromRequest(r)
 	accountID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("account_id")), 10, 64)
-	sessions := s.smtpLog.Sessions(cu.User.ID, limit)
+	sessions := s.smtpLog.Sessions(cu.User.ID, accountID, smtpLogLimitFromRequest(r))
 	out := make([]apiSMTPLogSession, 0, len(sessions))
 	for _, session := range sessions {
-		if accountID > 0 && session.AccountID != accountID {
-			continue
-		}
 		out = append(out, apiSMTPLogSessionFrom(session))
 	}
 	writeJSON(w, map[string]any{"sessions": out})
@@ -116,6 +131,11 @@ func (s *Server) apiTestSMTPAccount(w http.ResponseWriter, r *http.Request, acco
 		writeAPIError(w, http.StatusServiceUnavailable, "sending is not configured on this server")
 		return
 	}
+	if !s.reserveSMTPTest(cu.User.ID) {
+		writeAPIError(w, http.StatusTooManyRequests, "a connection test is already running or just finished; try again in a few seconds")
+		return
+	}
+	defer s.releaseSMTPTest(cu.User.ID)
 	sessionID, testErr := s.sender.Verify(r.Context(), smtpTestEnvelope(cu, account))
 	// A refused login is the expected answer here, not a server fault: the
 	// request succeeded, and what it found out is the payload. The transcript
@@ -129,6 +149,40 @@ func (s *Server) apiTestSMTPAccount(w http.ResponseWriter, r *http.Request, acco
 		response["session"] = apiSMTPLogSessionFrom(session)
 	}
 	writeJSON(w, response)
+}
+
+// reserveSMTPTest claims this user's single connection-test slot, or reports
+// that they already have one. The reservation is a deadline rather than a flag
+// so a test whose handler dies without releasing it expires on its own.
+func (s *Server) reserveSMTPTest(userID int64) bool {
+	now := time.Now()
+	s.smtpTestMu.Lock()
+	defer s.smtpTestMu.Unlock()
+	if until, ok := s.smtpTestUntil[userID]; ok && now.Before(until) {
+		return false
+	}
+	if s.smtpTestUntil == nil {
+		s.smtpTestUntil = map[int64]time.Time{}
+	}
+	if len(s.smtpTestUntil) > smtpTestReservationSweep {
+		for id, until := range s.smtpTestUntil {
+			if !now.Before(until) {
+				delete(s.smtpTestUntil, id)
+			}
+		}
+	}
+	s.smtpTestUntil[userID] = now.Add(smtpTestHold)
+	return true
+}
+
+// releaseSMTPTest shortens the reservation to the pause between tests.
+func (s *Server) releaseSMTPTest(userID int64) {
+	s.smtpTestMu.Lock()
+	defer s.smtpTestMu.Unlock()
+	if s.smtpTestUntil == nil {
+		return
+	}
+	s.smtpTestUntil[userID] = time.Now().Add(smtpTestMinInterval)
 }
 
 // smtpTestEnvelope describes the account to the sender. The address only labels

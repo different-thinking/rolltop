@@ -151,17 +151,25 @@ func (r *Recorder) pruneUsersLocked() {
 	}
 }
 
-// Sessions returns the newest sessions for one user, newest first.
-func (r *Recorder) Sessions(userID int64, limit int) []Session {
+// Sessions returns the newest sessions for one user, newest first. A non-zero
+// accountID narrows them to one outgoing server, and the narrowing happens
+// while walking rather than afterwards: filtering a page of newest attempts
+// would answer "nothing recorded" for a server whose conversation is still
+// held, merely because the user has since used a different one.
+func (r *Recorder) Sessions(userID, accountID int64, limit int) []Session {
 	if r == nil || limit <= 0 {
 		return nil
 	}
 	r.mu.Lock()
 	recordings := append([]*Recording(nil), r.byUser[userID]...)
 	r.mu.Unlock()
-	out := make([]Session, 0, len(recordings))
+	out := make([]Session, 0, min(limit, len(recordings)))
 	for i := len(recordings) - 1; i >= 0 && len(out) < limit; i-- {
-		out = append(out, recordings[i].Snapshot())
+		snapshot := recordings[i].Snapshot()
+		if accountID > 0 && snapshot.AccountID != accountID {
+			continue
+		}
+		out = append(out, snapshot)
 	}
 	return out
 }
@@ -278,13 +286,20 @@ func collapseLineBreaks(text string) string {
 	return strings.ReplaceAll(text, "\n", " | ")
 }
 
+// truncateLine bounds one record. Only a rune the cut landed inside is backed
+// off, never the whole tail: a reply from a mail server is not required to be
+// valid UTF-8, and rejecting the cut for an invalid byte anywhere behind it
+// reduced a long line to a few characters and an ellipsis.
 func truncateLine(text string) string {
 	text = strings.TrimRight(text, "\r\n")
 	if len(text) <= maxLineBytes {
 		return text
 	}
 	cut := text[:maxLineBytes]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
+	for range utf8.UTFMax - 1 {
+		if r, size := utf8.DecodeLastRuneInString(cut); r != utf8.RuneError || size != 1 {
+			break
+		}
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "..."

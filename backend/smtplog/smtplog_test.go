@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRecordingRedactsCredentialsAndBodies(t *testing.T) {
@@ -57,7 +58,7 @@ func TestRecorderScopesSessionsToTheirUser(t *testing.T) {
 	mine.Finish(nil)
 	theirs.Finish(errors.New("535 authentication failed"))
 
-	sessions := recorder.Sessions(1, 10)
+	sessions := recorder.Sessions(1, 0, 10)
 	if len(sessions) != 1 || sessions[0].Host != "mine.example.test" {
 		t.Fatalf("user 1 read %#v, want only their own session", sessions)
 	}
@@ -75,12 +76,57 @@ func TestRecorderKeepsTheNewestSessionsPerUser(t *testing.T) {
 		recording := recorder.Start(Session{UserID: 7, Host: "host", Port: i})
 		recording.Finish(nil)
 	}
-	sessions := recorder.Sessions(7, 100)
+	sessions := recorder.Sessions(7, 0, 100)
 	if len(sessions) != sessionsPerUser {
 		t.Fatalf("kept %d sessions, want %d", len(sessions), sessionsPerUser)
 	}
 	if sessions[0].Port != sessionsPerUser+4 {
 		t.Fatalf("newest session port = %d, want the last attempt", sessions[0].Port)
+	}
+}
+
+// Narrowing to one server has to happen while walking the tail, not on a page
+// of it: an account whose attempt has been pushed out of the newest few by a
+// different account is still recorded, and answering "nothing here" for it is
+// the failure this panel exists to end.
+func TestSessionsNarrowBeyondTheNewestPage(t *testing.T) {
+	recorder := NewRecorder()
+	recorder.Start(Session{UserID: 5, AccountID: 8, Host: "eight.example.test"}).Finish(nil)
+	for range sessionsPerUser - 1 {
+		recorder.Start(Session{UserID: 5, AccountID: 9, Host: "nine.example.test"}).Finish(nil)
+	}
+	sessions := recorder.Sessions(5, 8, 3)
+	if len(sessions) != 1 || sessions[0].Host != "eight.example.test" {
+		t.Fatalf("narrowed answer = %#v, want the one attempt on account 8", sessions)
+	}
+	if all := recorder.Sessions(5, 0, 3); len(all) != 3 {
+		t.Fatalf("unnarrowed answer = %d sessions, want the requested 3", len(all))
+	}
+}
+
+// A mail server's reply is not required to be valid UTF-8, and one stray byte
+// must not cost the rest of a long line.
+func TestTruncateKeepsWhatFitsAroundAnInvalidByte(t *testing.T) {
+	line := "550 " + strings.Repeat("a", 10) + "\xff" + strings.Repeat("b", maxLineBytes)
+	got := truncateLine(line)
+	if len(got) < maxLineBytes {
+		t.Fatalf("truncated to %d bytes, want the whole bound: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("truncated line does not say it was cut: %q", got)
+	}
+}
+
+// A cut that lands inside a rune backs off to the boundary rather than leaving
+// half of it.
+func TestTruncateCutsOnRuneBoundaries(t *testing.T) {
+	line := strings.Repeat("a", maxLineBytes-1) + "ü" + "tail"
+	got := strings.TrimSuffix(truncateLine(line), "...")
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated line ends inside a rune: %q", got)
+	}
+	if got != strings.Repeat("a", maxLineBytes-1) {
+		t.Fatalf("truncated line = %q, want the text before the split rune", got)
 	}
 }
 
@@ -113,7 +159,7 @@ func TestNilRecorderRecordsNothing(t *testing.T) {
 	if recording.Ref() != 0 {
 		t.Fatalf("nil recorder handed out session id %d", recording.Ref())
 	}
-	if sessions := recorder.Sessions(1, 10); sessions != nil {
+	if sessions := recorder.Sessions(1, 0, 10); sessions != nil {
 		t.Fatalf("nil recorder returned %#v", sessions)
 	}
 }

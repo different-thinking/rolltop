@@ -141,6 +141,53 @@ func TestSMTPAccountTestRefusesAnotherUsersServer(t *testing.T) {
 	}
 }
 
+// The test button is the one route where a signed-in user decides what address
+// the server dials, and it answers with what the peer said. One test at a time
+// per user, with a pause after it, is what keeps that from being a convenient
+// way to sweep a network.
+func TestSMTPAccountTestRefusesASecondTestWhileOneIsHeld(t *testing.T) {
+	server, owner, _ := newDatabaseAdminServer(t)
+	account, err := server.store.CreateSMTPAccount(context.Background(), store.SMTPAccount{
+		UserID: owner.ID, Label: "Outgoing", Host: "smtp.example.test", Port: 587,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &verifyStub{}
+	server.sender = stub
+
+	first := httptest.NewRecorder()
+	server.apiTestSMTPAccount(first, smtpTestRequest(t, server, owner, account.ID), account.ID)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first test status = %d body = %s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	server.apiTestSMTPAccount(second, smtpTestRequest(t, server, owner, account.ID), account.ID)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second test status = %d, want 429", second.Code)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("the sender was asked to sign in %d times, want 1", stub.calls)
+	}
+
+	// The pause is per user: somebody else's test is not blocked by it.
+	stranger, err := server.store.CreateUser(context.Background(), "stranger@example.test", "Stranger", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := server.store.CreateSMTPAccount(context.Background(), store.SMTPAccount{
+		UserID: stranger.ID, Label: "Theirs", Host: "smtp.example.test", Port: 587,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := httptest.NewRecorder()
+	server.apiTestSMTPAccount(third, smtpTestRequest(t, server, stranger, theirs.ID), theirs.ID)
+	if third.Code != http.StatusOK {
+		t.Fatalf("another user's test status = %d body = %s", third.Code, third.Body.String())
+	}
+}
+
 func recordSession(server *Server, userID, accountID int64, host string) {
 	recording := server.smtpLog.Start(smtplog.Session{UserID: userID, AccountID: accountID, Kind: smtplog.KindSend, Host: host, Port: 587})
 	recording.Client("EHLO localhost")

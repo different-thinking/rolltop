@@ -377,7 +377,9 @@ to the container log, which on a hosted installation nobody can read. **Settings
 - **Test connection** opens a connection to that server, upgrades it if TLS is
   configured, and signs in — then hangs up without offering a message, so
   pressing it cannot deliver mail to anybody. The transcript of that exchange
-  appears immediately.
+  appears immediately. One test runs at a time per user, with a short pause
+  after it: the test decides what address the server dials out to, and answers
+  with what the peer said back.
 - Below it, the same page lists the recent attempts made by real sends,
   newest first, each expanding into the conversation it produced: the greeting,
   the extensions the server advertised, the TLS upgrade, the reply to `AUTH`,

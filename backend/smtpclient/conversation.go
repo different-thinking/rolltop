@@ -220,8 +220,22 @@ func (c *conversation) cmdSecret(line string) (int, string, error) {
 	return code, message, err
 }
 
+// mail opens the envelope. The two parameters net/smtp attached here are
+// attached for the same reason it did: compose writes its text and HTML parts
+// with Content-Transfer-Encoding 8bit, and a relay that enforces 8BITMIME
+// refuses or mangles such a body unless the sender declares it. SMTPUTF8 goes
+// with it, for an envelope address whose domain or local part is not ASCII.
+// Both are named only when the server advertised them, because a server that
+// did not will reject the parameter it never offered.
 func (c *conversation) mail(from string) error {
-	if _, _, err := c.cmd(250, "MAIL FROM:<%s>", from); err != nil {
+	command := "MAIL FROM:<" + from + ">"
+	if _, ok := c.supports("8BITMIME"); ok {
+		command += " BODY=8BITMIME"
+	}
+	if _, ok := c.supports("SMTPUTF8"); ok {
+		command += " SMTPUTF8"
+	}
+	if _, _, err := c.cmd(250, "%s", command); err != nil {
 		return fmt.Errorf("SMTP MAIL FROM: %w", err)
 	}
 	return nil

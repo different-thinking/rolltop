@@ -104,6 +104,8 @@ type Server struct {
 	lifetime                  context.Context
 	sender                    mailSender
 	smtpLog                   *smtplog.Recorder
+	smtpTestMu                sync.Mutex
+	smtpTestUntil             map[int64]time.Time
 	masterKey                 []byte
 	dataDir                   string
 	databaseTarget            string

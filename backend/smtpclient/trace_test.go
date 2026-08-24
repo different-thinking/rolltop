@@ -174,6 +174,65 @@ func TestSTARTTLSKeepsRecordingAfterTheUpgrade(t *testing.T) {
 	}
 }
 
+// A message body is written with Content-Transfer-Encoding 8bit, so a relay
+// that enforces 8BITMIME has to be told the envelope carries one. The
+// parameters are named only when the server offered them, because a server
+// that did not will refuse the parameter it never advertised.
+func TestMailFromDeclaresOnlyTheExtensionsTheServerOffers(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		advertised string
+		want       string
+	}{
+		{name: "offered", advertised: "250-8BITMIME\r\n250 SMTPUTF8\r\n", want: "MAIL FROM:<user@example.test> BODY=8BITMIME SMTPUTF8"},
+		{name: "not offered", advertised: "250 PIPELINING\r\n", want: "MAIL FROM:<user@example.test>"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			_ = clientConn.SetDeadline(time.Now().Add(10 * time.Second))
+			commands := make(chan string, 4)
+			go serveEnvelopeExchange(serverConn, test.advertised, commands)
+
+			conversation, err := newConversation(clientConn, "smtp.example.test", true, nil)
+			if err != nil {
+				t.Fatalf("greeting: %v", err)
+			}
+			if err := conversation.hello("localhost"); err != nil {
+				t.Fatalf("hello: %v", err)
+			}
+			if err := conversation.mail("user@example.test"); err != nil {
+				t.Fatalf("MAIL FROM: %v", err)
+			}
+			<-commands
+			if got := strings.TrimRight(<-commands, "\r\n"); got != test.want {
+				t.Fatalf("MAIL FROM = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// serveEnvelopeExchange greets, advertises what the test asks it to, and
+// reports every command it was sent.
+func serveEnvelopeExchange(conn net.Conn, advertised string, commands chan<- string) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	reader := bufio.NewReader(conn)
+	fmt.Fprint(conn, "220 fake ESMTP ready\r\n")
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		commands <- line
+		if strings.HasPrefix(strings.ToUpper(line), "EHLO") {
+			fmt.Fprint(conn, "250-fake greets you\r\n"+advertised)
+			continue
+		}
+		fmt.Fprint(conn, "250 ok\r\n")
+	}
+}
+
 // fakePasswordSMTPServer answers AUTH PLAIN for one password and counts what it
 // was asked to deliver.
 type fakePasswordSMTPServer struct {
@@ -361,7 +420,7 @@ func selfSignedCertificate(t *testing.T, host string) (tls.Certificate, *x509.Ce
 
 func onlySession(t *testing.T, recorder *smtplog.Recorder, userID int64) smtplog.Session {
 	t.Helper()
-	sessions := recorder.Sessions(userID, 10)
+	sessions := recorder.Sessions(userID, 0, 10)
 	if len(sessions) != 1 {
 		t.Fatalf("recorded sessions = %d, want 1", len(sessions))
 	}
