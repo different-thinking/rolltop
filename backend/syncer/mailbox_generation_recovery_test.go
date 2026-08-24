@@ -216,6 +216,9 @@ func TestMailboxGenerationRecoveryFailureWaitsForRetryInterval(t *testing.T) {
 	fetcher := &recoveryFailingFetcher{moveTestFetcher: &moveTestFetcher{}}
 	runner := NewRunnerWithContext(ctx, &Service{Store: db, Fetcher: fetcher})
 	runner.rebuildRecoveryInterval = 200 * time.Millisecond
+	// Shrink the per-account failure backoff below the loop interval so the
+	// timer-driven retry this test asserts still happens inside its window.
+	runner.accountBackoffBaseOverride = 20 * time.Millisecond
 	if err := runner.RecoverPendingInboxArrivals(); err != nil {
 		t.Fatal(err)
 	}

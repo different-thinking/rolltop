@@ -90,7 +90,10 @@ func (s *Service) prewarmPendingMailboxGeneration(
 	}
 
 	generationRecoveryPhase(ctx, "sqlite-local-uids", "")
-	localUIDs, err := s.Store.MessageUIDsForMailbox(ctx, userID, account.ID, mailbox.ID)
+	// The local set is generation-bound: a surviving row from an older
+	// generation carrying a reused UID must not suppress that UID's fetch in
+	// the new one.
+	localUIDs, err := s.Store.MessageUIDsForMailboxGeneration(ctx, userID, account.ID, mailbox.ID, expectedUIDValidity)
 	if err != nil {
 		return snapshot, err, nil
 	}
@@ -206,9 +209,15 @@ func (s *Service) fetchMailboxGenerationSnapshotBatch(
 		}
 	}
 	complete := end == len(uids)
+	if !complete {
+		// The next turn re-plans from a fresh snapshot and prewarms the newest
+		// page before its own batch, so a non-final refresh here repeated that
+		// full-folder UID listing once per turn for nothing.
+		return false, nil
+	}
 	generationRecoveryPhase(ctx, "refresh-newest", "")
-	if err := refresh(complete); err != nil {
+	if err := refresh(true); err != nil {
 		return false, err
 	}
-	return complete, nil
+	return true, nil
 }

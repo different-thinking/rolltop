@@ -44,11 +44,11 @@ func (f *Fetcher) MoveMessageWithReceipt(ctx context.Context, account store.Mail
 	if err := validateMoveRequest(ctx, sourceMailbox, destMailbox, uid, expectedSourceUIDValidity); err != nil {
 		return nil, err
 	}
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return nil, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return moveMessageWithReceipt(ctx, c, sourceMailbox, destMailbox, uid, expectedSourceUIDValidity)
 }
 

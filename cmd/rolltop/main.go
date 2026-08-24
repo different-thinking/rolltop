@@ -14,6 +14,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -1139,29 +1140,6 @@ func backfillThreadHeaders(ctx context.Context, db *store.Store, dataDir string)
 	}
 }
 
-func inboxPoll(ctx context.Context, db *store.Store, runner *syncer.Runner, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			targets, err := inboxAutoTargets(ctx, db)
-			if err != nil {
-				log.Printf("inbox poll list accounts: %v", err)
-				continue
-			}
-			for _, target := range targets {
-				if !runner.QueueAccountMailboxes(target.UserID, target.Account.ID, []string{target.Mailbox.Name}) {
-					log.Printf("inbox poll user_id=%d account_id=%d not queued: sync runner stopped",
-						target.UserID, target.Account.ID)
-				}
-			}
-		}
-	}
-}
-
 func inboxIdle(ctx context.Context, db *store.Store, runner *syncer.Runner, watcher mailboxWatcher, retryEvery time.Duration) {
 	if watcher == nil {
 		return
@@ -1212,8 +1190,21 @@ func inboxIdle(ctx context.Context, db *store.Store, runner *syncer.Runner, watc
 					}
 					if err != nil {
 						log.Printf("inbox idle user_id=%d account_id=%d mailbox=%s: %v", target.UserID, target.Account.ID, target.Mailbox.Name, err)
+						// A watcher that cannot log in is the same failing
+						// account every sync turn sees; feed the shared
+						// backoff instead of reconnecting at full frequency.
+						runner.RecordAccountSyncOutcome(target.UserID, target.Account.ID, err)
 					}
-					timer := time.NewTimer(retryEvery)
+					// Jitter spreads mass reconnects after a server restart;
+					// the account's backoff extends the pause when the server
+					// keeps refusing.
+					pause := retryEvery + time.Duration(rand.Int63n(int64(retryEvery)/5+1))
+					if wait, reason := runner.AccountSyncBackoff(target.UserID, target.Account.ID); wait > pause {
+						log.Printf("inbox idle user_id=%d account_id=%d mailbox=%s: backing off %s (%s)",
+							target.UserID, target.Account.ID, target.Mailbox.Name, wait.Round(time.Second), reason)
+						pause = wait
+					}
+					timer := time.NewTimer(pause)
 					select {
 					case <-watchCtx.Done():
 						timer.Stop()

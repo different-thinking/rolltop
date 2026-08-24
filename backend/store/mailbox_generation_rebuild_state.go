@@ -515,12 +515,16 @@ func (s *Store) ListMailboxGenerationArrivalCandidates(ctx context.Context, user
 	if err != nil {
 		return nil, err
 	}
+	// The bodies are deliberately projected empty: this replay runs on every
+	// rebuild turn and only records arrivals and cancels snoozes, neither of
+	// which reads message text — selecting real bodies pulled every post-floor
+	// message's text into memory once per turn.
 	rows, err := db.QueryContext(ctx, `SELECT message.id, message.user_id, message.account_id,
 		message.mailbox_id, message.blob_id, message.message_id_header, message.in_reply_to,
 		message.references_header, message.thread_key, message.subject, message.language_code,
 		message.from_addr, message.to_addr, message.cc_addr, message.date_unix,
 		message.internal_date_unix, message.uid, message.size, message.blob_path,
-		message.body_text, message.body_html, message.is_read, message.read_sync_pending,
+		'' AS body_text, '' AS body_html, message.is_read, message.read_sync_pending,
 		message.is_starred, message.star_sync_pending, message.has_attachments,
 		message.is_encrypted, message.is_signed, message.attachment_indexed_at,
 		message.created_at, message.updated_at, message.category
@@ -590,6 +594,9 @@ type PendingMailboxGenerationRebuild struct {
 
 // ListPendingMailboxGenerationRebuilds supports crash recovery without
 // broadening a resume to same-named mailboxes on another account or tenant.
+// The scan is bounded: the recovery loop attempts one mailbox per tenant per
+// pass anyway, and re-reads on every pass, so an unbounded listing only made
+// a large backlog cost a full table read every thirty seconds.
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT rebuild.user_id, rebuild.account_id,
 		rebuild.mailbox_id, mailbox.name, rebuild.target_uid_validity,
@@ -599,7 +606,8 @@ func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]Pen
 			AND mailbox.account_id = rebuild.account_id AND mailbox.id = rebuild.mailbox_id
 		ORDER BY rebuild.user_id,
 			CASE WHEN lower(trim(mailbox.role)) = 'inbox' OR lower(trim(mailbox.name)) = 'inbox' THEN 0 ELSE 1 END,
-			rebuild.account_id, rebuild.mailbox_id`)
+			rebuild.account_id, rebuild.mailbox_id
+		LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}

@@ -303,6 +303,25 @@ func (w *routineWorker) Start() {
 		defer w.wg.Done()
 		w.idleLoop()
 	}()
+	// A routine that was failing before a restart keeps the pause it had
+	// earned: next_retry_at used to be written for the UI only and never
+	// consulted, so every deploy restarted a failing routine hot against the
+	// server that had just been refusing it.
+	if wait := time.Until(w.item.NextRetryAt); !w.item.NextRetryAt.IsZero() && wait > 0 {
+		if wait > maxRetryDelay {
+			wait = maxRetryDelay
+		}
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			select {
+			case <-w.ctx.Done():
+			case <-time.After(wait):
+				w.Trigger("startup")
+			}
+		}()
+		return
+	}
 	w.Trigger("startup")
 }
 
@@ -987,6 +1006,10 @@ func messageFingerprint(raw []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// maxRetryDelay caps a routine's failure backoff, and bounds how long a
+// restarted worker honors a stored next_retry_at.
+const maxRetryDelay = 5 * time.Minute
+
 func retryDelay(failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
@@ -996,8 +1019,8 @@ func retryDelay(failures int) time.Duration {
 		shift = 6
 	}
 	delay := 5 * time.Second * time.Duration(1<<shift)
-	if delay > 5*time.Minute {
-		return 5 * time.Minute
+	if delay > maxRetryDelay {
+		return maxRetryDelay
 	}
 	return delay
 }

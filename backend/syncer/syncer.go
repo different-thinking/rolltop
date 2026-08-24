@@ -165,11 +165,15 @@ type Service struct {
 	RegisterRunCancel   func(userID, runID int64, cancel context.CancelFunc)
 	UnregisterRunCancel func(runID int64)
 
-	BlobRetention                    time.Duration
-	Notify                           func(userID int64)
-	NotifyProgress                   func(userID int64)
-	ScheduleInboxArrival             func(userID, accountID int64, due time.Time)
-	NotifyRestoredState func(userID int64)
+	// AccountSyncOutcome reports each account turn's result so the Runner can
+	// track per-account health and back off a failing server.
+	AccountSyncOutcome func(userID, accountID int64, err error)
+
+	BlobRetention        time.Duration
+	Notify               func(userID int64)
+	NotifyProgress       func(userID int64)
+	ScheduleInboxArrival func(userID, accountID int64, due time.Time)
+	NotifyRestoredState  func(userID int64)
 	// MailboxGenerationRecoveryStarted closes the tenant's recovery gate. The
 	// context identifies the sync job that discovered the reset so the gate can
 	// cancel the tenant's other ordinary work without cancelling the caller,
@@ -369,6 +373,9 @@ func (s *Service) DiscoverMailboxes(ctx context.Context, userID int64) (int, err
 	if s.Fetcher == nil {
 		return 0, errors.New("sync fetcher is not configured")
 	}
+	var endSessions func()
+	ctx, endSessions = WithAccountSessionScope(ctx)
+	defer endSessions()
 	accounts, err := s.Store.ListMailAccountsForUser(ctx, userID)
 	if err != nil {
 		return 0, err
@@ -503,7 +510,22 @@ func (o syncAccountOptions) deferOrdinaryMaintenanceNow() bool {
 }
 
 func (s *Service) syncAccount(ctx context.Context, userID int64, account store.MailAccount, requestedMailboxes []string, options syncAccountOptions) (store.SyncRun, error) {
+	run, err := s.syncAccountTurn(ctx, userID, account, requestedMailboxes, options)
+	// Report the turn's outcome for per-account health tracking. A paused turn
+	// is a healthy one; the hook treats it as success.
+	if s.AccountSyncOutcome != nil {
+		s.AccountSyncOutcome(userID, account.ID, err)
+	}
+	return run, err
+}
+
+func (s *Service) syncAccountTurn(ctx context.Context, userID int64, account store.MailAccount, requestedMailboxes []string, options syncAccountOptions) (store.SyncRun, error) {
 	ctx = withSyncRunDiagnostics(ctx, options.runDiagnostics)
+	// One turn shares one connection per account: planning, fetching, flag
+	// syncs and reconciliation all reuse it instead of paying a login each.
+	var endSessions func()
+	ctx, endSessions = WithAccountSessionScope(ctx)
+	defer endSessions()
 	generationRecoveryPhase(ctx, "sqlite-create-sync-run", "")
 	run, err := s.Store.CreateSyncRun(ctx, userID, account.ID)
 	if err != nil {

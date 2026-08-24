@@ -5,6 +5,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -20,6 +21,9 @@ func (s *Service) CopyMessages(ctx context.Context, userID int64, messageIDs []i
 	if len(ids) == 0 {
 		return 0, errors.New("no messages selected")
 	}
+	var endSessions func()
+	ctx, endSessions = WithAccountSessionScope(ctx)
+	defer endSessions()
 	copied := 0
 	for _, id := range ids {
 		if err := s.CopyMessage(ctx, userID, id, destMailboxID); err != nil {
@@ -60,6 +64,9 @@ func (s *Service) StartCopyMessages(ctx context.Context, userID int64, messageID
 func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64, destMailboxID int64, destName string, runID int64, progress store.SyncProgress, onDone func()) {
 	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
 	defer finishRun()
+	var endSessions func()
+	ctx, endSessions = WithAccountSessionScope(ctx)
+	defer endSessions()
 	status := "ok"
 	errText := ""
 	defer func() {
@@ -81,6 +88,15 @@ func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64
 			onDone()
 		}
 	}()
+	// Like a move run: per-message failures are recorded and stepped over, a
+	// systemic failure streak ends the run, and progress publishes on a pace
+	// instead of a row write and a broadcast per message. Failing the whole
+	// run on the first bad message left every remaining copy undone.
+	failures := 0
+	consecutiveFailures := 0
+	firstFailure := ""
+	progress.CurrentMailbox = "Copying to " + destName
+	reporter := s.syncProgressReporter(userID, runID, &progress)
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
@@ -89,26 +105,73 @@ func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64
 		}
 		msg, err := s.Store.GetMessageForUser(ctx, userID, id)
 		if err != nil {
+			if store.IsNotFound(err) {
+				// The row vanished since the selection was made; there is
+				// nothing left to copy and nothing was left behind.
+				progress.MessagesSeen++
+				continue
+			}
 			status = "failed"
 			errText = err.Error()
 			return
 		}
-		progress.CurrentMailbox = "Copying to " + destName
 		progress.CurrentUID = msg.UID
-		if err := s.CopyMessage(ctx, userID, id, destMailboxID); err != nil {
-			status = "failed"
-			errText = err.Error()
-			return
-		}
 		progress.MessagesSeen++
+		if err := s.CopyMessage(ctx, userID, id, destMailboxID); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			failures++
+			consecutiveFailures++
+			if firstFailure == "" {
+				firstFailure = err.Error()
+			}
+			progress.MessagesSkipped = failures
+			log.Printf("copy run skipped message user_id=%d run_id=%d message_id=%d: %v", userID, runID, id, err)
+			if consecutiveFailures >= moveRunConsecutiveFailureLimit {
+				break
+			}
+			if err := reporter.step(ctx); err != nil {
+				status = "failed"
+				errText = err.Error()
+				return
+			}
+			continue
+		}
+		consecutiveFailures = 0
 		progress.MessagesStored++
-		if err := s.Store.UpdateSyncRunProgress(ctx, userID, runID, progress); err != nil {
+		if err := reporter.step(ctx); err != nil {
 			status = "failed"
 			errText = err.Error()
 			return
 		}
-		s.notify(userID)
 	}
+	if err := reporter.commit(ctx); err != nil {
+		status = "failed"
+		errText = err.Error()
+		return
+	}
+	if failures > 0 {
+		status = "failed"
+		errText = copyRunFailureSummary(progress.MessagesStored, len(ids), failures,
+			len(ids)-progress.MessagesSeen, firstFailure)
+	}
+}
+
+// copyRunFailureSummary is the move-run summary's copy counterpart.
+func copyRunFailureSummary(copied, total, failures, notAttempted int, firstFailure string) string {
+	summary := fmt.Sprintf("Copied %d of %d messages; %d could not be copied", copied, total, failures)
+	if notAttempted > 0 {
+		summary += fmt.Sprintf(" and %d were not attempted", notAttempted)
+	}
+	summary += "."
+	if notAttempted > 0 {
+		summary += " The copy stopped early after repeated failures; run it again to continue."
+	}
+	if strings.TrimSpace(firstFailure) != "" {
+		summary += " First failure: " + firstFailure
+	}
+	return summary
 }
 
 // CopyMessage writes one message to the destination IMAP mailbox and stores the
@@ -117,6 +180,12 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 	if s.Fetcher == nil {
 		return errors.New("sync fetcher is not configured")
 	}
+	// A copy pays for a boundary snapshot, the APPEND, a confirmation fetch and
+	// up to two flag writes. One session scope turns those four to six logins
+	// into one per account; a scope already present (a copy run) is reused.
+	var endSessions func()
+	ctx, endSessions = WithAccountSessionScope(ctx)
+	defer endSessions()
 	msg, err := s.Store.GetMessageForUser(ctx, userID, messageID)
 	if err != nil {
 		return err

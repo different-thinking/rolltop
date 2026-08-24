@@ -92,6 +92,9 @@ type Runner struct {
 	generationRecoveryBoxes    map[int64]map[string]string
 	generationRecoveryAccts    map[int64]map[string]deferredAccountMailbox
 	arrivalScheduler           *inboxArrivalScheduler
+	healthMu                   sync.Mutex
+	accountHealth              map[accountHealthKey]*accountHealth
+	accountBackoffBaseOverride time.Duration
 	rebuildRecoveryRunning     bool
 	rebuildRecoveryInterval    time.Duration
 	generationRecoveryTimeout  time.Duration
@@ -99,6 +102,7 @@ type Runner struct {
 	senderStatsTimeout         time.Duration
 	attachmentYieldTimeout     time.Duration
 	rebuildRecoveryWake        chan struct{}
+	recoverySlots              chan struct{}
 	rebuildRecoveryBeforeStop  func()
 	queueRebuildMailbox        func(store.PendingMailboxGenerationRebuild)
 	replayGenerationRecovery   func(generationRecoveryReplay)
@@ -165,6 +169,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		generationRecoveryAccts:    map[int64]map[string]deferredAccountMailbox{},
 		attachmentYieldTimeout:     attachmentIndexYieldTimeout,
 		rebuildRecoveryWake:        make(chan struct{}, 1),
+		recoverySlots:              make(chan struct{}, maxConcurrentGenerationRecoveries),
 	}
 	runner.arrivalScheduler = newInboxArrivalScheduler(ctx, runner.finalizePendingInboxArrivals, runner.notifyInboxArrivals)
 	if service != nil {
@@ -173,6 +178,7 @@ func NewRunnerWithContext(ctx context.Context, service *Service) *Runner {
 		service.MailboxGenerationRecoveryStarted = runner.signalMailboxGenerationRecoveryFromContext
 		service.RegisterRunCancel = runner.registerSyncRunCancel
 		service.UnregisterRunCancel = runner.unregisterSyncRunControl
+		service.AccountSyncOutcome = runner.RecordAccountSyncOutcome
 	}
 	if done := ctx.Done(); done != nil {
 		go func() {
@@ -1428,6 +1434,11 @@ func (r *Runner) waitForForegroundYield(ctx context.Context, userID int64, maint
 			return ctx.Err()
 		}
 	}
+	// The poll interval grows toward a cap: a worker that yields quickly is
+	// seen quickly, while a long wait — a plugin's 90-second acquire budget —
+	// no longer spends thousands of passes over the runner's mutex.
+	delay := 10 * time.Millisecond
+	const maxForegroundYieldPoll = 250 * time.Millisecond
 	for {
 		r.mu.Lock()
 		// A recovery turn can install its cancellation after reserving its
@@ -1438,7 +1449,7 @@ func (r *Runner) waitForForegroundYield(ctx context.Context, userID int64, maint
 		if !mailboxWriterRunning {
 			return ctx.Err()
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -1446,6 +1457,12 @@ func (r *Runner) waitForForegroundYield(ctx context.Context, userID int64, maint
 			}
 			return ctx.Err()
 		case <-timer.C:
+		}
+		if delay < maxForegroundYieldPoll {
+			delay *= 2
+			if delay > maxForegroundYieldPoll {
+				delay = maxForegroundYieldPoll
+			}
 		}
 	}
 }

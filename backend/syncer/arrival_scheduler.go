@@ -18,6 +18,10 @@ const (
 	inboxArrivalMinimumDelay                 = 10 * time.Millisecond
 	mailboxGenerationRebuildRecoveryInterval = 30 * time.Second
 	mailboxGenerationRecoveryTurnTimeout     = 2 * time.Minute
+	// maxConcurrentGenerationRecoveries bounds how many tenants recover at
+	// once. Each recovery turn holds an IMAP session and a database writer;
+	// one goroutine per gated tenant per scan was unbounded.
+	maxConcurrentGenerationRecoveries = 4
 )
 
 type inboxArrivalTimer interface {
@@ -133,6 +137,14 @@ func (r *Runner) queuePendingMailboxGenerationRebuilds(ctx context.Context) (int
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
+		// A server that keeps refusing gets its recovery attempts on the same
+		// backoff as everything else, instead of a flat retry every scan. The
+		// durable marker keeps the work queued; only this attempt waits.
+		if wait, reason := r.AccountSyncBackoff(rebuild.UserID, rebuild.AccountID); wait > 0 {
+			log.Printf("recover mailbox generation deferred user_id=%d account_id=%d mailbox=%q backoff=%s (%s)",
+				rebuild.UserID, rebuild.AccountID, rebuild.MailboxName, wait.Round(time.Second), reason)
+			continue
+		}
 		if r.queueRebuildMailbox != nil {
 			r.queueRebuildMailbox(rebuild)
 			r.markMailboxGenerationRecoveryAttempt(rebuild)
@@ -147,11 +159,19 @@ func (r *Runner) queuePendingMailboxGenerationRebuilds(ctx context.Context) (int
 }
 
 func (r *Runner) startPendingMailboxGenerationRebuild(rebuild store.PendingMailboxGenerationRebuild) bool {
+	select {
+	case r.recoverySlots <- struct{}{}:
+	default:
+		// Every cross-tenant recovery slot is busy; the next scan retries.
+		return false
+	}
 	keys, reserved := r.reserveGenerationRecoveryMailbox(rebuild)
 	if !reserved {
+		<-r.recoverySlots
 		return false
 	}
 	go func() {
+		defer func() { <-r.recoverySlots }()
 		succeeded := false
 		paused := false
 		defer func() {

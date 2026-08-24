@@ -306,3 +306,41 @@ Phase 3 pays down the scheduler. Phase 4 hardens verification.
   and can land in parallel.
 - Phase 3 should not start before Phase 2 lands, to avoid refactoring the
   scheduler around call patterns that are about to change.
+
+---
+
+## Part 4 — Implementation status (this branch)
+
+All four phases are implemented on this branch. Deviations from the plan as
+written, with reasons:
+
+- **Progress-based deadlines replaced the adaptive batch shrink.** The plan's
+  Phase 2 item 3 proposed halving the per-account batch byte budget after a
+  timeout. The implemented fix removes the root cause instead: connections are
+  wrapped in a byte-level activity tracker (`activityConn`), and
+  `guardedUIDFetch` terminates only when no byte arrives for a whole idle
+  window. A slow link that keeps delivering data now finishes any batch size,
+  so there is nothing left for a shrink policy to converge on. Untracked
+  clients (tests) keep an absolute fallback deadline.
+- **Session reuse is a per-turn scope, not a long-lived pool**
+  (`syncer.AccountSessionScope` + `imapclient.Fetcher.sessionClient`): one
+  cached connection per account for the duration of one sync turn / copy run /
+  discovery pass, dropped at turn end. That captures ~80 % of the login
+  savings without introducing pool lifetime/keepalive management.
+- **D4 (gate armed before the reservation guard) is intentionally unchanged.**
+  Cancelling the tenant's ordinary work when recovery cannot yet reserve is
+  the designed preemption: it is what makes room for the next scan, and the
+  cancelled turn's checkpoints are durable.
+- **B9 (foreground barrier held after an acquire timeout) is intentionally
+  unchanged**: releasing the barrier before the cancelled workers have
+  checkpointed can strand their replay state (see the comment at the site).
+  The busy-waits around it were softened to capped exponential polls instead.
+- **B5 (`QueueAccountMailboxes` return value)**: on inspection every deferral
+  branch records durable replay state that a later release replays, so `true`
+  ("a future pass is guaranteed") is accurate; only a stopped runner returns
+  `false`. No change.
+- The scheduler was hardened in place (bounded recovery concurrency, LIMIT on
+  the marker scan, backoff-aware attempts, capped polls, cancellation for all
+  run types). The full job-queue rewrite from Phase 3 item 1 remains future
+  work; the concrete defects it was meant to eliminate are fixed
+  individually.
