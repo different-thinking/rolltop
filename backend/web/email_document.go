@@ -111,15 +111,16 @@ func removeScriptElements(bodyHTML string) string {
 // the console with them. The handlers and javascript: URLs are removed for the
 // same reason <script> is: they can never run here, and what cannot run should
 // not be logged.
-var (
-	inlineScriptingHintRE = regexp.MustCompile(`(?is)<[^>]*(?:\son[a-z]{3,}\s*=|javascript:)`)
-	eventHandlerNameRE    = regexp.MustCompile(`(?i)^on[a-z]+$`)
-)
+var eventHandlerNameRE = regexp.MustCompile(`(?i)^on[a-z]+$`)
 
+// There is deliberately no cheap pre-test for whether a body is worth walking.
+// The obvious ones read the markup the way this code hopes it is written -
+// whitespace before a handler, javascript: spelled in letters - and a body that
+// spells either differently, as `<img src="x"onerror="…">` does and as an
+// entity-encoded scheme does, would skip the pass that was written for it. The
+// walk is one pass over the tags of a message body, which the neutralizing pass
+// below spends unconditionally already.
 func removeInlineScripting(bodyHTML string) string {
-	if !inlineScriptingHintRE.MatchString(bodyHTML) {
-		return bodyHTML
-	}
 	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
 		return rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
 			if eventHandlerNameRE.MatchString(strings.TrimSpace(attrName)) {
@@ -240,10 +241,17 @@ var (
 )
 
 var (
-	htmlTagRE        = regexp.MustCompile(`(?is)<[a-zA-Z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>`)
-	styleBlockRE     = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
-	tagNameRE        = regexp.MustCompile(`(?is)^<\s*([a-zA-Z][^\s/>]*)`)
-	tagAttrRE        = regexp.MustCompile(`(?is)^\s+([^\s/>=]+)(\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?`)
+	htmlTagRE    = regexp.MustCompile(`(?is)<[a-zA-Z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>`)
+	styleBlockRE = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	tagNameRE    = regexp.MustCompile(`(?is)^<\s*([a-zA-Z][^\s/>]*)`)
+	// An attribute does not need whitespace in front of it: a browser starts a
+	// new one at whatever follows a quoted value, and a solidus separates them
+	// too, so `<img src="x"onerror="…">` and `<img src="x"/onerror="…">` both
+	// carry a handler. Requiring the space here let those through untouched -
+	// the handler was never seen, and neither was a remote src written the same
+	// way. Only an unquoted value keeps the solidus, which the value pattern
+	// below already does, because that is where the browser keeps it too.
+	tagAttrRE        = regexp.MustCompile(`(?is)^[\s/]*([^\s/>=]+)(\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?`)
 	cssImportRuleRE  = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*("[^"]*"|'[^']*'|[^'")\s]*)\s*\)|("[^"]*"|'[^']*'))[^;]*;?`)
 	cssURLTokenRE    = regexp.MustCompile(`(?is)url\(\s*("([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)`)
 	remoteRefSchemes = []string{"http://", "https://", "//"}

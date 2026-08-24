@@ -222,7 +222,17 @@ Absender auf. Bei erlaubten Bildern bleiben sie dann stehen, bei blockierten
 werden sie entfernt — mit Basis sind sie genau die Fremdreferenzen, die
 dieser Modus ablehnt.
 
-**Die fünf Sandbox-Meldungen.** Die schon am 19.08. gesammelte Meldung, hier
+**Die fünf Sandbox-Meldungen.** (Nachtrag 24.08., nachdem die Meldung
+weiterhin auftrat: Der Scrubber sah zwei Schreibweisen nicht. Ein Browser
+beginnt ein neues Attribut hinter einem zitierten Wert auch ohne
+Leerzeichen — `<img src="x"onerror="…">` und `<img src="x"/onerror="…">`
+tragen beide einen Handler —, `tagAttrRE` verlangte aber eines. Und der
+Vortest, der entschied, ob der Durchlauf überhaupt lohnt, suchte nach
+`\son…=` beziehungsweise nach `javascript:` in Buchstaben; eine Mail, die
+es anders schreibt, sprang genau an dem Durchlauf vorbei, der für sie
+gedacht war. Der Vortest ist weg, das Attributmuster kennt beide
+Trennungen. Bei einem *unzitierten* Wert bleibt der Schrägstrich Teil der
+URL — da hält der Browser es genauso.) Die schon am 19.08. gesammelte Meldung, hier
 fünfmal. Skripte laufen nicht — der iframe ist ohne `allow-scripts`
 sandboxed, und die Dokument-CSP erlaubt keine Skriptquelle —, aber ein
 blockierter Versuch ist nicht still: Jedes `onerror` eines Bildes, das nicht

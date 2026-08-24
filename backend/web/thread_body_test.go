@@ -594,3 +594,50 @@ func TestEmailDocumentIgnoresACommentedOutBase(t *testing.T) {
 		t.Fatalf("dropped reference was not recorded: %s", doc)
 	}
 }
+
+func TestEmailDocumentRemovesInlineScriptingWrittenWithoutASeparator(t *testing.T) {
+	// A browser starts a new attribute at whatever follows a quoted value, so
+	// each of these carries a handler that fires, and each of them used to walk
+	// past the scrubber untouched.
+	for _, body := range []string{
+		`<img src="hero.png"onerror="alert(1)" alt="Hero">`,
+		`<img src="hero.png"/onerror="alert(1)" alt="Hero">`,
+		`<img src="hero.png" ONERROR=alert(1) alt="Hero">`,
+	} {
+		doc := emailDocument(body, "", false)
+		if strings.Contains(strings.ToLower(doc), "onerror") || strings.Contains(doc, "alert(1)") {
+			t.Fatalf("handler survived in %q: %s", body, doc)
+		}
+		if !strings.Contains(doc, `alt="Hero"`) {
+			t.Fatalf("message content was lost for %q: %s", body, doc)
+		}
+	}
+	// An unquoted value keeps its solidus - that is where the browser keeps it
+	// too, so the "handler" here is part of the URL and never runs as one.
+	unquoted := emailDocument(`<img src=hero.png/onerror=alert(1)>`, "", false)
+	if !strings.Contains(unquoted, `data-rolltop-unresolved-src="hero.png/onerror=alert(1)"`) {
+		t.Fatalf("unquoted value was split into an attribute: %s", unquoted)
+	}
+}
+
+func TestEmailDocumentRemovesDisguisedScriptURLs(t *testing.T) {
+	body := `<a href="&#106;avascript:alert(1)">Entity</a><a href="JaVaScRiPt:alert(2)">Case</a>` +
+		`<a href=" javascript:alert(3)">Space</a>`
+	doc := emailDocument(body, "", false)
+	if strings.Contains(strings.ToLower(doc), "alert(") {
+		t.Fatalf("script URL survived: %s", doc)
+	}
+	if !strings.Contains(doc, "Entity") || !strings.Contains(doc, "Case") || !strings.Contains(doc, "Space") {
+		t.Fatalf("link text was lost: %s", doc)
+	}
+}
+
+func TestEmailDocumentNeutralizesRemoteRefWrittenWithoutASeparator(t *testing.T) {
+	doc := emailDocument(`<img src="hero.png"srcset="https://cdn.example.test/hero.png 2x">`, "", false)
+	if strings.Contains(doc, ` srcset="https://cdn.example.test/hero.png 2x"`) {
+		t.Fatalf("document kept a live remote reference: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-blocked-srcset="https://cdn.example.test/hero.png 2x"`) {
+		t.Fatalf("blocked reference was not recorded: %s", doc)
+	}
+}
