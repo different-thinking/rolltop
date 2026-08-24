@@ -452,10 +452,14 @@ export const api = {
   // Compose sends pure JSON when possible, then switches to multipart only when
   // there are file bodies. Inline files are represented in the JSON payload by
   // stable form field names and Content-ID metadata.
+  //
+  // `message_id` is optional because one success shape does not carry it: when
+  // SMTP accepted the mail but storing the local copy failed, the server
+  // answers `sent` with a `warning` and no message row exists to name.
   send: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
     if (attachments.length === 0) {
-      return postJSON<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, payload);
+      return postJSON<{ ok: boolean; message_id?: number; sent?: boolean; warning?: string; archived_mailbox?: string }>("/api/compose", csrf, payload);
     }
     const body = new FormData();
     body.append("payload", JSON.stringify({
@@ -470,7 +474,7 @@ export const api = {
       }))
     }));
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
-    return postForm<{ ok: boolean; message_id: number; archived_mailbox?: string }>("/api/compose", csrf, body);
+    return postForm<{ ok: boolean; message_id?: number; sent?: boolean; warning?: string; archived_mailbox?: string }>("/api/compose", csrf, body);
   },
   saveDraft: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);

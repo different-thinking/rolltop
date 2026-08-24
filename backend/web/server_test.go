@@ -1340,3 +1340,17 @@ func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
 		t.Fatalf("messagesAccountScope error = %v, want nil", err)
 	}
 }
+
+// A uniform selection whose account simply is not the destination's used to be
+// answered with "select messages from a single account", which is the one thing
+// the caller had already done. The folder is what they have to change, and the
+// two failures have to stay distinguishable to say so.
+func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsUniform(t *testing.T) {
+	messages := []store.MessageRecord{
+		{ID: 1, AccountID: 11},
+		{ID: 2, AccountID: 11},
+	}
+	if err := messagesAccountScope(messages, 10); err != errBulkMoveWrongAccount {
+		t.Fatalf("messagesAccountScope error = %v, want errBulkMoveWrongAccount", err)
+	}
+}

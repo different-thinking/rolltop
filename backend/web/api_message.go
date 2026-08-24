@@ -804,15 +804,31 @@ func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, mess
 // unlike copy, there is no cross-account destination for it, and starting the
 // walk anyway lets messages from the caller's own account move while every
 // other account's messages fail one by one deep inside the run.
-var errBulkMoveCrossesAccounts = errors.New("select messages from a single account to move them together")
+var (
+	errBulkMoveCrossesAccounts = errors.New("select messages from a single account to move them together")
+	// A selection can be perfectly uniform and still not match the destination.
+	// Telling that caller to "select messages from a single account" sends them
+	// to fix the one thing already right; what they have to change is the
+	// folder. The syncer words this case correctly but is never reached,
+	// because the handler rejects first.
+	errBulkMoveWrongAccount = errors.New("the destination folder belongs to a different account than the selected messages")
+)
 
 // messagesAccountScope reports whether every message belongs to accountID, so
-// a bulk move can be rejected up front rather than partially completing.
+// a bulk move can be rejected up front rather than partially completing. The
+// two ways that can fail are distinct and get distinct answers.
 func messagesAccountScope(messages []store.MessageRecord, accountID int64) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	selected := messages[0].AccountID
 	for _, msg := range messages {
-		if msg.AccountID != accountID {
+		if msg.AccountID != selected {
 			return errBulkMoveCrossesAccounts
 		}
+	}
+	if selected != accountID {
+		return errBulkMoveWrongAccount
 	}
 	return nil
 }
@@ -929,10 +945,15 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(messages) == 0 {
-		// None of the given ids resolved to a message this user owns. Answering
-		// here skips reserving the foreground turn and starting a sync run for a
-		// selection that has nothing left to move.
-		http.NotFound(w, r)
+		// None of the given ids resolved to a message this user owns — most
+		// often a list this tab rendered before another one moved the same mail.
+		// Answering here still skips reserving the foreground turn and starting
+		// a sync run for a selection with nothing left to move, but it answers
+		// success: the messages are not where the caller wanted them moved from,
+		// which is the outcome the request asked for. A 404 turned that into a
+		// "Move failed" toast that also un-hid the rows the move had already
+		// optimistically cleared.
+		writeJSON(w, map[string]any{"ok": true, "queued": false, "moved": 0, "mailbox": dest.Name})
 		return
 	}
 	if err := messagesAccountScope(messages, dest.AccountID); err != nil {

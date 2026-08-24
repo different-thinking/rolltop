@@ -1334,6 +1334,22 @@ func (s *Server) supersedeDraft(ctx context.Context, userID, oldMessageID int64)
 		}
 		return
 	}
+	// The id arrives as `draft_message_id` in the request body and is only
+	// checked for ownership before this point, so without a role check any
+	// message the caller owns — an Inbox message — supersedes as a draft and
+	// lands in Trash. The GET side of this endpoint already refuses a non-draft
+	// id (`composeFormForDraft`); this is the same rule on the writing side.
+	from, err := s.store.GetMailboxForUser(ctx, userID, old.MailboxID)
+	if err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
+		}
+		return
+	}
+	if from.Role != "drafts" {
+		log.Printf("supersede draft user_id=%d old_message_id=%d: refusing to supersede a message in role %q", userID, oldMessageID, from.Role)
+		return
+	}
 	trash, err := s.store.GetMailboxByRoleForAccount(ctx, userID, old.AccountID, "trash")
 	if err != nil {
 		if !store.IsNotFound(err) {
@@ -1462,13 +1478,33 @@ func (s *Server) storeSentMessage(ctx context.Context, userID int64, account sto
 		Size:   saved.Size,
 	})
 	if err != nil {
-		// CreateBlob never inserted a row on this failure, so there is nothing in
-		// the store to unreference: the physical file SaveRawMessage already wrote
-		// is the only thing left over from this attempt, and blobRec.ID is the
-		// zero value of a row that does not exist.
+		// This error does not mean "no row was written". CreateBlob upserts and
+		// then reads the row back in a second statement, so the read can fail —
+		// a cancelled request context is the routine case, the same one
+		// supersedeDraft above defends against — after the write has committed.
+		// The upsert can also land on a row that already existed: blob paths are
+		// derived from account, mailbox, UID and content hash, so a background
+		// sync that already indexed this same copy owns a row a stored message
+		// references. Deleting the file unconditionally would leave that message
+		// pointing at nothing.
+		//
+		// So resolve the row and let the unreferenced check decide, on a context
+		// that outlives the request because a dead request context is the most
+		// likely reason to be here at all.
+		cleanupCtx := context.WithoutCancel(ctx)
 		var cleanupErr error
-		if s.blobs != nil {
-			cleanupErr = s.blobs.DeleteUserBlob(userID, saved.Path)
+		switch existing, lookupErr := s.store.GetBlobByPathForUser(cleanupCtx, userID, saved.Path); {
+		case lookupErr == nil:
+			cleanupErr = s.cleanupOrphanedBlob(cleanupCtx, userID, existing.ID, saved.Path)
+		case store.IsNotFound(lookupErr):
+			// Nothing committed, so the file is this attempt's only leftover.
+			if s.blobs != nil {
+				cleanupErr = s.blobs.DeleteUserBlob(userID, saved.Path)
+			}
+		default:
+			// Cannot tell whether a row exists. Leaving a file behind costs disk;
+			// removing one still referenced costs the message.
+			cleanupErr = lookupErr
 		}
 		return store.MessageRecord{}, errors.Join(err, cleanupErr)
 	}

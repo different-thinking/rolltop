@@ -751,7 +751,16 @@ export function ComposeBox({
       // The move is reported rather than assumed: an account with no Archive
       // folder chosen, or a conversation already filed in one, sends the reply
       // and leaves the message where it is.
-      addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
+      //
+      // `warning` means SMTP accepted the mail but the local copy did not get
+      // stored, so the recipient has it and the sender will not find it in
+      // Sent. That is worth saying: a plain "Message sent." left the only
+      // account of it in the server log.
+      if (result.warning) {
+        addToast(`Message sent, but it could not be saved locally: ${result.warning}`, "error");
+      } else {
+        addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
+      }
       onSent({ archived: Boolean(result.archived_mailbox) });
     } catch (err) {
       addToast(messageFromError(err), "error");
