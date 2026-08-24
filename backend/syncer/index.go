@@ -24,6 +24,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	generationRecoveryStartMessage(ctx, item.UID)
 	generationRecoveryPhase(ctx, "mime-parse", "")
 	parsed, err := mailparse.Parse(item.Raw)
+	parseFailed := err != nil
 	if err != nil {
 		parsed = mailparse.ParsedMessage{
 			Subject: fmt.Sprintf("Unparseable message UID %d", item.UID),
@@ -159,7 +160,17 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	prepareSearchDocument = prepareSearchDocument && searchVisible
 	attachmentDocs := make([]search.AttachmentDoc, 0, len(parsed.Files))
 	visibleAttachmentCount := 0
-	if len(parsed.Files) > 0 {
+	// What the parse found is what the rows say, including when it found
+	// nothing: a refetched UID reaches an existing message row, and a security
+	// plugin that drops attachments (client_side_pgp hands the ciphertext to the
+	// browser) leaves parsed.Files empty for mail whose rows were written before
+	// the plugin was turned on. Leaving those rows behind kept the parts this
+	// pass just decided not to store downloadable by ID.
+	//
+	// A parse that failed decided nothing, though. It yields no files whatever
+	// the message holds, so it is the one case that leaves the rows alone rather
+	// than reading its own failure as an attachment-free message.
+	if !parseFailed {
 		generationRecoveryPhase(ctx, "sqlite-replace-attachments", "")
 		if _, err := s.Store.ReplaceAttachmentsForMessage(ctx, userID, msg.ID, attachmentRowsForFiles(userID, msg.ID, blobRec.ID, parsed.Files)); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
@@ -599,10 +610,12 @@ func (s *Service) prepareSearchVisibleAttachmentIndexMessageFromRaw(ctx context.
 	if err := s.Store.UpdateMessageSecurityState(ctx, msg.UserID, msg.ID, msg.IsEncrypted, msg.IsSigned); err != nil {
 		return nil, err
 	}
-	if len(parsed.Files) > 0 {
-		if _, err := s.Store.ReplaceAttachmentsForMessage(ctx, msg.UserID, msg.ID, attachmentRowsForFiles(msg.UserID, msg.ID, msg.BlobID, parsed.Files)); err != nil {
-			return nil, err
-		}
+	// Unconditional for the same reason as the store path, and with no parse
+	// failure to exclude: a raw message this could not parse left through the
+	// branch above. Reaching here means the parse decided, so an empty
+	// parsed.Files is a message with no attachments to serve and its rows go.
+	if _, err := s.Store.ReplaceAttachmentsForMessage(ctx, msg.UserID, msg.ID, attachmentRowsForFiles(msg.UserID, msg.ID, msg.BlobID, parsed.Files)); err != nil {
+		return nil, err
 	}
 	attachmentDocs := make([]search.AttachmentDoc, 0, len(parsed.Files))
 	visibleAttachmentCount := 0

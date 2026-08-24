@@ -238,6 +238,12 @@ func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messag
 	if err != nil {
 		return nil, err
 	}
+	// Most mail carries no attachments at all, and every stored and reindexed
+	// message now comes through here, so the case with nothing on either side
+	// answers without opening a transaction.
+	if len(existing) == 0 && len(files) == 0 {
+		return nil, nil
+	}
 	ts := nowUnix()
 	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
 	if err != nil {

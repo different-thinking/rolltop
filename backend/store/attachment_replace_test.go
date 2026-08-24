@@ -142,6 +142,15 @@ func TestReplaceAttachmentsForMessageAddsAndRemovesRows(t *testing.T) {
 	if len(remaining) != 0 {
 		t.Fatalf("attachments after empty replace = %d, want 0", len(remaining))
 	}
+	// Every stored and reindexed message reaches this call, and most mail has no
+	// attachments at either end, so that case has to answer without work.
+	empty, err := db.ReplaceAttachmentsForMessage(ctx, user.ID, message.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("attachments for a message with none = %+v, want none", empty)
+	}
 }
 
 // TestReplaceAttachmentsForMessageIsTenantScoped keeps the isolation rule: one

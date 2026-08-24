@@ -377,7 +377,12 @@ site and in review.
   reparsed message's rows: it matches rows to parts by position, so a reparse
   updates in place and only a message that really gained or lost a part inserts
   or deletes anything. Do not reintroduce a bulk delete of a message's
-  attachments ahead of recreating them.
+  attachments ahead of recreating them. Rows follow the parse **down** as well:
+  a reparse that finds no files removes them, because a security plugin that
+  drops attachments (`transform.DropAttachments`) leaves mail stored before it
+  was enabled with rows for parts nothing means to serve any more. Only a parse
+  that *failed* is excluded — it decided nothing, so it must not be read as an
+  attachment-free message.
 - `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
   from stored data only. A pending row means one of two things and only the
   index can tell them apart, so the maintenance worker asks it
