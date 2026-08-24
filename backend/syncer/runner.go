@@ -520,6 +520,11 @@ func (r *Runner) startMailboxMaintenance(userID int64, mailbox store.Mailbox, la
 	}
 	progress := store.SyncProgress{MailboxesTotal: 1, CurrentMailbox: mailbox.Name, LatestNewFrom: "rolltop:maintenance", LatestNewSubject: label}
 	if err := r.Service.Store.UpdateSyncRunProgress(context.Background(), userID, run.ID, progress); err != nil {
+		// CreateSyncRun already committed this row as "running", and no worker
+		// goroutine starts below to ever finish it. Without this the row is a
+		// phantom job the user cannot cancel until stale-run or restart recovery
+		// notices it much later.
+		r.Service.failSyncRunInit(userID, run.ID, progress, err)
 		finishSetup()
 		r.releaseMailboxMaintenanceReservation(userID, mailbox.AccountID, mailboxes, keys)
 		r.StartAttachmentIndex(userID)
@@ -601,6 +606,10 @@ func (r *Runner) startAccountMaintenance(userID int64, account store.MailAccount
 		LatestNewSubject: label,
 	}
 	if err := r.Service.Store.UpdateSyncRunProgress(context.Background(), userID, run.ID, progress); err != nil {
+		// Same lifecycle gap as the mailbox-scoped path above: the row this call
+		// created stays "running" forever unless it is finalized here, because no
+		// worker goroutine starts below to do it later.
+		r.Service.failSyncRunInit(userID, run.ID, progress, err)
 		r.releaseMailboxMaintenanceReservation(userID, account.ID, names, keys)
 		r.StartAttachmentIndex(userID)
 		return store.SyncRun{}, true, err

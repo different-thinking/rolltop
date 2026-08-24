@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -1294,7 +1295,58 @@ func (s *Server) saveComposeDraft(ctx context.Context, cu currentUser, form comp
 	if err != nil {
 		return store.MessageRecord{}, fmt.Errorf("could not save draft to %s: %w", draftsMailbox.Name, err)
 	}
-	return s.storeSentMessage(ctx, cu.User.ID, imapAccount, draftsMailbox, msg, form, fetched)
+	saved, err := s.storeSentMessage(ctx, cu.User.ID, imapAccount, draftsMailbox, msg, form, fetched)
+	if err != nil {
+		return store.MessageRecord{}, err
+	}
+	if form.DraftMessageID > 0 && form.DraftMessageID != saved.ID {
+		// The replacement draft is safely saved on both IMAP and locally before
+		// the old one is touched, so a failure below leaves two drafts rather than
+		// none. supersedeDraft is best-effort and logs its own failures: not being
+		// able to clean up the old draft must not undo a save that already
+		// succeeded.
+		//
+		// The request context is deliberately not used directly: a client that
+		// closes the tab right after a draft autosave is routine, not an error,
+		// and must not cancel the IMAP MOVE that cleans up the copy it leaves
+		// behind -- the same reasoning archiveRepliedMessage applies to filing the
+		// message a reply answered.
+		supersedeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), draftSupersedeTimeout)
+		defer cancel()
+		s.supersedeDraft(supersedeCtx, cu.User.ID, form.DraftMessageID)
+	}
+	return saved, nil
+}
+
+// supersedeDraft retires a draft an edit just replaced. It moves the old copy
+// to the account's Trash rather than deleting it outright -- permanent remote
+// deletion stays confined to emptying Trash -- and drops the local mirror row
+// the same way any other move does, so a superseded draft simply stops
+// appearing in Drafts instead of accumulating there on every save.
+func (s *Server) supersedeDraft(ctx context.Context, userID, oldMessageID int64) {
+	if s.syncer == nil {
+		return
+	}
+	old, err := s.store.GetMessageForUser(ctx, userID, oldMessageID)
+	if err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
+		}
+		return
+	}
+	trash, err := s.store.GetMailboxByRoleForAccount(ctx, userID, old.AccountID, "trash")
+	if err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
+		}
+		return
+	}
+	if trash.ID == old.MailboxID {
+		return
+	}
+	if err := s.syncer.MoveMessage(ctx, userID, old.ID, trash.ID); err != nil {
+		log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
+	}
 }
 
 func (s *Server) appendSentMessage(ctx context.Context, account store.MailAccount, mailbox store.Mailbox, raw []byte, messageID string, date time.Time) (syncer.FetchedMessage, error) {
@@ -1360,6 +1412,18 @@ func smtpHasVisibleAttachments(attachments []smtpclient.Attachment) bool {
 	return false
 }
 
+// cleanupOrphanedBlob reclaims a blob record and its physical file once
+// nothing local is left to reference it. It is safe to retry: deleting an
+// already-gone blob row is a no-op, and DeleteBlobIfUnreferencedForUser only
+// removes the row (and reports it deleted) when no message still points at it.
+func (s *Server) cleanupOrphanedBlob(ctx context.Context, userID, blobID int64, path string) error {
+	deleted, err := s.store.DeleteBlobIfUnreferencedForUser(ctx, userID, blobID)
+	if deleted && s.blobs != nil {
+		err = errors.Join(err, s.blobs.DeleteUserBlob(userID, path))
+	}
+	return err
+}
+
 func (s *Server) storeSentMessage(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox, outgoing smtpclient.Message, form composeForm, fetched syncer.FetchedMessage) (store.MessageRecord, error) {
 	uid := fetched.UID
 	if uid == 0 {
@@ -1398,9 +1462,13 @@ func (s *Server) storeSentMessage(ctx context.Context, userID int64, account sto
 		Size:   saved.Size,
 	})
 	if err != nil {
-		deleted, cleanupErr := s.store.DeleteBlobIfUnreferencedForUser(ctx, userID, blobRec.ID)
-		if deleted && s.blobs != nil {
-			cleanupErr = errors.Join(cleanupErr, s.blobs.DeleteUserBlob(userID, saved.Path))
+		// CreateBlob never inserted a row on this failure, so there is nothing in
+		// the store to unreference: the physical file SaveRawMessage already wrote
+		// is the only thing left over from this attempt, and blobRec.ID is the
+		// zero value of a row that does not exist.
+		var cleanupErr error
+		if s.blobs != nil {
+			cleanupErr = s.blobs.DeleteUserBlob(userID, saved.Path)
 		}
 		return store.MessageRecord{}, errors.Join(err, cleanupErr)
 	}
@@ -1444,7 +1512,10 @@ func (s *Server) storeSentMessage(ctx context.Context, userID int64, account sto
 		ImportPending:    true,
 	})
 	if err != nil {
-		return store.MessageRecord{}, err
+		// No message row exists to reference the blob this attempt created, so
+		// it is reclaimed here rather than left as a raw .eml file with nothing
+		// pointing at it.
+		return store.MessageRecord{}, errors.Join(err, s.cleanupOrphanedBlob(ctx, userID, blobRec.ID, saved.Path))
 	}
 	if err := s.store.CreateLocation(ctx, userID, msg.ID, mailbox.ID, uid); err != nil {
 		return store.MessageRecord{}, err

@@ -91,6 +91,7 @@ func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, 
 		LatestNewSubject: "Deleting messages on the server",
 	}
 	if err := s.Store.UpdateSyncRunProgress(ctx, userID, run.ID, progress); err != nil {
+		s.failSyncRunInit(userID, run.ID, progress, err)
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)

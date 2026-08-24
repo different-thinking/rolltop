@@ -293,6 +293,45 @@ func TestSendComposePreemptsMailboxGenerationRecovery(t *testing.T) {
 	}
 }
 
+// failingAppendFetcher lets SMTP delivery succeed while every IMAP append
+// fails, which is exactly the shape of a send whose message already left
+// through SMTP before anything about saving it locally went wrong.
+type failingAppendFetcher struct {
+	syncer.Fetcher
+	err error
+}
+
+func (f *failingAppendFetcher) AppendMessage(context.Context, store.MailAccount, string, []byte, string, time.Time) (syncer.FetchedMessage, error) {
+	return syncer.FetchedMessage{}, f.err
+}
+
+// Once SMTP has accepted a message, retrying the request would resend it: the
+// mail already left. A failure in saving the local Sent copy must therefore
+// surface as composeSentIncompleteError rather than a plain error a caller
+// might treat as "nothing happened, try again".
+func TestSendComposeReturnsIncompleteErrorWhenAppendFailsAfterSMTPAccepted(t *testing.T) {
+	ctx := context.Background()
+	server, user, fromID, sender, _ := setupAutocryptComposeTest(t, ctx, false)
+	server.syncer.Fetcher = &failingAppendFetcher{err: errors.New("append boom")}
+
+	_, err := server.sendCompose(ctx, currentUser{User: user}, composeForm{
+		To:             "recipient@example.test",
+		Subject:        "Accepted then append fails",
+		Body:           "body",
+		FromIdentityID: fromID,
+	})
+	if err == nil {
+		t.Fatal("sendCompose succeeded despite a failed append")
+	}
+	var incomplete *composeSentIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("sendCompose error = %v, want *composeSentIncompleteError so the caller never retries a send SMTP already accepted", err)
+	}
+	if sender.count != 1 {
+		t.Fatalf("SMTP send count = %d, want 1", sender.count)
+	}
+}
+
 func TestBeginComposeForegroundOperationHasBoundedWait(t *testing.T) {
 	const userID = int64(47)
 	runner := syncer.NewRunner(nil)

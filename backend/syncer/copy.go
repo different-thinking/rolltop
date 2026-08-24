@@ -54,6 +54,7 @@ func (s *Service) StartCopyMessages(ctx context.Context, userID int64, messageID
 	}
 	progress := store.SyncProgress{MessagesTotal: len(ids), MailboxesTotal: 1, CurrentMailbox: "Copying to " + dest.Name}
 	if err := s.Store.UpdateSyncRunProgress(ctx, userID, run.ID, progress); err != nil {
+		s.failSyncRunInit(userID, run.ID, progress, err)
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
