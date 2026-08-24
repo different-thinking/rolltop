@@ -339,6 +339,32 @@ func TestStorageStatsNameFoldersSearchedButNeverSynced(t *testing.T) {
 		t.Fatalf("folders searched but never synced = %d, want Sent and the folder inheriting manual from Archive", stats.UnsyncedSearchFolders)
 	}
 
+	// A folder the server has told us is empty holds nothing search is missing,
+	// and reporting it would put a permanent false alarm on the page for every
+	// empty folder someone keeps.
+	empty, err := f.db.GetOrCreateMailbox(f.ctx, f.owner.ID, f.mailbox.AccountID, "Newsletters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.owner.ID, empty.ID, store.MailboxSettings{
+		SyncMode: "manual", ShowInSidebar: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxRemoteStatus(f.ctx, f.owner.ID, empty.ID, 0, 0, 1, uint32(empty.UIDValidity)); err != nil {
+		t.Fatal(err)
+	}
+	f.server.invalidateStorageStats(f.owner.ID)
+	stats = f.server.storageStatsForUser(f.owner.ID)
+	if stats.UnsyncedSearchFolders != 2 {
+		t.Fatalf("folders searched but never synced = %d, want the proven-empty folder left out", stats.UnsyncedSearchFolders)
+	}
+	for _, name := range stats.UnsyncedSearchFolderNames {
+		if name == "Newsletters" {
+			t.Fatalf("named folders = %v, want an empty folder left out", stats.UnsyncedSearchFolderNames)
+		}
+	}
+
 	// Gmail's label views carry sync mode never by default, and their mail is
 	// already stored in the real folder it also appears in. Reporting one would
 	// push a reader toward mirroring most of their mailbox a second time to

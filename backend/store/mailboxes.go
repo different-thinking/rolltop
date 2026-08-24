@@ -709,9 +709,17 @@ func (s *Store) ListUnsyncedSearchFoldersForUser(ctx context.Context, userID int
 	// Deliberately not joined to messages: a grouped count over the whole
 	// mailbox is the expensive half of the folder listing, and an EXISTS per
 	// folder answers the only question asked of it here.
+	//
+	// A folder the server has told us is empty is not a folder search is
+	// missing anything in. Without the status clause every empty folder someone
+	// keeps - and a status check is what proves it empty - reads as mail that
+	// cannot be found, which is the kind of false alarm that teaches a reader to
+	// ignore the whole notice. So: never checked (nothing is known about what it
+	// holds) or known to hold something.
 	rows, err := db.QueryContext(ctx, `SELECT mb.account_id, mb.name, mb.sync_mode, mb.remote_message_count
 		FROM mailboxes mb
 		WHERE mb.user_id = ? AND mb.include_in_search = 1
+			AND (mb.status_checked_at = 0 OR mb.remote_message_count > 0)
 			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.user_id = mb.user_id AND m.mailbox_id = mb.id)
 		ORDER BY mb.account_id, lower(mb.name)`, userID)
 	if err != nil {
