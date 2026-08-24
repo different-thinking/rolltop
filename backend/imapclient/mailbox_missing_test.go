@@ -41,6 +41,9 @@ func TestMailboxMissingReadsTheServerWording(t *testing.T) {
 		"Mailbox doesn't exist: [Gmail]/Gesendet (0.002 + 0.000 secs).",
 		"Unknown Mailbox: [Gmail]/Sent Mail (Failure)",
 		"[NONEXISTENT] No such mailbox",
+		// The folder named between the two halves of the answer.
+		"Mailbox [Gmail]/Gesendet does not exist",
+		"Folder \"Archiv\" doesn't exist on this server",
 	}
 	for _, text := range missing {
 		if !mailboxMissing(errorString(text)) {
@@ -51,6 +54,9 @@ func TestMailboxMissingReadsTheServerWording(t *testing.T) {
 		"[SERVERBUG] Internal error occurred. Refer to server log for more information.",
 		"Mailbox is locked by another session",
 		"[OVERQUOTA] Quota exceeded",
+		// A folder is named, but what is absent is not the folder.
+		"Cannot open mailbox: index file not found",
+		"Unknown command while a folder is selected",
 	}
 	for _, text := range present {
 		if mailboxMissing(errorString(text)) {

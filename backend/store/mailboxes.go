@@ -306,7 +306,10 @@ func (s *Store) MailboxNamesForAccount(ctx context.Context, userID, accountID in
 		}
 		out = append(out, name)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // DeleteUnsyncedMailbox removes the local row for a folder the server has said
@@ -329,6 +332,7 @@ func (s *Store) DeleteUnsyncedMailbox(ctx context.Context, userID, accountID int
 	if err != nil {
 		return false, err
 	}
+	defer func() { _ = tx.Rollback() }()
 	var mailboxID int64
 	err = tx.QueryRowContext(ctx, `SELECT id FROM mailboxes
 		WHERE user_id = ? AND account_id = ? AND name = ?
@@ -336,7 +340,6 @@ func (s *Store) DeleteUnsyncedMailbox(ctx context.Context, userID, accountID int
 			AND NOT EXISTS (SELECT 1 FROM messages WHERE user_id = ? AND mailbox_id = mailboxes.id)`,
 		userID, accountID, name, userID).Scan(&mailboxID)
 	if err != nil {
-		_ = tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -350,11 +353,9 @@ func (s *Store) DeleteUnsyncedMailbox(ctx context.Context, userID, accountID int
 			updated_at = ?
 		WHERE user_id = ? AND ? IN (sent_mailbox_id, drafts_mailbox_id, archive_mailbox_id)`,
 		mailboxID, mailboxID, mailboxID, ts, userID, mailboxID); err != nil {
-		_ = tx.Rollback()
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mailboxes WHERE user_id = ? AND id = ?`, userID, mailboxID); err != nil {
-		_ = tx.Rollback()
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {

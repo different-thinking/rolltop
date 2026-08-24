@@ -28,6 +28,20 @@ var mailboxMissingPhrases = []string{
 	"no such folder",
 }
 
+// Servers that put the folder name between the two halves of the answer --
+// "Mailbox [Gmail]/Gesendet doesn't exist" -- say the same thing, and no
+// contiguous phrase catches them. Naming what is missing and saying it is not
+// there is taken as that answer even when the two are apart.
+//
+// What may pair up is deliberately narrower than the phrases above: "unknown"
+// and "not found" are how servers also report a command, a credential or an
+// index file, and those refusals must keep failing loudly. They are recognized
+// only where a folder is named in the same breath.
+var (
+	mailboxMissingSubjects = []string{"mailbox", "folder"}
+	mailboxMissingAbsences = []string{"does not exist", "doesn't exist", "no such"}
+)
+
 // mailboxMissing reports whether a failed IMAP command was refused because the
 // account has no folder by that name.
 func mailboxMissing(err error) bool {
@@ -36,6 +50,15 @@ func mailboxMissing(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	for _, phrase := range mailboxMissingPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return containsAny(text, mailboxMissingSubjects) && containsAny(text, mailboxMissingAbsences)
+}
+
+func containsAny(text string, phrases []string) bool {
+	for _, phrase := range phrases {
 		if strings.Contains(text, phrase) {
 			return true
 		}
