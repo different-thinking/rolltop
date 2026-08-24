@@ -141,6 +141,34 @@ func TestSMTPAccountTestRefusesAnotherUsersServer(t *testing.T) {
 	}
 }
 
+// An attempt that has not finished carries no end time, and the page reads
+// that field to tell a running conversation from a finished one. It has to
+// reach the browser as an empty string: any timestamp there, including a
+// formatted zero time, is truthy in JavaScript and would report a send that is
+// still dialling as one that succeeded.
+func TestSMTPLogLeavesARunningAttemptWithoutAnEndTime(t *testing.T) {
+	server, owner, _ := newDatabaseAdminServer(t)
+	running := server.smtpLog.Start(smtplog.Session{UserID: owner.ID, AccountID: 3, Kind: smtplog.KindSend, Host: "smtp.example.test", Port: 587})
+	running.Client("EHLO localhost")
+
+	body := smtpLogBody(t, server, owner, "/api/smtp-log")
+	var payload struct {
+		Sessions []apiSMTPLogSession `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1: %s", len(payload.Sessions), body)
+	}
+	if payload.Sessions[0].EndedAt != "" {
+		t.Fatalf("running attempt reported ended_at = %q, want it empty", payload.Sessions[0].EndedAt)
+	}
+	if payload.Sessions[0].StartedAt == "" {
+		t.Fatal("running attempt reported no start time")
+	}
+}
+
 // The test button is the one route where a signed-in user decides what address
 // the server dials, and it answers with what the peer said. One test at a time
 // per user, with a pause after it, is what keeps that from being a convenient
