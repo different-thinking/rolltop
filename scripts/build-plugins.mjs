@@ -14,7 +14,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { availableParallelism, totalmem } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,16 +105,42 @@ async function buildPlugin({ id }) {
   }
 }
 
+// `os.totalmem()` reports the host's memory, not the container's, so a build
+// box with a small limit would otherwise look enormous and be told to run four
+// Node processes inside a budget for one. The cgroup limit is the number that
+// actually gets enforced, and exceeding it is not a slow build but a killed one.
+function memoryLimitBytes() {
+  for (const file of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    try {
+      const raw = readFileSync(file, "utf8").trim();
+      if (!raw || raw === "max") continue;
+      const value = Number(raw);
+      // cgroup v1 spells "unlimited" as a number near 2^63.
+      if (Number.isFinite(value) && value > 0 && value < Number.MAX_SAFE_INTEGER) {
+        return value;
+      }
+    } catch {
+      // No cgroup files: not a container, or a kernel that puts them elsewhere.
+    }
+  }
+  return totalmem();
+}
+
 // Each Vite build is a separate Node process holding a full module graph, so
-// concurrency is bounded by memory rather than by cores: four of the large
-// bundles at once is already several gigabytes. `ROLLTOP_BUILD_JOBS` exists for
-// machines that want to go wider or narrower.
+// concurrency is bounded by memory rather than by cores. Going wide on a
+// memory-capped builder does not slow the build down, it gets the build OOM
+// killed — which is exactly what was happening on ours, where three killed
+// attempts read as one thirteen-minute build. Budget ~1.5 GB per job and let
+// `ROLLTOP_BUILD_JOBS` override when the shape of the machine is known.
+const bytesPerJob = 1.5 * 1024 * 1024 * 1024;
+
 function jobLimit() {
   const requested = Number.parseInt(process.env.ROLLTOP_BUILD_JOBS ?? "", 10);
   if (Number.isInteger(requested) && requested > 0) {
     return requested;
   }
-  return Math.max(1, Math.min(4, availableParallelism()));
+  const byMemory = Math.floor(memoryLimitBytes() / bytesPerJob);
+  return Math.max(1, Math.min(4, availableParallelism(), byMemory));
 }
 
 async function runPool(items, limit, worker) {

@@ -1,10 +1,35 @@
 // File overview: Vite library builds for runtime-loaded frontend plugin bundles.
 
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-const fromRoot = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+const fromRoot = (relative: string) => fileURLToPath(new URL(relative, import.meta.url));
+
+// Redirects the host's icon module to the shim, whatever spelling reaches it.
+//
+// This was a pattern on the import specifier first, and that was the wrong
+// place to look: `frontend/src/components/common.tsx` imports its neighbour as
+// `"./Icon"`, which no rule anchored on `components/Icon` can match, so a
+// plugin pulling in `common.tsx` would have quietly bundled all 4,543 Phosphor
+// modules again. Matching the *resolved file* has no spellings to enumerate —
+// every route to that module ends at the same path.
+function iconShimPlugin(): Plugin {
+  const iconModule = fromRoot("./frontend/src/components/Icon.tsx");
+  const shim = fromRoot("./frontend/src/plugins/shared/iconShim.ts");
+  return {
+    name: "rolltop:icon-shim",
+    enforce: "pre",
+    async resolveId(source, importer, options) {
+      // The shim imports React and the icon runtime, never the icon module, so
+      // skipping it here costs nothing and removes any chance of a cycle.
+      if (!importer || importer === shim) return null;
+      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      return resolved && path.resolve(resolved.id) === iconModule ? shim : null;
+    }
+  };
+}
 
 const target = (process.env.ROLLTOP_PLUGIN_TARGET || "client_side_pgp").trim();
 // `attachment_preview` is deliberately absent. Its UI is part of the
@@ -76,19 +101,12 @@ const sourcemap = process.env.ROLLTOP_BUILD_SOURCEMAPS !== "0";
 
 export default defineConfig({
   root: ".",
-  plugins: [react()],
+  plugins: [iconShimPlugin(), react()],
   define: {
     "process.env.NODE_ENV": JSON.stringify("production")
   },
   resolve: {
     alias: [
-      // Matches the whole specifier, however deep the plugin sits — Vite
-      // replaces only what the pattern covers, so an unanchored one would
-      // splice the shim path into the middle of the import. Host modules a
-      // plugin pulls in reach `components/Icon` by their own relative path and
-      // are aliased by the same rule, which is the point: Phosphor's 4,543
-      // modules must not enter a plugin bundle by any route.
-      { find: /^.*\/components\/Icon$/, replacement: fromRoot("./frontend/src/plugins/shared/iconShim.ts") },
       { find: /^react$/, replacement: fromRoot("./frontend/src/plugins/shared/reactShim.ts") },
       { find: /^react-dom$/, replacement: fromRoot("./frontend/src/plugins/shared/reactDOMShim.ts") },
       { find: /^react\/jsx-runtime$/, replacement: fromRoot("./frontend/src/plugins/shared/reactJSXRuntimeShim.ts") },

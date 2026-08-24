@@ -625,8 +625,18 @@ The same rule now covers the frontend half. `npm run build:plugins` is
 `scripts/build-plugins.mjs`, which derives its targets from the plugins whose
 `manifest.json` declares `frontend.module` — the same field the server reads to
 serve the bundle, so a plugin cannot be built without being served or the
-reverse. It builds several at a time; `ROLLTOP_BUILD_JOBS` bounds that, because
-concurrency here is limited by memory rather than cores. A plugin's stylesheet
+reverse.
+
+**Build concurrency is bounded by memory, not cores, and the ceiling is a hard
+one.** Both the plugin bundles and the `.so` links size their job count from the
+cgroup memory limit — `os.totalmem()` and `nproc` report the host, which on a
+capped builder is a fiction that gets the build killed rather than slowed. A
+2 GB builder runs one job. This is not hypothetical: the image build was being
+OOM killed and retried three times, and because the attempts share one log
+stream it read as a single thirteen-minute build. `ROLLTOP_BUILD_JOBS` overrides
+the frontend half when the machine is known. Raise neither default without
+knowing what the builder actually has; a Go link holding `language_search`'s
+124 MB embedded model set is gigabytes on its own. A plugin's stylesheet
 step must stay sequential *after* its own Vite build, since `emptyOutDir` wipes
 the directory both write into, and a new stylesheet needs an entry in that
 file's `cssScripts` map. Forgetting is not silent: the script fails on any
@@ -651,13 +661,21 @@ modules, so importing it — directly, or through `components/Icon`, or through 
 host module like `SettingsUI` that a plugin pulls in — made every plugin build
 transform all of them to keep a handful of glyphs, and shipped a second copy of
 the host's icons. One plugin measured 4,548 modules and 222 kB before, 8 modules
-and 12 kB after. `vite.plugins.config.ts` therefore aliases any specifier ending
-in `components/Icon` to `frontend/src/plugins/shared/iconShim.ts`, which reads
-the components the host installs in `main.tsx` — the same arrangement React
-already had. Render icons in plugin code as `<Icon name="lock" />`; if a glyph
-is missing, add it to the host's map in `frontend/src/components/Icon.tsx`
-rather than importing it where you need it. The alias pattern is anchored at
-both ends because Vite substitutes only the part a regular expression matches.
+and 12 kB after. `vite.plugins.config.ts` therefore redirects the host's icon
+module to `frontend/src/plugins/shared/iconShim.ts`, which reads the components
+the host installs in `main.tsx` — the same arrangement React already had. Render
+icons in plugin code as `<Icon name="lock" />`; if a glyph is missing, add it to
+the host's map in `frontend/src/components/Icon.tsx` rather than importing it
+where you need it.
+
+That redirect matches the **resolved file**, not the import specifier, and it
+has to stay that way. A pattern on the specifier has to enumerate spellings, and
+the first version missed one: `components/common.tsx` imports its neighbour as
+`"./Icon"`, so a plugin reaching Phosphor through `common.tsx` bundled all 4,543
+modules with the rule apparently in place. Reproduced both ways — 8 modules
+resolved, 4,548 with the pattern. Note that the built bundle contains no literal
+"phosphor" once minified, so grepping for the name proves nothing; the module
+count in the build output is the signal.
 
 **`attachment_preview` has no `frontend` block in its manifest, on purpose.**
 Its UI is part of the application bundle: `ThreadView` imports

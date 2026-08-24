@@ -1,6 +1,13 @@
 # Build-time note for whoever configures the builder, because the two largest
 # remaining costs cannot be fixed from inside this file.
 #
+# If the build is being OOM killed, start with `--compressed-caching=false`.
+# Kaniko holds layer contents in memory to compress them, and this image's
+# plugin layer is ~324 MB of `.so` files, so the default costs roughly that
+# again in RSS at the worst moment. A killed build retries and the attempts
+# share one log stream, which reads convincingly like one very slow build
+# rather than three dead ones.
+#
 # Nothing here is cached between builds unless the builder is told to cache.
 # Under Kaniko that means `--cache=true --cache-repo=<registry>/rolltop-cache`;
 # without it `apk add build-base`, `npm ci` and `go mod download` are paid in
@@ -68,9 +75,30 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w -X rolltop/backe
 # compiles packages differently from the main binary above, so its cache is
 # cold, and starting all of them together would have every process compiling
 # the same shared packages at once instead of reusing the first one's work.
+#
+# How many run together is bounded by the builder's *memory*, not its cores.
+# A Go link holds its output in memory, and `language_search` links a 124 MB
+# embedded model set, so a few of those at once is gigabytes. Overshooting a
+# memory-capped builder does not make the build slow, it makes the kernel kill
+# it — so a builder with 2 GB gets one job, and nothing here goes wide by
+# default on a machine that cannot afford it. `ROLLTOP_BUILD_JOBS` is the
+# equivalent override for the frontend half.
 RUN set -eu; \
 	jobs="$(nproc 2>/dev/null || echo 2)"; \
 	if [ "$jobs" -gt 4 ]; then jobs=4; fi; \
+	limit=""; \
+	if [ -r /sys/fs/cgroup/memory.max ]; then \
+		limit="$(cat /sys/fs/cgroup/memory.max)"; \
+	elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then \
+		limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"; \
+	fi; \
+	case "$limit" in ""|max|*[!0-9]*) limit="" ;; esac; \
+	if [ -n "$limit" ]; then \
+		bymem=$((limit / 2147483648)); \
+		if [ "$bymem" -lt 1 ]; then bymem=1; fi; \
+		if [ "$jobs" -gt "$bymem" ]; then jobs="$bymem"; fi; \
+	fi; \
+	echo "building plugin backends, $jobs at a time"; \
 	build_one() { \
 		plugin="$(basename "$(dirname "$1")")"; \
 		mkdir -p "/out/plugins/${plugin}/backend"; \

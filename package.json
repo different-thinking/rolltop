@@ -8,7 +8,6 @@
     "build": "npm run typecheck && vite build && npm run build:plugins",
     "build:themes": "mkdir -p plugins/matrix_theme/frontend_dist/themes/matrix && sass plugins/matrix_theme/themes/matrix/theme.scss plugins/matrix_theme/frontend_dist/themes/matrix/theme.css --style=compressed",
     "build:plugins": "node scripts/build-plugins.mjs",
-    "build:plugin-dist": "node scripts/assemble-plugin-dist.mjs",
     "build:pgp-css": "mkdir -p plugins/client_side_pgp/frontend_dist/styles && sass plugins/client_side_pgp/frontend/styles/pgp.scss plugins/client_side_pgp/frontend_dist/styles/pgp.css --style=compressed",
     "build:mail-filters-css": "mkdir -p plugins/mail_filters/frontend_dist && sass plugins/mail_filters/frontend/styles.css plugins/mail_filters/frontend_dist/styles.css --style=compressed",
     "build:remote-imap-sync-css": "mkdir -p plugins/remote_imap_sync/frontend_dist && sass plugins/remote_imap_sync/frontend/styles.css plugins/remote_imap_sync/frontend_dist/styles.css --style=compressed",
