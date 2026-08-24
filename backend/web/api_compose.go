@@ -60,7 +60,12 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 		}
 		sent, err := s.sendCompose(r.Context(), cu, form)
 		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, err.Error())
+			// A send failure otherwise exists only in the browser's console: the
+			// error text already names the SMTP host and the underlying network or
+			// auth failure, which is exactly what is needed to tell a one-off blip
+			// from a host that is unreachable every time, but only if it is written
+			// down somewhere a user cannot lose by refreshing the page.
+			s.apiError(w, r, http.StatusBadRequest, err.Error(), fmt.Errorf("send compose user_id=%d: %w", cu.User.ID, err))
 			return
 		}
 		archived := s.archiveRepliedMessage(r.Context(), cu.User.ID, form)
