@@ -402,8 +402,15 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		scoreArgs = append(scoreArgs, relevanceArgs...)
 		scoreArgs = append(scoreArgs, nudgeArgs...)
 	} else {
-		// Filters alone selected these rows, so there is no relevance for a
-		// nudge to be a nudge to. Here they are the ranking, as they were.
+		// Filters alone selected these rows - is:starred, has:attachment - so
+		// there is no relevance for a nudge to be a nudge to, and they are the
+		// ranking. Added, as they always were here, but on the normalized scale
+		// the multiplying branch needs: familiarity and freshness are now
+		// within one doubling of each other rather than the five to one the raw
+		// scales gave, so a filter-only list leans less on who wrote the mail
+		// and more on when. Renormalizing this branch back would mean carrying
+		// both scales through the spec to preserve the ordering of a list that
+		// has no relevance to preserve.
 		score = `(0::float4` + nudge.String() + `)`
 		scoreArgs = append(scoreArgs, nudgeArgs...)
 	}

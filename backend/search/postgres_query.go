@@ -56,6 +56,25 @@ const (
 // correspondent.
 const pgSenderBoostCeiling = 8
 
+// pgRecencyBoostCeiling is the same divisor for the recency buckets: the largest
+// boost any bias produces, so the strongest setting reaches one doubling on the
+// freshest mail and the others land under it in proportion.
+//
+// One ceiling across every bias, not each bias divided by its own peak. Its own
+// peak would map the top bucket of every setting to exactly 1.0, giving "light"
+// and "strong" the same curve and leaving the recency-bias setting looking like
+// it still worked while doing nothing. Read from the tables rather than written
+// down, so a change to a bucket cannot leave a constant behind.
+var pgRecencyBoostCeiling = func() float64 {
+	peak := 0.0
+	for _, bias := range []string{"none", "light", "normal", "strong"} {
+		for _, bucket := range RecencyRankBuckets(bias) {
+			peak = max(peak, bucket.Boost)
+		}
+	}
+	return peak
+}()
+
 // pgWeights orders {D, C, B, A}: attachments, body, addresses, subject — the
 // same precedence the Bleve field boosts encode, normalized to ts_rank_cd's
 // convention. The attachment weight scales with the user's knob.
@@ -179,15 +198,10 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 	// The Bleve path only nudges by recency when no explicit date range says
 	// the user is already navigating time; mirrored here.
 	if parsed.After.IsZero() && parsed.Before.IsZero() {
-		buckets := RecencyRankBuckets(behavior.RecencyBias)
-		peak := 0.0
-		for _, bucket := range buckets {
-			peak = max(peak, bucket.Boost)
-		}
-		for _, bucket := range buckets {
+		for _, bucket := range RecencyRankBuckets(behavior.RecencyBias) {
 			boost := bucket.Boost
-			if peak > 0 {
-				boost /= peak
+			if pgRecencyBoostCeiling > 0 {
+				boost /= pgRecencyBoostCeiling
 			}
 			spec.RecencyBuckets = append(spec.RecencyBuckets, store.MessageSearchRecencyBucket{
 				MaxAgeSeconds: int64(bucket.Age / time.Second), Boost: boost,
@@ -233,6 +247,30 @@ func pgMatchedFields(hit store.MessageSearchHit, fuzzy bool) []string {
 		return []string{"subject", "from", "body", "attachments"}
 	}
 	return fields
+}
+
+// SenderRankNudge and RecencyRankNudge report one boost as the backend in force
+// actually applies it, so a page explaining a rank shows the number that acted.
+//
+// On Bleve a boost is added to a tf-idf score of comparable size and is its own
+// explanation. On Postgres it is normalized and multiplied (see the ranking
+// comment in store.SearchMessageIDs), where the caller's raw 8 is a doubling
+// rather than eight points of a score whose whole range is under one.
+func (s *Service) SenderRankNudge(boost float64) float64 {
+	if s == nil || !s.PostgresBackend() {
+		return boost
+	}
+	// The SQL caps the sum of the boosts naming one address; a panel showing
+	// them one at a time caps each, which is the same ceiling for the single
+	// boost it is describing.
+	return min(boost/pgSenderBoostCeiling, 1)
+}
+
+func (s *Service) RecencyRankNudge(boost float64) float64 {
+	if s == nil || !s.PostgresBackend() || pgRecencyBoostCeiling <= 0 {
+		return boost
+	}
+	return boost / pgRecencyBoostCeiling
 }
 
 // specUsesFuzzy reports whether any term in the compiled spec can match by

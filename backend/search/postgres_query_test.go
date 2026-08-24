@@ -851,3 +851,68 @@ func TestPostgresNudgesStillOrderComparableMatches(t *testing.T) {
 			hits[0].ID, familiar.ID, stranger.ID)
 	}
 }
+
+// The recency-bias setting has to keep meaning something after normalization.
+// Dividing each bias by its own peak - the obvious way to bound a nudge - maps
+// the freshest bucket of every setting to exactly 1.0, so light, normal and
+// strong become one curve and a setting the reader can still see stops doing
+// anything.
+func TestPGRecencyBiasStaysDistinctAfterNormalization(t *testing.T) {
+	freshest := func(bias string) float64 {
+		spec := pgSearchSpec(1, parseQuery("rechnung"), SearchOptions{
+			Behavior: SearchBehavior{RecencyBias: bias},
+		}, 10, 0, false)
+		if len(spec.RecencyBuckets) == 0 {
+			t.Fatalf("bias %q produced no recency buckets", bias)
+		}
+		top := 0.0
+		for _, bucket := range spec.RecencyBuckets {
+			top = max(top, bucket.Boost)
+		}
+		return top
+	}
+
+	light, normal, strong := freshest("light"), freshest("normal"), freshest("strong")
+	if !(light < normal && normal < strong) {
+		t.Fatalf("freshest boost light=%g normal=%g strong=%g, want the setting to still order them", light, normal, strong)
+	}
+	// The bound the ranking is documented on: one doubling at most, reached by
+	// the strongest setting.
+	if strong > 1.0 {
+		t.Fatalf("strongest recency boost = %g, want at most one doubling", strong)
+	}
+	if light >= 0.5*normal {
+		t.Fatalf("light=%g against normal=%g, want light to be a visibly lighter nudge", light, normal)
+	}
+
+	if spec := pgSearchSpec(1, parseQuery("rechnung"), SearchOptions{
+		Behavior: SearchBehavior{RecencyBias: "none"},
+	}, 10, 0, false); len(spec.RecencyBuckets) != 0 {
+		t.Fatalf("bias none produced %d buckets, want none", len(spec.RecencyBuckets))
+	}
+}
+
+// Sender boosts are bounded the same way, and the cap is in SQL because several
+// of them can name one address.
+func TestPGSenderBoostsNormalizeToAtMostOneDoubling(t *testing.T) {
+	spec := pgSearchSpec(1, parseQuery("rechnung"), SearchOptions{
+		SenderBoosts: []SenderBoost{{Sender: "chef@firma.test", Boost: 8}},
+	}, 10, 0, false)
+	if len(spec.SenderBoosts) != 1 {
+		t.Fatalf("sender boosts = %+v, want one", spec.SenderBoosts)
+	}
+	if got := spec.SenderBoosts[0].Boost; got != 1.0 {
+		t.Fatalf("top of the sender scale normalized to %g, want one doubling", got)
+	}
+	// A contact is worth an eighth of a sender read every time, and that ratio
+	// is the statement the two lists together make. The contact scale carries
+	// no default of its own - searchOptionsForUser supplies it - so it is
+	// passed here rather than left zero, which would drop the list entirely.
+	contact := pgSearchSpec(1, parseQuery("rechnung"), SearchOptions{
+		ContactBoosts: []SenderBoost{{Sender: "kontakt@firma.test", Boost: 1}},
+		Behavior:      SearchBehavior{ContactBoostScale: 1},
+	}, 10, 0, false)
+	if len(contact.SenderBoosts) != 1 || contact.SenderBoosts[0].Boost != 1.0/pgSenderBoostCeiling {
+		t.Fatalf("contact boost = %+v, want %g", contact.SenderBoosts, 1.0/pgSenderBoostCeiling)
+	}
+}

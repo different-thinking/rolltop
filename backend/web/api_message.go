@@ -424,7 +424,7 @@ func (s *Server) apiMessageSearchExplanation(w http.ResponseWriter, r *http.Requ
 		"fields":               result.Fields,
 		"field_matches":        apiSearchFieldMatches(result.FieldMatches),
 		"term_contributions":   apiSearchTermContributions(result.TermContributions),
-		"boosts":               apiSearchBoosts(cu.User, explainedMsg, rankingBoosts, !searchQueryHasDateOperator(query)),
+		"boosts":               s.apiSearchBoosts(cu.User, explainedMsg, rankingBoosts, !searchQueryHasDateOperator(query)),
 		"raw":                  apiScoreExplanationFromRaw(result.Raw, 0),
 	})
 }
@@ -445,7 +445,7 @@ func (s *Server) searchExplanationOptions(ctx context.Context, user store.User, 
 						Label:       "Familiar sender",
 						Description: fmt.Sprintf("%d of %d messages from this sender are read.", stat.ReadCount, stat.TotalCount),
 						Value:       fmt.Sprintf("%s sender history", searchSenderHistoryWeightForUser(user)),
-						Boost:       stat.Boost * opts.Behavior.SenderBoostScale,
+						Boost:       s.search.SenderRankNudge(stat.Boost * opts.Behavior.SenderBoostScale),
 					})
 					break
 				}
@@ -463,7 +463,7 @@ func (s *Server) searchExplanationOptions(ctx context.Context, user store.User, 
 				Label:       "In contacts",
 				Description: fmt.Sprintf("Sender is in your contacts as %s.", label),
 				Value:       fmt.Sprintf("%s contact boost", searchContactBoostWeightForUser(user)),
-				Boost:       opts.Behavior.ContactBoostScale,
+				Boost:       s.search.SenderRankNudge(opts.Behavior.ContactBoostScale),
 			})
 		}
 	}
@@ -525,10 +525,10 @@ func apiSearchFieldLabel(field string) string {
 	}
 }
 
-func apiSearchBoosts(user store.User, msg store.MessageRecord, rankingBoosts []apiSearchBoost, includeRecency bool) []apiSearchBoost {
+func (s *Server) apiSearchBoosts(user store.User, msg store.MessageRecord, rankingBoosts []apiSearchBoost, includeRecency bool) []apiSearchBoost {
 	var out []apiSearchBoost
 	if includeRecency {
-		if recency := apiRecencySearchBoost(user, msg); recency != nil {
+		if recency := s.apiRecencySearchBoost(user, msg); recency != nil {
 			out = append(out, *recency)
 		}
 	}
@@ -546,7 +546,7 @@ func searchQueryHasDateOperator(query string) bool {
 	return false
 }
 
-func apiRecencySearchBoost(user store.User, msg store.MessageRecord) *apiSearchBoost {
+func (s *Server) apiRecencySearchBoost(user store.User, msg store.MessageRecord) *apiSearchBoost {
 	bias := normalizedRecencyBiasForUser(user)
 	if bias == "none" {
 		return nil
@@ -565,7 +565,7 @@ func apiRecencySearchBoost(user store.User, msg store.MessageRecord) *apiSearchB
 	for _, bucket := range recencyExplanationBuckets(bias) {
 		if age <= bucket.age {
 			label := "Recent mail"
-			description := fmt.Sprintf("Message date is within %s; recency profile is %s. This nudge contributes to the final rank score but is not required for matching.", bucket.label, bias)
+			description := fmt.Sprintf("Message date is within %s; recency profile is %s. This nudge lifts the final rank score but is not required for matching.", bucket.label, bias)
 			value := fmt.Sprintf("%s freshness bucket", bucket.label)
 			if bucket.boost < 0 {
 				label = "Older mail"
@@ -577,7 +577,9 @@ func apiRecencySearchBoost(user store.User, msg store.MessageRecord) *apiSearchB
 				Label:       label,
 				Description: description,
 				Value:       value,
-				Boost:       bucket.boost,
+				// The number that acted, which is not the number in the bucket
+				// table on the backend that multiplies it in.
+				Boost: s.search.RecencyRankNudge(bucket.boost),
 			}
 		}
 	}
