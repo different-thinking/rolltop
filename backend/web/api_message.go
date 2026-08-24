@@ -808,13 +808,32 @@ func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, mess
 // other account's messages fail one by one deep inside the run.
 var errBulkMoveCrossesAccounts = errors.New("select messages from a single account to move them together")
 
+// errMoveDestinationOtherAccount reports the other way this check fails: one
+// account's messages aimed at another account's folder. The selection is sound
+// and telling the reader to narrow it describes work they have already done -
+// what is wrong is the destination, and that is what the message has to name.
+var errMoveDestinationOtherAccount = errors.New("choose a destination folder in the same account as the messages you are moving")
+
 // messagesAccountScope reports whether every message belongs to accountID, so
 // a bulk move can be rejected up front rather than partially completing.
+// accountID is the destination's, so a mismatch is either of two faults and
+// they are distinguished: the selection spans accounts, or it is a single
+// account that is not the destination's.
 func messagesAccountScope(messages []store.MessageRecord, accountID int64) error {
+	var selected int64
+	mismatch := false
 	for _, msg := range messages {
-		if msg.AccountID != accountID {
+		if selected == 0 {
+			selected = msg.AccountID
+		} else if msg.AccountID != selected {
 			return errBulkMoveCrossesAccounts
 		}
+		if msg.AccountID != accountID {
+			mismatch = true
+		}
+	}
+	if mismatch {
+		return errMoveDestinationOtherAccount
 	}
 	return nil
 }

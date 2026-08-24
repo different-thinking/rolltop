@@ -1334,6 +1334,23 @@ func (s *Server) supersedeDraft(ctx context.Context, userID, oldMessageID int64)
 		}
 		return
 	}
+	// The id arrives from the client, and everything below it moves a message
+	// to Trash. Loading a draft into the composer already refuses an id that is
+	// not in a Drafts folder (composeFormForRequest); retiring one has to refuse
+	// the same, or a stale or wrong draft_message_id files arbitrary mail of
+	// this user's under a save they made of something else.
+	source, err := s.store.GetMailboxForUser(ctx, userID, old.MailboxID)
+	if err != nil {
+		if !store.IsNotFound(err) {
+			log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
+		}
+		return
+	}
+	if source.Role != "drafts" {
+		log.Printf("supersede draft user_id=%d old_message_id=%d: refusing to retire a message in %q, which is not a Drafts folder",
+			userID, oldMessageID, source.Name)
+		return
+	}
 	trash, err := s.store.GetMailboxByRoleForAccount(ctx, userID, old.AccountID, "trash")
 	if err != nil {
 		if !store.IsNotFound(err) {

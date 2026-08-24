@@ -751,7 +751,12 @@ export function ComposeBox({
       // The move is reported rather than assumed: an account with no Archive
       // folder chosen, or a conversation already filed in one, sends the reply
       // and leaves the message where it is.
-      addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
+      // A send whose Sent copy could not be saved still delivered the mail, so
+      // it comes back on the success path with a warning. Reported instead of
+      // the success toast, which would otherwise be the only thing said about a
+      // message the user cannot find in Sent afterwards.
+      if (result.warning) addToast(result.warning, "error");
+      else addToast(result.archived_mailbox ? `Message sent and filed in ${result.archived_mailbox}.` : "Message sent.");
       onSent({ archived: Boolean(result.archived_mailbox) });
     } catch (err) {
       addToast(messageFromError(err), "error");
