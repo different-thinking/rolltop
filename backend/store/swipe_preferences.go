@@ -85,7 +85,8 @@ func (s *Store) ArchiveMailboxesForUser(ctx context.Context, userID int64) ([]Sw
 	}
 	swipeRows, err := db.QueryContext(ctx, `SELECT sam.account_id, sam.mailbox_id
 		FROM swipe_archive_mailboxes sam
-		JOIN mailboxes mb ON mb.user_id = sam.user_id AND mb.id = sam.mailbox_id AND mb.role = ''
+		JOIN mailboxes mb ON mb.user_id = sam.user_id AND mb.id = sam.mailbox_id
+			AND mb.role NOT IN ('inbox', 'sent', 'drafts', 'trash', 'junk')
 		WHERE sam.user_id = ? ORDER BY sam.account_id`, userID)
 	if err != nil {
 		return nil, err
@@ -150,7 +151,8 @@ func (s *Store) GetSwipePreferences(ctx context.Context, userID int64) (SwipePre
 		FROM swipe_archive_mailboxes AS mappings
 		JOIN mailboxes ON mailboxes.user_id = mappings.user_id
 			AND mailboxes.account_id = mappings.account_id AND mailboxes.id = mappings.mailbox_id
-		WHERE mappings.user_id = ? AND mailboxes.role = '' ORDER BY mappings.account_id`, userID)
+		WHERE mappings.user_id = ? AND mailboxes.role NOT IN ('inbox', 'sent', 'drafts', 'trash', 'junk')
+		ORDER BY mappings.account_id`, userID)
 	if err != nil {
 		return SwipePreferences{}, err
 	}
@@ -288,7 +290,7 @@ func (s *Store) validateSwipeArchiveMailboxes(ctx context.Context, userID int64,
 		if mailbox.AccountID != account.ID {
 			return nil, fmt.Errorf("%w: archive mailbox belongs to another account", ErrInvalidSwipePreferences)
 		}
-		if mailbox.Role != "" {
+		if archiveMailboxRoleBlocked(mailbox.Role) {
 			return nil, fmt.Errorf("%w: archive destination must be a regular folder", ErrInvalidSwipePreferences)
 		}
 		byAccount[target.AccountID] = target.MailboxID
