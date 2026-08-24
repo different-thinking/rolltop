@@ -950,10 +950,15 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(messages) == 0 {
-		// None of the given ids resolved to a message this user owns. Answering
-		// here skips reserving the foreground turn and starting a sync run for a
-		// selection that has nothing left to move.
-		http.NotFound(w, r)
+		// None of the given ids resolved to a message this user owns — most
+		// often a list this tab rendered before another one moved the same mail.
+		// Answering here still skips reserving the foreground turn and starting
+		// a sync run for a selection with nothing left to move, but it answers
+		// success: the messages are not where the caller wanted them moved from,
+		// which is the outcome the request asked for. A 404 turned that into a
+		// "Move failed" toast that also un-hid the rows the move had already
+		// optimistically cleared.
+		writeJSON(w, map[string]any{"ok": true, "queued": false, "moved": 0, "mailbox": dest.Name})
 		return
 	}
 	if err := messagesAccountScope(messages, dest.AccountID); err != nil {

@@ -676,3 +676,94 @@ Docker frontend stage copies into the image, so it has to stay ahead of the
 Docker build; and neither the workflow nor the `Dockerfile` may go back to a
 hand-maintained plugin list — both derive the set from `plugins/*/backend`,
 because the hardcoded lists had already drifted apart.
+
+The same rule now covers the frontend half. `npm run build:plugins` is
+`scripts/build-plugins.mjs`, which derives its targets from the plugins whose
+`manifest.json` declares `frontend.module` — the same field the server reads to
+serve the bundle, so a plugin cannot be built without being served or the
+reverse.
+
+**The Go stage builds everything in one step and throws its caches away in the
+same one** (`scripts/build-go.sh`). Kaniko keeps a layer per `RUN` in memory,
+and split into download/build/build-plugins this stage retained ~760 MB of
+module cache and ~610 MB of build cache for the rest of a build capped at 4 GB
+— against a final image of ~400 MB, so the caches, not the image, were the
+memory. Ending the step with the cache directories removed leaves a layer
+holding `/out` and the sources. The paths are resolved into variables *before*
+the builds because the cleanup must not invoke `go` again: where the toolchain
+itself lives under `GOMODCACHE`, `go clean -modcache` deletes the toolchain it
+is running from and the next `go` call puts 214 MB straight back. The cost is
+that `go mod download` has no layer of its own to cache across builds, which is
+free while the builder runs without `--cache`; split it back apart if caching is
+switched on and memory stops being the binding constraint.
+
+**Build concurrency is bounded by memory, not cores, and the ceiling is a hard
+one.** Both the plugin bundles and the `.so` links size their job count from the
+cgroup memory limit — `os.totalmem()` and `nproc` report the host, which on a
+capped builder is a fiction that gets the build killed rather than slowed. A
+2 GB builder runs one job. This is not hypothetical: the image build was being
+OOM killed and retried three times, and because the attempts share one log
+stream it read as a single thirteen-minute build. `ROLLTOP_BUILD_JOBS` overrides
+the frontend half when the machine is known. Raise neither default without
+knowing what the builder actually has; a Go link holding `language_search`'s
+124 MB embedded model set is gigabytes on its own. A plugin's stylesheet
+step must stay sequential *after* its own Vite build, since `emptyOutDir` wipes
+the directory both write into, and a new stylesheet needs an entry in that
+file's `cssScripts` map. Forgetting is not silent: the script fails on any
+manifest-declared file no step produced.
+
+The image gets an assembled plugin tree, not the source tree —
+`scripts/assemble-plugin-dist.mjs` copies each `manifest.json`, the directories
+its declared assets live in, and `migrations/`. Those migrations are the trap:
+they are read at startup and applied to the tenant schema, so a plugin tree
+assembled without them starts a server whose plugin tables never appear. Theme
+CSS is the other one — `LoadManifests` stats it and the process refuses to boot
+when it is missing. Both are covered by deriving the copy set from the manifest;
+keep it derived.
+
+Sourcemaps are off in the image (`ROLLTOP_BUILD_SOURCEMAPS=0`) and on
+everywhere else. They outweigh the bundles they describe, and the plugin asset
+route serves whole bundle directories, so shipping them also published the
+sources.
+
+**A plugin must never reach `@phosphor-icons/react`.** Its barrel is 4,543
+modules, so importing it — directly, or through `components/Icon`, or through a
+host module like `SettingsUI` that a plugin pulls in — made every plugin build
+transform all of them to keep a handful of glyphs, and shipped a second copy of
+the host's icons. One plugin measured 4,548 modules and 222 kB before, 8 modules
+and 12 kB after. `vite.plugins.config.ts` therefore redirects the host's icon
+module to `frontend/src/plugins/shared/iconShim.ts`, which reads the components
+the host installs in `main.tsx` — the same arrangement React already had. Render
+icons in plugin code as `<Icon name="lock" />`; if a glyph is missing, add it to
+the host's map in `frontend/src/components/Icon.tsx` rather than importing it
+where you need it.
+
+That redirect matches the **resolved file**, not the import specifier, and it
+has to stay that way. A pattern on the specifier has to enumerate spellings, and
+the first version missed one: `components/common.tsx` imports its neighbour as
+`"./Icon"`, so a plugin reaching Phosphor through `common.tsx` bundled all 4,543
+modules with the rule apparently in place. Reproduced both ways — 8 modules
+resolved, 4,548 with the pattern. Note that the built bundle contains no literal
+"phosphor" once minified, so grepping for the name proves nothing; the module
+count in the build output is the signal.
+
+**`attachment_preview` has no `frontend` block in its manifest, on purpose.**
+Its UI is part of the application bundle: `ThreadView` imports
+`AttachmentPreviewSlot` directly, and the slot gates itself on
+`enabled_plugins`, which comes from the plugin settings table and is unrelated
+to whether a manifest declares a frontend module. The runtime bundle it used to
+emit was 15 MB — PDFium inlined as a 6 MB base64 data URI — and was loaded by
+every user, registered in `byID`, and read by nothing: no `getRuntimePlugin`
+call exists, and the module exposed neither `accountSettingsRoutes` nor
+`renderMessageDetails`. Adding the block back means building and serving that
+again for no reader. It is also coupled to the entry file: `index.tsx` has no
+default export, so a manifest that declares a module would make
+`loadRuntimePlugins` report "could not load" in settings.
+
+Nothing in `plugins/attachment_preview/frontend/index.tsx` may reference
+`./AttachmentPreviewAction` statically. That module reaches PDFium, and a static
+import — or a re-export of the same binding, which is what the old
+`export { AttachmentPreviewAction, PdfAttachmentViewer }` was — pins it into the
+entry chunk and makes the `lazy()` beside it decorative. Vite reports this as
+"dynamically imported by index.tsx but also statically imported"; treat that
+warning as a build failure in review.

@@ -7,8 +7,5 @@
   "backend": {
     "kind": "go-plugin",
     "binary": "backend/attachment_preview.so"
-  },
-  "frontend": {
-    "module": "frontend_dist/index.js"
   }
 }
