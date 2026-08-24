@@ -831,9 +831,13 @@ export function SettingsView({
       const result = await api.rebuildOwnSearchIndex(csrf);
       setStorage(result.storage);
       setStorageError("");
+      // A partly started rebuild names what held the rest. "2 were already
+      // syncing" reads as "wait a moment", which is wrong when what holds them
+      // is a recovery that will refuse every rebuild until it clears.
+      const held = (result.blocked || []).map((block) => `${block.account}: ${block.reason}`).join("; ");
       addToast(
         result.busy_accounts > 0
-          ? `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started; ${result.busy_accounts} ${result.busy_accounts === 1 ? "was" : "were"} already syncing.`
+          ? `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started; ${result.busy_accounts} did not${held ? ` - ${held}` : ""}.`
           : `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started reindexing - follow it in Activity.`
       );
     } catch (err) {

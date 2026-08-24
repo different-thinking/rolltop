@@ -31,6 +31,7 @@ import type {
   ScopeMoveResponse,
   SearchExplanation,
   SearchIndexReport,
+  SearchRebuildBlock,
   ServerLogLine,
   StorageStats,
   SwipePreferences,
@@ -590,8 +591,13 @@ export const api = {
   // is the reader acting on their own index, and acting on somebody else's is
   // the admin route.
   rebuildOwnSearchIndex: (csrf: string) =>
-    postJSON<{ ok: boolean; started_runs: number; busy_accounts: number; storage: StorageStats }>(
-      "/api/storage/search-index/rebuild", csrf),
+    postJSON<{
+      ok: boolean;
+      started_runs: number;
+      busy_accounts: number;
+      blocked?: SearchRebuildBlock[];
+      storage: StorageStats;
+    }>("/api/storage/search-index/rebuild", csrf),
   plugins: () => getJSON<{ enabled: string[] }>("/api/plugins"),
   saveProfile: (csrf: string, profile: {
     backup_email: string;

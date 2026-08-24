@@ -852,14 +852,25 @@ export type SearchIndexTenant = {
   error?: string;
 };
 
+/** SearchRebuildBlock is one mail server a rebuild could not start on, and the
+ * reason the sync runner gave. The reason distinguishes work that ends by
+ * itself - a folder sync, another rebuild - from a recovery that refuses every
+ * rebuild until it clears, which is the difference between waiting a minute and
+ * waiting for something else to be fixed. */
+export type SearchRebuildBlock = {
+  account: string;
+  reason: string;
+};
+
 /** SearchIndexReport is the search index card payload. After a rebuild it names
- * the tenant, how many per-account runs started, and how many accounts were
- * already busy syncing and so could not start one. */
+ * the tenant, how many per-account runs started, and which accounts could not
+ * start one and why. */
 export type SearchIndexReport = {
   tenants: SearchIndexTenant[];
   rebuilt?: number;
   started_runs?: number;
   busy_accounts?: number;
+  blocked?: SearchRebuildBlock[];
 };
 
 /** DatabaseOverview is the admin database page payload.

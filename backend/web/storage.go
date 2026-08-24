@@ -413,15 +413,16 @@ func (s *Server) apiStorageSearchRebuild(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), searchIndexTimeout)
 	defer cancel()
-	started, busy, err := s.startSearchRebuildForUser(ctx, cu.User.ID)
+	started, blocked, err := s.startSearchRebuildForUser(ctx, cu.User.ID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	if started == 0 {
-		if busy > 0 {
+		if len(blocked) > 0 {
 			writeAPIError(w, http.StatusConflict,
-				"Sync or full-text reindexing is already running for your mail servers.")
+				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked)+
+					" Follow it in Activity, then try again.")
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "There are no search-visible folders to rebuild.")
@@ -438,7 +439,8 @@ func (s *Server) apiStorageSearchRebuild(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{
 		"ok":            true,
 		"started_runs":  started,
-		"busy_accounts": busy,
+		"busy_accounts": len(blocked),
+		"blocked":       blocked,
 		"storage":       s.storageStatsForUser(cu.User.ID),
 	})
 }

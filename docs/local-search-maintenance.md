@@ -88,6 +88,36 @@ count reach the remote mailbox count first; use `reset-search` only if Bleve rep
 still stalled. After restart, indexing may retrieve raw messages from IMAP when
 the local `.eml` retention window has already expired.
 
+## Why a Rebuild Says It Did Not Start
+
+The admin search-index card and the per-account rebuild in folder settings both
+queue the same work: one run per mail server, purging and refilling every
+search-visible folder of that server. Because the run claims all of those
+folders at once, a single busy folder refuses the whole mail server, and the
+request answers `409 Conflict` rather than waiting — an HTTP request cannot sit
+behind a sync that may take hours.
+
+The refusal names the mail server and what the sync runner found holding it:
+
+- **`Folder sync is already running for the folder "INBOX"`** — ordinary sync
+  work. It ends by itself; watch it in Activity and press rebuild again.
+- **`Search index rebuild is already running for the folder …`** — the rebuild
+  is already in flight, most likely from an earlier click. Rebuilding an account
+  with a Gmail `All Mail` folder re-reads the whole mailbox, so this can hold for
+  a long time. There is nothing to retry.
+- **`Folder maintenance is already running for the folder …`** — a purge, a
+  folder deletion, or another destructive local task.
+- **`folder recovery is still pending for this mail server`** — the tenant-wide
+  generation-recovery gate above. Nothing is reserved and nothing appears in
+  Activity, and every rebuild is refused until recovery clears. Waiting for a
+  sync to finish will not help here; see Mailbox Recovery Status.
+- **`the rebuild was not started`** — whatever held it has since been released.
+  Press rebuild again.
+
+The distinction is the point of the message. All of these once read "sync or
+full-text reindexing is already running", which sent an operator to Activity to
+look for work that, in the recovery case, is not there.
+
 ## Mailbox Recovery Status
 
 Generation recovery is serialized to one active mailbox per user. A queue line
