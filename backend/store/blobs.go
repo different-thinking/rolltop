@@ -135,12 +135,6 @@ func (s *Store) CreateAttachment(ctx context.Context, a Attachment) (Attachment,
 	return s.GetAttachmentForUser(ctx, a.UserID, id)
 }
 
-// DeleteAttachmentsForMessage removes attachment rows when a message is replaced or deleted.
-func (s *Store) DeleteAttachmentsForMessage(ctx context.Context, userID, messageID int64) error {
-	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `DELETE FROM attachments WHERE user_id = ? AND message_id = ?`, userID, messageID)
-	return err
-}
-
 // GetAttachmentForUser loads one attachment through its message ownership boundary.
 func (s *Store) GetAttachmentForUser(ctx context.Context, userID, id int64) (Attachment, error) {
 	var a Attachment
@@ -225,4 +219,61 @@ func (s *Store) ListAttachmentsForMessages(ctx context.Context, userID int64, me
 		}
 	}
 	return out, nil
+}
+
+// ReplaceAttachmentsForMessage rewrites the attachment rows of one message while
+// keeping the row IDs that are already in use. Reindexing reparses the very same
+// MIME parts, so deleting the rows and inserting them again handed every
+// attachment a fresh ID: an open mail view still holding the old ones then got a
+// 404 from /attachments/<id>/download and from the preview route, for a message
+// nothing about had changed. Rows are matched to files by position — the same
+// raw message parses to the same parts in the same order — so only a message
+// that really gained or lost a part inserts or deletes anything.
+//
+// An empty files slice removes every row; callers that reparse a message keep
+// what they have instead of calling with one, because a parse that yields no
+// files is the failure case, not an attachment-free message.
+func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messageID int64, files []Attachment) ([]Attachment, error) {
+	existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	// Most mail carries no attachments at all, and every stored and reindexed
+	// message now comes through here, so the case with nothing on either side
+	// answers without opening a transaction.
+	if len(existing) == 0 && len(files) == 0 {
+		return nil, nil
+	}
+	ts := nowUnix()
+	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for i, file := range files {
+		if i < len(existing) {
+			if _, err := tx.ExecContext(ctx, `UPDATE attachments
+				SET blob_id = ?, filename = ?, content_type = ?, content_id = ?, is_inline = ?, size = ?, blob_path = ?
+				WHERE user_id = ? AND id = ?`,
+				file.BlobID, file.Filename, file.ContentType, file.ContentID, boolInt(file.IsInline), file.Size, file.BlobPath,
+				userID, existing[i].ID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attachments (user_id, message_id, blob_id, filename, content_type, content_id, is_inline, size, blob_path, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			userID, messageID, file.BlobID, file.Filename, file.ContentType, file.ContentID, boolInt(file.IsInline), file.Size, file.BlobPath, ts); err != nil {
+			return nil, err
+		}
+	}
+	for _, surplus := range existing[min(len(files), len(existing)):] {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM attachments WHERE user_id = ? AND id = ?`, userID, surplus.ID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.ListAttachmentsForMessage(ctx, userID, messageID)
 }

@@ -1488,11 +1488,9 @@ func (s *Server) repairMessageAttachments(ctx context.Context, userID int64, msg
 	if err != nil || len(parsed.Files) == 0 {
 		return nil, nil
 	}
-	if err := s.store.DeleteAttachmentsForMessage(ctx, userID, msg.ID); err != nil {
-		return nil, err
-	}
+	rows := make([]store.Attachment, 0, len(parsed.Files))
 	for _, file := range parsed.Files {
-		if _, err := s.store.CreateAttachment(ctx, store.Attachment{
+		rows = append(rows, store.Attachment{
 			UserID:      userID,
 			MessageID:   msg.ID,
 			BlobID:      msg.BlobID,
@@ -1502,11 +1500,9 @@ func (s *Server) repairMessageAttachments(ctx context.Context, userID int64, msg
 			IsInline:    file.IsInline,
 			Size:        int64(len(file.Data)),
 			BlobPath:    "",
-		}); err != nil {
-			return nil, err
-		}
+		})
 	}
-	return s.store.ListAttachmentsForMessage(ctx, userID, msg.ID)
+	return s.store.ReplaceAttachmentsForMessage(ctx, userID, msg.ID, rows)
 }
 
 func (s *Server) repairMessageAttachmentsAsync(userID int64, msg store.MessageRecord) {

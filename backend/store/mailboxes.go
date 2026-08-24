@@ -616,6 +616,21 @@ func normalizeSyncMode(mode string) string {
 	}
 }
 
+// archiveMailboxRoleBlocked reports whether a folder's role rules it out as an
+// Archive destination. Archive has no role of its own, so this blocks only the
+// roles that already mean something else (Inbox, Sent, Drafts, Trash, Junk);
+// a plain folder or one carrying "all" (Gmail's All Mail) both stay eligible.
+// The identity Archive picker and the swipe-settings Archive picker share this
+// so a folder valid in one is always valid in the other.
+func archiveMailboxRoleBlocked(role string) bool {
+	switch normalizeMailboxRole(role) {
+	case "inbox", "sent", "drafts", "trash", "junk":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeMailboxRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "inbox":

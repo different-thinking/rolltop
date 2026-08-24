@@ -881,6 +881,42 @@ export type ServerLogLine = {
   error: boolean;
 };
 
+/** SMTPLogLine is one recorded utterance of an SMTP conversation. `direction`
+ * is "client" for what Rolltop sent, "server" for the reply, and "note" for
+ * Rolltop's own commentary — the dial, the TLS upgrade, the message body that
+ * is deliberately not transcribed. */
+export type SMTPLogLine = {
+  time: string;
+  direction: "client" | "server" | "note";
+  text: string;
+};
+
+/** SMTPLogSession is one send or connection test with the conversation it
+ * produced. It never carries credentials or message content: the AUTH exchange
+ * is redacted and the payload appears only as a byte count. */
+export type SMTPLogSession = {
+  id: number;
+  account_id: number;
+  kind: "send" | "test";
+  host: string;
+  port: number;
+  username: string;
+  from: string;
+  started_at: string;
+  ended_at: string;
+  error: string;
+  truncated: boolean;
+  lines: SMTPLogLine[];
+};
+
+/** SMTPTestResult answers the settings page's connection test. A refused login
+ * is a successful request with `ok: false`: the transcript is the payload. */
+export type SMTPTestResult = {
+  ok: boolean;
+  error?: string;
+  session?: SMTPLogSession;
+};
+
 /** CalendarSummary is one subscribed Google calendar. */
 export type CalendarSummary = {
   id: number;

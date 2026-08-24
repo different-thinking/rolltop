@@ -1158,6 +1158,7 @@ func smtpEnvelopeForIdentity(identity composeIdentity, account store.SMTPAccount
 	return store.MailAccount{
 		UserID:                account.UserID,
 		Email:                 identity.Email,
+		SMTPAccountID:         account.ID,
 		SMTPHost:              account.Host,
 		SMTPPort:              account.Port,
 		SMTPUsername:          account.Username,
@@ -1318,6 +1319,28 @@ func (s *Server) saveComposeDraft(ctx context.Context, cu currentUser, form comp
 	return saved, nil
 }
 
+// deleteUnreferencedRawMessage removes a raw message file written for a copy that
+// was not stored, and its blob row with it, but only while no message,
+// attachment or cached image still points at that path.
+func (s *Server) deleteUnreferencedRawMessage(ctx context.Context, userID int64, blobPath string) error {
+	existing, err := s.store.GetBlobByPathForUser(ctx, userID, blobPath)
+	switch {
+	case store.IsNotFound(err):
+		// No row was ever written, so the file belongs to this attempt alone.
+	case err != nil:
+		return err
+	default:
+		deleted, err := s.store.DeleteBlobIfUnreferencedForUser(ctx, userID, existing.ID)
+		if err != nil || !deleted {
+			return err
+		}
+	}
+	if s.blobs == nil {
+		return nil
+	}
+	return s.blobs.DeleteUserBlob(userID, blobPath)
+}
+
 // supersedeDraft retires a draft an edit just replaced. It moves the old copy
 // to the account's Trash rather than deleting it outright -- permanent remote
 // deletion stays confined to emptying Trash -- and drops the local mirror row
@@ -1334,21 +1357,20 @@ func (s *Server) supersedeDraft(ctx context.Context, userID, oldMessageID int64)
 		}
 		return
 	}
-	// The id arrives from the client, and everything below it moves a message
-	// to Trash. Loading a draft into the composer already refuses an id that is
-	// not in a Drafts folder (composeFormForRequest); retiring one has to refuse
-	// the same, or a stale or wrong draft_message_id files arbitrary mail of
-	// this user's under a save they made of something else.
-	source, err := s.store.GetMailboxForUser(ctx, userID, old.MailboxID)
+	// The ID being retired comes from the request, and a compose tab can hold a
+	// stale one for minutes: the draft it names may have been sent, moved or
+	// discarded from another tab since. Trashing whatever that ID now points at
+	// would move an ordinary message -- locally and over IMAP -- so the folder
+	// it actually sits in has to be the Drafts one, the same check the prefill
+	// route makes before it will load a draft at all.
+	mailbox, err := s.store.GetMailboxForUser(ctx, userID, old.MailboxID)
 	if err != nil {
 		if !store.IsNotFound(err) {
 			log.Printf("supersede draft user_id=%d old_message_id=%d: %v", userID, oldMessageID, err)
 		}
 		return
 	}
-	if source.Role != "drafts" {
-		log.Printf("supersede draft user_id=%d old_message_id=%d: refusing to retire a message in %q, which is not a Drafts folder",
-			userID, oldMessageID, source.Name)
+	if mailbox.Role != "drafts" {
 		return
 	}
 	trash, err := s.store.GetMailboxByRoleForAccount(ctx, userID, old.AccountID, "trash")
@@ -1479,15 +1501,13 @@ func (s *Server) storeSentMessage(ctx context.Context, userID int64, account sto
 		Size:   saved.Size,
 	})
 	if err != nil {
-		// CreateBlob never inserted a row on this failure, so there is nothing in
-		// the store to unreference: the physical file SaveRawMessage already wrote
-		// is the only thing left over from this attempt, and blobRec.ID is the
-		// zero value of a row that does not exist.
-		var cleanupErr error
-		if s.blobs != nil {
-			cleanupErr = s.blobs.DeleteUserBlob(userID, saved.Path)
-		}
-		return store.MessageRecord{}, errors.Join(err, cleanupErr)
+		// The file is already on disk, and CreateBlob upserts by path before it
+		// reads the row back, so this error can arrive with a live row for that
+		// path -- the syncer fetching the copy that was just APPENDed writes the
+		// same path under the same UID. Deleting the file on the strength of the
+		// error alone would then pull it out from under whatever owns the row, so
+		// the row decides: the file goes only once nothing names that path.
+		return store.MessageRecord{}, errors.Join(err, s.deleteUnreferencedRawMessage(ctx, userID, saved.Path))
 	}
 	messageDate := outgoing.Date
 	if messageDate.IsZero() {
