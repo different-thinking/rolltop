@@ -12,6 +12,22 @@ type PdfFetchState =
 
 const EMPTY_PDF_FONT_FALLBACK = { fonts: {} } satisfies NonNullable<PDFViewerConfig["fontFallback"]>;
 
+// PDFium is fetched by the viewer's own worker, and that worker is created from
+// a blob: URL. A blob: base has no path for a root-relative URL to resolve
+// against, so the "/assets/pdfium-<hash>.wasm" that the bundler hands us -- the
+// only form it ever produces -- reached fetch() inside the worker as an
+// unparseable URL. The engine then never started, and the viewer sat on
+// "Loading document..." forever with nothing in the console of the page itself,
+// because the failure was reported inside the worker. Resolving it against the
+// document first is what makes it fetchable from there; an absolute URL, which
+// is what a bundler that inlines the wasm emits instead, is returned unchanged.
+//
+// Guarded the same way the sibling preload guards `document`, so importing this
+// module somewhere without a DOM stays a no-op rather than a ReferenceError.
+// Nothing renders in that case, so the unresolved value is never fetched.
+const PDFIUM_WASM_URL =
+  typeof window === "undefined" ? pdfiumWasmUrl : new URL(pdfiumWasmUrl, window.location.href).href;
+
 type PdfAttachmentViewerProps = {
   src: string;
 };
@@ -46,7 +62,7 @@ export function PdfAttachmentViewer({ src }: PdfAttachmentViewerProps) {
   const config = useMemo<PDFViewerConfig | null>(() => {
     if (pdfFetch.status !== "ready") return null;
     return {
-      wasmUrl: pdfiumWasmUrl,
+      wasmUrl: PDFIUM_WASM_URL,
       fontFallback: EMPTY_PDF_FONT_FALLBACK,
       tabBar: "never",
       disabledCategories: ["annotation", "redaction", "insert", "stamp", "signature", "print", "export"],
