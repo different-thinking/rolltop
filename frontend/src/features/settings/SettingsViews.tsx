@@ -10,7 +10,7 @@ import { Icon } from "../../components/Icon";
 import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm, suggestedSyncStart, AUTH_GOOGLE, AUTH_PASSWORD } from "../../lib/accountForm";
 import { messageFromError } from "../../lib/errors";
-import { displayDateTime, displayTime, formatBytes } from "../../lib/format";
+import { describeSearchRebuildBlocks, displayDateTime, displayTime, formatBytes } from "../../lib/format";
 import { folderParentNames, folderTree, isArchiveMailboxChoice, trashMailboxForAccount, type FolderNode } from "../../lib/folders";
 import { effectiveMailboxSyncMode, mergeSyncRuns } from "../../lib/sync";
 import { swipeActionChoices, swipeSnoozeChoices } from "../../lib/swipeActions";
@@ -834,10 +834,10 @@ export function SettingsView({
       // A partly started rebuild names what held the rest. "2 were already
       // syncing" reads as "wait a moment", which is wrong when what holds them
       // is a recovery that will refuse every rebuild until it clears.
-      const held = (result.blocked || []).map((block) => `${block.account}: ${block.reason}`).join("; ");
+      const held = describeSearchRebuildBlocks(result.blocked || []);
       addToast(
         result.busy_accounts > 0
-          ? `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started; ${result.busy_accounts} did not${held ? ` - ${held}` : ""}.`
+          ? `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started; ${result.busy_accounts} did not.${held ? ` ${held}` : ""}`
           : `Rebuilding. ${result.started_runs} mail server${result.started_runs === 1 ? "" : "s"} started reindexing - follow it in Activity.`
       );
     } catch (err) {

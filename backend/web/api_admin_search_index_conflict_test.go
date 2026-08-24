@@ -91,7 +91,7 @@ func TestAdminSearchIndexRebuildConflictNamesTheFolderHoldingIt(t *testing.T) {
 	}
 	// The account, the folder and the kind of work: each one is a step the
 	// operator would otherwise have to guess at.
-	for _, want := range []string{admin.Email, `"INBOX"`, "Folder maintenance"} {
+	for _, want := range []string{admin.Email, `"INBOX"`, "Folder maintenance", "Follow it in Activity"} {
 		if !strings.Contains(conflict.Error, want) {
 			t.Fatalf("conflict error = %q, want it to name %s", conflict.Error, want)
 		}
@@ -110,5 +110,27 @@ func TestAdminSearchIndexRebuildConflictNamesTheFolderHoldingIt(t *testing.T) {
 	report := decodeSearchIndexReport(t, recorder)
 	if report.StartedRuns != 1 || len(report.Blocked) != 0 {
 		t.Fatalf("released rebuild report = %+v", report)
+	}
+}
+
+// The recovery gate is one gate for the whole tenant. Reported once per mail
+// server it would read as several independent recoveries, so servers sharing a
+// reason are named together — while genuinely different causes stay apart.
+func TestDescribeSearchRebuildBlocksGroupsServersSharingAReason(t *testing.T) {
+	const recovery = "Folder recovery is still pending for this user, and it holds every mail server until it finishes."
+	const held = `Folder sync is already running for the folder "INBOX". Follow it in Activity, then try again.`
+
+	got := describeSearchRebuildBlocks([]searchRebuildBlock{
+		{Account: "Gmail", Reason: recovery},
+		{Account: "Fastmail", Reason: held},
+		{Account: "Work", Reason: recovery},
+	})
+	want := "Gmail, Work: " + recovery + " Fastmail: " + held
+	if got != want {
+		t.Fatalf("description = %q, want %q", got, want)
+	}
+
+	if got := describeSearchRebuildBlocks(nil); got != "" {
+		t.Fatalf("empty description = %q", got)
 	}
 }

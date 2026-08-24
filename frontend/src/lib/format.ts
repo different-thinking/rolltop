@@ -2,6 +2,7 @@
 // preferences while keeping list and thread rendering consistent.
 
 import type { DatePrefs } from "../appTypes";
+import type { SearchRebuildBlock } from "../types";
 
 /** formatBytes renders unknown byte counts as compact human-readable storage text. */
 export function formatBytes(value: unknown): string {
@@ -181,4 +182,22 @@ export function dateGroupLabel(value: string, now = new Date()): string {
 /** messageCountLabel renders "1 message" / "N messages" for move/copy/delete toasts. */
 export function messageCountLabel(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
+}
+
+/** describeSearchRebuildBlocks names the mail servers a search-index rebuild
+ * could not start on, and why. Each reason arrives from the server as a full
+ * sentence carrying its own next step, so this only groups and joins them.
+ *
+ * Servers sharing a reason are named together: the folder-recovery gate is one
+ * gate for the whole user, and repeating its sentence once per server would
+ * describe several. It mirrors describeSearchRebuildBlocks in the Go handler,
+ * which composes the same text for the conflict message. */
+export function describeSearchRebuildBlocks(blocked: SearchRebuildBlock[]): string {
+  const accounts = new Map<string, string[]>();
+  for (const block of blocked) {
+    const named = accounts.get(block.reason);
+    if (named) named.push(block.account);
+    else accounts.set(block.reason, [block.account]);
+  }
+  return [...accounts.entries()].map(([reason, named]) => `${named.join(", ")}: ${reason}`).join(" ");
 }

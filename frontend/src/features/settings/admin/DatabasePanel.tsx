@@ -28,7 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
-import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
+import { describeSearchRebuildBlocks, displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
 import type { DatePrefs } from "../../../appTypes";
 import type {
   DatabaseOverview,
@@ -143,9 +143,7 @@ function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
               gave. A count alone cannot say whether the operator should wait a
               minute or go and look at something else. */}
           {queued.blocked.length > 0
-            ? ` ${queued.blocked.length} did not start — ${queued.blocked
-                .map((block) => `${block.account}: ${block.reason}`)
-                .join("; ")}.`
+            ? ` ${queued.blocked.length} did not start. ${describeSearchRebuildBlocks(queued.blocked)}`
             : ""}
         </p>
       ) : null}

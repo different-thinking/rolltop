@@ -1800,15 +1800,19 @@ func uniqueMailboxes(mailboxes []string) []string {
 // with "a sync is already running" sends an operator to Activity to look for
 // work that is not there.
 //
+// Each answer carries its own next step rather than leaving the caller to
+// append one, because the step differs: work that is listed in Activity is
+// waited out there, and the recovery gate is not listed at all.
+//
 // It reports the state it finds when it is asked, not the state at the instant
-// of the refusal. A folder released in between reads as "not started", which is
-// the honest answer to "why did that fail" once the cause has cleared.
+// of the refusal. A folder released in between says so, which is the honest
+// answer to "why did that fail" once the cause has cleared.
 func (r *Runner) AccountSearchRebuildBlockReason(userID, accountID int64, mailboxes []store.Mailbox) string {
 	if r == nil {
-		return "the sync runner is unavailable"
+		return "The sync runner is unavailable."
 	}
 	if r.context().Err() != nil {
-		return "the server is shutting down"
+		return "The server is shutting down."
 	}
 	names := mailboxNamesForReservation(mailboxes)
 	r.mu.Lock()
@@ -1816,7 +1820,10 @@ func (r *Runner) AccountSearchRebuildBlockReason(userID, accountID int64, mailbo
 	// Checked in the order reserveAccountMailboxesForMaintenance checks it, so
 	// the reason named is the one that actually refused the reservation.
 	if r.generationRecoveryGatedLocked(userID) {
-		return "folder recovery is still pending for this mail server"
+		// Keyed on the user, not the account: one recovery holds every mail
+		// server this tenant has. Saying "this mail server" would read, once it
+		// has been repeated per server, as several independent recoveries.
+		return "Folder recovery is still pending for this user, and it holds every mail server until it finishes."
 	}
 	for _, name := range names {
 		key, reserved := r.reservedAccountMailboxKeyLocked(userID, accountID, name)
@@ -1825,11 +1832,12 @@ func (r *Runner) AccountSearchRebuildBlockReason(userID, accountID int64, mailbo
 		}
 		activity, tracked := r.workActivities[runnerMailboxWorkActivityKey(key)]
 		if !tracked {
-			return fmt.Sprintf("another job holds the folder %q", name)
+			return fmt.Sprintf("Another job holds the folder %q. Follow it in Activity, then try again.", name)
 		}
-		return fmt.Sprintf("%s is already running for the folder %q", WorkerKindLabel(activity.kind), name)
+		return fmt.Sprintf("%s is already running for the folder %q. Follow it in Activity, then try again.",
+			WorkerKindLabel(activity.kind), name)
 	}
-	return "the rebuild was not started"
+	return "Whatever held it has since been released — press rebuild again."
 }
 
 func (r *Runner) mailboxReservedByAnyAccountLocked(userID int64, mailbox string) bool {

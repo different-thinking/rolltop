@@ -21,30 +21,33 @@ func TestAccountSearchRebuildBlockReasonNamesTheFolderAndTheWorkHoldingIt(t *tes
 	defer cancel()
 	runner := NewRunnerWithContext(ctx, &Service{})
 	const userID, accountID = 3, 7
+	// Every reason carries its own next step, so an idle runner has to say that
+	// the cause has cleared rather than leave the caller to append "try again".
+	const idleReason = "Whatever held it has since been released — press rebuild again."
 	mailboxes := []store.Mailbox{
 		{AccountID: accountID, Name: "INBOX"},
 		{AccountID: accountID, Name: "[Gmail]/All Mail"},
 	}
 
-	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != "the rebuild was not started" {
+	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != idleReason {
 		t.Fatalf("idle runner reason = %q", reason)
 	}
 
 	reserveForTest(t, runner, userID, accountID, "[Gmail]/All Mail", runnerWorkMailboxSync)
-	want := `Folder sync is already running for the folder "[Gmail]/All Mail"`
+	want := `Folder sync is already running for the folder "[Gmail]/All Mail". Follow it in Activity, then try again.`
 	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != want {
 		t.Fatalf("reserved folder reason = %q, want %q", reason, want)
 	}
 
 	// The one folder another tenant's rebuild would have to name is not this
 	// tenant's, so the reservation must not leak across the user id.
-	if reason := runner.AccountSearchRebuildBlockReason(userID+1, accountID, mailboxes); reason != "the rebuild was not started" {
+	if reason := runner.AccountSearchRebuildBlockReason(userID+1, accountID, mailboxes); reason != idleReason {
 		t.Fatalf("other tenant reason = %q", reason)
 	}
 
 	releaseForTest(t, runner, userID, accountID, "[Gmail]/All Mail")
 	reserveForTest(t, runner, userID, accountID, "INBOX", runnerWorkMailboxSearchMaintenance)
-	want = `Search index rebuild is already running for the folder "INBOX"`
+	want = `Search index rebuild is already running for the folder "INBOX". Follow it in Activity, then try again.`
 	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != want {
 		t.Fatalf("rebuild-in-flight reason = %q, want %q", reason, want)
 	}
@@ -65,7 +68,9 @@ func TestAccountSearchRebuildBlockReasonSeparatesRecoveryFromRunningWork(t *test
 	runner.generationRecoveryUsers[userID] = true
 	runner.mu.Unlock()
 
-	want := "folder recovery is still pending for this mail server"
+	// Keyed on the user, so it must not claim to be about one mail server: the
+	// admin card repeats the reason once per server a tenant owns.
+	want := "Folder recovery is still pending for this user, and it holds every mail server until it finishes."
 	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != want {
 		t.Fatalf("gated reason = %q, want %q", reason, want)
 	}
@@ -73,7 +78,7 @@ func TestAccountSearchRebuildBlockReasonSeparatesRecoveryFromRunningWork(t *test
 	// A stopping server refuses before it looks at any of that, and says so:
 	// trying again is pointless until it is back.
 	cancel()
-	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != "the server is shutting down" {
+	if reason := runner.AccountSearchRebuildBlockReason(userID, accountID, mailboxes); reason != "The server is shutting down." {
 		t.Fatalf("stopping reason = %q", reason)
 	}
 }

@@ -305,8 +305,7 @@ func (s *Server) apiRebuildIMAPAccountSearchIndex(w http.ResponseWriter, r *http
 	})
 	if !started && err == nil {
 		writeAPIError(w, http.StatusConflict, "Rebuilding did not start. "+
-			s.syncRunner.AccountSearchRebuildBlockReason(cu.User.ID, account.ID, mailboxes)+
-			". Follow it in Activity, then try again.")
+			s.syncRunner.AccountSearchRebuildBlockReason(cu.User.ID, account.ID, mailboxes))
 		return
 	}
 	if err != nil {

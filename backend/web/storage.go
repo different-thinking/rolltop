@@ -421,8 +421,7 @@ func (s *Server) apiStorageSearchRebuild(w http.ResponseWriter, r *http.Request)
 	if started == 0 {
 		if len(blocked) > 0 {
 			writeAPIError(w, http.StatusConflict,
-				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked)+
-					" Follow it in Activity, then try again.")
+				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked))
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "There are no search-visible folders to rebuild.")

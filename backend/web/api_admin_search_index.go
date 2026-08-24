@@ -81,13 +81,26 @@ type searchRebuildBlock struct {
 	Reason  string `json:"reason"`
 }
 
-// describeSearchRebuildBlocks turns the refusals into one sentence per mail
-// server. The reasons come from the runner, which is the only place that knows
-// whether a folder is held, a recovery is pending, or nothing is running at all.
+// describeSearchRebuildBlocks names the mail servers that did not start and why.
+// The reasons come from the runner, which is the only place that knows whether a
+// folder is held, a recovery is pending, or nothing is running at all, and each
+// one already carries its own next step.
+//
+// Servers sharing a reason are named together: the recovery gate is one gate for
+// the whole tenant, and repeating its sentence once per server would describe
+// several.
 func describeSearchRebuildBlocks(blocked []searchRebuildBlock) string {
-	parts := make([]string, 0, len(blocked))
+	order := make([]string, 0, len(blocked))
+	accounts := map[string][]string{}
 	for _, block := range blocked {
-		parts = append(parts, fmt.Sprintf("%s: %s.", block.Account, block.Reason))
+		if _, seen := accounts[block.Reason]; !seen {
+			order = append(order, block.Reason)
+		}
+		accounts[block.Reason] = append(accounts[block.Reason], block.Account)
+	}
+	parts := make([]string, 0, len(order))
+	for _, reason := range order {
+		parts = append(parts, fmt.Sprintf("%s: %s", strings.Join(accounts[reason], ", "), reason))
 	}
 	return strings.Join(parts, " ")
 }
@@ -153,8 +166,7 @@ func (s *Server) apiAdminSearchIndexRebuild(w http.ResponseWriter, r *http.Reque
 	if started == 0 {
 		if len(blocked) > 0 {
 			writeAPIError(w, http.StatusConflict,
-				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked)+
-					" Follow it in Activity, then try again.")
+				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked))
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "This user has no search-visible folders to rebuild.")
