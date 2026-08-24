@@ -702,3 +702,27 @@ func TestEmailDocumentKeepsCachedRemoteImageURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestEmailDocumentResolvesQueryStringsPerContext(t *testing.T) {
+	// The same URL is written two ways. A <style> element is raw text: an &amp;
+	// written into it reaches the CSS parser as five characters and breaks the
+	// query string. An attribute is decoded by the HTML parser first, so there
+	// the entity is what keeps a bare & from being read as one.
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<style>body{background-image:url(track.png?a=1&b=2)}@import "theme.css?v=3&x=4";</style>` +
+		`<img src="hero.png?a=1&amp;b=2">` +
+		`<div style="background-image:url(tile.png?a=1&amp;b=2)">Tile</div>`
+	doc := emailDocumentWithBlocklist(body, "", true, nil)
+	if !strings.Contains(doc, `url(https://newsletter.example.test/2026/08/track.png?a=1&b=2)`) {
+		t.Fatalf("style element URL was HTML-escaped into invalid CSS: %s", doc)
+	}
+	if !strings.Contains(doc, `"https://newsletter.example.test/2026/08/theme.css?v=3&x=4"`) {
+		t.Fatalf("@import URL was HTML-escaped into invalid CSS: %s", doc)
+	}
+	if !strings.Contains(doc, `src="https://newsletter.example.test/2026/08/hero.png?a=1&amp;b=2"`) {
+		t.Fatalf("attribute URL lost its entity: %s", doc)
+	}
+	if !strings.Contains(doc, `url(https://newsletter.example.test/2026/08/tile.png?a=1&amp;b=2)`) {
+		t.Fatalf("style attribute URL lost its entity: %s", doc)
+	}
+}

@@ -328,7 +328,7 @@ func resolveRefsAgainstDeclaredBase(bodyHTML string) string {
 		return bodyHTML
 	}
 	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, func(css string) string {
-		return resolveCSSRefs(css, base)
+		return resolveCSSRefs(css, base, rawText)
 	})
 	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
 		if strings.EqualFold(tagName(tag), "base") && strings.TrimSpace(tagAttrValue(tag, "href")) != "" {
@@ -373,7 +373,10 @@ func resolveTagRefs(tag string, base *url.URL) string {
 		value, quote := splitAttrValue(rawValue)
 		switch {
 		case lower == "style":
-			resolved := resolveCSSRefs(value, base)
+			// An attribute value reaches the CSS parser already decoded by the
+			// HTML one, so the URLs inside it are read - and written back -
+			// the way every other attribute is.
+			resolved := resolveCSSRefs(value, base, htmlEscapedText)
 			if resolved == value {
 				return "", false
 			}
@@ -385,7 +388,7 @@ func resolveTagRefs(tag string, base *url.URL) string {
 			}
 			return "srcset=" + quoteAttrValue(resolved, quote), true
 		case remoteFetchAttrs[lower] || elementAttrs[lower] || lower == "href":
-			resolved, changed := resolvedRef(value, base)
+			resolved, changed := resolvedRef(value, base, htmlEscapedText)
 			if !changed {
 				return "", false
 			}
@@ -395,18 +398,18 @@ func resolveTagRefs(tag string, base *url.URL) string {
 	})
 }
 
-func resolveCSSRefs(css string, base *url.URL) string {
+func resolveCSSRefs(css string, base *url.URL, encoding refEncoding) string {
 	css = cssImportRuleRE.ReplaceAllStringFunc(css, func(rule string) string {
-		raw := attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)
-		resolved, changed := resolvedRef(strings.Trim(raw, `"'`), base)
+		raw := strings.Trim(attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1), `"'`)
+		resolved, changed := resolvedRef(raw, base, encoding)
 		if !changed {
 			return rule
 		}
-		return strings.Replace(rule, strings.Trim(raw, `"'`), resolved, 1)
+		return strings.Replace(rule, raw, resolved, 1)
 	})
 	return cssURLTokenRE.ReplaceAllStringFunc(css, func(token string) string {
 		raw := attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)
-		resolved, changed := resolvedRef(raw, base)
+		resolved, changed := resolvedRef(raw, base, encoding)
 		if !changed {
 			return token
 		}
@@ -422,7 +425,7 @@ func resolvedSrcset(value string, base *url.URL) (string, bool) {
 	changed := false
 	out := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		resolved, did := resolvedRef(candidate.url, base)
+		resolved, did := resolvedRef(candidate.url, base, htmlEscapedText)
 		changed = changed || did
 		out = append(out, strings.TrimSpace(resolved+" "+candidate.descriptor))
 	}
@@ -432,12 +435,28 @@ func resolvedSrcset(value string, base *url.URL) (string, bool) {
 	return strings.Join(out, ", "), true
 }
 
+// refEncoding says whether a reference is written where the HTML parser decodes
+// entities before anything else reads it. An attribute value is: a query string
+// arrives there as ?a=1&amp;b=2 and has to go back the same way. The text of a
+// <style> element is not - it is a raw text element, and an &amp; written into
+// it reaches the CSS parser as the five characters it is, which breaks the URL
+// it belongs to.
+type refEncoding bool
+
+const (
+	htmlEscapedText refEncoding = true
+	rawText         refEncoding = false
+)
+
 // resolvedRef resolves the references a base applies to, which are exactly the
 // ones that would otherwise be measured against Rolltop: isUnresolvableRef
 // already names that set, so the two cannot drift apart and leave a reference
 // neither resolved nor dropped.
-func resolvedRef(value string, base *url.URL) (string, bool) {
-	trimmed := strings.TrimSpace(html.UnescapeString(value))
+func resolvedRef(value string, base *url.URL, encoding refEncoding) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if encoding == htmlEscapedText {
+		trimmed = strings.TrimSpace(html.UnescapeString(trimmed))
+	}
 	if trimmed == "" || !isUnresolvableRef(trimmed) {
 		return value, false
 	}
@@ -445,7 +464,11 @@ func resolvedRef(value string, base *url.URL) (string, bool) {
 	if err != nil {
 		return value, false
 	}
-	return html.EscapeString(base.ResolveReference(ref).String()), true
+	resolved := base.ResolveReference(ref).String()
+	if encoding == htmlEscapedText {
+		return html.EscapeString(resolved), true
+	}
+	return resolved, true
 }
 
 func neutralizeRefs(bodyHTML string, filter refFilter) string {
