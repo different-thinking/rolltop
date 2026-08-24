@@ -142,6 +142,7 @@ type Server struct {
 	mailCategoryCache         *mailCategoryChromeCache
 	attachmentRepairMu        sync.Mutex
 	attachmentRepairRunning   map[int64]map[int64]bool
+	inlineRepairAttempted     map[int64]map[int64]bool
 	senderContactIconMu       sync.Mutex
 	senderContactIconCache    map[int64]map[string]senderContactIconCacheEntry
 	composeIdentityMu         sync.Mutex
@@ -414,6 +415,7 @@ func New(opts Options) (*Server, error) {
 		mailCategoryCache:         newMailCategoryChromeCache(),
 		mailWarmRunning:           map[int64]bool{},
 		attachmentRepairRunning:   map[int64]map[int64]bool{},
+		inlineRepairAttempted:     map[int64]map[int64]bool{},
 		senderContactIconCache:    map[int64]map[string]senderContactIconCacheEntry{},
 		composeIdentityCache:      map[int64]composeIdentityCacheEntry{},
 		webPushRunning:            map[int64]bool{},

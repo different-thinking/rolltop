@@ -215,3 +215,82 @@ func TestExpandedMessageRepairsInlineAttachmentRowFromRawMessage(t *testing.T) {
 		t.Fatalf("repaired inline attachment status = %d body = %q", rec.Code, rec.Body.String())
 	}
 }
+
+func TestInlineCIDRepairIsAttemptedOncePerMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	blobs := blob.New(t.TempDir())
+
+	user, err := db.CreateUser(ctx, "dangling@example.test", "Dangling", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993,
+		Username: user.Email, EncryptedPassword: "secret", UseTLS: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The sender referenced a part it never attached: no repair can ever
+	// resolve this cid:, so the evidence stays exactly as the repair found it.
+	body := `<p>Hallo</p><img src="cid:typo@example.test">`
+	raw := []byte(strings.Join([]string{
+		"From: sender@example.test",
+		"To: " + user.Email,
+		"Subject: dangling reference",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		body,
+	}, "\r\n"))
+	saved, err := blobs.SaveRawMessage(user.ID, account.ID, mailbox.Name, 3, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobRec, err := db.CreateBlob(ctx, store.BlobRecord{
+		UserID: user.ID, Kind: "message", Path: saved.Path, SHA256: saved.SHA256, Size: saved.Size,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := db.CreateMessage(ctx, store.CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blobRec.ID,
+		UID: 3, Date: time.Now(), InternalDate: time.Now(), Subject: "dangling reference",
+		Size: saved.Size, BlobPath: saved.Path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{store: db, blobs: blobs}
+	if got := server.ensureInlineCIDAttachments(ctx, user.ID, message, nil, body, true); len(got) != 0 {
+		t.Fatalf("repair invented rows for a dangling reference: %+v", got)
+	}
+	if !server.inlineRepairAttempted[user.ID][message.ID] {
+		t.Fatal("first render did not record its attempt")
+	}
+	// Renders after the first must not reparse the raw message again, and the
+	// only evidence available for that here is the claim the repair takes.
+	if server.claimInlineRepairAttempt(user.ID, message.ID) {
+		t.Fatal("a later render claimed a second repair attempt")
+	}
+	if got := server.ensureInlineCIDAttachments(ctx, user.ID, message, nil, body, true); len(got) != 0 {
+		t.Fatalf("second render returned rows: %+v", got)
+	}
+	other, err := db.CreateUser(ctx, "dangling-other@example.test", "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !server.claimInlineRepairAttempt(other.ID, message.ID) {
+		t.Fatal("another tenant was refused an attempt of its own")
+	}
+}

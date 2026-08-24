@@ -311,6 +311,11 @@ func declaresRemoteBase(bodyHTML string) bool {
 	if !strings.Contains(strings.ToLower(bodyHTML), "<base") {
 		return false
 	}
+	// A base inside a comment sets nothing - the browser never reads it as an
+	// element - so reading one here would hand a message the exception on the
+	// strength of markup that does not apply, and leave its relative references
+	// live for the app to answer.
+	bodyHTML = htmlCommentRE.ReplaceAllString(bodyHTML, "")
 	for _, tag := range htmlTagRE.FindAllString(bodyHTML, -1) {
 		if strings.EqualFold(tagName(tag), "base") && isRemoteRef(tagAttrValue(tag, "href")) {
 			return true

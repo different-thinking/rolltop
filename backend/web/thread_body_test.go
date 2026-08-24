@@ -581,3 +581,16 @@ func TestEmailDocumentKeepsRelativeRefsUnderADeclaredBase(t *testing.T) {
 		t.Fatalf("message content was lost: %s", blocked)
 	}
 }
+
+func TestEmailDocumentIgnoresACommentedOutBase(t *testing.T) {
+	// A base inside a comment sets nothing, so the reference beside it still
+	// resolves against the app and must not be kept alive by it.
+	body := `<!-- <base href="https://newsletter.example.test/"> --><img src="hero.png" alt="Hero">`
+	doc := emailDocumentWithBlocklist(body, "", true, nil)
+	if strings.Contains(doc, ` src="hero.png"`) {
+		t.Fatalf("commented-out base kept a reference to the app origin alive: %s", doc)
+	}
+	if !strings.Contains(doc, `data-rolltop-unresolved-src="hero.png"`) {
+		t.Fatalf("dropped reference was not recorded: %s", doc)
+	}
+}
