@@ -139,6 +139,24 @@ func (h syncPluginHost) ForwardMessage(ctx context.Context, userID, messageID in
 	return h.s.ForwardMessage(ctx, userID, messageID, to, headers)
 }
 
+// ArchiveMailboxID answers with the account's chosen Archive folder, or zero
+// when the reader has not named one; archiving has no role to fall back on.
+func (h syncPluginHost) ArchiveMailboxID(ctx context.Context, userID, accountID int64) (int64, error) {
+	if h.s == nil || h.s.Store == nil {
+		return 0, errors.New("message store is not configured")
+	}
+	targets, err := h.s.Store.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	for _, target := range targets {
+		if target.AccountID == accountID {
+			return target.MailboxID, nil
+		}
+	}
+	return 0, nil
+}
+
 var _ plugins.BackendHost = syncPluginHost{}
 var _ plugins.StoredMessageHost = syncPluginHost{}
 var _ plugins.MessageSimilarityHost = syncPluginHost{}

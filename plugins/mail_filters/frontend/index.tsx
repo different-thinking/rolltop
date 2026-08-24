@@ -1,7 +1,7 @@
 // File overview: Runtime frontend settings view for the mail filters plugin.
 
 import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent } from "react";
 import type { DatePrefs, LocationState, Toast } from "../../../frontend/src/appTypes";
 import { Icon } from "../../../frontend/src/components/Icon";
 import { SettingsEmpty, SettingsError, SettingsLoading, SettingsPage } from "../../../frontend/src/features/settings/SettingsUI";
@@ -10,8 +10,12 @@ import type { AccountSettingsRuntimePlugin } from "../../../frontend/src/plugins
 import type { Mailbox, ThreadMessage, User } from "../../../frontend/src/types";
 import "./styles.css";
 
+// A destination is either relative to the message's own account -- Trash or
+// Archive, so one rule covering several accounts lands in each account's own
+// folder -- or one exact folder. The two are mutually exclusive, which is why
+// the editor holds them as a single select value rather than two fields that
+// can disagree.
 type Actions = {
-  star: boolean;
   move_mailbox_id: number;
   move_role: string;
   forward_to: string;
@@ -59,6 +63,7 @@ type MessageActionContext = {
   activePanel: string;
   openPanel: (panelID: string) => void;
   closePanel: () => void;
+  navigate: (url: string) => void;
   addToast: (message: string, kind?: Toast["kind"]) => number;
 };
 
@@ -185,6 +190,49 @@ function ageDays(value: string) {
   return amount * (perUnit[match[2]] || 0);
 }
 
+// The destination select carries one value for what are two fields on the
+// rule, so the two can never both be set. "role:" names a folder relative to
+// the message's own account and "mailbox:" names one exact folder.
+function destinationValue(actions: Actions) {
+  if (actions.move_mailbox_id > 0) return `mailbox:${actions.move_mailbox_id}`;
+  if (actions.move_role) return `role:${actions.move_role}`;
+  return "";
+}
+
+function destinationActions(value: string): Pick<Actions, "move_role" | "move_mailbox_id"> {
+  if (value.startsWith("role:")) return { move_role: value.slice("role:".length), move_mailbox_id: 0 };
+  if (value.startsWith("mailbox:")) return { move_role: "", move_mailbox_id: Number(value.slice("mailbox:".length)) || 0 };
+  return { move_role: "", move_mailbox_id: 0 };
+}
+
+// actionSummary says what a saved rule does, in the words the editor uses, so
+// the list answers "what will this actually do to my mail" without opening it.
+function actionSummary(actions: Actions, mailboxes: Mailbox[]) {
+  const parts: string[] = [];
+  if (actions.forward_to.trim()) parts.push(`Forward to ${actions.forward_to.trim()}`);
+  if (actions.move_role === "trash") parts.push("Delete");
+  else if (actions.move_role === "archive") parts.push("Archive");
+  else if (actions.move_mailbox_id > 0) {
+    const folder = mailboxes.find((mailbox) => mailbox.id === actions.move_mailbox_id);
+    parts.push(folder ? `Move to ${folder.account_label || folder.account_email} / ${folder.name}` : "Move to a folder that is gone");
+  }
+  return parts.length > 0 ? parts.join(" \u00b7 ") : "Record matches only";
+}
+
+// A From header carries a display name as often as not, and the search's from:
+// operator wants the address. Take what the angle brackets hold when there is a
+// pair, and the whole trimmed value otherwise.
+function senderAddress(fromAddr: string) {
+  const angled = /<([^<>]+)>/.exec(fromAddr);
+  return (angled ? angled[1] : fromAddr).trim().toLowerCase();
+}
+
+// A reply prefix is not part of what the subject is about, and a filter written
+// from one reply should reach the rest of the thread, so the prefixes come off.
+function subjectStem(subject: string) {
+  return subject.replace(/^\s*(?:(?:re|aw|fwd?|wg|antw)\s*(?:\[\d+\])?\s*:\s*)+/i, "").trim();
+}
+
 const blankRule: Rule = {
   id: 0,
   name: "",
@@ -192,7 +240,7 @@ const blankRule: Rule = {
   enabled: true,
   scope_mode: "all_accounts",
   account_ids: [],
-  actions: { star: false, move_mailbox_id: 0, move_role: "", forward_to: "" },
+  actions: { move_mailbox_id: 0, move_role: "", forward_to: "" },
   position: 0
 };
 
@@ -224,6 +272,34 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
     return [...seen.entries()].map(([id, label]) => ({ id, label }));
   }, [mailboxes]);
 
+  // Folders are grouped under the account that owns them, because a folder only
+  // means anything inside its own account: a move cannot cross accounts.
+  const folderGroups = useMemo(() => {
+    const groups = new Map<number, { label: string; folders: Mailbox[] }>();
+    mailboxes.forEach((mailbox) => {
+      const group = groups.get(mailbox.account_id) || {
+        label: mailbox.account_label || mailbox.account_email || `Account ${mailbox.account_id}`,
+        folders: []
+      };
+      group.folders.push(mailbox);
+      groups.set(mailbox.account_id, group);
+    });
+    return [...groups.entries()].map(([id, group]) => ({ id, ...group }));
+  }, [mailboxes]);
+
+  // A rule that names one account's folder but reaches other accounts would
+  // fail on every message from those accounts, one failed action at a time, and
+  // the reader would only find out from the audit. Say it in the editor.
+  const destinationFolder = draft.actions.move_mailbox_id > 0
+    ? mailboxes.find((mailbox) => mailbox.id === draft.actions.move_mailbox_id)
+    : undefined;
+  const ruleAccountIDs = draft.scope_mode === "selected_accounts"
+    ? (draft.account_ids || [])
+    : accounts.map((account) => account.id);
+  const strandedAccounts = destinationFolder
+    ? accounts.filter((account) => account.id !== destinationFolder.account_id && ruleAccountIDs.includes(account.id))
+    : [];
+
   async function load(quiet = false) {
     if (!quiet) {
       setLoading(true);
@@ -247,9 +323,12 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
   }
 
   useEffect(() => {
+    // Arriving with a query -- from a search, or from an open message -- means
+    // "make a filter for this", never "rewrite the rule I had open", so the
+    // draft starts blank rather than inheriting whatever id was being edited.
     const initialQuery = new URLSearchParams(location.search).get("query") || "";
     if (initialQuery) {
-      setDraft((current) => ({ ...current, query: initialQuery, name: `Filter: ${initialQuery}` }));
+      setDraft({ ...blankRule, query: initialQuery, name: `Filter: ${initialQuery}` });
       setConditions(parseConditions(initialQuery));
     }
     void load();
@@ -369,7 +448,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
   return (
     <SettingsPage
       title="Mail filters"
-      description="Create search-based rules for new and existing mail."
+      description="Rules that forward, archive or delete mail by sender, subject or age, for new and existing mail."
       backPath="/settings/account/plugins"
       navigate={navigate}
       className="mail-filter-settings"
@@ -419,32 +498,13 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
             </label>
           ) : null}
         </fieldset>
-        <div className="mail-filter-grid">
-          <label>
-            <span className="settings-field-label">Scope</span>
-            <select value={draft.scope_mode} onChange={(event) => setDraft({ ...draft, scope_mode: event.target.value })}>
-              <option value="all_accounts">All accounts</option>
-              <option value="selected_accounts">Selected accounts</option>
-            </select>
-          </label>
-          <label>
-            <span className="settings-field-label">Move</span>
-            <select value={draft.actions.move_mailbox_id || draft.actions.move_role} onChange={(event) => {
-              const value = event.target.value;
-              if (value === "trash") setAction({ move_role: "trash", move_mailbox_id: 0 });
-              else setAction({ move_role: "", move_mailbox_id: Number(value || 0) });
-            }}>
-              <option value="">Do not move</option>
-              <option value="trash">Source account Trash</option>
-              {mailboxes.map((mailbox) => <option value={mailbox.id} key={mailbox.id}>{mailbox.account_label || mailbox.account_email} / {mailbox.name}</option>)}
-            </select>
-          </label>
-        </div>
-        {ageDaysValue > 0 && draft.actions.move_role === "trash" ? (
-          <p className="muted">
-            Matching mail moves to Trash {ageDaysValue} {ageDaysValue === 1 ? "day" : "days"} after it was sent. Until then it waits in the queue below.
-          </p>
-        ) : null}
+        <label>
+          <span className="settings-field-label">Applies to</span>
+          <select value={draft.scope_mode} onChange={(event) => setDraft({ ...draft, scope_mode: event.target.value })}>
+            <option value="all_accounts">All accounts</option>
+            <option value="selected_accounts">Selected accounts</option>
+          </select>
+        </label>
         {draft.scope_mode === "selected_accounts" ? (
           <div className="mail-filter-account-list">
             {accounts.map((account) => (
@@ -455,13 +515,53 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
             ))}
           </div>
         ) : null}
+        <fieldset className="mail-filter-conditions">
+          <legend>Then do this</legend>
+          <div className="mail-filter-grid">
+            <label>
+              <span className="settings-field-label">Move it to</span>
+              <select value={destinationValue(draft.actions)} onChange={(event) => setAction(destinationActions(event.target.value))}>
+                <option value="">Nowhere &mdash; leave it where it is</option>
+                <optgroup label={accounts.length > 1 ? "Each message\u2019s own account" : "This account"}>
+                  <option value="role:trash">Trash &mdash; this deletes it</option>
+                  <option value="role:archive">Archive</option>
+                </optgroup>
+                {folderGroups.map((group) => (
+                  <optgroup label={group.label} key={group.id}>
+                    {group.folders.map((folder) => <option value={`mailbox:${folder.id}`} key={folder.id}>{folder.name}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </label>
+            <label className="mail-filter-forward">
+              <span className="settings-field-label">Forward to</span>
+              <input type="email" value={draft.actions.forward_to} onChange={(event) => setAction({ forward_to: event.target.value })} placeholder="name@example.com" />
+            </label>
+          </div>
+          {draft.actions.move_role === "trash" ? (
+            <p className="muted">
+              Deleting puts mail in the account&rsquo;s own Trash, the same as deleting it by hand. Rolltop never erases mail on the server.
+            </p>
+          ) : null}
+          {draft.actions.move_role === "archive" ? (
+            <p className="muted">
+              Archiving uses each account&rsquo;s chosen Archive folder &mdash; the one its identity settings name. An account without one records a failure rather than guessing; name the folder, then save this filter again to reconsider that mail.
+            </p>
+          ) : null}
+          {strandedAccounts.length > 0 ? (
+            <p className="error-text">
+              Mail cannot move between accounts. {strandedAccounts.map((account) => account.label).join(", ")} {strandedAccounts.length === 1 ? "is also covered by this rule and its mail" : "are also covered by this rule and their mail"} would fail to move.
+              Choose Delete or Archive to mean each account&rsquo;s own folder, or narrow this rule to {destinationFolder ? (accounts.find((account) => account.id === destinationFolder.account_id)?.label || "one account") : "one account"}.
+            </p>
+          ) : null}
+          {ageDaysValue > 0 && draft.actions.move_role === "trash" ? (
+            <p className="muted">
+              Matching mail is deleted {ageDaysValue} {ageDaysValue === 1 ? "day" : "days"} after it was sent, not after the rule saw it. Anything already older goes on the next pass; the rest waits in the queue below.
+            </p>
+          ) : null}
+        </fieldset>
         <div className="mail-filter-actions">
           <label><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /> Enabled</label>
-          <label><input type="checkbox" checked={draft.actions.star} onChange={(event) => setAction({ star: event.target.checked })} /> Star matches</label>
-          <label className="mail-filter-forward">
-            <span className="settings-field-label">Forward to</span>
-            <input type="email" value={draft.actions.forward_to} onChange={(event) => setAction({ forward_to: event.target.value })} placeholder="name@example.com" />
-          </label>
         </div>
         <div className="form-actions">
           <button disabled={busy || ageInvalid || !draft.query.trim()}><Icon name="label" />Save filter</button>
@@ -481,6 +581,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
               <button type="button" onClick={() => edit(rule)}>
                 <strong>{rule.name || rule.query}</strong>
                 <small>{rule.query}</small>
+                <small>{actionSummary({ ...blankRule.actions, ...(rule.actions || {}) }, mailboxes)}</small>
               </button>
               <button className="secondary" type="button" disabled={busy} onClick={() => void backfill(rule)}><Icon name="sync" />Backfill</button>
               <button className="icon-button" type="button" disabled={busy} onClick={() => void remove(rule)} title="Delete filter"><Icon name="delete" /></button>
@@ -497,7 +598,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
       </section>
       <EvaluationPanel
         title="Waiting on age"
-        description="Matched mail an age condition has not released yet. Nothing has been moved, starred or forwarded for these."
+        description="Matched mail an age condition has not released yet. Nothing has been moved or forwarded for these."
         emptyTitle="Nothing waiting"
         emptyDescription="Filters with an age condition queue their matches here until the mail is old enough."
         evaluations={pending}
@@ -683,7 +784,7 @@ export default {
       aliases: ["/settings/account/filters"],
       title: "Mail filters",
       label: "Filters",
-      description: "Search-based rules for new and existing mail.",
+      description: "Rules that forward, archive or delete mail by sender, subject or age.",
       icon: "label",
       section: "plugins",
       render: (context: Context) => <MailFilterSettings {...context} />
@@ -694,14 +795,14 @@ export default {
       <div className="panel-headline">
         <div>
           <h2>Mail filters</h2>
-          <div className="muted">Search-based automation for starring, forwarding, moving, and age-based cleanup.</div>
+          <div className="muted">Rules that forward, archive, or delete matching mail, now and as it arrives.</div>
         </div>
         <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/filters")}><Icon name="label" />Manage</button>
       </div>
       <button className="server-row" type="button" onClick={() => navigate("/settings/account/plugins/filters")}>
         <span className="server-row-icon"><Icon name="label" /></span>
         <strong>Filters</strong>
-        <small>Create filters from searches and review the 30-day match audit.</small>
+        <small>Filter by sender, subject or age; forward, archive or delete what matches.</small>
       </button>
     </section>
   ),
@@ -710,18 +811,43 @@ export default {
       <Icon name="label" />Create filter
     </button>
   ),
-  renderMessageMenuActions: ({ activePanel, openPanel, closePanel }: MessageActionContext) => (
-    <button
-      type="button"
-      onClick={(event) => {
-        event.currentTarget.closest("details")?.removeAttribute("open");
-        if (activePanel === "mail-filter-evaluations") closePanel();
-        else openPanel("mail-filter-evaluations");
-      }}
-    >
-      <Icon name="rule" />
-      Filter evaluations
-    </button>
-  ),
+  renderMessageMenuActions: ({ item, navigate, activePanel, openPanel, closePanel, addToast }: MessageActionContext) => {
+    // The editor already reads a query out of the URL and lifts from: and
+    // subject: back into its own fields, so an open message only has to hand it
+    // one condition -- no second prefill path to keep in step with the parser.
+    const openEditor = (event: MouseEvent<HTMLButtonElement>, condition: string, missing: string) => {
+      event.currentTarget.closest("details")?.removeAttribute("open");
+      if (!condition) {
+        addToast(missing, "error");
+        return;
+      }
+      navigate(`/settings/account/plugins/filters?query=${encodeURIComponent(condition)}`);
+    };
+    const address = senderAddress(item.message.from_addr || "");
+    const subject = subjectStem(item.message.subject || "");
+    return (
+      <>
+        <button type="button" onClick={(event) => openEditor(event, address ? `from:${quoteValue(address)}` : "", "This message has no sender to filter on.")}>
+          <Icon name="label" />
+          Filter mail from this sender
+        </button>
+        <button type="button" onClick={(event) => openEditor(event, subject ? `subject:${quoteValue(subject)}` : "", "This message has no subject to filter on.")}>
+          <Icon name="label" />
+          Filter mail with this subject
+        </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.currentTarget.closest("details")?.removeAttribute("open");
+            if (activePanel === "mail-filter-evaluations") closePanel();
+            else openPanel("mail-filter-evaluations");
+          }}
+        >
+          <Icon name="rule" />
+          Filter evaluations
+        </button>
+      </>
+    );
+  },
   renderMessageActionPanels: (context: MessageActionContext) => <MessageFilterEvaluationsPanel {...context} />
 } satisfies AccountSettingsRuntimePlugin;

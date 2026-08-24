@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,8 +163,12 @@ type fakeFilterHost struct {
 	matches  map[string]bool
 	searched []string
 	moved    []int64
-	starred  []int64
+	movedTo  []int64
 	forwards []string
+	// archiveMailboxID is the account's chosen Archive folder, and zero stands
+	// for an account whose reader never named one.
+	archiveMailboxID int64
+	archiveErr       error
 }
 
 func (h *fakeFilterHost) Store() any        { return h.store }
@@ -176,14 +181,16 @@ func (h *fakeFilterHost) MatchMessageSearch(_ context.Context, _, _ int64, query
 	return plugins.SearchMatchResult{Matched: h.matches[query]}, nil
 }
 
-func (h *fakeFilterHost) StarMessage(_ context.Context, _, messageID int64, _ bool) error {
-	h.starred = append(h.starred, messageID)
+func (h *fakeFilterHost) StarMessage(context.Context, int64, int64, bool) error { return nil }
+
+func (h *fakeFilterHost) MoveMessage(_ context.Context, _, messageID, destID int64) error {
+	h.moved = append(h.moved, messageID)
+	h.movedTo = append(h.movedTo, destID)
 	return nil
 }
 
-func (h *fakeFilterHost) MoveMessage(_ context.Context, _, messageID, _ int64) error {
-	h.moved = append(h.moved, messageID)
-	return nil
+func (h *fakeFilterHost) ArchiveMailboxID(context.Context, int64, int64) (int64, error) {
+	return h.archiveMailboxID, h.archiveErr
 }
 
 func (h *fakeFilterHost) ForwardMessage(_ context.Context, _, _ int64, to string, _ []plugins.MailHeader) error {
@@ -669,5 +676,148 @@ func TestScheduledPassSweepsRetention(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("evaluation rows = %d, want the stale row swept", remaining)
+	}
+}
+
+// evaluationError reads what a rule recorded when an action did not happen. A
+// destination that cannot be resolved has to leave a reason behind: the reader
+// finds out from the audit or not at all.
+func evaluationError(t *testing.T, db *sql.DB, userID, ruleID, messageID int64) string {
+	t.Helper()
+	var text string
+	if err := db.QueryRowContext(context.Background(), `SELECT error FROM plugin_mail_filter_evaluations
+		WHERE user_id = ? AND rule_id = ? AND message_id = ? ORDER BY id DESC LIMIT 1`,
+		userID, ruleID, messageID).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	return text
+}
+
+// Deleting is a move into the account's own Trash, resolved per message, so one
+// rule over several accounts files each account's mail in its own Trash rather
+// than in whichever one the rule happened to be written against.
+func TestDeleteMovesMailIntoTheAccountsOwnTrash(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "delete-dest@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, user.ID, account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 300, time.Now().UTC().Add(-time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.movedTo) != 1 || host.movedTo[0] != trash.ID {
+		t.Fatalf("moved to %v, want the account's Trash %d", host.movedTo, trash.ID)
+	}
+}
+
+// Archiving has no role behind it: the destination is the folder the reader
+// named for that account, which only the host knows.
+func TestArchiveMovesMailIntoTheFolderTheAccountChose(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "archive-dest@example.test")
+	chosen, err := st.GetOrCreateMailbox(ctx, user.ID, account.ID, "Keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}, archiveMailboxID: chosen.ID}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 301, time.Now().UTC().Add(-time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.movedTo) != 1 || host.movedTo[0] != chosen.ID {
+		t.Fatalf("moved to %v, want the chosen Archive %d", host.movedTo, chosen.ID)
+	}
+}
+
+// An account with no Archive folder chosen used to be indistinguishable from a
+// rule that moved nothing on purpose: the destination resolved to zero, the
+// move was skipped and the row still said "matched". The reader would have had
+// no way to tell that the rule had never once archived anything.
+func TestArchiveWithoutAChosenFolderIsRecordedAsAFailure(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "archive-missing@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 302, time.Now().UTC().Add(-time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.moved) != 0 {
+		t.Fatalf("moved %v, want nothing moved without a destination", host.moved)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusFailed {
+		t.Fatalf("status = %q, want %q", status, statusFailed)
+	}
+	if text := evaluationError(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(text, "Archive") {
+		t.Fatalf("error = %q, want it to name the missing Archive folder", text)
+	}
+}
+
+// The same holds for an account with no Trash folder: a rule that says "delete"
+// and quietly does nothing is worse than one that says it failed.
+func TestDeleteWithoutATrashFolderIsRecordedAsAFailure(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "trash-missing@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 303, time.Now().UTC().Add(-time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.moved) != 0 {
+		t.Fatalf("moved %v, want nothing moved without a destination", host.moved)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusFailed {
+		t.Fatalf("status = %q, want %q", status, statusFailed)
+	}
+}
+
+// A destination and a folder are two answers to one question. Storing both and
+// letting the resolver pick would make a saved rule mean something the editor
+// never showed, so the save is refused instead.
+func TestARuleCannotNameBothADestinationAndAFolder(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	user, _, mailbox := mailFilterFixture(t, st, "two-destinations@example.test")
+	_, err := saveRule(context.Background(), db, user.ID, Rule{
+		Name: "both", Query: "from:studio@example.test", Enabled: true,
+		Actions: Actions{MoveRole: moveRoleTrash, MoveMailboxID: mailbox.ID},
+	})
+	if err == nil {
+		t.Fatal("saved a rule naming both a destination and a folder")
+	}
+}
+
+func TestARuleRefusesADestinationTheEngineCannotResolve(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	user, _, _ := mailFilterFixture(t, st, "unknown-destination@example.test")
+	_, err := saveRule(context.Background(), db, user.ID, Rule{
+		Name: "spam", Query: "from:studio@example.test", Enabled: true,
+		Actions: Actions{MoveRole: "junk"},
+	})
+	if err == nil {
+		t.Fatal("saved a rule naming a destination the engine cannot resolve")
 	}
 }

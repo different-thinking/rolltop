@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -34,6 +35,13 @@ const (
 	statusFailed     = "action_failed"
 	statusLoop       = "loop_prevented"
 	pluginID         = "mail_filters"
+	// moveRoleTrash and moveRoleArchive are destinations named relative to the
+	// message's own account, so one rule can say "Trash" and mean each
+	// account's own Trash. Deleting mail is exactly this move: Rolltop never
+	// flags \Deleted or expunges outside of emptying a Trash folder, so the
+	// most a filter can do to mail is put it where a manual delete puts it.
+	moveRoleTrash   = "trash"
+	moveRoleArchive = "archive"
 	// zeroDateUnix is what a message with no parseable Date is stored as:
 	// store.CreateMessage writes m.Date.UTC().Unix(), and Go's zero time is
 	// this. It is not 0, so a cursor or a guard that tests for 0 misses it.
@@ -329,8 +337,11 @@ func (p *mailFiltersBackend) apiMessageAction(host plugins.APIHost, db *sql.DB, 
 	host.WriteJSON(w, map[string]any{"evaluations": evals})
 }
 
+// Actions is what a rule does to the mail it matches. MoveRole names a
+// destination relative to the message's own account -- Trash or Archive -- and
+// MoveMailboxID names one exact folder instead, which only fits a rule that
+// stays inside that folder's account, because a move cannot cross accounts.
 type Actions struct {
-	Star          bool   `json:"star"`
 	MoveMailboxID int64  `json:"move_mailbox_id"`
 	MoveRole      string `json:"move_role"`
 	ForwardTo     string `json:"forward_to"`
@@ -472,6 +483,21 @@ func saveRule(ctx context.Context, db *sql.DB, userID int64, in Rule) (Rule, err
 	}
 	if in.Query == "" {
 		return Rule{}, errors.New("search query is required")
+	}
+	in.Actions.MoveRole = strings.ToLower(strings.TrimSpace(in.Actions.MoveRole))
+	switch in.Actions.MoveRole {
+	case "", moveRoleTrash, moveRoleArchive:
+	default:
+		return Rule{}, errors.New("a filter moves mail to Trash, to Archive, or to a folder you name")
+	}
+	if in.Actions.MoveMailboxID < 0 {
+		return Rule{}, errors.New("invalid destination folder")
+	}
+	// A named destination and a named folder are two answers to one question,
+	// and guessing which one the reader meant is how a rule ends up deleting
+	// mail it was supposed to file. Say so instead.
+	if in.Actions.MoveRole != "" && in.Actions.MoveMailboxID > 0 {
+		return Rule{}, errors.New("choose either Trash or Archive or one folder, not both")
 	}
 	actionsJSON, err := json.Marshal(in.Actions)
 	if err != nil {
@@ -635,15 +661,42 @@ func scheduleEvaluation(ctx context.Context, db *sql.DB, evalID int64, rule Rule
 	return err
 }
 
+// moveDestination resolves the folder a rule's move sends one message to, in
+// that message's own account. A destination that cannot be resolved is an
+// error rather than a silent zero: a rule that says "delete" against an account
+// with no Trash folder has not done what it said, and reporting it as a match
+// with nothing recorded would hide that from the reader for as long as the rule
+// keeps running.
+func moveDestination(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, actions Actions, msg plugins.StoredMessageContext) (int64, error) {
+	if actions.MoveMailboxID > 0 {
+		return actions.MoveMailboxID, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(actions.MoveRole)) {
+	case "":
+		return 0, nil
+	case moveRoleTrash:
+		id := mailboxIDByRole(ctx, db, msg.UserID, msg.AccountID, moveRoleTrash)
+		if id == 0 {
+			return 0, errors.New("this account has no Trash folder to delete into")
+		}
+		return id, nil
+	case moveRoleArchive:
+		// Archive is a choice rather than a role, so the host is asked for the
+		// same folder the header's Archive button uses.
+		id, err := host.ArchiveMailboxID(ctx, msg.UserID, msg.AccountID)
+		if err != nil {
+			return 0, err
+		}
+		if id == 0 {
+			return 0, errors.New("this account has no Archive folder chosen; name one in its identity settings")
+		}
+		return id, nil
+	}
+	return 0, fmt.Errorf("unknown move destination %q", actions.MoveRole)
+}
+
 func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext) (string, bool, string, string) {
 	results := map[string]string{}
-	if rule.Actions.Star {
-		if err := host.StarMessage(ctx, msg.UserID, msg.MessageID, true); err != nil {
-			results["star"] = "failed"
-			return mustJSON(results), false, statusFailed, err.Error()
-		}
-		results["star"] = "ok"
-	}
 	if strings.TrimSpace(rule.Actions.ForwardTo) != "" {
 		forwarderID, err := ensureForwarderID(ctx, db, msg.UserID, msg.AccountID)
 		if err != nil {
@@ -660,9 +713,10 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		}
 		results["forward"] = "ok"
 	}
-	destID := rule.Actions.MoveMailboxID
-	if destID == 0 && strings.TrimSpace(rule.Actions.MoveRole) != "" {
-		destID = mailboxIDByRole(ctx, db, msg.UserID, msg.AccountID, rule.Actions.MoveRole)
+	destID, err := moveDestination(ctx, host, db, rule.Actions, msg)
+	if err != nil {
+		results["move"] = "failed"
+		return mustJSON(results), false, statusFailed, err.Error()
 	}
 	if destID > 0 {
 		if err := host.MoveMessage(ctx, msg.UserID, msg.MessageID, destID); err != nil {

@@ -29,8 +29,13 @@
 }
 
 .mail-filter-conditions > .mail-filter-grid,
-.mail-filter-conditions > label {
+.mail-filter-conditions > label,
+.mail-filter-conditions > p {
   width: 100%;
+}
+
+.mail-filter-conditions > p {
+  margin: 0;
 }
 
 .mail-filter-query-preview {
