@@ -667,7 +667,19 @@ func TestPostgresSearchFuzzesOnlyWhileExactMatchesAreScarce(t *testing.T) {
 	}
 
 	// The ranked query cuts the page in an inner layer and answers the
-	// weight-class question in an outer one. Paging has to survive that.
+	// weight-class question in an outer one. Paging has to survive that, and it
+	// needs more mail than the gate does - seeded here rather than by widening
+	// the corpus above, which would tie a paging test to a tuning constant.
+	const pagedMessages = 20
+	paging := make([]MessageIndexDocument, 0, pagedMessages)
+	for uid := uint32(2000); uid < 2000+pagedMessages; uid++ {
+		paging = append(paging, MessageIndexDocument{
+			Message: seedPostgresSearchMessage(t, db, user, mailbox, uid, "Rechnung", "anbei die rechnung"),
+		})
+	}
+	if err := svc.IndexMessages(ctx, paging); err != nil {
+		t.Fatalf("index paging corpus: %v", err)
+	}
 	first, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 10, 0, SearchOptions{})
 	if err != nil {
 		t.Fatalf("first page: %v", err)
@@ -698,4 +710,144 @@ func hitsContain(hits []Hit, id int64) bool {
 		}
 	}
 	return false
+}
+
+// Typo tolerance has to tolerate typos and nothing else. The loose similarity
+// operator scores its needle against the best substring of the haystack, which
+// in German makes every compound a synonym of its parts: a body saying the
+// amount appears on the card statement answered searches for invoices. The
+// misspelling is the witness on the other side - fixing the noise by raising
+// the floor instead would have taken the real typo with it.
+func TestPostgresFuzzyMatchesTyposNotCompoundParts(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	if err := db.EnsureTrigramSearch(ctx); err != nil {
+		t.Fatalf("ensure trigram search: %v", err)
+	}
+	if !db.TrigramSearchEnabled() {
+		t.Skip("trigram search unavailable")
+	}
+
+	compound := seedPostgresSearchMessage(t, db, user, mailbox, 700, "Beleg fuer Ihre Zahlung",
+		"der betrag wird auf ihrer kreditkartenabrechnung abgebucht")
+	typo := seedPostgresSearchMessage(t, db, user, mailbox, 701, "Rechnnung zu Ihrer BahnCard",
+		"die unterlagen liegen bei")
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: compound}, {Message: typo}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	// No exact match at all, so the fallback is certainly open: whatever comes
+	// back came back through similarity.
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 50, 0, SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !hitsContain(hits, typo.ID) {
+		t.Fatalf("hits = %v, want the misspelled subject %d - typo tolerance stopped tolerating typos", hits, typo.ID)
+	}
+	if hitsContain(hits, compound.ID) {
+		t.Fatalf("hits = %v, want no %d: kreditkartenabrechnung is not a misspelling of rechnung", hits, compound.ID)
+	}
+}
+
+// An exact match outranks one reached by similarity, whatever the nudges say.
+// Arithmetic alone did not settle this: similarity contributes up to 0.3 per
+// term while an exact body mention measures 0.033, so the near miss won on
+// score and the mail the reader searched for sat under it.
+func TestPostgresExactMatchOutranksFuzzyMatch(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+	if err := db.EnsureTrigramSearch(ctx); err != nil {
+		t.Fatalf("ensure trigram search: %v", err)
+	}
+	if !db.TrigramSearchEnabled() {
+		t.Skip("trigram search unavailable")
+	}
+
+	old := time.Now().AddDate(-2, 0, 0)
+	exact := seedPostgresSearchMessageFrom(t, db, user, mailbox, 710, "Unterlagen",
+		"anbei die rechnung", "fremder@example.test", old)
+	// Everything the ranking used to reward, on the message that does not
+	// contain the word: a sender read every time, and mail from this morning.
+	nearMiss := seedPostgresSearchMessageFrom(t, db, user, mailbox, 711, "Rechnnung heute",
+		"nur ueber aehnlichkeit erreichbar", "vertraut@example.test", time.Now())
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: exact}, {Message: nearMiss}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "rechnung", 50, 0, SearchOptions{
+		SenderBoosts: []SenderBoost{{Sender: "vertraut@example.test", Boost: 8}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no hits")
+	}
+	if hits[0].ID != exact.ID {
+		t.Fatalf("top hit = %d, want the exact match %d ahead of the near miss %d", hits[0].ID, exact.ID, nearMiss.ID)
+	}
+}
+
+// What the text said decides the order; who wrote it and when only nudge it.
+// The two were added together once, on a scale where a subject match measures
+// 0.51 and a familiar sender contributes 8, which is not a ranking with a nudge
+// - it is a list of frequent correspondents that a search term filters.
+func TestPostgresRelevanceOutranksSenderAndRecencyNudges(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+
+	old := time.Now().AddDate(-2, 0, 0)
+	subjectHit := seedPostgresSearchMessageFrom(t, db, user, mailbox, 720, "Rechnung BahnCard",
+		"die unterlagen liegen bei", "fremder@example.test", old)
+	bodyMention := seedPostgresSearchMessageFrom(t, db, user, mailbox, 721, "Beleg fuer Ihre Zahlung",
+		"ihre bahncard rechnung wurde bereits beglichen", "vertraut@example.test", time.Now())
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: subjectHit}, {Message: bodyMention}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "bahncard rechnung", 50, 0, SearchOptions{
+		SenderBoosts: []SenderBoost{{Sender: "vertraut@example.test", Boost: 8}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d, want both messages", len(hits))
+	}
+	if hits[0].ID != subjectHit.ID {
+		t.Fatalf("top hit = %d, want the subject match %d ahead of the boosted body mention %d",
+			hits[0].ID, subjectHit.ID, bodyMention.ID)
+	}
+}
+
+// The nudges still nudge: between two messages the text ranks alike, the
+// familiar sender and the fresher date decide. A bound that reordered nothing
+// would be a bound that removed the feature.
+func TestPostgresNudgesStillOrderComparableMatches(t *testing.T) {
+	svc, db, user, mailbox := openPostgresSearchFixtures(t)
+	ctx := context.Background()
+
+	old := time.Now().AddDate(-2, 0, 0)
+	stranger := seedPostgresSearchMessageFrom(t, db, user, mailbox, 730, "Rechnung BahnCard",
+		"die unterlagen liegen bei", "fremder@example.test", old)
+	familiar := seedPostgresSearchMessageFrom(t, db, user, mailbox, 731, "Rechnung BahnCard",
+		"die unterlagen liegen bei", "vertraut@example.test", time.Now())
+	if err := svc.IndexMessages(ctx, []MessageIndexDocument{{Message: stranger}, {Message: familiar}}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	hits, err := svc.SearchHitsWithOptions(ctx, user.ID, "bahncard rechnung", 50, 0, SearchOptions{
+		SenderBoosts: []SenderBoost{{Sender: "vertraut@example.test", Boost: 8}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d, want both messages", len(hits))
+	}
+	if hits[0].ID != familiar.ID {
+		t.Fatalf("top hit = %d, want the familiar sender %d ahead of the stranger %d on equal text",
+			hits[0].ID, familiar.ID, stranger.ID)
+	}
 }

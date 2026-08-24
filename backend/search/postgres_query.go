@@ -6,9 +6,9 @@
 // matches (subject/addresses/body/attachments), which is coarser than Bleve's
 // per-term locations but carries the same highlighting decisions.
 //
-// Fuzzy matching rides pg_trgm word similarity over the indexed word list and
-// is available only where the extension is (EnsureTrigramSearch); without it
-// the same queries run exact. Reductions against the Bleve path, recorded in
+// Fuzzy matching rides pg_trgm strict word similarity over the indexed word
+// list and is available only where the extension is (EnsureTrigramSearch);
+// without it the same queries run exact. Reductions against the Bleve path, recorded in
 // docs/search-postgres-plan.md §5: query-side compound splitting relies on the
 // split terms already in the vector, and Explain reports weight-class matches
 // instead of a scorer tree.
@@ -44,6 +44,17 @@ const (
 	pgFuzzyMinRunesBalanced   = 5
 	pgFuzzyMinRunesForgiving  = 4
 )
+
+// pgSenderBoostCeiling is the top of the scale the caller's sender boosts are
+// expressed on (store.senderReadBoost caps at 8), and so the divisor that turns
+// one into the fraction of a doubling the store's ranking multiplies by.
+//
+// Both boost lists are divided by it, not each by its own maximum: a contact
+// weighs 1 against a sender read every time weighing 8, and that ratio is the
+// statement the two lists together make. Normalizing them apart would silently
+// promote every address in the contact book to the weight of the most-read
+// correspondent.
+const pgSenderBoostCeiling = 8
 
 // pgWeights orders {D, C, B, A}: attachments, body, addresses, subject — the
 // same precedence the Bleve field boosts encode, normalized to ts_rank_cd's
@@ -159,7 +170,7 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 				continue
 			}
 			spec.SenderBoosts = append(spec.SenderBoosts, store.MessageSearchBoost{
-				Pattern: strings.ToLower(sender), Boost: boost.Boost * scale,
+				Pattern: strings.ToLower(sender), Boost: boost.Boost * scale / pgSenderBoostCeiling,
 			})
 		}
 	}
@@ -168,9 +179,18 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 	// The Bleve path only nudges by recency when no explicit date range says
 	// the user is already navigating time; mirrored here.
 	if parsed.After.IsZero() && parsed.Before.IsZero() {
-		for _, bucket := range RecencyRankBuckets(behavior.RecencyBias) {
+		buckets := RecencyRankBuckets(behavior.RecencyBias)
+		peak := 0.0
+		for _, bucket := range buckets {
+			peak = max(peak, bucket.Boost)
+		}
+		for _, bucket := range buckets {
+			boost := bucket.Boost
+			if peak > 0 {
+				boost /= peak
+			}
 			spec.RecencyBuckets = append(spec.RecencyBuckets, store.MessageSearchRecencyBucket{
-				MaxAgeSeconds: int64(bucket.Age / time.Second), Boost: bucket.Boost,
+				MaxAgeSeconds: int64(bucket.Age / time.Second), Boost: boost,
 			})
 		}
 	}
@@ -246,12 +266,20 @@ func pgNeedleTerms(parsed parsedQuery) []string {
 // was spelled correctly and the page is already full of real matches.
 //
 // So it becomes what it always was for the reader: a fallback. A query that
-// already finds a page of mail is answered exactly; one that finds almost
-// nothing is the query that was probably mistyped, and that one pays. The gate
-// is one bounded count off the index, and it reads a property of the query
-// rather than of the page, so every page of the same search decides alike and
-// paging stays consistent.
-const pgFuzzyFallbackBelow = 50
+// already finds mail is answered exactly; one that finds almost nothing is the
+// query that was probably mistyped, and that one pays. The gate is one bounded
+// count off the index, and it reads a property of the query rather than of the
+// page, so every page of the same search decides alike and paging stays
+// consistent.
+//
+// A handful, not a page. Terms are ANDed, so a term the reader misspelled takes
+// the whole query to zero exact matches - typo tolerance is needed at the bottom
+// of that range, not near a full page of hits. Set at fifty this fired for
+// nearly every specific search anyone types, which is exactly the search that
+// least needs it: six real answers became a page of near-spellings ranked
+// alongside them. The cushion above zero is for the misspelling that happens to
+// be a word in somebody's mail.
+const pgFuzzyFallbackBelow = 5
 
 // pgExactSpec is one spec with its fuzzy half removed: membership and score
 // both fall back to the lexeme query alone.

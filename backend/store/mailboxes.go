@@ -644,6 +644,138 @@ func normalizeMailboxIcon(icon string, name string, role string) string {
 	return defaultMailboxIcon(name, role)
 }
 
+// UnsyncedSearchFolders describes folders a reader has included in search that
+// no sync ever fills. Names carries a few of them so a page can say which.
+type UnsyncedSearchFolders struct {
+	Folders int64
+	// Messages is what those folders last reported holding on the server, and
+	// is a floor rather than a total: a folder whose status has never been
+	// checked reports nothing while still holding mail.
+	Messages int64
+	Names    []string
+}
+
+// maxUnsyncedSearchFolderNames bounds the names a page is handed. Someone with
+// forty manual folders needs the count and an example, not a list that is
+// longer than the panel it appears in.
+const maxUnsyncedSearchFolderNames = 5
+
+// ListUnsyncedSearchFoldersForUser reports the folders that are marked for
+// full-text search and are waiting for a sync that only happens on request.
+//
+// The two settings are independent and only one of them is on by default:
+// include_in_search starts true for every folder discovered, while
+// defaultMailboxSyncMode gives automatic sync to INBOX alone. A folder in that
+// state is included in a search of mail that never arrives, which is invisible
+// from every figure the storage page otherwise shows: coverage compares the
+// index against the messages table, and a folder that was never fetched has no
+// rows in it. Search reports full coverage of a mailbox missing whole folders.
+//
+// Two exclusions keep the answer actionable rather than merely true:
+//
+//   - Folders holding local mail. A manual folder someone syncs by hand is
+//     genuinely searchable up to its last sync, and naming it would tell them
+//     their sent mail cannot be found while they are looking at it.
+//   - Folders set to never. That is a decision rather than an oversight, and
+//     for the folders that carry it by default - Gmail's label views - it is
+//     the right one: their mail is already stored in the real folder it also
+//     appears in, so it is searchable, and syncing them would mirror most of
+//     the mailbox a second time. Reporting them would push a reader toward
+//     doubling their database to find mail they can already find.
+func (s *Store) ListUnsyncedSearchFoldersForUser(ctx context.Context, userID int64) (UnsyncedSearchFolders, error) {
+	var out UnsyncedSearchFolders
+	if userID <= 0 {
+		return out, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return out, err
+	}
+	// Deliberately not joined to messages: a grouped count over the whole
+	// mailbox is the expensive half of the folder listing, and an EXISTS per
+	// folder answers the only question asked of it here.
+	rows, err := db.QueryContext(ctx, `SELECT mb.account_id, mb.name, mb.sync_mode, mb.remote_message_count
+		FROM mailboxes mb
+		WHERE mb.user_id = ? AND mb.include_in_search = 1
+			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.user_id = mb.user_id AND m.mailbox_id = mb.id)
+		ORDER BY mb.account_id, lower(mb.name)`, userID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	type candidate struct {
+		accountID int64
+		name      string
+		syncMode  string
+		remote    int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.accountID, &c.name, &c.syncMode, &c.remote); err != nil {
+			return out, err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	// inherit resolves against parent folders, so the modes are read from the
+	// set already in hand rather than a query per folder.
+	modes := make(map[int64]map[string]string, 1)
+	for _, c := range candidates {
+		if modes[c.accountID] == nil {
+			modes[c.accountID] = map[string]string{}
+		}
+		modes[c.accountID][c.name] = normalizeSyncMode(c.syncMode)
+	}
+	for _, c := range candidates {
+		if resolveInheritedSyncMode(ctx, s, userID, c.accountID, c.name, modes[c.accountID]) != "manual" {
+			continue
+		}
+		out.Folders++
+		out.Messages += max(c.remote, 0)
+		if len(out.Names) < maxUnsyncedSearchFolderNames {
+			out.Names = append(out.Names, c.name)
+		}
+	}
+	return out, nil
+}
+
+// resolveInheritedSyncMode walks a folder's parents for the mode it inherits,
+// preferring the set already loaded and falling back to a lookup for a parent
+// that is not in it (a parent holding mail, so not a candidate itself). An
+// unreadable parent resolves to "auto", which counts the folder as synced and
+// keeps a failed lookup from inventing a warning.
+func resolveInheritedSyncMode(ctx context.Context, s *Store, userID, accountID int64, name string, loaded map[string]string) string {
+	mode := loaded[name]
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode != "inherit" {
+		return mode
+	}
+	for _, parent := range mailboxParentNames(name) {
+		if parentMode, ok := loaded[parent]; ok {
+			if parentMode != "inherit" {
+				return parentMode
+			}
+			continue
+		}
+		mb, err := s.GetMailbox(ctx, userID, accountID, parent)
+		if IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return "auto"
+		}
+		if parentMode := normalizeSyncMode(mb.SyncMode); parentMode != "inherit" {
+			return parentMode
+		}
+	}
+	return "auto"
+}
+
 func defaultMailboxSyncMode(name, role string, attributes []string) string {
 	if isLabelViewMailbox(name, role, attributes) {
 		return "never"

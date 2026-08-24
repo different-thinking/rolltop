@@ -154,10 +154,10 @@ Translation of the parsed query:
 | free text, unquoted | AND of lexemes, prefix match (`:*`) on the final term |
 | free text, quoted | phrase query (`<->` / `phraseto_tsquery`) |
 | negated terms | `AND NOT (tsv @@ ...)` |
-| fuzzy (`Behavior.Fuzzy`) | **shipped, as a fallback**: per-term `pg_trgm` word similarity against a distinct-words column (migration 0002), OR-composed with the term's lexeme match; floors 0.35 (balanced) / 0.30 (forgiving) set per query with `SET LOCAL`, minimum term length 5/4 runes, quoted phrases never fuzz. Extension and trigram index are runtime-optional (`EnsureTrigramSearch`) — absent privileges degrade to exact matching, never block startup. It runs only when the exact query finds fewer than `pgFuzzyFallbackBelow` messages (§5a) |
+| fuzzy (`Behavior.Fuzzy`) | **shipped, as a fallback**: per-term `pg_trgm` **strict** word similarity (`<<%`) against a distinct-words column (migration 0002), OR-composed with the term's lexeme match; floors 0.35 (balanced) / 0.30 (forgiving) set per query with `SET LOCAL pg_trgm.strict_word_similarity_threshold`, minimum term length 5/4 runes, quoted phrases never fuzz. Strict, because the loose operator scores against the best *substring* of the haystack and German compounds then read as synonyms of their parts: measured on PostgreSQL 16, "rechnung" against a body carrying "kreditkartenabrechnung" scores 0.778 loose and 0.280 strict, while a real typo ("rehcnung") scores 0.385 under both. Extension and trigram index are runtime-optional (`EnsureTrigramSearch`) — absent privileges degrade to exact matching, never block startup. It runs only when the exact query finds fewer than `pgFuzzyFallbackBelow` messages (§5a), and never outranks an exact match (§5b) |
 | ranking boosts (subject > from > body > attachments) | `ts_rank_cd` weight array `{D,C,B,A}` |
-| recency bias | multiply by an exponential decay on `messages.date_unix`, in the `ORDER BY` expression |
-| sender/contact boosts | `CASE WHEN from_addr = ANY($senders) THEN boost` factors |
+| recency bias | a bucket `CASE` on `messages.date_unix`, normalized to at most one doubling and **multiplied** into the rank (§5b) |
+| sender/contact boosts | `CASE WHEN position(pattern in from_addr) > 0 THEN boost` factors, summed, capped at one doubling and **multiplied** into the rank (§5b) |
 | `Hit.Terms`/`Fields`/`QueryTerms` | per-field match detection on the returned page only: run the tsquery against per-field `to_tsvector` of the joined row — page-sized, so cost is bounded by the page |
 | `Explain*` (term contributions panel) | reduced fidelity: per-field rank components instead of Bleve's scorer tree; the panel renders what it gets |
 | `SimilarMessages` | candidates already come from the store; scoring becomes `ts_rank` of the weighted term set restricted to `message_id = ANY(candidates)` |
@@ -181,15 +181,51 @@ two things that used to ride along with it did:
   the message's text, for every candidate the query touches — 6.3s against 360ms
   for the same search on that corpus. It earns nothing when the word was spelled
   correctly, so it is now gated: a capped count off the GIN index (~6ms, and
-  0.04ms when the term matches nothing) decides, and only a query finding fewer
-  than fifty messages pays for typo tolerance. The gate reads the query, not the
-  page, so paging a search stays consistent.
+  0.04ms when the term matches nothing) decides, and only a query finding almost
+  nothing (`pgFuzzyFallbackBelow`, a handful) pays for typo tolerance. The gate
+  reads the query, not the page, so paging a search stays consistent. It was
+  fifty until the gate was measured against real searches: terms are ANDed, so a
+  misspelled term takes the whole query to zero exact matches, and a threshold
+  set at a full page fired for nearly every specific search anyone types — the
+  search that least needs it.
 
 The third multiplier is above this package. Callers that need more hits than one
 page holds — collecting distinct conversations, resolving a whole-filter delete —
 get them by asking again at a higher offset, and each of those asks re-ranks the
 whole match set. They now ask for pages of up to `maxHitsPerRequest` (500)
 instead of 100, which is the same query for a fifth of the rounds.
+
+## 5b. What the ranking is on, and why the nudges multiply
+
+§8 listed result-quality comparison as an open question, and this is the first
+answer it produced. The knobs were mapped from Bleve one for one — the boost
+values carried across unchanged — and on this backend they are not knobs at all.
+
+`ts_rank_cd` answers on a scale the query's own width sets. Measured on
+PostgreSQL 16 with the weight array above, a two-term query scores **0.51** with
+both terms in the subject, **0.10** for an attachment name and **0.033** for a
+body mention; a one-term query, 1.8 / 0.1 / 0.2. Beside that, `senderReadBoost`
+produces up to **8** and the "normal" recency bias up to **1.6**. Added, as they
+were, every gap the text can open is an order of magnitude below them: the top
+of a result page was whoever writes most often, in date order, with the search
+term acting as a filter rather than a ranking. A body mention from a familiar
+sender outranked a subject line from a stranger by two hundred times the margin
+the text had to give.
+
+So they multiply, and each is normalized to at most one doubling — sender boosts
+divided by `pgSenderBoostCeiling` and capped by `LEAST(…, 1.0)`, recency buckets
+divided by the largest bucket of the chosen bias. The widest reach a nudge has is
+then 3x, against a narrowest measured gap between two field classes of 5.1x
+(attachment against subject): familiarity and freshness reorder comparable
+matches and never promote a passing mention over a subject line.
+
+Membership needs the same rule made structural rather than arithmetic. A row
+reached by similarity alone contributes up to 0.3 per term while an exact body
+mention measures 0.033, so an `exact_match` column sorts ahead of the score
+whenever the fuzzy fallback is open. Ordering it by arithmetic would have to be
+re-argued after every change to a weight, and one weight is already allowed to be
+zero — the attachment knob at "off" makes `ts_rank_cd` return 0 for a genuine
+match on that class.
 
 ## 6. Backfill and cutover
 
@@ -218,6 +254,12 @@ rows behind a one-minute cache) and `FuzzyAvailable`.
   `POST /api/storage/search-index/rebuild`, which is `startSearchRebuildForUser`
   for the signed-in user and takes no user id. The Bleve segment breakdown
   renders only on the Bleve backend, which is the only one with files.
+  It also names the folders included in search that have never been synced
+  (`ListUnsyncedSearchFoldersForUser`). That gap is outside the coverage figures
+  and cannot be derived from them: both sides count rows in `messages`, so mail
+  that was never fetched is in neither, and a mailbox missing whole folders
+  reports full coverage. What closes it is a folder setting, not the rebuild
+  beside it, which cannot fetch what the sync was never asked for.
 - **`/activity`** shows index upkeep that runs beside the request path as
   non-cancellable worker rows (`Service.StartMaintenance`; the trigram index
   build is registered whole-server, the coverage check per tenant), plus a note
@@ -235,7 +277,7 @@ rows behind a one-minute cache) and `FuzzyAvailable`.
 |---|---|---|
 | A | **Done**: incremental schema migrations (§2) — `backend/store/postgres_migrations.go` | yes — independently valuable |
 | B | **Done**: migration 0001, Postgres write path + counts/ids/purge/drop, backfill trigger, `ROLLTOP_SEARCH_BACKEND` flag | yes |
-| C | **Done**: read path — search/match/similar via one SQL spec (`message_search_query.go`), ranking knobs (weights, sender boosts, recency buckets), explain as weight-class matches. query-side compound splitting leans on the indexed split terms; fuzzy shipped via pg_trgm word similarity (runtime-optional) | yes |
+| C | **Done**: read path — search/match/similar via one SQL spec (`message_search_query.go`), ranking knobs (weights, sender boosts, recency buckets), explain as weight-class matches. query-side compound splitting leans on the indexed split terms; fuzzy shipped via pg_trgm strict word similarity (runtime-optional), gated and outranked by exact matches (§5, §5b) | yes |
 | D | flip the default after comparing result quality on real mail, README/compose, observe | small |
 | E | retire Bleve: delete the watchdog/quarantine/coordinator/footprint machinery, drop the index from `/data`, revisit the single-process constraint | yes |
 
@@ -252,4 +294,7 @@ rows behind a one-minute cache) and `FuzzyAvailable`.
   §12 were collected before this; re-check the plan's growth numbers.
 - **Result-quality comparison.** Before phase D, run the same queries against
   both backends on a real mailbox and compare; the ranking knobs are mapped,
-  not proven equivalent.
+  not proven equivalent. Partly answered: §5b measured the scale the knobs land
+  on here and rebuilt their composition around it, and the fuzzy operator was
+  measured against German compounds (§5). What is still unmeasured is the two
+  backends side by side on the same mailbox, which is what phase D asks for.

@@ -2375,6 +2375,13 @@ export function SettingsView({
     // Purged folders are the part of a shortfall no background work closes, so
     // they are named separately from the part that fills itself in.
     const foldersPurged = Number(storage.FoldersPurged || 0);
+    // Folders included in search that nothing ever syncs. This gap is outside
+    // the coverage figures and cannot be derived from them: they compare the
+    // index against the messages table, and mail that was never fetched is in
+    // neither, so a mailbox missing whole folders reads as fully covered.
+    const foldersUnsynced = Number(storage.UnsyncedSearchFolders || 0);
+    const unsyncedMessages = Number(storage.UnsyncedSearchMessages || 0);
+    const unsyncedNames = (storage.UnsyncedSearchFolderNames || []).filter((name) => String(name || "").trim() !== "");
     if (storageLoading) return <SettingsLoading label="Calculating storage usage..." />;
     if (storageError) return <SettingsError message={storageError} onRetry={() => void loadStorage()} />;
     return (
@@ -2423,6 +2430,22 @@ export function SettingsView({
             {foldersPending > 0
               ? `${formatStatCount(foldersPending)} ${foldersPending === 1 ? "folder has" : "folders have"} coverage nothing has verified since their index was last disturbed; a rebuild is what verifies it.`
               : ""}
+          </p>
+        ) : null}
+        {/* Said whatever the coverage figures do, including when they could not
+            be measured: this gap is not part of them, and a rebuild is not what
+            closes it. */}
+        {foldersUnsynced > 0 ? (
+          <p className="settings-error">
+            {`${formatStatCount(foldersUnsynced)} ${foldersUnsynced === 1 ? "folder is" : "folders are"} included in search but ${foldersUnsynced === 1 ? "has" : "have"} never been synced, so search cannot find anything in ${foldersUnsynced === 1 ? "it" : "them"}`}
+            {unsyncedNames.length > 0
+              ? ` (${unsyncedNames.join(", ")}${foldersUnsynced > unsyncedNames.length ? ", ..." : ""})`
+              : ""}
+            {". "}
+            {unsyncedMessages > 0
+              ? `Those folders last reported ${formatStatCount(unsyncedMessages)} ${unsyncedMessages === 1 ? "email" : "emails"} on the server. `
+              : ""}
+            Set them to sync automatically under Folder sync to make that mail searchable; a rebuild cannot, because the mail is not on this device.
           </p>
         ) : null}
         {/* The armed state changes only a button label, which says nothing to a
