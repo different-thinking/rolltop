@@ -228,7 +228,7 @@ func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessag
 		filename = params["name"]
 	}
 	contentID := strings.Trim(header.Get("Content-ID"), "<>")
-	if filename != "" || strings.EqualFold(disposition, "attachment") {
+	if filename != "" || strings.EqualFold(disposition, "attachment") || isCIDReferencedPart(contentID, mediaType) {
 		parsed.Files = append(parsed.Files, Attachment{
 			Filename:    decodedHeader(filename),
 			ContentType: mediaType,
@@ -252,6 +252,21 @@ func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessag
 		}
 	}
 	return nil
+}
+
+// isCIDReferencedPart reports a part the message body can only reach through its
+// Content-ID. Senders routinely ship those images with neither a filename nor a
+// disposition, and the filename test above dropped them: the part never became
+// an attachment row, the cid: reference in the body found nothing to point at,
+// and the reader showed a broken image for a picture the message carried all
+// along. text/ parts stay out of it - multipart/related gives the HTML body
+// itself a Content-ID often enough, and pulling that out of the body and into
+// the attachment list would empty the message.
+func isCIDReferencedPart(contentID, mediaType string) bool {
+	if strings.TrimSpace(contentID) == "" {
+		return false
+	}
+	return !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "text/")
 }
 
 func isInlineMIMEFile(disposition, mediaType, contentID string) bool {

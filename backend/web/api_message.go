@@ -1356,12 +1356,13 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 		if err != nil {
 			return nil, msg, err
 		}
-		attachments := visibleAttachments(allAttachments)
 		if timing != nil {
 			stop = timing.measure(&timing.body)
 		}
 		sourceHTML, sourceText, previewOnly := s.displayBodiesForMessage(ctx, cu.User.ID, threadMsg)
 		stop()
+		allAttachments = s.ensureInlineCIDAttachments(ctx, cu.User.ID, threadMsg, allAttachments, sourceHTML, expanded)
+		attachments := visibleAttachments(allAttachments)
 		displayMsg := threadMsg
 		displayMsg.BodyHTML = sourceHTML
 		displayMsg.BodyText = sourceText
@@ -1466,6 +1467,10 @@ func (s *Server) ensureMessageSecurityState(ctx context.Context, userID int64, m
 
 const maxSyncAttachmentRepairBytes int64 = 256 * 1024
 
+// inlineRepairAttemptMemory bounds how many messages per tenant the inline
+// attachment repair remembers having tried.
+const inlineRepairAttemptMemory = 4096
+
 func (s *Server) ensureMessageAttachments(ctx context.Context, userID int64, msg store.MessageRecord, current []store.Attachment, allowSyncRepair bool) ([]store.Attachment, error) {
 	if len(current) > 0 || !msg.HasAttachments {
 		return current, nil
@@ -1482,6 +1487,72 @@ func (s *Server) ensureMessageAttachments(ctx context.Context, userID int64, msg
 		return current, nil
 	}
 	return repaired, nil
+}
+
+// ensureInlineCIDAttachments repairs the one shape the repair above cannot see.
+// A message whose only parts are inline pictures counts as carrying no
+// attachments, so ensureMessageAttachments returns before it looks at anything,
+// and a message indexed before inline parts without a filename were captured
+// (mailparse.isCIDReferencedPart) has exactly that shape: a picture inside the
+// message, no row to serve it from, and a broken image in the reader that
+// nothing else would ever come back to. The body is the evidence - a cid: no
+// row answers - so this runs only for the message the reader has open, and only
+// while it has no attachment row at all, which is what stops it repeating once
+// the parts are stored.
+func (s *Server) ensureInlineCIDAttachments(ctx context.Context, userID int64, msg store.MessageRecord, current []store.Attachment, bodyHTML string, expanded bool) []store.Attachment {
+	if !expanded || len(current) > 0 || !hasUnresolvedCIDRefs(bodyHTML, current) {
+		return current
+	}
+	// A cid: nothing answers is not always a message with parts to recover: a
+	// sender that referenced a part it never attached leaves one for good, and
+	// that message would otherwise reparse its whole raw body on every render,
+	// because a repair that stores nothing leaves the evidence exactly as it
+	// found it. One attempt per message and process is enough - a repair that
+	// did find the parts is remembered by the rows it wrote.
+	if !s.claimInlineRepairAttempt(userID, msg.ID) {
+		return current
+	}
+	if msg.Size > 0 && msg.Size <= maxSyncAttachmentRepairBytes {
+		if repaired, err := s.repairMessageAttachments(ctx, userID, msg); err == nil && len(repaired) > 0 {
+			return repaired
+		}
+		return current
+	}
+	// A message too large to reparse inside the request is repaired behind it,
+	// and the reader is told to fetch the thread again when it worked.
+	s.repairMessageAttachmentsAsync(userID, msg)
+	return current
+}
+
+// claimInlineRepairAttempt reports whether this process has yet to look inside
+// the raw message for the inline parts of this message, and records that it is
+// about to. The record is per process and deliberately forgettable: it exists to
+// keep one render from paying for the last one, not to remember an answer, so a
+// tenant that has opened more messages than inlineRepairAttemptMemory starts
+// over rather than growing without bound.
+func (s *Server) claimInlineRepairAttempt(userID, messageID int64) bool {
+	if s == nil || userID <= 0 || messageID <= 0 {
+		return false
+	}
+	s.attachmentRepairMu.Lock()
+	defer s.attachmentRepairMu.Unlock()
+	if s.inlineRepairAttempted == nil {
+		s.inlineRepairAttempted = map[int64]map[int64]bool{}
+	}
+	attempted := s.inlineRepairAttempted[userID]
+	if attempted == nil {
+		attempted = map[int64]bool{}
+		s.inlineRepairAttempted[userID] = attempted
+	}
+	if attempted[messageID] {
+		return false
+	}
+	if len(attempted) >= inlineRepairAttemptMemory {
+		attempted = map[int64]bool{}
+		s.inlineRepairAttempted[userID] = attempted
+	}
+	attempted[messageID] = true
+	return true
 }
 
 func (s *Server) repairMessageAttachments(ctx context.Context, userID int64, msg store.MessageRecord) ([]store.Attachment, error) {
@@ -1511,7 +1582,12 @@ func (s *Server) repairMessageAttachments(ctx context.Context, userID int64, msg
 }
 
 func (s *Server) repairMessageAttachmentsAsync(userID int64, msg store.MessageRecord) {
-	if s == nil || s.store == nil || userID <= 0 || msg.ID <= 0 || !msg.HasAttachments {
+	// HasAttachments is deliberately not required here. It counts only the
+	// attachments the reader sees listed, and ensureInlineCIDAttachments calls
+	// this for messages that carry nothing but an inline picture, which is
+	// counted as none. The caller that does care about the flag checks it
+	// before it gets this far.
+	if s == nil || s.store == nil || userID <= 0 || msg.ID <= 0 {
 		return
 	}
 	s.attachmentRepairMu.Lock()

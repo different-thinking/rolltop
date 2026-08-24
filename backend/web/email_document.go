@@ -41,12 +41,22 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	}
 	bodyHTML = strings.ReplaceAll(bodyHTML, "\x00", "")
 	bodyHTML = removeScriptElements(bodyHTML)
+	bodyHTML = removeInlineScripting(bodyHTML)
 	bodyHTML = replaceInlineCIDRefs(bodyHTML, attachments)
 	if allowRemoteImages {
 		bodyHTML = normalizeProtocolRelativeRemoteRefs(bodyHTML)
 		bodyHTML = removeBlockedRemoteImages(bodyHTML, blockedImagePatterns)
+		// A message that carries its own <base href> answers the question the
+		// pass below exists for: its relative references resolve against the
+		// sender's server, which the reader has just agreed to load from.
+		if !declaresRemoteBase(bodyHTML) {
+			bodyHTML = neutralizeUnresolvableRefs(bodyHTML)
+		}
 	} else {
 		bodyHTML = neutralizeRemoteRefs(bodyHTML)
+		// A declared base does not save a relative reference here: it makes it
+		// remote, and remote is what this mode refuses.
+		bodyHTML = neutralizeUnresolvableRefs(bodyHTML)
 	}
 	imgSrc := "'self' data: cid:"
 	styleSrc := "'unsafe-inline'"
@@ -94,6 +104,50 @@ func removeScriptElements(bodyHTML string) string {
 	return scriptCloseRE.ReplaceAllString(bodyHTML, "")
 }
 
+// A blocked script is not silent either. The frame around a message body is
+// sandboxed without allow-scripts, so an inline event handler - typically the
+// onerror on an image that did not load - costs one "Blocked script execution
+// in 'about:srcdoc'" line per firing, and a reader opening one newsletter fills
+// the console with them. The handlers and javascript: URLs are removed for the
+// same reason <script> is: they can never run here, and what cannot run should
+// not be logged.
+var (
+	inlineScriptingHintRE = regexp.MustCompile(`(?is)<[^>]*(?:\son[a-z]{3,}\s*=|javascript:)`)
+	eventHandlerNameRE    = regexp.MustCompile(`(?i)^on[a-z]+$`)
+)
+
+func removeInlineScripting(bodyHTML string) string {
+	if !inlineScriptingHintRE.MatchString(bodyHTML) {
+		return bodyHTML
+	}
+	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
+		return rewriteTagAttrs(tag, func(attrName, rawValue string) (string, bool) {
+			if eventHandlerNameRE.MatchString(strings.TrimSpace(attrName)) {
+				return "", true
+			}
+			value, _ := splitAttrValue(rawValue)
+			if isScriptURL(value) {
+				return "", true
+			}
+			return "", false
+		})
+	})
+}
+
+// isScriptURL reads a URL the way a browser does before it decides to run one:
+// leading whitespace and HTML entities are decoded away first, so an obfuscated
+// javascript: URL is recognised as the same thing as a plain one.
+func isScriptURL(value string) bool {
+	value = strings.ToLower(html.UnescapeString(value))
+	value = strings.Map(func(r rune) rune {
+		if r <= ' ' {
+			return -1
+		}
+		return r
+	}, value)
+	return strings.HasPrefix(value, "javascript:") || strings.HasPrefix(value, "vbscript:")
+}
+
 var cidURLRE = regexp.MustCompile(`(?i)cid:([^\s"'<>\)]+)`)
 
 func replaceInlineCIDRefs(bodyHTML string, attachments []store.Attachment) string {
@@ -114,6 +168,25 @@ func replaceInlineCIDRefs(bodyHTML string, attachments []store.Attachment) strin
 		}
 		return match
 	})
+}
+
+// hasUnresolvedCIDRefs reports a body that points at a part of its own message
+// which no attachment row answers, so replaceInlineCIDRefs left the cid: URL
+// standing and the reader will show a broken image for it.
+func hasUnresolvedCIDRefs(bodyHTML string, attachments []store.Attachment) bool {
+	if !strings.Contains(strings.ToLower(bodyHTML), "cid:") {
+		return false
+	}
+	urlsByCID := inlineAttachmentURLsByCID(attachments)
+	for _, match := range cidURLRE.FindAllStringSubmatch(bodyHTML, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		if _, ok := urlsByCID[normalizeContentID(match[1])]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func inlineAttachmentURLsByCID(attachments []store.Attachment) map[string]string {
@@ -188,6 +261,20 @@ var (
 	}
 )
 
+// refFilter is what one neutralizing pass removes: a test for the references it
+// takes out, and the data-* infix the removed value is parked under, so a
+// reference the reader could still choose to load stays distinguishable from
+// one that could never have loaded at all.
+type refFilter struct {
+	blocks func(value string) bool
+	marker string
+}
+
+var (
+	remoteRefFilter       = refFilter{blocks: isRemoteRef, marker: "blocked"}
+	unresolvableRefFilter = refFilter{blocks: isUnresolvableRef, marker: "unresolved"}
+)
+
 // neutralizeRemoteRefs rewrites remote references so a blocked message body
 // asks the network for nothing. The document CSP already refuses these loads,
 // but a document that keeps the live URLs still makes the browser start (and
@@ -197,15 +284,60 @@ func neutralizeRemoteRefs(bodyHTML string) string {
 	if !containsRemoteRef(bodyHTML) {
 		return bodyHTML
 	}
-	// url() is only rewritten where a browser reads it as CSS. Running it over
-	// the whole document would also rewrite url(...) inside ordinary sentences.
-	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, neutralizeRemoteCSS)
-	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, neutralizeTagRemoteRefs)
+	return neutralizeRefs(bodyHTML, remoteRefFilter)
 }
 
-func neutralizeTagRemoteRefs(tag string) string {
+// neutralizeUnresolvableRefs rewrites references that point nowhere a message
+// body can reach. A body is rendered in an about:srcdoc iframe, and such a
+// frame inherits the reader's own URL as its base, so every relative reference
+// in the mail resolves against the app instead of against the sender: a mail
+// asking for static/DuplicateSans-Regular-Web.woff2 makes the browser ask
+// Rolltop for /messages/static/DuplicateSans-Regular-Web.woff2 - refused by the
+// document CSP while remote content is blocked, and answered with the reader's
+// own HTML or a 404 once it is allowed. Neither outcome shows the picture the
+// sender meant, and the reference cannot be repaired because the origin it was
+// written for is nowhere in the message, so it is dropped like a blocked remote
+// one. This runs whether or not remote content is allowed: allowing images
+// grants the sender's server, not Rolltop's own routes.
+func neutralizeUnresolvableRefs(bodyHTML string) string {
+	return neutralizeRefs(bodyHTML, unresolvableRefFilter)
+}
+
+// declaresRemoteBase reports a message that sets its own document base to an
+// absolute address. The browser resolves the message's relative references
+// against that rather than against the reader's URL, so they name the sender's
+// server after all.
+func declaresRemoteBase(bodyHTML string) bool {
+	if !strings.Contains(strings.ToLower(bodyHTML), "<base") {
+		return false
+	}
+	// A base inside a comment sets nothing - the browser never reads it as an
+	// element - so reading one here would hand a message the exception on the
+	// strength of markup that does not apply, and leave its relative references
+	// live for the app to answer.
+	bodyHTML = htmlCommentRE.ReplaceAllString(bodyHTML, "")
+	for _, tag := range htmlTagRE.FindAllString(bodyHTML, -1) {
+		if strings.EqualFold(tagName(tag), "base") && isRemoteRef(tagAttrValue(tag, "href")) {
+			return true
+		}
+	}
+	return false
+}
+
+func neutralizeRefs(bodyHTML string, filter refFilter) string {
+	// url() is only rewritten where a browser reads it as CSS. Running it over
+	// the whole document would also rewrite url(...) inside ordinary sentences.
+	bodyHTML = styleBlockRE.ReplaceAllStringFunc(bodyHTML, func(css string) string {
+		return neutralizeFilteredCSS(css, filter)
+	})
+	return htmlTagRE.ReplaceAllStringFunc(bodyHTML, func(tag string) string {
+		return neutralizeTagRefs(tag, filter)
+	})
+}
+
+func neutralizeTagRefs(tag string, filter refFilter) string {
 	name := strings.ToLower(tagName(tag))
-	if name == "link" && isRemoteRef(tagAttrValue(tag, "href")) {
+	if name == "link" && filter.blocks(tagAttrValue(tag, "href")) {
 		return ""
 	}
 	elementAttrs := remoteFetchAttrsByTag[name]
@@ -214,40 +346,40 @@ func neutralizeTagRemoteRefs(tag string) string {
 		value, quote := splitAttrValue(rawValue)
 		switch {
 		case lower == "style":
-			neutralized := neutralizeRemoteCSS(value)
+			neutralized := neutralizeFilteredCSS(value, filter)
 			if neutralized == value {
 				return "", false
 			}
 			return "style=" + quoteAttrValue(neutralized, quote), true
 		case lower == "srcset":
-			kept, removed := withoutRemoteSrcsetCandidates(value)
+			kept, removed := withoutFilteredSrcsetCandidates(value, filter)
 			if !removed {
 				return "", false
 			}
-			blocked := `data-rolltop-blocked-srcset="` + escapeBlockedRef(value) + `"`
+			blocked := `data-rolltop-` + filter.marker + `-srcset="` + escapeBlockedRef(value) + `"`
 			if kept == "" {
 				return blocked, true
 			}
 			return "srcset=" + quoteAttrValue(kept, quote) + " " + blocked, true
-		case (remoteFetchAttrs[lower] || elementAttrs[lower]) && isRemoteRef(value):
+		case (remoteFetchAttrs[lower] || elementAttrs[lower]) && filter.blocks(value):
 			// The reference is dropped rather than replaced with a placeholder
 			// image: an element without src makes no request and still shows
 			// its alt text at its own size.
-			return `data-rolltop-blocked-` + blockedAttrName(lower) + `="` + escapeBlockedRef(value) + `"`, true
+			return `data-rolltop-` + filter.marker + `-` + blockedAttrName(lower) + `="` + escapeBlockedRef(value) + `"`, true
 		}
 		return "", false
 	})
 }
 
-func neutralizeRemoteCSS(css string) string {
+func neutralizeFilteredCSS(css string, filter refFilter) string {
 	css = cssImportRuleRE.ReplaceAllStringFunc(css, func(rule string) string {
-		if isRemoteRef(attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)) {
+		if filter.blocks(attrValueFromMatch(cssImportRuleRE.FindStringSubmatch(rule), 1)) {
 			return ""
 		}
 		return rule
 	})
 	return cssURLTokenRE.ReplaceAllStringFunc(css, func(token string) string {
-		if !isRemoteRef(attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)) {
+		if !filter.blocks(attrValueFromMatch(cssURLTokenRE.FindStringSubmatch(token), 2)) {
 			return token
 		}
 		// "none" is the one replacement that stays inert in every context a
@@ -335,14 +467,15 @@ func blockedAttrName(name string) string {
 	return strings.ReplaceAll(name, ":", "-")
 }
 
-// withoutRemoteSrcsetCandidates drops only the remote candidates, so a srcset
-// that also lists an inline attachment keeps rendering that attachment.
-func withoutRemoteSrcsetCandidates(value string) (string, bool) {
+// withoutFilteredSrcsetCandidates drops only the candidates the filter removes,
+// so a srcset that also lists an inline attachment keeps rendering that
+// attachment.
+func withoutFilteredSrcsetCandidates(value string, filter refFilter) (string, bool) {
 	candidates := parseSrcset(value)
 	kept := make([]string, 0, len(candidates))
 	removed := false
 	for _, candidate := range candidates {
-		if isRemoteRef(candidate.url) {
+		if filter.blocks(candidate.url) {
 			removed = true
 			continue
 		}
@@ -411,6 +544,27 @@ func isRemoteRef(value string) bool {
 		}
 	}
 	return false
+}
+
+// isUnresolvableRef reports a reference the browser would resolve against
+// Rolltop itself. Everything a message body may legitimately load names where
+// it comes from: a data: payload carries it, a cid: part names an attachment of
+// this very message, and an /attachments/ path is one this renderer wrote for
+// exactly that part. A cid: that found no attachment stays: it is a valid
+// scheme the CSP allows and a missing part is worth seeing as a broken image
+// rather than silently dropping. What is left is relative or root-relative -
+// written for the sender's web server and meaningful only there.
+func isUnresolvableRef(value string) bool {
+	value = strings.ToLower(strings.Trim(strings.TrimSpace(html.UnescapeString(value)), `"' `))
+	if value == "" || strings.HasPrefix(value, "#") {
+		return false
+	}
+	for _, prefix := range []string{"http://", "https://", "//", "data:", "cid:", "mailto:", "tel:", "/attachments/"} {
+		if strings.HasPrefix(value, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // attrValueFromMatch reads the first non-empty alternative of a quoted or

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -198,17 +199,18 @@ func (s *Server) attachmentContentBytes(ctx context.Context, userID int64, att s
 	if maxBytes <= 0 {
 		maxBytes = hook.MaxPreviewBytes()
 	}
-	if strings.TrimSpace(att.BlobPath) != "" {
-		if s.blobs == nil {
-			return nil, "", store.ErrNotFound
-		}
+	if strings.TrimSpace(att.BlobPath) != "" && s.blobs != nil {
 		file, err := s.blobs.OpenUserBlob(userID, att.BlobPath)
-		if err != nil {
-			return nil, "", err
+		if err == nil {
+			defer file.Close()
+			data, err := hook.ReadPreviewLimited(file, maxBytes)
+			return data, att.ContentType, err
 		}
-		defer file.Close()
-		data, err := hook.ReadPreviewLimited(file, maxBytes)
-		return data, att.ContentType, err
+		// The same fallback handleAttachment makes: a stored attachment file
+		// that will not open leaves the part where every attachment without one
+		// is read from anyway, rather than answering a preview of a file the
+		// message still carries with a 404.
+		log.Printf("attachment preview blob unavailable, falling back to the raw message user_id=%d attachment_id=%d path=%q: %v", userID, att.ID, att.BlobPath, err)
 	}
 	msg, err := s.store.GetMessageForUser(ctx, userID, att.MessageID)
 	if err != nil {

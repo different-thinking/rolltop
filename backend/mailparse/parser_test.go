@@ -319,3 +319,41 @@ func officeZipFixture(t *testing.T, files map[string]string) []byte {
 	}
 	return buf.Bytes()
 }
+
+func TestParseKeepsCIDImageWithoutFilename(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: sender.test",
+		"To: archive.test",
+		"Subject: inline image without a name",
+		"Content-Type: multipart/related; boundary=rel",
+		"",
+		"--rel",
+		"Content-Type: text/html; charset=utf-8",
+		"Content-ID: <body-part>",
+		"",
+		`<p>Hello</p><img src="cid:hero">`,
+		"--rel",
+		"Content-Type: image/png",
+		"Content-ID: <hero>",
+		"Content-Transfer-Encoding: base64",
+		"",
+		"iVBORw0KGgo=",
+		"--rel--",
+	}, "\r\n")
+	parsed, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The image is the only file: the HTML part carries a Content-ID too, and
+	// pulling that out of the body would leave the message without one.
+	if len(parsed.Files) != 1 {
+		t.Fatalf("files = %+v", parsed.Files)
+	}
+	file := parsed.Files[0]
+	if file.ContentID != "hero" || file.ContentType != "image/png" || !file.IsInline {
+		t.Fatalf("cid image was not captured as an inline file: %+v", file)
+	}
+	if !strings.Contains(parsed.HTML, `src="cid:hero"`) {
+		t.Fatalf("html body = %q", parsed.HTML)
+	}
+}

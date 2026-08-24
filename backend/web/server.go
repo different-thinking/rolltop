@@ -142,6 +142,7 @@ type Server struct {
 	mailCategoryCache         *mailCategoryChromeCache
 	attachmentRepairMu        sync.Mutex
 	attachmentRepairRunning   map[int64]map[int64]bool
+	inlineRepairAttempted     map[int64]map[int64]bool
 	senderContactIconMu       sync.Mutex
 	senderContactIconCache    map[int64]map[string]senderContactIconCacheEntry
 	composeIdentityMu         sync.Mutex
@@ -414,6 +415,7 @@ func New(opts Options) (*Server, error) {
 		mailCategoryCache:         newMailCategoryChromeCache(),
 		mailWarmRunning:           map[int64]bool{},
 		attachmentRepairRunning:   map[int64]map[int64]bool{},
+		inlineRepairAttempted:     map[int64]map[int64]bool{},
 		senderContactIconCache:    map[int64]map[string]senderContactIconCacheEntry{},
 		composeIdentityCache:      map[int64]composeIdentityCacheEntry{},
 		webPushRunning:            map[int64]bool{},
@@ -672,29 +674,34 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	att, err := s.store.GetAttachmentForUser(r.Context(), cu.User.ID, id)
 	if store.IsNotFound(err) {
-		http.NotFound(w, r)
+		attachmentUnavailable(w, cu.User.ID, id, "no attachment row for this user")
 		return
 	}
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	if strings.TrimSpace(att.BlobPath) != "" {
+	if strings.TrimSpace(att.BlobPath) != "" && s.blobs != nil {
 		file, err := s.blobs.OpenUserBlob(cu.User.ID, att.BlobPath)
-		if err != nil {
-			http.NotFound(w, r)
+		if err == nil {
+			defer file.Close()
+			w.Header().Set("Content-Type", att.ContentType)
+			w.Header().Set("Content-Disposition", attachmentContentDisposition(inline, att.Filename, att.ContentType))
+			_, _ = io.Copy(w, file)
 			return
 		}
-		defer file.Close()
-		w.Header().Set("Content-Type", att.ContentType)
-		w.Header().Set("Content-Disposition", attachmentContentDisposition(inline, att.Filename, att.ContentType))
-		_, _ = io.Copy(w, file)
-		return
+		// A stored blob file that will not open is not the end of the request.
+		// The part is also in the raw message, which the branch below extracts
+		// it from - the same route every attachment saved without its own blob
+		// already takes - and answering a picture the message still carries
+		// with a 404 would leave the reader with a broken image for a file
+		// retention pruned or a copy that never reached disk.
+		log.Printf("attachment blob unavailable, falling back to the raw message user_id=%d attachment_id=%d path=%q: %v", cu.User.ID, att.ID, att.BlobPath, err)
 	}
 
 	msg, err := s.store.GetMessageForUser(r.Context(), cu.User.ID, att.MessageID)
 	if store.IsNotFound(err) {
-		http.NotFound(w, r)
+		attachmentUnavailable(w, cu.User.ID, att.ID, "message row is gone")
 		return
 	}
 	if err != nil {
@@ -713,7 +720,7 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	file, ok := matchingAttachment(att, parsed.Files)
 	if !ok {
-		http.NotFound(w, r)
+		attachmentUnavailable(w, cu.User.ID, att.ID, fmt.Sprintf("no matching part in the raw message (content_id=%q filename=%q content_type=%q parts=%d)", att.ContentID, att.Filename, att.ContentType, len(parsed.Files)))
 		return
 	}
 	contentType := file.ContentType
@@ -723,6 +730,16 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", attachmentContentDisposition(inline, att.Filename, contentType))
 	_, _ = w.Write(file.Data)
+}
+
+// attachmentUnavailable answers the 404 and records which of the handler's
+// several dead ends produced it. The reader sees the same broken image for all
+// of them, and the console line it logs names only the URL, so without this the
+// difference between a row that is gone, a message that is gone and a part that
+// no longer parses out of the message is not recoverable after the fact.
+func attachmentUnavailable(w http.ResponseWriter, userID, attachmentID int64, reason string) {
+	log.Printf("attachment unavailable user_id=%d attachment_id=%d reason=%s", userID, attachmentID, reason)
+	http.Error(w, "attachment not found", http.StatusNotFound)
 }
 
 func attachmentContentDisposition(inline bool, filename, contentType string) string {
