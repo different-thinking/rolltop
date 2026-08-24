@@ -1081,8 +1081,15 @@ func (s *Server) apiAccountSync(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "Sync is not configured.")
 		return
 	}
-	if !s.syncRunner.Start(cu.User.ID) {
-		writeAPIError(w, http.StatusConflict, "Sync is already running for this account.")
+	// The admission wait is bounded by the request context: a tenant whose
+	// foreground operation holds the exclusive-writer barrier must not hang
+	// this handler (and its HTTP worker) for as long as that operation runs.
+	if !s.syncRunner.StartWithinContext(r.Context(), cu.User.ID) {
+		if s.syncRunner.IsRunning(cu.User.ID) {
+			writeAPIError(w, http.StatusConflict, "Sync is already running for this account.")
+			return
+		}
+		writeAPIError(w, http.StatusConflict, "Sync could not start because another mail operation is holding this account. Try again shortly.")
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})

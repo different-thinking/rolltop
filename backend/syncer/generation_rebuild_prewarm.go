@@ -5,6 +5,7 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 
 	"rolltop/backend/store"
@@ -65,6 +66,15 @@ func (s *Service) prewarmPendingMailboxGeneration(
 		previous = uid
 	}
 	snapshot.UIDs = append([]uint32(nil), unique...)
+	// Recovery decides what to download, so it must see only the UIDs the
+	// account's sync start date allows — exactly like sparse repair does with
+	// Fetchable(). Working from the full list re-downloaded the entire
+	// pre-cutoff history after every UIDVALIDITY reset, and the marker could
+	// not finalize until all of it had been fetched.
+	if skipped := restrictSnapshotToFetchable(&snapshot); skipped > 0 {
+		log.Printf("recover mailbox generation user_id=%d account_id=%d mailbox=%q skips %d pre-cutoff UIDs per sync start date",
+			userID, account.ID, mailbox.Name, skipped)
+	}
 	generationRecoverySetTotal(ctx, len(snapshot.UIDs))
 	if snapshotReady != nil {
 		if err := snapshotReady(snapshot); err != nil {
@@ -80,7 +90,10 @@ func (s *Service) prewarmPendingMailboxGeneration(
 	}
 
 	generationRecoveryPhase(ctx, "sqlite-local-uids", "")
-	localUIDs, err := s.Store.MessageUIDsForMailbox(ctx, userID, account.ID, mailbox.ID)
+	// The local set is generation-bound: a surviving row from an older
+	// generation carrying a reused UID must not suppress that UID's fetch in
+	// the new one.
+	localUIDs, err := s.Store.MessageUIDsForMailboxGeneration(ctx, userID, account.ID, mailbox.ID, expectedUIDValidity)
 	if err != nil {
 		return snapshot, err, nil
 	}
@@ -131,6 +144,30 @@ func (s *Service) prewarmPendingMailboxGeneration(
 	return snapshot, nil, nil
 }
 
+// restrictSnapshotToFetchable narrows a validated, sorted, deduplicated
+// snapshot to the UIDs the account's sync start date allows recovery to
+// download. It intersects with the validated full list rather than trusting
+// the cutoff search alone, and reports how many UIDs the cutoff removed. A
+// snapshot without a cutoff list is left untouched.
+func restrictSnapshotToFetchable(snapshot *MailboxUIDSnapshot) int {
+	if snapshot == nil || snapshot.FetchableUIDs == nil {
+		return 0
+	}
+	allowed := make(map[uint32]struct{}, len(snapshot.FetchableUIDs))
+	for _, uid := range snapshot.FetchableUIDs {
+		allowed[uid] = struct{}{}
+	}
+	fetchable := make([]uint32, 0, len(allowed))
+	for _, uid := range snapshot.UIDs {
+		if _, ok := allowed[uid]; ok {
+			fetchable = append(fetchable, uid)
+		}
+	}
+	skipped := len(snapshot.UIDs) - len(fetchable)
+	snapshot.UIDs = fetchable
+	return skipped
+}
+
 func mailboxGenerationSnapshotCompletedBefore(snapshot MailboxUIDSnapshot, afterUID uint32) int {
 	return sort.Search(len(snapshot.UIDs), func(i int) bool { return snapshot.UIDs[i] > afterUID })
 }
@@ -172,9 +209,15 @@ func (s *Service) fetchMailboxGenerationSnapshotBatch(
 		}
 	}
 	complete := end == len(uids)
+	if !complete {
+		// The next turn re-plans from a fresh snapshot and prewarms the newest
+		// page before its own batch, so a non-final refresh here repeated that
+		// full-folder UID listing once per turn for nothing.
+		return false, nil
+	}
 	generationRecoveryPhase(ctx, "refresh-newest", "")
-	if err := refresh(complete); err != nil {
+	if err := refresh(true); err != nil {
 		return false, err
 	}
-	return complete, nil
+	return true, nil
 }

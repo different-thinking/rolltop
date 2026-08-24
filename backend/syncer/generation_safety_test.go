@@ -87,7 +87,10 @@ func TestLargeGenerationSnapshotRequiresThreeRecoveryTurns(t *testing.T) {
 	if len(handled) != len(uids) || handled[0] != 1 || handled[len(handled)-1] != 1001 {
 		t.Fatalf("handled UIDs count=%d first=%d last=%d", len(handled), handled[0], handled[len(handled)-1])
 	}
-	wantRefreshes := []bool{false, false, true}
+	// Only the final batch refreshes the newest page: every earlier turn is
+	// followed by the next turn's own prewarm, which re-snapshots the folder
+	// anyway, so the per-turn refresh only repeated a full-folder UID listing.
+	wantRefreshes := []bool{true}
 	if len(refreshes) != len(wantRefreshes) {
 		t.Fatalf("refreshes=%v, want %v", refreshes, wantRefreshes)
 	}
@@ -418,7 +421,7 @@ func TestRunnerServiceYieldsDiscoveredGenerationToSerializedRecovery(t *testing.
 	// Keep the test deterministic while retaining the Runner-installed policy.
 	// The production callback wakes the same recovery entrypoint invoked below.
 	signals := 0
-	service.MailboxGenerationRecoveryStarted = func(signalUserID int64) {
+	service.MailboxGenerationRecoveryStarted = func(_ context.Context, signalUserID int64) {
 		if signalUserID != user.ID {
 			t.Fatalf("recovery signal user_id=%d, want %d", signalUserID, user.ID)
 		}

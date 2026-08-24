@@ -320,8 +320,8 @@ func TestGuardedUIDFetchHonorsConfiguredCommandTimeout(t *testing.T) {
 
 	started := time.Now()
 	err = guardedUIDFetch(ctx, c, seqset, []imap.FetchItem{imap.FetchUid, rawBodySection().FetchItem()}, messages)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("guardedUIDFetch() error = %v, want context deadline exceeded", err)
+	if !errors.Is(err, errFetchStalled) {
+		t.Fatalf("guardedUIDFetch() error = %v, want the fetch-stalled verdict", err)
 	}
 	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
 		t.Fatalf("guardedUIDFetch() took %s, want configured timeout before parent deadline", elapsed)

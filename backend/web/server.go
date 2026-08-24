@@ -82,6 +82,10 @@ type Options struct {
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
+	// Lifetime is the process-scoped context handed to backend plugins so
+	// their background workers stop with the server instead of racing the
+	// database shutdown. Nil means context.Background.
+	Lifetime context.Context
 }
 
 // Server owns HTTP handlers, shared services, session settings, event fanout, and lightweight caches.
@@ -92,6 +96,7 @@ type Server struct {
 	syncer                    *syncer.Service
 	syncRunner                *syncer.Runner
 	ownedSyncRunnerCancel     context.CancelFunc
+	lifetime                  context.Context
 	sender                    mailSender
 	masterKey                 []byte
 	dataDir                   string
@@ -362,6 +367,7 @@ func New(opts Options) (*Server, error) {
 		syncer:                opts.Syncer,
 		syncRunner:            opts.SyncRunner,
 		ownedSyncRunnerCancel: ownedSyncRunnerCancel,
+		lifetime:              opts.Lifetime,
 		sender:                opts.Sender,
 		masterKey:             opts.MasterKey,
 		dataDir:               opts.DataDir,

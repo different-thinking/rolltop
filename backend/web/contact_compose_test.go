@@ -411,7 +411,7 @@ func TestSaveComposeDraftAppendsToDraftsMailbox(t *testing.T) {
 	}
 	// Observe the exact reset signal point without starting an asynchronous
 	// recovery worker against this intentionally minimal compose fetcher.
-	service.MailboxGenerationRecoveryStarted = func(userID int64) {
+	service.MailboxGenerationRecoveryStarted = func(_ context.Context, userID int64) {
 		recoverySignaledDuringForeground = runner.IsRunning(userID)
 	}
 	server := &Server{store: db, blobs: blobStore, syncer: service, syncRunner: runner}

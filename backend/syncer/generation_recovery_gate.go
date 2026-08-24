@@ -38,6 +38,27 @@ type generationRecoveryActivity struct {
 // sync creates a durable generation marker. The epoch prevents an older store
 // snapshot from reopening a gate that was signaled while that query ran.
 func (r *Runner) SignalMailboxGenerationRecovery(userID int64) {
+	r.signalMailboxGenerationRecoveryExcluding(userID, nil)
+}
+
+// signalMailboxGenerationRecoveryFromContext is the Service reset hook. It
+// closes the gate like SignalMailboxGenerationRecovery, but leaves the calling
+// sync job running: the caller discovered the reset and still owes durable
+// bookkeeping — the STATUS snapshot, run progress, its own clean hand-off to
+// the recovery worker — and cancelling its context turned that hand-off into a
+// failed run and skipped work nothing retried.
+func (r *Runner) signalMailboxGenerationRecoveryFromContext(ctx context.Context, userID int64) {
+	var exclude map[string]bool
+	if keys := ordinaryMailboxContextKeys(ctx); len(keys) > 0 {
+		exclude = make(map[string]bool, len(keys))
+		for _, key := range keys {
+			exclude[key] = true
+		}
+	}
+	r.signalMailboxGenerationRecoveryExcluding(userID, exclude)
+}
+
+func (r *Runner) signalMailboxGenerationRecoveryExcluding(userID int64, exclude map[string]bool) {
 	if r == nil || userID <= 0 || r.context().Err() != nil {
 		return
 	}
@@ -48,7 +69,7 @@ func (r *Runner) SignalMailboxGenerationRecovery(userID int64) {
 	delete(r.generationRecoveryTargets, userID)
 	delete(r.generationRecoveryKnown, userID)
 	r.activateGenerationRecoveryLocked(userID)
-	r.cancelOrdinaryMailboxWorkLocked(userID)
+	r.cancelOrdinaryMailboxWorkExceptLocked(userID, exclude)
 	r.mu.Unlock()
 	r.wakeMailboxGenerationRebuildRecovery()
 }
@@ -417,21 +438,6 @@ func (r *Runner) scheduleGenerationRecoveryWorkOutsideGate(replay generationReco
 	}
 }
 
-func (r *Runner) waitForGenerationRecoveryReplayMarkerCheck(userID int64) (bool, error) {
-	for r.context().Err() == nil {
-		pending, err := r.Service.Store.HasPendingMailboxGenerationRebuildsForUser(r.context(), userID)
-		if err == nil {
-			return pending, nil
-		}
-		log.Printf("check mailbox generation replay completion user_id=%d: %v", userID, err)
-		r.wakeMailboxGenerationRebuildRecovery()
-		if waitForGenerationRecoveryReplay(r.context(), time.Second) != nil {
-			break
-		}
-	}
-	return false, r.context().Err()
-}
-
 func (r *Runner) prepareGenerationRecoveryReplay(replay generationRecoveryReplay) (generationRecoveryReplay, bool) {
 	if !replay.auto {
 		return r.coalesceGenerationRecoveryReplay(replay), !r.generationRecoveryInterrupted(replay.userID)
@@ -455,6 +461,7 @@ func (r *Runner) prepareGenerationRecoveryReplay(replay generationRecoveryReplay
 }
 
 func (r *Runner) runGenerationRecoveryReplayMailboxes(userID int64, mailboxes []string) bool {
+	delay := replayReservePollFloor
 	for r.context().Err() == nil {
 		keys, reserved := r.reserveGenerationRecoveryReplayMailboxes(userID, mailboxes)
 		if reserved {
@@ -466,15 +473,17 @@ func (r *Runner) runGenerationRecoveryReplayMailboxes(userID int64, mailboxes []
 		if r.generationRecoveryInterrupted(userID) {
 			return false
 		}
-		if waitForGenerationRecoveryReplay(r.context(), 10*time.Millisecond) != nil {
+		if waitForGenerationRecoveryReplay(r.context(), delay) != nil {
 			return false
 		}
+		delay = nextReplayReservePoll(delay)
 	}
 	return false
 }
 
 func (r *Runner) runGenerationRecoveryReplayAccountMailbox(userID int64, request deferredAccountMailbox) bool {
 	mailboxes := []string{request.mailbox}
+	delay := replayReservePollFloor
 	for r.context().Err() == nil {
 		keys, reserved := r.reserveGenerationRecoveryReplayAccountMailboxes(userID, request.accountID, mailboxes)
 		if reserved {
@@ -486,11 +495,29 @@ func (r *Runner) runGenerationRecoveryReplayAccountMailbox(userID int64, request
 		if r.generationRecoveryInterrupted(userID) {
 			return false
 		}
-		if waitForGenerationRecoveryReplay(r.context(), 10*time.Millisecond) != nil {
+		if waitForGenerationRecoveryReplay(r.context(), delay) != nil {
 			return false
 		}
+		delay = nextReplayReservePoll(delay)
 	}
 	return false
+}
+
+// replayReservePollFloor and nextReplayReservePoll pace the replay's
+// reservation retries: quick when the holder is about to yield, capped so a
+// live Inbox turn holding its reservation for its whole budget does not cost
+// thousands of lock acquisitions.
+const (
+	replayReservePollFloor = 10 * time.Millisecond
+	replayReservePollCap   = 250 * time.Millisecond
+)
+
+func nextReplayReservePoll(delay time.Duration) time.Duration {
+	delay *= 2
+	if delay > replayReservePollCap {
+		return replayReservePollCap
+	}
+	return delay
 }
 
 func (r *Runner) reserveGenerationRecoveryReplayMailboxes(userID int64, mailboxes []string) ([]string, bool) {
@@ -922,16 +949,6 @@ func (r *Runner) generationRecoveryOrdinaryWriterRunningLocked(userID int64) boo
 			continue
 		}
 		return true
-	}
-	return false
-}
-
-func (r *Runner) generationRecoveryReplayWorkRunningLocked(userID int64) bool {
-	prefix := mailboxKey(userID, "")
-	for key := range r.mailboxRunning {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
 	}
 	return false
 }

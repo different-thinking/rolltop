@@ -238,7 +238,10 @@ func (s *Server) apiSyncRun(w http.ResponseWriter, r *http.Request, rest string)
 	live := syncRunLiveDetail{}
 	if s.syncRunner != nil {
 		details := s.syncRunner.SyncRunLiveDetails(cu.User.ID, id)
-		live = syncRunLiveDetail{Active: details.Active, Cancellable: details.Cancellable || run.Status == "running", Phase: details.Phase, Detail: details.Detail, PhaseStartedAt: timeString(details.PhaseStartedAt)}
+		// Cancellable now reflects only runs whose worker actually registered a
+		// cancellation. Forcing it for every running row offered a cancel that
+		// stamped the row interrupted while the worker kept running.
+		live = syncRunLiveDetail{Active: details.Active, Cancellable: details.Cancellable, Phase: details.Phase, Detail: details.Detail, PhaseStartedAt: timeString(details.PhaseStartedAt)}
 	}
 	writeJSONCached(w, r, map[string]any{"sync_run": apiSyncRunFrom(run), "live": live})
 }

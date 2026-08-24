@@ -86,12 +86,14 @@ func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, 
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
-	go s.runEmptyTrash(context.Background(), userID, account, mailbox, run.ID, progress, onDone)
+	go s.runEmptyTrash(s.backgroundContext(), userID, account, mailbox, run.ID, progress, onDone)
 	return run, nil
 }
 
 func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox,
 	runID int64, progress store.SyncProgress, onDone func()) {
+	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
+	defer finishRun()
 	status := "ok"
 	errText := ""
 	defer func() {

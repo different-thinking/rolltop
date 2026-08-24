@@ -132,11 +132,11 @@ func (f *Fetcher) SearchMailboxUIDsSince(ctx context.Context, account store.Mail
 	if mailbox == "" {
 		return MailboxUIDSearch{}, errors.New("search mailbox requires a mailbox name")
 	}
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return MailboxUIDSearch{}, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	selected, err := c.Select(mailbox, true)
 	if err != nil {
 		return MailboxUIDSearch{}, fmt.Errorf("select mailbox %q read-only for UID search: %w", mailbox, err)

@@ -26,6 +26,15 @@ func (s *Server) Store() any {
 	return s.store
 }
 
+// Lifetime satisfies plugins.LifecycleHost: plugin background workers derive
+// from it so a server shutdown interrupts them before the database closes.
+func (s *Server) Lifetime() context.Context {
+	if s == nil || s.lifetime == nil {
+		return context.Background()
+	}
+	return s.lifetime
+}
+
 func (s *Server) MasterKey() []byte {
 	if s == nil {
 		return nil

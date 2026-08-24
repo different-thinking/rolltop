@@ -30,6 +30,14 @@ type BackendHost interface {
 	PluginEnabled(context.Context, string) bool
 }
 
+// LifecycleHost is an optional host capability handing plugins the process
+// lifetime. Plugin background workers derive their contexts from it so a
+// server shutdown interrupts them before the database closes underneath them.
+type LifecycleHost interface {
+	BackendHost
+	Lifetime() context.Context
+}
+
 // AccountMailboxSyncHost is an optional host capability for plugins that write
 // a message to a configured IMAP destination. Implementations must validate the
 // account and mailbox against userID before queuing the incremental refetch.

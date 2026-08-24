@@ -44,11 +44,11 @@ func (f *Fetcher) MoveMessageWithReceipt(ctx context.Context, account store.Mail
 	if err := validateMoveRequest(ctx, sourceMailbox, destMailbox, uid, expectedSourceUIDValidity); err != nil {
 		return nil, err
 	}
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return nil, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return moveMessageWithReceipt(ctx, c, sourceMailbox, destMailbox, uid, expectedSourceUIDValidity)
 }
 
@@ -78,7 +78,9 @@ func moveMessageWithReceipt(ctx context.Context, c moveCommandClient, sourceMail
 		return nil, fmt.Errorf("search source mailbox %q for UID %d before move: %w", sourceMailbox, uid, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		// The MOVE has not been issued: this abort leaves the message exactly
+		// where it was, and must not read as a failed or unknown move.
+		return nil, syncer.MoveNotAttempted(err)
 	}
 	found := false
 	for _, foundUID := range foundUIDs {
@@ -117,7 +119,7 @@ func moveMessageWithReceipt(ctx context.Context, c moveCommandClient, sourceMail
 
 func validateMoveRequest(ctx context.Context, sourceMailbox string, destMailbox string, uid uint32, expectedSourceUIDValidity uint32) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return syncer.MoveNotAttempted(err)
 	}
 	if strings.TrimSpace(sourceMailbox) == "" || strings.TrimSpace(destMailbox) == "" || uid == 0 || expectedSourceUIDValidity == 0 {
 		return errors.New("move message requires source mailbox, destination mailbox, UID, and source UIDVALIDITY")

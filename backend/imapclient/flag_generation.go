@@ -28,38 +28,38 @@ var _ syncer.UIDValidityFlagFetcher = (*Fetcher)(nil)
 var _ syncer.UIDValidityFlagReader = (*Fetcher)(nil)
 
 func (f *Fetcher) SetSeenWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string, uid uint32, seen bool, expectedUIDValidity uint32) (bool, error) {
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return false, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return setFlagWithUIDValidity(ctx, c, mailbox, uid, seen, expectedUIDValidity, imap.SeenFlag, "seen")
 }
 
 func (f *Fetcher) SetFlaggedWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string, uid uint32, flagged bool, expectedUIDValidity uint32) (bool, error) {
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return false, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return setFlagWithUIDValidity(ctx, c, mailbox, uid, flagged, expectedUIDValidity, imap.FlaggedFlag, "flagged")
 }
 
 func (f *Fetcher) SeenUIDsWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string, expectedUIDValidity uint32) ([]uint32, bool, error) {
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return nil, false, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return flagUIDsWithUIDValidity(ctx, c, mailbox, expectedUIDValidity, imap.SeenFlag, "seen")
 }
 
 func (f *Fetcher) FlaggedUIDsWithUIDValidity(ctx context.Context, account store.MailAccount, mailbox string, expectedUIDValidity uint32) ([]uint32, bool, error) {
-	c, err := f.loginWithinContext(ctx, account)
+	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
 		return nil, false, err
 	}
-	defer terminateClientOnContext(ctx, c)()
+	defer release()
 	return flagUIDsWithUIDValidity(ctx, c, mailbox, expectedUIDValidity, imap.FlaggedFlag, "flagged")
 }
 

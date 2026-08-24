@@ -977,3 +977,29 @@ func (s *Store) MessageUIDsForMailbox(ctx context.Context, userID, accountID, ma
 	}
 	return uids, rows.Err()
 }
+
+// MessageUIDsForMailboxGeneration is MessageUIDsForMailbox bound to one
+// UIDVALIDITY. Rebuild prewarming asks it which UIDs are already local: the
+// unbound list let a surviving row from an older generation, carrying a reused
+// UID, silently suppress that UID's fetch in the new one.
+func (s *Store) MessageUIDsForMailboxGeneration(ctx context.Context, userID, accountID, mailboxID int64, uidValidity uint32) ([]uint32, error) {
+	if uidValidity == 0 {
+		return nil, fmt.Errorf("mailbox generation UID listing requires a UIDVALIDITY")
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT uid FROM messages
+		WHERE user_id = ? AND account_id = ? AND mailbox_id = ? AND uid_validity = ? AND import_completed_at > 0 ORDER BY uid`,
+		userID, accountID, mailboxID, int64(uidValidity))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	uids := []uint32{}
+	for rows.Next() {
+		var uid uint32
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		uids = append(uids, uid)
+	}
+	return uids, rows.Err()
+}

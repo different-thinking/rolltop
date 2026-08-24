@@ -323,7 +323,11 @@ func (s *Store) FinishMessageTransferDispatch(ctx context.Context, userID, trans
 // ReopenMessageTransferDispatchAfterProof clears one inactive claim only when
 // it is still the exact attempt that was reconciled. Callers must first obtain
 // authoritative, operation-specific proof that the remote command was absent.
-func (s *Store) ReopenMessageTransferDispatchAfterProof(ctx context.Context, userID, transferID int64, expected MessageTransferDispatchClaim, currentOwner string) (bool, error) {
+// A live same-owner claim is refused unless it was dispatched before
+// staleBefore: a claim this process took but never settled — a panic, a killed
+// goroutine — would otherwise refuse every retry until the process restarts.
+// A zero staleBefore disables that escape.
+func (s *Store) ReopenMessageTransferDispatchAfterProof(ctx context.Context, userID, transferID int64, expected MessageTransferDispatchClaim, currentOwner string, staleBefore time.Time) (bool, error) {
 	if userID <= 0 || transferID <= 0 || expected.Attempt < 0 || strings.TrimSpace(currentOwner) == "" {
 		return false, errors.New("invalid message transfer dispatch reconciliation")
 	}
@@ -331,13 +335,18 @@ func (s *Store) ReopenMessageTransferDispatchAfterProof(ctx context.Context, use
 	if err != nil {
 		return false, err
 	}
+	staleCutoff := int64(0)
+	if !staleBefore.IsZero() {
+		staleCutoff = staleBefore.Unix()
+	}
 	now := nowUnix()
 	result, err := db.ExecContext(ctx, `UPDATE message_transfers
 		SET dispatched_at = 0, dispatch_owner = '', dispatch_finished_at = 0, updated_at = ?
 		WHERE user_id = ? AND id = ? AND state = 'pending' AND dispatched_at > 0
 			AND dispatch_owner = ? AND dispatch_attempt = ?
-			AND (dispatch_finished_at > 0 OR dispatch_owner <> ?)`,
-		now, userID, transferID, expected.Owner, expected.Attempt, currentOwner)
+			AND (dispatch_finished_at > 0 OR dispatch_owner <> ?
+				OR (CAST(? AS BIGINT) > 0 AND dispatched_at <= CAST(? AS BIGINT)))`,
+		now, userID, transferID, expected.Owner, expected.Attempt, currentOwner, staleCutoff, staleCutoff)
 	if err != nil {
 		return false, err
 	}
@@ -347,6 +356,35 @@ func (s *Store) ReopenMessageTransferDispatchAfterProof(ctx context.Context, use
 	}
 	return rows == 1, nil
 
+}
+
+// ReleaseUnattemptedMessageTransferDispatch returns a claim whose command was
+// never sent back to the undispatched state, so the next attempt dispatches
+// directly instead of paying a remote reconciliation. Callers may use it only
+// when the dispatch provably did not reach the wire — a cancellation observed
+// before the command was issued.
+func (s *Store) ReleaseUnattemptedMessageTransferDispatch(ctx context.Context, userID, transferID int64, claim MessageTransferDispatchClaim) (bool, error) {
+	if userID <= 0 || transferID <= 0 || strings.TrimSpace(claim.Owner) == "" || claim.Attempt <= 0 {
+		return false, errors.New("invalid message transfer dispatch claim")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	now := nowUnix()
+	result, err := db.ExecContext(ctx, `UPDATE message_transfers
+		SET dispatched_at = 0, dispatch_owner = '', dispatch_finished_at = 0, updated_at = ?
+		WHERE user_id = ? AND id = ? AND state = 'pending' AND dispatched_at > 0
+			AND dispatch_owner = ? AND dispatch_attempt = ? AND dispatch_finished_at = 0`,
+		now, userID, transferID, claim.Owner, claim.Attempt)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
 // SetMessageTransferDestinationSnapshot stores the pre-dispatch destination

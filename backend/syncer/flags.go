@@ -92,12 +92,7 @@ func (s *Service) PushPendingReadState(ctx context.Context, userID int64, limit 
 	if err != nil {
 		return err
 	}
-	for _, msg := range messages {
-		if err := s.SyncReadStateForMessage(ctx, userID, msg.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.pushPendingFlagState(ctx, userID, messages, pendingReadFlag)
 }
 
 // SyncReadStateForMessage pushes the read state for one message UID to IMAP.
@@ -148,12 +143,7 @@ func (s *Service) PushPendingStarState(ctx context.Context, userID int64, limit 
 	if err != nil {
 		return err
 	}
-	for _, msg := range messages {
-		if err := s.SyncStarStateForMessage(ctx, userID, msg.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.pushPendingFlagState(ctx, userID, messages, pendingStarFlag)
 }
 
 // SetStarredForMessage updates local star state and queues or performs the matching IMAP flag change.
