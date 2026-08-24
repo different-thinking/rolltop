@@ -33,11 +33,15 @@ func TestBundledPluginMigrationsRespectDatabaseScope(t *testing.T) {
 	}
 	// GoBuildFlags carries -race when this test binary is instrumented; without
 	// it plugin.Open rejects the plugin over a mismatched build fingerprint.
-	args := append([]string{"build", "-a"}, plugins.GoBuildFlags()...)
+	args := append([]string{"build"}, plugins.GoBuildFlags()...)
 	args = append(args, "-buildmode=plugin", "-o", filepath.Join(backendDir, "remote_image_blocklist.so"), "./plugins/remote_image_blocklist/backend")
 	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "GOCACHE=/tmp/rolltop-go-build")
+	// No GOCACHE override. This build shares the caller's build cache on
+	// purpose: a private cache directory is cold on every CI run, which
+	// turned a ~2s plugin link into a ~28s rebuild of the whole dependency
+	// tree. The build fingerprint plugin.Open checks comes from the flags
+	// above and the package sources, not from where the cache lives.
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}

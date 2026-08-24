@@ -156,10 +156,24 @@ func TestInboxArrivalSchedulerTimerRespectsContextCancellation(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// A window in which the finalizer must *not* run, so it is spelled out here
+	// rather than borrowing waitForEvent: this branch is the passing path, and
+	// waitForEvent made every green run of this test sit here for 30 seconds.
+	//
+	// It stays a window rather than becoming a non-blocking check. Against the
+	// guards as they stand today a bare `default:` would be just as strong -
+	// `fire` bails on `entry == nil`, and the loop above has already seen the
+	// watcher empty the map, so nothing survives to reach `finalize`. But what
+	// this test is named for is a timer, and the timer was due 200ms out; a
+	// check taken a few milliseconds after cancel says nothing about it. The
+	// window spans that deadline instead, which is the only way the assertion
+	// can see a finalizer that runs late. Being short only costs detection, so
+	// it can never make the test flaky.
+	const finalizerMustNotRun = 500 * time.Millisecond
 	select {
 	case <-finalized:
 		t.Fatal("canceled scheduler ran the finalizer")
-	case <-time.After(waitForEvent):
+	case <-time.After(finalizerMustNotRun):
 	}
 	if scheduler.schedule(7, 11, time.Now()) {
 		t.Fatal("canceled scheduler accepted new work")

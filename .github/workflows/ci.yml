@@ -2,9 +2,28 @@ name: CI
 
 # Two-stage pipeline for `main` and tags.
 #
-# `verify` answers the one question a merge commit raises that no pull request
-# can: two changes that are each green on their own may still be broken
-# together. It runs on every push to `main` and stays lean.
+# `verify` covers what a merge commit carries that no pull request check ran.
+# That set is smaller than it looks: GitHub builds a pull request's checks from
+# `refs/pull/N/merge`, the branch already merged into `main`, so `pr.yml` runs
+# the same `go test` over the same tree the merge produces. Re-running the whole
+# suite here bought a second copy of a result that already existed.
+#
+# What `pr.yml` genuinely does not cover is its own path gate. Its `go` filter
+# does not match `plugins/*/manifest.json` - no filter there matches it at all,
+# so a manifest-only pull request runs no Go job whatsoever - nor
+# `plugins/*/themes/`, nor the npm manifests. Yet `plugins.LoadManifests` parses
+# every manifest and stats the theme CSS it declares, and two tests read the
+# real `plugins/` tree rather than a fixture.
+#
+# So the Go suite runs here only when the merge touched one of those paths, or
+# when nothing stood behind the push at all: a direct push to `main`, a tag, or
+# a manual dispatch. Everything else in a merge was already run, against this
+# exact tree, by the pull request that produced it.
+#
+# The trade this accepts: a pull request whose last run predates a sibling merge
+# is green against an older `main`, and that stale result is now trusted.
+# Requiring branches to be up to date before merging, or a merge queue, is what
+# closes that properly - re-running the suite on every merge only narrowed it.
 #
 # `release` does the expensive packaging (Android APK, Docker image, GHCR push,
 # artifacts, godoc) and runs only for `v*` tags, plus manual dispatch. Nothing
@@ -66,6 +85,56 @@ jobs:
     steps:
       - name: Check Out
         uses: actions/checkout@v5
+        with:
+          # The classification below diffs this push against the commit it
+          # replaced, so a shallow tip is not enough history.
+          fetch-depth: 0
+
+      # Decides whether the Go suite has to run at all. Every branch that cannot
+      # prove a pull request already ran it answers `true`: this is a merge gate,
+      # so it fails towards running the suite.
+      - name: Classify Push
+        id: classify
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          run_suite() {
+            echo "Go suite: running - $1"
+            echo "go_suite=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          [ "$EVENT" = "push" ] || run_suite "not a push event"
+          [ "$REF_TYPE" = "branch" ] || run_suite "tag build"
+
+          case "$BEFORE" in
+            "" | 0000000000000000000000000000000000000000)
+              run_suite "no previous commit to diff against" ;;
+          esac
+          git cat-file -e "${BEFORE}^{commit}" 2>/dev/null || run_suite "previous commit ${BEFORE} is unreachable"
+
+          # A reviewed merge has two parents. One parent means someone pushed
+          # straight to `main`, and then no pull request ran anything.
+          if [ "$(git rev-list --parents -n 1 "$AFTER" | wc -w)" -ne 3 ]; then
+            run_suite "push is not a two-parent merge commit"
+          fi
+
+          # Kept deliberately in step with the `changes` job in `pr.yml`: every
+          # entry is a path its `go` filter misses and the Go suite still reads.
+          # Widening that filter instead would put a three-minute Go job on every
+          # theme-only pull request, which is the cost this avoids.
+          uncovered='^plugins/[^/]+/manifest\.json$|^plugins/[^/]+/themes/|^package(-lock)?\.json$|^\.github/workflows/'
+          if hits="$(git diff --name-only "$BEFORE" "$AFTER" | grep -E "$uncovered")"; then
+            run_suite "$(tr '\n' ' ' <<< "$hits")"
+          fi
+
+          echo "Go suite: skipped - the pull request ran it against this tree"
+          echo "go_suite=false" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Artifact Directories
       # -p 2 bounds how many package binaries run at once. The suite does real
@@ -84,7 +153,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Node exists here only to compile the themes the Go suite stats and to
+      # render its report, so it follows the same condition.
       - name: Set Up Node
+        if: steps.classify.outputs.go_suite == 'true'
         uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -94,6 +166,7 @@ jobs:
       # Go suite needs the compiled themes. Build only those, not the full
       # frontend bundle: `release` and the `Dockerfile` build that from source.
       - name: Build Theme Assets
+        if: steps.classify.outputs.go_suite == 'true'
         run: |
           npm ci
           npm run build:themes
@@ -117,6 +190,7 @@ jobs:
       # they normally clear in under a second. A scheduling limit, not a flake
       # workaround: the same run is green at 2 and red at 4, reproducibly.
       - name: Run Go Tests
+        if: steps.classify.outputs.go_suite == 'true'
         env:
           TEST_DATABASE_URL: postgres://rolltop:rolltop@localhost:5432/rolltop_test?sslmode=disable
         run: |

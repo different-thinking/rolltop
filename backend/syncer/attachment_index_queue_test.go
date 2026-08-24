@@ -548,7 +548,12 @@ func TestRunnerYieldsBetweenAllDeferredAttachmentPages(t *testing.T) {
 	}
 	fixture.service.Search = searchService
 	fixture.service.Fetcher = fetcher
-	fixture.service.attachmentIndexContinuationDelay = 80 * time.Millisecond
+	// Long enough that the bookkeeping between the two call-count reads below
+	// cannot eat it. At 80ms the two polls after each page - both 5ms-granular
+	// and both touching the database - could consume most of the delay on a
+	// loaded machine, and the probe that followed them then landed after the
+	// next page had already started.
+	fixture.service.attachmentIndexContinuationDelay = time.Second
 	// A late wake can begin beyond the current maximum ID and wrap immediately.
 	// Fresh failures on that wrapped page must still yield forward to later IDs.
 	fixture.service.advanceAttachmentIndexCursor(fixture.userID, messages[len(messages)-1].ID+1)
@@ -559,6 +564,7 @@ func TestRunnerYieldsBetweenAllDeferredAttachmentPages(t *testing.T) {
 	}
 	for _, want := range []int{25, 50, 75} {
 		waitForAttachmentFetchCalls(t, fetcher, want)
+		pageDone := time.Now()
 		waitForRunnerMaintenanceIdle(t, runner, fixture.userID)
 		waitForAttachmentRetryTimer(t, runner, fixture.userID, true)
 		if got := fetcher.totalCallCount(); got != want {
@@ -569,7 +575,12 @@ func TestRunnerYieldsBetweenAllDeferredAttachmentPages(t *testing.T) {
 				t.Fatal("unrelated attachment start bypassed continuation delay")
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		// The window in which the next page must *not* have started. It is
+		// measured from the moment this page's last call landed, not from here,
+		// so however long the two polls above took cannot shorten it.
+		if rest := fixture.service.attachmentIndexContinuationDelay/4 - time.Since(pageDone); rest > 0 {
+			time.Sleep(rest)
+		}
 		if got := fetcher.totalCallCount(); got != want {
 			t.Fatalf("attachment queue swept without yielding: calls=%d want=%d", got, want)
 		}
