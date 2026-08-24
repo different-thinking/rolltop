@@ -96,6 +96,55 @@ func TestSwipePreferencesDefaultsAndRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSaveSwipePreferencesAcceptsAllMailArchiveFolder guards against the
+// swipe archive validator diverging from the identity Archive picker and the
+// settings UI, which both treat a folder carrying the "all" role (Gmail's
+// All Mail, offered in the folder dialog as "All Mail / Archive") as a valid
+// Archive destination. The validator previously rejected any role at all,
+// so choosing that exact folder produced "archive destination must be a
+// regular folder" even though the UI let the user pick it.
+func TestSaveSwipePreferencesAcceptsAllMailArchiveFolder(t *testing.T) {
+	ctx := context.Background()
+	db, err := openTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "all-mail-swipes@example.test", "All Mail Swipes", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, allMail := createSwipeTestAccount(t, ctx, db, user, "all-mail")
+	if err := db.UpdateMailboxSettings(ctx, user.ID, allMail.ID, MailboxSettings{
+		SyncMode: "manual", Role: "all", Icon: "archive", ShowInSidebar: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	saved, err := db.SaveSwipePreferences(ctx, SwipePreferences{
+		UserID:            user.ID,
+		LeftAction:        SwipeActionArchive,
+		LeftSnoozePreset:  SwipeSnoozeTomorrow,
+		RightAction:       SwipeActionMarkRead,
+		RightSnoozePreset: SwipeSnoozeTomorrow,
+		ArchiveMailboxes:  []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: allMail.ID}},
+	})
+	if err != nil {
+		t.Fatalf("SaveSwipePreferences rejected an All Mail archive folder: %v", err)
+	}
+	want := []SwipeArchiveMailbox{{AccountID: account.ID, MailboxID: allMail.ID}}
+	if !reflect.DeepEqual(saved.ArchiveMailboxes, want) {
+		t.Fatalf("saved archive mailboxes = %+v, want %+v", saved.ArchiveMailboxes, want)
+	}
+	reloaded, err := db.GetSwipePreferences(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reloaded.ArchiveMailboxes, want) {
+		t.Fatalf("reloaded archive mailboxes = %+v, want %+v", reloaded.ArchiveMailboxes, want)
+	}
+}
+
 func TestSaveSwipePreferencesRejectsInvalidValues(t *testing.T) {
 	ctx := context.Background()
 	db, err := openTestStore(t)

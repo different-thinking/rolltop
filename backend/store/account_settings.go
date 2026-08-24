@@ -685,8 +685,7 @@ func (s *Store) validateIdentityArchiveMailbox(ctx context.Context, userID, mail
 	if err != nil {
 		return err
 	}
-	switch normalizeMailboxRole(mailbox.Role) {
-	case "inbox", "sent", "drafts", "trash", "junk":
+	if archiveMailboxRoleBlocked(mailbox.Role) {
 		return ErrNotFound
 	}
 	if imapAccountID > 0 && mailbox.AccountID != imapAccountID {
