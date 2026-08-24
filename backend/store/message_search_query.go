@@ -3,9 +3,11 @@
 // turns the neutral spec into one SQL statement over message_search joined
 // with messages, so every filter reads the current row — flags, mailbox, and
 // dates are never stale the way an index copy is. Ranking happens in the same
-// statement: ts_rank_cd over the weighted vector, plus the sender-history and
-// recency nudges the Bleve query encoded as boolean should-clauses and a
-// custom scorer.
+// statement: ts_rank_cd over the weighted vector, scaled by the sender-history
+// and recency nudges the Bleve query encoded as boolean should-clauses and a
+// custom scorer. They scale rather than add, because the score they would be
+// added to is a fraction here, and a nudge larger than what it nudges is not a
+// nudge — it is the ranking.
 
 package store
 
@@ -33,16 +35,23 @@ const maxMessageSearchTextTerms = 64
 // - they filter rows the GIN scan already selected.
 const collateDefault = ` COLLATE "default"`
 
-// MessageSearchBoost adds to a hit's score when the sender matches. Pattern is
+// MessageSearchBoost lifts a hit's score when the sender matches. Pattern is
 // compared as a lowercase substring of from_addr, which is how the Bleve
 // should-clause on the from field behaved for addresses.
+//
+// Boost is a fraction of one doubling, not a number of score points: the
+// caller normalizes its own scale into [0, 1] and the sum is capped there, so
+// familiarity with a sender can at most double what the text said. See
+// searchNudge below for why that bound is the whole point.
 type MessageSearchBoost struct {
 	Pattern string
 	Boost   float64
 }
 
-// MessageSearchRecencyBucket adds Boost while the message is at most MaxAge
-// seconds old. Buckets are checked in order; the first match wins.
+// MessageSearchRecencyBucket lifts a hit's score while the message is at most
+// MaxAge seconds old. Buckets are checked in order; the first match wins, and
+// Boost is a fraction of one doubling on the same scale as MessageSearchBoost
+// (negative for the buckets that demote old mail).
 type MessageSearchRecencyBucket struct {
 	MaxAgeSeconds int64
 	Boost         float64
@@ -156,7 +165,18 @@ func messageSearchFilters(q MessageSearchQuery, fuzzy bool) ([]string, []any, er
 				continue
 			}
 			if term.FuzzyTerm != "" {
-				conditions = append(conditions, `(ms.tsv @@ to_tsquery('simple', ?) OR ? <% ms.words)`)
+				// <<% (strict_word_similarity), not <% (word_similarity): the
+				// loose operator scores its needle against the best substring
+				// of the haystack, and German compounds make that a synonym
+				// generator rather than typo tolerance. Measured on
+				// PostgreSQL 16: "rechnung" against a body carrying
+				// "kreditkartenabrechnung" scores 0.778 loose - far above any
+				// floor worth setting - and 0.280 strict, which is below both.
+				// Genuine typos are unaffected, because a misspelling is a
+				// whole word either way: "rehcnung" scores 0.385 under both.
+				// The GIN index serves <<% through its %>> commutator exactly
+				// as it served <%, so this costs no plan.
+				conditions = append(conditions, `(ms.tsv @@ to_tsquery('simple', ?) OR ? <<% ms.words)`)
 				args = append(args, term.TSQuery, term.FuzzyTerm)
 				continue
 			}
@@ -304,40 +324,116 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		return nil, err
 	}
 
-	var score strings.Builder
-	var scoreArgs []any
+	// Relevance is what the text said: the ranked vector, plus similarity for
+	// the terms allowed to match by it.
+	var relevance strings.Builder
+	var relevanceArgs []any
 	if hasText {
-		score.WriteString(`ts_rank_cd(?::float4[], ms.tsv, to_tsquery('simple', ?))`)
-		scoreArgs = append(scoreArgs, formatWeightArray(q.Weights), q.TSQuery)
+		relevance.WriteString(`ts_rank_cd(?::float4[], ms.tsv, to_tsquery('simple', ?))`)
+		relevanceArgs = append(relevanceArgs, formatWeightArray(q.Weights), q.TSQuery)
 	} else {
-		score.WriteString(`0::float4`)
+		relevance.WriteString(`0::float4`)
 	}
 	if fuzzy {
-		// Rank fuzzy evidence below exact lexeme rank: similarity tops out at
-		// 0.3 per term, so an exact subject hit always outranks a typo match.
 		for _, term := range q.TextTerms {
 			if term.FuzzyTerm == "" {
 				continue
 			}
-			score.WriteString(` + (0.3 * word_similarity(?, ms.words))::float4`)
-			scoreArgs = append(scoreArgs, term.FuzzyTerm)
+			relevance.WriteString(` + (0.3 * strict_word_similarity(?, ms.words))::float4`)
+			relevanceArgs = append(relevanceArgs, term.FuzzyTerm)
 		}
 	}
+
+	// The nudges are multiplied into that relevance rather than added to it,
+	// and this is the difference between a ranking and a list of the senders
+	// someone reads most.
+	//
+	// ts_rank_cd answers on a scale the query's own width sets. Measured on
+	// PostgreSQL 16 with these weights, a two-term query scores 0.51 when both
+	// terms are in the subject, 0.10 for an attachment name and 0.033 for a
+	// body mention. Added to that, a sender the reader always opens (up to 8 on
+	// the caller's own scale) and a message from this morning (up to 1.6) do
+	// not tilt the ranking, they replace it: every gap the text could open is
+	// an order of magnitude below them, so the top of every result page is
+	// whoever writes most often, sorted by date.
+	//
+	// Multiplied in, and bounded so each nudge is worth at most one doubling,
+	// they do what they were named for. The widest reach a nudge then has is 3x,
+	// while the narrowest measured gap between two field classes - an
+	// attachment name against a subject - is 5.1x, so familiarity and freshness
+	// reorder comparable matches and never promote a passing mention over a
+	// subject line.
+	var nudge strings.Builder
+	var nudgeArgs []any
+	var sender strings.Builder
+	var senderArgs []any
 	for _, boost := range q.SenderBoosts {
 		pattern := strings.ToLower(strings.TrimSpace(boost.Pattern))
 		if pattern == "" || boost.Boost <= 0 {
 			continue
 		}
-		score.WriteString(` + CASE WHEN position(? in lower(m.from_addr` + collateDefault + `)) > 0 THEN ?::float4 ELSE 0 END`)
-		scoreArgs = append(scoreArgs, pattern, boost.Boost)
+		if sender.Len() > 0 {
+			sender.WriteString(` + `)
+		}
+		sender.WriteString(`CASE WHEN position(? in lower(m.from_addr` + collateDefault + `)) > 0 THEN ?::float4 ELSE 0 END`)
+		senderArgs = append(senderArgs, pattern, boost.Boost)
+	}
+	if sender.Len() > 0 {
+		// Several boosts can name one address - a familiar sender who is also
+		// in the contact book - and the cap is what keeps their sum inside the
+		// one doubling each of them was scaled for.
+		nudge.WriteString(` + LEAST(` + sender.String() + `, 1.0)`)
+		nudgeArgs = append(nudgeArgs, senderArgs...)
 	}
 	if len(q.RecencyBuckets) > 0 && q.NowUnix > 0 {
-		score.WriteString(` + CASE`)
+		// First match wins, so the buckets bound themselves.
+		nudge.WriteString(` + CASE`)
 		for _, bucket := range q.RecencyBuckets {
-			score.WriteString(` WHEN (? - m.date_unix) <= ? THEN ?::float4`)
-			scoreArgs = append(scoreArgs, q.NowUnix, bucket.MaxAgeSeconds, bucket.Boost)
+			nudge.WriteString(` WHEN (? - m.date_unix) <= ? THEN ?::float4`)
+			nudgeArgs = append(nudgeArgs, q.NowUnix, bucket.MaxAgeSeconds, bucket.Boost)
 		}
-		score.WriteString(` ELSE 0 END`)
+		nudge.WriteString(` ELSE 0 END`)
+	}
+
+	var score string
+	scoreArgs := make([]any, 0, len(relevanceArgs)+len(nudgeArgs))
+	if hasText {
+		score = `(` + relevance.String() + `) * (1` + nudge.String() + `)`
+		scoreArgs = append(scoreArgs, relevanceArgs...)
+		scoreArgs = append(scoreArgs, nudgeArgs...)
+	} else {
+		// Filters alone selected these rows - is:starred, has:attachment - so
+		// there is no relevance for a nudge to be a nudge to, and they are the
+		// ranking. Added, as they always were here, but on the normalized scale
+		// the multiplying branch needs: familiarity and freshness are now
+		// within one doubling of each other rather than the five to one the raw
+		// scales gave, so a filter-only list leans less on who wrote the mail
+		// and more on when. Renormalizing this branch back would mean carrying
+		// both scales through the spec to preserve the ordering of a list that
+		// has no relevance to preserve.
+		score = `(0::float4` + nudge.String() + `)`
+		scoreArgs = append(scoreArgs, nudgeArgs...)
+	}
+
+	// Whether the row matched the lexeme query at all, which is what separates
+	// mail that contains the words from mail that merely resembles them. It
+	// sorts ahead of the score because the alternative is arithmetic that has
+	// to be re-argued after every change to a weight: similarity contributes up
+	// to 0.3 per term while an exact body mention measures 0.033, so without
+	// this a typo match outranks the mail the reader was actually looking for.
+	//
+	// Only fuzzy queries need it - every row of an exact query matched by
+	// definition - and its cost is one more tsquery evaluation per candidate,
+	// beside the per-term ones the fuzzy path already runs.
+	exactColumn := ""
+	exactOrder := ""
+	outerExactOrder := ""
+	var exactArgs []any
+	if fuzzy {
+		exactColumn = `, (ms.tsv @@ to_tsquery('simple', ?)) AS exact_match`
+		exactOrder = `exact_match DESC, `
+		outerExactOrder = `r.exact_match DESC, `
+		exactArgs = append(exactArgs, q.TSQuery)
 	}
 
 	limit := q.Limit
@@ -346,11 +442,11 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 	}
 	offset := max(q.Offset, 0)
 
-	ranked := `SELECT ms.message_id, (` + score.String() + `)::float8 AS score, m.date_unix AS ranked_date
+	ranked := `SELECT ms.message_id, (` + score + `)::float8 AS score` + exactColumn + `, m.date_unix AS ranked_date
 		FROM message_search ms
 		JOIN messages m ON m.id = ms.message_id
 		WHERE ` + strings.Join(conditions, " AND ") + `
-		ORDER BY score DESC, m.date_unix DESC, ms.message_id DESC
+		ORDER BY ` + exactOrder + `score DESC, m.date_unix DESC, ms.message_id DESC
 		LIMIT ? OFFSET ?`
 
 	var query string
@@ -360,6 +456,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		// text, so their parameters bind first however the query nests.
 		args = append(args, q.TSQuery, q.TSQuery, q.TSQuery, q.TSQuery)
 		args = append(args, scoreArgs...)
+		args = append(args, exactArgs...)
 		args = append(args, conditionArgs...)
 		args = append(args, limit, offset, q.UserID)
 		query = `SELECT r.message_id, r.score,
@@ -369,30 +466,33 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 			ts_filter(ms.tsv, '{d}'::"char"[]) @@ to_tsquery('simple', ?)
 			FROM (` + ranked + `) r
 			JOIN message_search ms ON ms.message_id = r.message_id AND ms.user_id = ?
-			ORDER BY r.score DESC, r.ranked_date DESC, r.message_id DESC`
+			ORDER BY ` + outerExactOrder + `r.score DESC, r.ranked_date DESC, r.message_id DESC`
 	} else {
 		args = append(args, scoreArgs...)
+		args = append(args, exactArgs...)
 		args = append(args, conditionArgs...)
 		args = append(args, limit, offset)
 		query = `SELECT r.message_id, r.score, false, false, false, false
 			FROM (` + ranked + `) r
-			ORDER BY r.score DESC, r.ranked_date DESC, r.message_id DESC`
+			ORDER BY ` + outerExactOrder + `r.score DESC, r.ranked_date DESC, r.message_id DESC`
 	}
 
 	var rows *sql.Rows
 	if fuzzy {
-		// The <% operator reads its floor from a GUC, and the useful floor for
-		// typo matching (~0.35) is far below the server default (0.6). SET
-		// LOCAL scopes the change to this transaction; the value is a bounded
-		// number this function validated, rendered as a literal because SET
-		// takes no parameters.
+		// The <<% operator reads its floor from a GUC of its own - the strict
+		// variant has a separate one, so setting word_similarity_threshold
+		// here would leave the operator on the 0.5 default it does not use.
+		// The useful floor for typo matching (~0.35) is below both. SET LOCAL
+		// scopes the change to this transaction; the value is a bounded number
+		// this function validated, rendered as a literal because SET takes no
+		// parameters.
 		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = tx.Rollback() }()
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`SET LOCAL pg_trgm.word_similarity_threshold = %.2f`, q.FuzzyThreshold)); err != nil {
+			fmt.Sprintf(`SET LOCAL pg_trgm.strict_word_similarity_threshold = %.2f`, q.FuzzyThreshold)); err != nil {
 			return nil, err
 		}
 		rows, err = tx.QueryContext(ctx, query, args...)

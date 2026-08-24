@@ -1331,6 +1331,20 @@ func TestMessagesAccountScopeRejectsASelectionCrossingAccounts(t *testing.T) {
 	}
 }
 
+// The other fault the same check catches: a sound single-account selection
+// aimed at another account's folder. Reporting that as a selection spanning
+// accounts describes work the reader has already done and hides the destination
+// they actually have to change.
+func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsSound(t *testing.T) {
+	messages := []store.MessageRecord{
+		{ID: 1, AccountID: 10},
+		{ID: 2, AccountID: 10},
+	}
+	if err := messagesAccountScope(messages, 11); err != errMoveDestinationOtherAccount {
+		t.Fatalf("messagesAccountScope error = %v, want errMoveDestinationOtherAccount", err)
+	}
+}
+
 func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
 	messages := []store.MessageRecord{
 		{ID: 1, AccountID: 10},
@@ -1338,19 +1352,5 @@ func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
 	}
 	if err := messagesAccountScope(messages, 10); err != nil {
 		t.Fatalf("messagesAccountScope error = %v, want nil", err)
-	}
-}
-
-// A uniform selection whose account simply is not the destination's used to be
-// answered with "select messages from a single account", which is the one thing
-// the caller had already done. The folder is what they have to change, and the
-// two failures have to stay distinguishable to say so.
-func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsUniform(t *testing.T) {
-	messages := []store.MessageRecord{
-		{ID: 1, AccountID: 11},
-		{ID: 2, AccountID: 11},
-	}
-	if err := messagesAccountScope(messages, 10); err != errBulkMoveWrongAccount {
-		t.Fatalf("messagesAccountScope error = %v, want errBulkMoveWrongAccount", err)
 	}
 }

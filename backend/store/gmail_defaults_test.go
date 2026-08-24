@@ -39,3 +39,42 @@ func TestGmailLabelViewsDefaultToNeverSyncing(t *testing.T) {
 		}
 	}
 }
+
+// resolveInheritedSyncMode is the in-memory twin of EffectiveMailboxSyncMode,
+// and it exists so that reporting unsynced folders costs one query for the
+// whole table rather than one per parent per candidate. It has to answer the
+// way the query-per-parent version did.
+func TestResolveInheritedSyncModeMatchesTheEffectiveMode(t *testing.T) {
+	modes := map[string]string{
+		"INBOX":                    "auto",
+		"Archive":                  "manual",
+		"Archive/2025":             "inherit",
+		"Archive/2025/Rechnungen":  "inherit",
+		"Projekte":                 "inherit",
+		"Projekte/Kunde":           "inherit",
+		"[Gmail]/Alle Nachrichten": "never",
+		"Sent":                     "manual",
+	}
+	for _, c := range []struct {
+		name string
+		want string
+	}{
+		{"INBOX", "auto"},
+		{"Sent", "manual"},
+		{"[Gmail]/Alle Nachrichten", "never"},
+		// The nearest parent with a mode of its own decides, however deep.
+		{"Archive/2025", "manual"},
+		{"Archive/2025/Rechnungen", "manual"},
+		// A chain that names nothing lands on auto, exactly as walking it
+		// through the store does when every lookup misses.
+		{"Projekte", "auto"},
+		{"Projekte/Kunde", "auto"},
+		// A folder absent from the map is auto rather than a zero value that
+		// would read as some other mode.
+		{"Unbekannt", "auto"},
+	} {
+		if got := resolveInheritedSyncMode(c.name, modes); got != c.want {
+			t.Errorf("resolveInheritedSyncMode(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

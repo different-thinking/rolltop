@@ -430,6 +430,19 @@ site and in review.
   holds must ask for a bigger page, not for more pages: every page re-ranks the
   whole match set, so the loops collecting conversations or resolving a
   whole-filter delete pay the full cost again on each round.
+- On the Postgres backend the ranking is what the text said; everything else
+  multiplies into it, bounded. `ts_rank_cd` answers on a scale the query's width
+  sets - a two-term query measures 0.51 with both terms in the subject and 0.033
+  for a body mention - so a sender-history boost of up to 8 or a recency bucket
+  of up to 1.6, added, is not a nudge but the ranking, and the result page
+  becomes the senders someone reads most with the search term acting as a
+  filter. Each nudge is normalized to at most one doubling and multiplied in, so
+  it reorders comparable matches and never promotes a passing mention over a
+  subject line. Membership follows the same rule structurally rather than
+  arithmetically: an exact lexeme match sorts ahead of one reached by
+  similarity, because a weight is allowed to be zero and the arithmetic would
+  have to be re-argued after every change to one. Never add a ranking term to
+  that score without deciding, in the same change, what bounds it.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the
