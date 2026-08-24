@@ -282,7 +282,13 @@ func isImmutableFrontendAsset(cleanPath string) bool {
 		return false
 	}
 	switch strings.ToLower(filepath.Ext(cleanPath)) {
-	case ".js", ".css":
+	// .wasm belongs here for the same reason .js does, and its absence cost
+	// more: PDFium is 4.6 MB, the bundler content-hashes it into assets/ like
+	// every other file here, and with no Cache-Control at all the browser was
+	// left guessing whether the one file in the build that never changes under
+	// its own name could be reused. The PDF preview preloads it and then has
+	// its worker fetch it, so the guess was being made twice per preview.
+	case ".js", ".css", ".wasm":
 		return true
 	default:
 		return false

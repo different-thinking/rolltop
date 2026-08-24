@@ -54,6 +54,7 @@ func TestImmutableFrontendAssetCacheScope(t *testing.T) {
 		{path: "assets/index-release123.js", want: true},
 		{path: "assets/index-release123.css", want: true},
 		{path: "assets/chunk-release123.JS", want: true},
+		{path: "assets/pdfium-release123.wasm", want: true},
 		{path: "sw.js", want: false},
 		{path: "manifest.webmanifest", want: false},
 		{path: "index.html", want: false},
@@ -212,6 +213,7 @@ func TestFrontendAssetCacheControl(t *testing.T) {
 	}{
 		{path: "assets/index-release123.js", want: immutableFrontendAssetCacheControl},
 		{path: "assets/index-release123.css", want: immutableFrontendAssetCacheControl},
+		{path: "assets/pdfium-release123.wasm", want: immutableFrontendAssetCacheControl},
 		{path: "sw.js", want: "no-cache"},
 		{path: "manifest.webmanifest", want: ""},
 		{path: "icon.svg", want: ""},
