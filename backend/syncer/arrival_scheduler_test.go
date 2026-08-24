@@ -156,10 +156,17 @@ func TestInboxArrivalSchedulerTimerRespectsContextCancellation(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// A window in which the finalizer must *not* run, so it is spelled out here
+	// rather than borrowing waitForEvent: this branch is the passing path, and
+	// waitForEvent made every green run of this test sit here for 30 seconds.
+	// The schedule above was due 200ms out and the loop has already seen its
+	// timer cleared, so a second is an order of magnitude past the moment a
+	// surviving timer would have fired.
+	const finalizerMustNotRun = time.Second
 	select {
 	case <-finalized:
 		t.Fatal("canceled scheduler ran the finalizer")
-	case <-time.After(waitForEvent):
+	case <-time.After(finalizerMustNotRun):
 	}
 	if scheduler.schedule(7, 11, time.Now()) {
 		t.Fatal("canceled scheduler accepted new work")

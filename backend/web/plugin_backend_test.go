@@ -85,7 +85,11 @@ func testClientSidePGPPluginDir(t *testing.T) string {
 		args = append(args, "-buildmode=plugin", "-o", filepath.Join(backendDir, "client_side_pgp.so"), "./plugins/client_side_pgp/backend")
 		cmd := exec.Command("go", args...)
 		cmd.Dir = repoRoot
-		cmd.Env = append(os.Environ(), "GOCACHE=/tmp/rolltop-go-build")
+		// No GOCACHE override. This build shares the caller's build cache on
+		// purpose: a private cache directory is cold on every CI run, which
+		// turned a ~2s plugin link into a ~28s rebuild of the whole dependency
+		// tree. The build fingerprint plugin.Open checks comes from the flags
+		// above and the package sources, not from where the cache lives.
 		if out, err := cmd.CombinedOutput(); err != nil {
 			testPGPPluginErr = &execBuildError{err: err, out: string(out)}
 		}
