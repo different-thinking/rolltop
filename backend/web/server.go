@@ -31,6 +31,7 @@ import (
 	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
+	"rolltop/backend/remoteimages"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
 	"rolltop/backend/smtplog"
@@ -491,9 +492,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/contacts/", s.handleContactOrApp)
 	mux.HandleFunc("/webhooks/sync", s.handleSyncWebhook)
-	mux.HandleFunc("/attachments/", s.handleAttachment)
+	mux.HandleFunc(attachmentRoutePrefix, s.handleAttachment)
 	mux.HandleFunc("/blobs/", s.handleBlob)
-	mux.HandleFunc("/remote-images/", s.handleRemoteImage)
+	mux.HandleFunc(remoteimages.CachedURLPrefix, s.handleRemoteImage)
 	mux.HandleFunc("/brand-icons/", s.handleBrandIcon)
 	mux.HandleFunc("/plugins/", s.handlePluginRoute)
 	return s.securityHeaders(s.withCurrentUser(mux))
@@ -667,7 +668,7 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		pathValue = strings.TrimSuffix(pathValue, "/inline")
 		inline = true
 	}
-	id, ok := idFromPath(pathValue, "/attachments/")
+	id, ok := idFromPath(pathValue, attachmentRoutePrefix)
 	if !ok {
 		http.NotFound(w, r)
 		return

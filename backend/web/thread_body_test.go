@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"rolltop/backend/remoteimages"
 	"rolltop/backend/store"
 )
 
@@ -565,23 +566,54 @@ func TestEmailDocumentRemovesInlineScripting(t *testing.T) {
 	}
 }
 
-func TestEmailDocumentKeepsRelativeRefsUnderADeclaredBase(t *testing.T) {
-	body := `<base href="https://newsletter.example.test/2026/08/"><img src="hero.png" alt="Hero">`
+func TestEmailDocumentResolvesRelativeRefsAgainstADeclaredBase(t *testing.T) {
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<img src="hero.png" alt="Hero"><a href="offer.html">Angebot</a>` +
+		`<div style="background-image:url(bg.png)">Tile</div>`
 	allowed := emailDocumentWithBlocklist(body, "", true, nil)
-	if !strings.Contains(allowed, ` src="hero.png"`) {
-		t.Fatalf("relative reference under a declared base was dropped: %s", allowed)
+	// The base is applied here rather than left standing, because it also moves
+	// the paths this renderer writes itself.
+	if strings.Contains(allowed, "<base href=") {
+		t.Fatalf("declared base was left in the document: %s", allowed)
 	}
-	// Without images the same reference is a remote one, which is what this
-	// mode refuses - live or not, it would cost a CSP violation.
+	for _, resolved := range []string{
+		`src="https://newsletter.example.test/2026/08/hero.png"`,
+		`href="https://newsletter.example.test/2026/08/offer.html"`,
+		`url(https://newsletter.example.test/2026/08/bg.png)`,
+	} {
+		if !strings.Contains(allowed, resolved) {
+			t.Fatalf("reference was not resolved against the base (%s): %s", resolved, allowed)
+		}
+	}
+	// Resolved, those references are remote, and remote is what a blocked
+	// document refuses - live or not, each would cost a CSP violation.
 	blocked := emailDocument(body, "", false)
-	if strings.Contains(blocked, ` src="hero.png"`) {
-		t.Fatalf("blocked document kept a reference to the sender's server: %s", blocked)
+	if strings.Contains(blocked, ` src="https://newsletter.example.test/2026/08/hero.png"`) {
+		t.Fatalf("blocked document kept a live reference to the sender: %s", blocked)
 	}
-	if !strings.Contains(blocked, `alt="Hero"`) {
+	if !strings.Contains(blocked, `data-rolltop-blocked-src="https://newsletter.example.test/2026/08/hero.png"`) {
+		t.Fatalf("blocked reference was not recorded: %s", blocked)
+	}
+	if !strings.Contains(blocked, `alt="Hero"`) || !strings.Contains(blocked, "Tile") {
 		t.Fatalf("message content was lost: %s", blocked)
 	}
 }
 
+func TestEmailDocumentKeepsItsOwnPathsUnderADeclaredBase(t *testing.T) {
+	// The reason the base is applied and removed: these two paths are Rolltop's
+	// own, and a base would send them to the sender's web server instead - a
+	// broken picture, and a request for a file only Rolltop has.
+	cached := remoteimages.CachedURL("b69b957cbc9cdd98bb64b5b3ab32e2a7fe7ead1bb7a59b07983008e046553be0")
+	attachments := []store.Attachment{{ID: 7, ContentID: "hero@example.test", IsInline: true, ContentType: "image/png"}}
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<img src="` + cached + `"><img src="cid:hero@example.test">`
+	doc := emailDocumentWithInlineAttachments(body, "", true, nil, attachments)
+	for _, kept := range []string{`src="` + cached + `"`, `src="/attachments/7/inline"`} {
+		if !strings.Contains(doc, kept) {
+			t.Fatalf("%q was moved off Rolltop by the declared base: %s", kept, doc)
+		}
+	}
+}
 func TestEmailDocumentIgnoresACommentedOutBase(t *testing.T) {
 	// A base inside a comment sets nothing, so the reference beside it still
 	// resolves against the app and must not be kept alive by it.
@@ -639,5 +671,58 @@ func TestEmailDocumentNeutralizesRemoteRefWrittenWithoutASeparator(t *testing.T)
 	}
 	if !strings.Contains(doc, `data-rolltop-blocked-srcset="https://cdn.example.test/hero.png 2x"`) {
 		t.Fatalf("blocked reference was not recorded: %s", doc)
+	}
+}
+
+func TestEmailDocumentKeepsCachedRemoteImageURLs(t *testing.T) {
+	// With images allowed, remote references are rewritten to the local cache
+	// (remoteimages.ReplaceCached) before the document is built. Those URLs are
+	// Rolltop's own route, not a sender's relative path, and dropping them left
+	// a newsletter with no pictures at all.
+	cached := remoteimages.CachedURL("b69b957cbc9cdd98bb64b5b3ab32e2a7fe7ead1bb7a59b07983008e046553be0")
+	body := `<img src="` + cached + `" height="40">` +
+		`<img srcset="` + cached + ` 2x">` +
+		`<div style="background-image:url(` + cached + `)">Hero</div>` +
+		`<img src="/assets/tracker.gif">`
+	for _, imagesAllowed := range []bool{false, true} {
+		doc := emailDocumentWithInlineAttachments(body, "", imagesAllowed, nil, nil)
+		for _, kept := range []string{
+			`src="` + cached + `"`,
+			`srcset="` + cached + ` 2x"`,
+			`url(` + cached + `)`,
+		} {
+			if !strings.Contains(doc, kept) {
+				t.Fatalf("images_allowed=%t dropped the app's own cached image %q: %s", imagesAllowed, kept, doc)
+			}
+		}
+		// A path the sender wrote still goes: it names their web server, and
+		// resolving it against Rolltop asks this app for a file it never had.
+		if strings.Contains(doc, ` src="/assets/tracker.gif"`) {
+			t.Fatalf("images_allowed=%t kept a sender path pointing at the app: %s", imagesAllowed, doc)
+		}
+	}
+}
+
+func TestEmailDocumentResolvesQueryStringsPerContext(t *testing.T) {
+	// The same URL is written two ways. A <style> element is raw text: an &amp;
+	// written into it reaches the CSS parser as five characters and breaks the
+	// query string. An attribute is decoded by the HTML parser first, so there
+	// the entity is what keeps a bare & from being read as one.
+	body := `<base href="https://newsletter.example.test/2026/08/">` +
+		`<style>body{background-image:url(track.png?a=1&b=2)}@import "theme.css?v=3&x=4";</style>` +
+		`<img src="hero.png?a=1&amp;b=2">` +
+		`<div style="background-image:url(tile.png?a=1&amp;b=2)">Tile</div>`
+	doc := emailDocumentWithBlocklist(body, "", true, nil)
+	if !strings.Contains(doc, `url(https://newsletter.example.test/2026/08/track.png?a=1&b=2)`) {
+		t.Fatalf("style element URL was HTML-escaped into invalid CSS: %s", doc)
+	}
+	if !strings.Contains(doc, `"https://newsletter.example.test/2026/08/theme.css?v=3&x=4"`) {
+		t.Fatalf("@import URL was HTML-escaped into invalid CSS: %s", doc)
+	}
+	if !strings.Contains(doc, `src="https://newsletter.example.test/2026/08/hero.png?a=1&amp;b=2"`) {
+		t.Fatalf("attribute URL lost its entity: %s", doc)
+	}
+	if !strings.Contains(doc, `url(https://newsletter.example.test/2026/08/tile.png?a=1&amp;b=2)`) {
+		t.Fatalf("style attribute URL lost its entity: %s", doc)
 	}
 }

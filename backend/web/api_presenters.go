@@ -395,13 +395,13 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 		if view.HasHiddenQuoted {
 			fullHTML := view.Message.BodyHTML
 			if view.ImagesAllowed {
-				fullHTML = remoteimages.ReplaceCached(fullHTML, s.cachedRemoteImageURLs(ctx, userID, view.Message, fullHTML))
+				fullHTML = remoteimages.ReplaceCached(fullHTML, s.cachedRemoteImageURLs(ctx, userID, view.Message, fullHTML, view.ImageBlockRules))
 			}
 			fullDoc = emailDocumentWithInlineAttachments(fullHTML, view.Message.BodyText, view.ImagesAllowed, view.ImageBlockRules, view.InlineAttachments)
 		}
 		bodyHTML := view.DisplayBodyHTML
 		if view.ImagesAllowed {
-			bodyHTML = remoteimages.ReplaceCached(bodyHTML, s.cachedRemoteImageURLs(ctx, userID, view.Message, bodyHTML))
+			bodyHTML = remoteimages.ReplaceCached(bodyHTML, s.cachedRemoteImageURLs(ctx, userID, view.Message, bodyHTML, view.ImageBlockRules))
 		}
 		bodyDoc := emailDocumentWithInlineAttachments(bodyHTML, view.DisplayBodyText, view.ImagesAllowed, view.ImageBlockRules, view.InlineAttachments)
 		stop()

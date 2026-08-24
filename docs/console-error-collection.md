@@ -216,11 +216,26 @@ die Herkunft steht nirgends in der Nachricht. `neutralizeUnresolvableRefs`
 (`backend/web/email_document.go`) entfernt sie deshalb wie eine blockierte
 Fremdreferenz und parkt sie unter `data-rolltop-unresolved-*` — in beiden
 Modi, denn „Bilder erlauben" erlaubt den Server des Absenders und nicht die
-eigenen Routen. Eine Ausnahme gibt es: Setzt die Mail selbst ein
-`<base href="https://…">`, löst der Browser ihre relativen Verweise gegen den
-Absender auf. Bei erlaubten Bildern bleiben sie dann stehen, bei blockierten
-werden sie entfernt — mit Basis sind sie genau die Fremdreferenzen, die
-dieser Modus ablehnt.
+eigenen Routen. Nachtrag 24.08.: Die erste Fassung hat dabei zu viel entfernt. Bei
+erlaubten Bildern schreibt `remoteimages.ReplaceCached` Fremdbilder auf
+Rolltops eigene Cache-Route `/remote-images/<hash>` um, *bevor* das
+Dokument gebaut wird — und die sah wie jeder andere absolute Pfad aus, den
+der Absender geschrieben haben könnte. Ergebnis: ein Newsletter ohne jedes
+Bild, sichtbar im DOM als `data-rolltop-unresolved-src="/remote-images/…"`.
+Die zwei Routen, die der Renderer selbst in einen Body schreibt
+(`/attachments/` und `/remote-images/`), stehen jetzt als Konstanten in
+`resolvableRefPrefixes` — bei den Routen, die sie bedienen, damit eine
+verschobene Route diese Liste nicht ins Leere zeigen lässt.
+
+Setzt die Mail selbst ein `<base href="https://…">`, wird es angewendet und
+dann entfernt: Die Basis verschiebt nämlich nicht nur die Verweise des
+Absenders, sondern auch die zwei Pfade, die der Renderer selbst schreibt —
+`/remote-images/<hash>` und `/attachments/<id>/inline` wären beim Absender
+gelandet. `resolveRefsAgainstDeclaredBase` löst die Absender-Verweise
+deshalb selbst auf (aus `hero.png` wird `https://…/hero.png`) und nimmt das
+`<base>` weg; danach ist alles Übrige entweder absolut — und damit eine
+ganz normale Fremdreferenz, über die der Bilder-Modus entscheidet — oder
+hatte nie eine Basis und fällt als unauflösbar weg.
 
 **Die fünf Sandbox-Meldungen.** (Nachtrag 24.08., nachdem die Meldung
 weiterhin auftrat: Der Scrubber sah zwei Schreibweisen nicht. Ein Browser
