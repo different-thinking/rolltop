@@ -1305,7 +1305,15 @@ func (s *Server) saveComposeDraft(ctx context.Context, cu currentUser, form comp
 		// none. supersedeDraft is best-effort and logs its own failures: not being
 		// able to clean up the old draft must not undo a save that already
 		// succeeded.
-		s.supersedeDraft(ctx, cu.User.ID, form.DraftMessageID)
+		//
+		// The request context is deliberately not used directly: a client that
+		// closes the tab right after a draft autosave is routine, not an error,
+		// and must not cancel the IMAP MOVE that cleans up the copy it leaves
+		// behind -- the same reasoning archiveRepliedMessage applies to filing the
+		// message a reply answered.
+		supersedeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), draftSupersedeTimeout)
+		defer cancel()
+		s.supersedeDraft(supersedeCtx, cu.User.ID, form.DraftMessageID)
 	}
 	return saved, nil
 }

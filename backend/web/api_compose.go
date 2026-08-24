@@ -30,6 +30,11 @@ const (
 	// send that the user would then retry into a duplicate.
 	archiveAfterSendTimeout         = 10 * time.Second
 	archiveAfterSendReservationWait = 2 * time.Second
+	// The old draft supersedeDraft retires runs on the same clock, for the same
+	// reason: the replacement draft is already saved by the time it starts, so a
+	// client that navigates away right after saving must not cancel a move that
+	// only cleans up the copy left behind.
+	draftSupersedeTimeout = 10 * time.Second
 )
 
 func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {

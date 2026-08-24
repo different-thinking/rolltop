@@ -928,6 +928,13 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	if len(messages) == 0 {
+		// None of the given ids resolved to a message this user owns. Answering
+		// here skips reserving the foreground turn and starting a sync run for a
+		// selection that has nothing left to move.
+		http.NotFound(w, r)
+		return
+	}
 	if err := messagesAccountScope(messages, dest.AccountID); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
