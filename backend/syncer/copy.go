@@ -132,6 +132,9 @@ func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64
 				break
 			}
 			if err := reporter.step(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				status = "failed"
 				errText = err.Error()
 				return
@@ -141,12 +144,20 @@ func (s *Service) runCopyMessages(ctx context.Context, userID int64, ids []int64
 		consecutiveFailures = 0
 		progress.MessagesStored++
 		if err := reporter.step(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			status = "failed"
 			errText = err.Error()
 			return
 		}
 	}
 	if err := reporter.commit(ctx); err != nil {
+		// A cancelled run is stamped interrupted by the finalizer; only a live
+		// context turns a progress-write failure into a failed run.
+		if ctx.Err() != nil {
+			return
+		}
 		status = "failed"
 		errText = err.Error()
 		return

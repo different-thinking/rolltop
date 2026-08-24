@@ -594,9 +594,10 @@ type PendingMailboxGenerationRebuild struct {
 
 // ListPendingMailboxGenerationRebuilds supports crash recovery without
 // broadening a resume to same-named mailboxes on another account or tenant.
-// The scan is bounded: the recovery loop attempts one mailbox per tenant per
-// pass anyway, and re-reads on every pass, so an unbounded listing only made
-// a large backlog cost a full table read every thirty seconds.
+// The listing is deliberately unbounded: the recovery reconciler treats a
+// tenant's absence from it as proof that tenant has no pending markers and
+// clears their gate on that basis, so a truncated page would wrongly reopen
+// gates for tenants whose rows fell past it.
 func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]PendingMailboxGenerationRebuild, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT rebuild.user_id, rebuild.account_id,
 		rebuild.mailbox_id, mailbox.name, rebuild.target_uid_validity,
@@ -606,8 +607,7 @@ func (s *Store) ListPendingMailboxGenerationRebuilds(ctx context.Context) ([]Pen
 			AND mailbox.account_id = rebuild.account_id AND mailbox.id = rebuild.mailbox_id
 		ORDER BY rebuild.user_id,
 			CASE WHEN lower(trim(mailbox.role)) = 'inbox' OR lower(trim(mailbox.name)) = 'inbox' THEN 0 ELSE 1 END,
-			rebuild.account_id, rebuild.mailbox_id
-		LIMIT 256`)
+			rebuild.account_id, rebuild.mailbox_id`)
 	if err != nil {
 		return nil, err
 	}

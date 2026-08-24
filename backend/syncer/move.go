@@ -180,6 +180,12 @@ func (s *Service) runMoveMessages(ctx context.Context, userID int64, ids []int64
 		unpublished = false
 		lastPublished = time.Now()
 		if err := s.Store.UpdateSyncRunProgress(ctx, userID, runID, progress); err != nil {
+			if ctx.Err() != nil {
+				// The run was cancelled, not broken: leave status alone so the
+				// finalizer stamps it interrupted instead of recording a failed
+				// run whose error is the cancellation itself.
+				return false
+			}
 			status = "failed"
 			errText = err.Error()
 			progressWriteFailed = true

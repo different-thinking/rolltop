@@ -4,6 +4,7 @@
 package syncer
 
 import (
+	"context"
 	"errors"
 	"log"
 	"math/rand"
@@ -60,8 +61,10 @@ func (r *Runner) RecordAccountSyncOutcome(userID, accountID int64, err error) {
 		r.healthMu.Unlock()
 		return
 	}
-	if r.context().Err() != nil {
-		// Shutdown cancellation says nothing about the account.
+	if r.context().Err() != nil || errors.Is(err, context.Canceled) {
+		// Shutdown, a user's cancel, a recovery signal preempting the turn — a
+		// local cancellation says nothing about the server. It neither counts
+		// as a failure nor clears an earlier one.
 		return
 	}
 	kind := ClassifyRemoteError(err)

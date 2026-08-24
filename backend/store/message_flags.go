@@ -115,6 +115,17 @@ func (s *Store) ClearReadSyncPending(ctx context.Context, userID, messageID int6
 	return err
 }
 
+// ClearReadSyncPendingIfUnchanged clears the pending push flag only while the
+// local read state still matches the value the push carried. A toggle that
+// landed between listing the pending set and the STORE keeps its marker, so
+// the next push uploads the newer value instead of losing it.
+func (s *Store) ClearReadSyncPendingIfUnchanged(ctx context.Context, userID, messageID int64, pushedIsRead bool) error {
+	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages SET read_sync_pending = 0, updated_at = ?
+		WHERE user_id = ? AND id = ? AND is_read = ?`,
+		nowUnix(), userID, messageID, boolInt(pushedIsRead))
+	return err
+}
+
 // MarkMessageStarredForUser changes local star state and optionally marks it for IMAP push.
 func (s *Store) MarkMessageStarredForUser(ctx context.Context, userID, messageID int64, isStarred bool, pending bool) error {
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages SET is_starred = ?, star_sync_pending = ?, updated_at = ?
@@ -126,6 +137,15 @@ func (s *Store) MarkMessageStarredForUser(ctx context.Context, userID, messageID
 func (s *Store) ClearStarSyncPending(ctx context.Context, userID, messageID int64) error {
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages SET star_sync_pending = 0, updated_at = ? WHERE user_id = ? AND id = ?`,
 		nowUnix(), userID, messageID)
+	return err
+}
+
+// ClearStarSyncPendingIfUnchanged is ClearReadSyncPendingIfUnchanged's star
+// counterpart.
+func (s *Store) ClearStarSyncPendingIfUnchanged(ctx context.Context, userID, messageID int64, pushedIsStarred bool) error {
+	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `UPDATE messages SET star_sync_pending = 0, updated_at = ?
+		WHERE user_id = ? AND id = ? AND is_starred = ?`,
+		nowUnix(), userID, messageID, boolInt(pushedIsStarred))
 	return err
 }
 

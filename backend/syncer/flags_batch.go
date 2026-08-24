@@ -113,8 +113,25 @@ func (s *Service) pushPendingFlagGroup(ctx context.Context, userID, accountID, m
 	}
 	changes := MailboxFlagChanges{}
 	confirmed := make([]store.MessageRecord, 0, len(group))
-	for _, msg := range group {
-		if msg.UID == 0 {
+	for _, listed := range group {
+		if listed.UID == 0 {
+			continue
+		}
+		// Re-read the message just before it joins the batch: the listing was
+		// taken before earlier folder groups pushed, and STOREing a flag value
+		// the user toggled since would upload stale state. The per-message
+		// path re-read for the same reason.
+		msg, err := s.Store.GetMessageForUser(ctx, userID, listed.ID)
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if kind == pendingReadFlag && !msg.ReadSyncPending {
+			continue
+		}
+		if kind == pendingStarFlag && !msg.StarSyncPending {
 			continue
 		}
 		expected, err := s.Store.GetMessageUIDValidityForUser(ctx, userID, msg.ID)
@@ -155,13 +172,16 @@ func (s *Service) pushPendingFlagGroup(ctx context.Context, userID, accountID, m
 		return nil
 	}
 	for _, msg := range confirmed {
+		// The clear is conditional on the value the STORE actually carried: a
+		// toggle that landed while the batch was on the wire keeps its pending
+		// marker, so the next push uploads the newer value instead of losing it.
 		if kind == pendingReadFlag {
-			if err := s.Store.ClearReadSyncPending(ctx, userID, msg.ID); err != nil {
+			if err := s.Store.ClearReadSyncPendingIfUnchanged(ctx, userID, msg.ID, msg.IsRead); err != nil {
 				return err
 			}
 			msg.ReadSyncPending = false
 		} else {
-			if err := s.Store.ClearStarSyncPending(ctx, userID, msg.ID); err != nil {
+			if err := s.Store.ClearStarSyncPendingIfUnchanged(ctx, userID, msg.ID, msg.IsStarred); err != nil {
 				return err
 			}
 			msg.StarSyncPending = false
