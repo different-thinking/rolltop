@@ -1331,6 +1331,20 @@ func TestMessagesAccountScopeRejectsASelectionCrossingAccounts(t *testing.T) {
 	}
 }
 
+// The other fault the same check catches: a sound single-account selection
+// aimed at another account's folder. Reporting that as a selection spanning
+// accounts describes work the reader has already done and hides the destination
+// they actually have to change.
+func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsSound(t *testing.T) {
+	messages := []store.MessageRecord{
+		{ID: 1, AccountID: 10},
+		{ID: 2, AccountID: 10},
+	}
+	if err := messagesAccountScope(messages, 11); err != errMoveDestinationOtherAccount {
+		t.Fatalf("messagesAccountScope error = %v, want errMoveDestinationOtherAccount", err)
+	}
+}
+
 func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
 	messages := []store.MessageRecord{
 		{ID: 1, AccountID: 10},

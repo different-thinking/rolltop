@@ -543,6 +543,14 @@ export type StorageStats = {
   FoldersNeedingRebuild?: number;
   /** Folders whose documents were purged and are waiting for a rebuild. */
   FoldersPurged?: number;
+  /** Folders included in search that no sync ever fills, with what they last
+   * reported holding on the server and a few of their names. This gap is
+   * outside the coverage figures above and has to be: those compare the index
+   * against the messages table, and mail that was never fetched is in neither.
+   * The answer is a folder setting, not a rebuild. */
+  UnsyncedSearchFolders?: number;
+  UnsyncedSearchMessages?: number;
+  UnsyncedSearchFolderNames?: string[];
   /** True when both sides of the index/mail comparison were actually read. */
   SearchCoverageMeasured?: boolean;
   FuzzyAvailable?: boolean;

@@ -84,6 +84,32 @@ func seedPostgresSearchMessage(t *testing.T, db *store.Store, user store.User, m
 	return msg
 }
 
+// seedPostgresSearchMessageFrom is seedPostgresSearchMessage for the ranking
+// assertions, which only mean something when the sender and the date differ
+// between the messages being ranked.
+func seedPostgresSearchMessageFrom(t *testing.T, db *store.Store, user store.User, mailbox store.Mailbox, uid uint32, subject, body, from string, date time.Time) store.MessageRecord {
+	t.Helper()
+	ctx := context.Background()
+	path := fmt.Sprintf("users/%d/pg-search/uid-%d.eml", user.ID, uid)
+	blob, err := db.CreateBlob(ctx, store.BlobRecord{UserID: user.ID, Kind: "message", Path: path, SHA256: fmt.Sprintf("%064d", uid), Size: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := db.CreateMessage(ctx, store.CreateMessage{
+		UserID: user.ID, AccountID: mailbox.AccountID, MailboxID: mailbox.ID, BlobID: blob.ID,
+		MessageIDHeader: fmt.Sprintf("<pg-search-%d@example.test>", uid),
+		CanonicalSHA256: fmt.Sprintf("%064d", uid), MessageIDHash: fmt.Sprintf("pg-hash-%d", uid),
+		ThreadKey: fmt.Sprintf("pg-thread-%d", uid), Subject: subject, BodyText: body,
+		FromAddr: from, ToAddr: "bob@example.test",
+		Date: date, InternalDate: date,
+		UID: uid, UIDValidity: mailbox.UIDValidity, Size: 1, BlobPath: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
 func TestPostgresBackendWritePath(t *testing.T) {
 	svc, db, user, mailbox := openPostgresSearchFixtures(t)
 	ctx := context.Background()
