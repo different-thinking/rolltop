@@ -536,13 +536,19 @@ func (s *Server) apiDeleteIMAPAccount(w http.ResponseWriter, r *http.Request, ac
 	writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "estimate": estimate})
 }
 
-// Gmail's IMAP and SMTP endpoints. Implicit TLS on 465 is used for submission
-// because that is the port the sender opens a TLS connection on directly.
+// Gmail's IMAP and SMTP endpoints. Submission goes to 587 and upgrades with
+// STARTTLS rather than to 465, which opens TLS directly: Google serves both,
+// but 465 is the port hosters block. Blocking outbound submission is how a
+// provider keeps a compromised machine from emitting spam, and the rule is
+// usually written against 25 and 465 while 587 -- the port meant for
+// authenticated submission -- is left open. A pinned 465 therefore fails on
+// such a network with a connection that times out rather than an error anybody
+// can act on, and the pin means it cannot be worked around in the settings.
 const (
 	gmailIMAPHost = "imap.gmail.com"
 	gmailIMAPPort = 993
 	gmailSMTPHost = "smtp.gmail.com"
-	gmailSMTPPort = 465
+	gmailSMTPPort = 587
 )
 
 func applyGmailEndpoints(in *accountSettingsInput) {

@@ -202,7 +202,7 @@ connection is marked as needing reauthorization rather than failing silently.
 
 Once an account is connected under Settings → Google, an IMAP server can select
 it under **Sign-in** instead of asking for a password. The endpoints are set to
-`imap.gmail.com:993` and `smtp.gmail.com:465` and no password is stored; the
+`imap.gmail.com:993` and `smtp.gmail.com:587` and no password is stored; the
 same choice is available for the outgoing SMTP server, so a Gmail account needs
 no app password in either direction. Existing password accounts can be switched
 over and back, though switching back requires entering a password, since the

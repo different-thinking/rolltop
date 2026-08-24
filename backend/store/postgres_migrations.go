@@ -62,6 +62,20 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE message_search ADD COLUMN words text NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// Gmail submission moves from implicit TLS on 465 to STARTTLS on 587
+		// (gmailSMTPPort, backend/web/api_account.go). The endpoint is pinned
+		// rather than typed, so a server saved before this change keeps a port
+		// its owner cannot correct in the settings, and on a network that
+		// blocks 465 it fails with a connection that times out. Only rows that
+		// still carry the pinned endpoint are moved: a host somebody typed
+		// themselves is theirs.
+		Version: "0003-gmail-submission-port",
+		Statements: []string{
+			`UPDATE smtp_accounts SET port = 587
+				WHERE auth_type = 'google_oauth' AND host = 'smtp.gmail.com' AND port = 465`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

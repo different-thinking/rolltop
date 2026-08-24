@@ -47,6 +47,26 @@ func TestSavingAGoogleAccountUsesGmailEndpointsAndStoresNoPassword(t *testing.T)
 	}
 }
 
+// The submission endpoint is pinned, so the port it names is the only one a
+// Google account can ever use. It has to be 587: the sender opens TLS directly
+// only on 465 and upgrades with STARTTLS everywhere else (backend/smtpclient/
+// sender.go), Google serves both, and 465 is the one hosters block against
+// spam from compromised machines -- which on such a network leaves a pinned
+// account timing out with nothing its owner can change.
+func TestGmailSubmissionIsPinnedToTheSTARTTLSPort(t *testing.T) {
+	var host string
+	var port int
+	var useTLS bool
+	password := "kept"
+	applyGmailSMTPEndpoint(&host, &port, &useTLS, &password)
+	if host != "smtp.gmail.com" || port != 587 || !useTLS {
+		t.Fatalf("pinned submission endpoint = %s:%d tls=%t, want smtp.gmail.com:587 with TLS", host, port, useTLS)
+	}
+	if password != "" {
+		t.Fatalf("a pinned Google endpoint kept a password: %q", password)
+	}
+}
+
 // The connection identifier arrives from the browser. Accepting one that
 // belongs to another tenant would authenticate this account as that tenant's
 // mailbox, which is exactly the isolation rule the project is built on.
