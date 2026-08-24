@@ -202,9 +202,13 @@ connection is marked as needing reauthorization rather than failing silently.
 
 Once an account is connected under Settings → Google, an IMAP server can select
 it under **Sign-in** instead of asking for a password. The endpoints are set to
-`imap.gmail.com:993` and `smtp.gmail.com:465` and no password is stored; the
+`imap.gmail.com:993` and `smtp.gmail.com:587` and no password is stored; the
 same choice is available for the outgoing SMTP server, so a Gmail account needs
-no app password in either direction. Existing password accounts can be switched
+no app password in either direction. Google also answers on `465`, where TLS
+opens before the greeting instead of after `EHLO`, and the outgoing server
+offers that port for the network that blocks `587` — which port a provider
+blocks against spam is theirs to decide, and the connection test says which one
+gets through. Existing password accounts can be switched
 over and back, though switching back requires entering a password, since the
 OAuth row does not keep one.
 

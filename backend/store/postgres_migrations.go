@@ -62,6 +62,32 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE message_search ADD COLUMN words text NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// Gmail submission moves from implicit TLS on 465 to STARTTLS on 587
+		// (gmailSMTPPort, backend/web/api_account.go). The endpoint was written
+		// by the server rather than typed, so an account saved before this
+		// change carries a port its owner never chose, and on a network that
+		// blocks 465 it fails with a connection that times out. Only rows that
+		// still carry the written endpoint are moved: a host somebody entered
+		// themselves is theirs. The move is not a one-way door -- 465 is
+		// offered in the settings for the network where it is 587 that is
+		// blocked -- so a row this puts on the wrong port can be put back.
+		//
+		// Both tables hold the endpoint. smtp_accounts is the outgoing server,
+		// and it is the row every send builds its envelope from.
+		// mail_accounts.smtp_* is what an incoming account was saved with, and
+		// it is copied into a new outgoing server when a user who has none
+		// saves a mailbox (ensureMailAccountOnboarding, api_account.go).
+		// Moving only the first would let the old port arrive in smtp_accounts
+		// afterwards, through a row this migration can no longer reach.
+		Version: "0003-gmail-submission-port",
+		Statements: []string{
+			`UPDATE smtp_accounts SET port = 587
+				WHERE auth_type = 'google_oauth' AND host = 'smtp.gmail.com' AND port = 465`,
+			`UPDATE mail_accounts SET smtp_port = 587
+				WHERE auth_type = 'google_oauth' AND smtp_host = 'smtp.gmail.com' AND smtp_port = 465`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

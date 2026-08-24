@@ -124,7 +124,7 @@ viele Gmail-Konten. Der gesamte Sync-, Such- und Sende-Stack bleibt unverändert
    via `googleauth.TokenSource` holen und per XOAUTH2 authentifizieren. Bei Auth-Fehler
    einmalig Token force-refreshen und erneut versuchen.
 4. **Konto-Anlage-UX:** Im Account-Formular Weg „Mit Google verbinden" → Auswahl/
-   Neuverbindung eines Google-Kontos → `imap.gmail.com:993` / `smtp.gmail.com:465` und
+   Neuverbindung eines Google-Kontos → `imap.gmail.com:993` / `smtp.gmail.com:587` und
    Nutzername werden automatisch gesetzt, Passwortfelder entfallen.
 5. **Gmail-Ordner-Defaults:** Beim Anlegen eines Gmail-Kontos `[Gmail]/All Mail` und
    `[Gmail]/Important` standardmäßig vom Sync ausnehmen (Duplikat-Vermeidung — jede

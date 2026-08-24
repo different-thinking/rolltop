@@ -47,6 +47,41 @@ func TestSavingAGoogleAccountUsesGmailEndpointsAndStoresNoPassword(t *testing.T)
 	}
 }
 
+// The submission host is fixed and the port defaults to 587: the sender opens
+// TLS directly only on 465 and upgrades with STARTTLS everywhere else
+// (backend/smtpclient/sender.go), Google serves both, and 465 is the one
+// hosters block against spam -- which on such a network left an account timing
+// out with nothing its owner could change. The choice stays available, because
+// a network that blocks 587 instead would be the same dead end reversed, and
+// it is a choice between Google's two ports rather than a free field: a third
+// port would be a typo, not a setting.
+func TestGmailSubmissionDefaultsTo587AndKeeps465WhenAsked(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		submitted int
+		want      int
+	}{
+		{name: "nothing chosen", submitted: 0, want: 587},
+		{name: "the default", submitted: 587, want: 587},
+		{name: "implicit TLS", submitted: 465, want: 465},
+		{name: "a port Google does not serve", submitted: 25, want: 587},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := "typed.example.test"
+			port := test.submitted
+			var useTLS bool
+			password := "kept"
+			applyGmailSMTPEndpoint(&host, &port, &useTLS, &password)
+			if host != "smtp.gmail.com" || port != test.want || !useTLS {
+				t.Fatalf("endpoint = %s:%d tls=%t, want smtp.gmail.com:%d with TLS", host, port, useTLS, test.want)
+			}
+			if password != "" {
+				t.Fatalf("a Google endpoint kept a password: %q", password)
+			}
+		})
+	}
+}
+
 // The connection identifier arrives from the browser. Accepting one that
 // belongs to another tenant would authenticate this account as that tenant's
 // mailbox, which is exactly the isolation rule the project is built on.

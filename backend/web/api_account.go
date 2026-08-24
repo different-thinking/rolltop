@@ -537,13 +537,27 @@ func (s *Server) apiDeleteIMAPAccount(w http.ResponseWriter, r *http.Request, ac
 	writeJSON(w, map[string]any{"ok": true, "queued": true, "run_id": run.ID, "estimate": estimate})
 }
 
-// Gmail's IMAP and SMTP endpoints. Implicit TLS on 465 is used for submission
-// because that is the port the sender opens a TLS connection on directly.
+// Gmail's IMAP and SMTP endpoints. Submission defaults to 587 and upgrades with
+// STARTTLS rather than to 465, which opens TLS directly: Google serves both,
+// but 465 is the port hosters block. Blocking outbound submission is how a
+// provider keeps a compromised machine from emitting spam, and the rule is
+// usually written against 25 and 465 while 587 -- the port meant for
+// authenticated submission -- is left open. Defaulting to 465 therefore failed
+// on such a network with a connection that timed out rather than an error
+// anybody could act on.
+//
+// The submission port is a default rather than a pin, because the block runs
+// both ways: a network that permits 465 and refuses 587 would otherwise be the
+// same dead end with the ports swapped. The host stays pinned -- there is one
+// Gmail submission host and no reason to type it.
 const (
 	gmailIMAPHost = "imap.gmail.com"
 	gmailIMAPPort = 993
 	gmailSMTPHost = "smtp.gmail.com"
-	gmailSMTPPort = 465
+	gmailSMTPPort = 587
+	// gmailSMTPImplicitTLSPort is the other port Google serves, where TLS
+	// opens before the greeting instead of after EHLO.
+	gmailSMTPImplicitTLSPort = 465
 )
 
 func applyGmailEndpoints(in *accountSettingsInput) {
@@ -561,9 +575,21 @@ func applyGmailEndpoints(in *accountSettingsInput) {
 // two ways an outgoing server is created.
 func applyGmailSMTPEndpoint(host *string, port *int, useTLS *bool, password *string) {
 	*host = gmailSMTPHost
-	*port = gmailSMTPPort
+	*port = gmailSubmissionPort(*port)
 	*useTLS = true
 	*password = ""
+}
+
+// gmailSubmissionPort keeps the choice between Google's two submission ports
+// and answers 587 for everything else. Narrowing it to the two rather than
+// accepting the field as typed keeps the endpoint something the server knows
+// is reachable at all: a Google account authenticates with a token against
+// Google, so a third port would be a typo, not a setting.
+func gmailSubmissionPort(port int) int {
+	if port == gmailSMTPImplicitTLSPort {
+		return gmailSMTPImplicitTLSPort
+	}
+	return gmailSMTPPort
 }
 
 // parseSyncStartDate accepts a calendar date or an empty value meaning "no
