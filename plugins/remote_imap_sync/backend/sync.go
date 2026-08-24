@@ -314,9 +314,11 @@ func (w *routineWorker) Start() {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
 			select {
 			case <-w.ctx.Done():
-			case <-time.After(wait):
+			case <-timer.C:
 				w.Trigger("startup")
 			}
 		}()

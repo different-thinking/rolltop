@@ -95,7 +95,14 @@ func (r *Runner) RecordAccountSyncOutcome(userID, accountID int64, err error) {
 	if kind == RemoteErrorAuth {
 		pause = authPause
 	} else {
-		pause = base << (health.consecutiveFailures - 1)
+		// The shift count is capped: a long failure streak would otherwise
+		// wrap the int64 and could land on a small positive pause. Sixteen
+		// doublings are far past every cap in use.
+		shift := health.consecutiveFailures - 1
+		if shift > 16 {
+			shift = 16
+		}
+		pause = base << shift
 		if pause > backoffCap || pause <= 0 {
 			pause = backoffCap
 		}
