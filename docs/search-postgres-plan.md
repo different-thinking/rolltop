@@ -214,10 +214,17 @@ the text had to give.
 
 So they multiply, and each is normalized to at most one doubling — sender boosts
 divided by `pgSenderBoostCeiling` and capped by `LEAST(…, 1.0)`, recency buckets
-divided by the largest bucket of the chosen bias. The widest reach a nudge has is
-then 3x, against a narrowest measured gap between two field classes of 5.1x
-(attachment against subject): familiarity and freshness reorder comparable
-matches and never promote a passing mention over a subject line.
+divided by `pgRecencyBoostCeiling`. The widest reach a nudge has is then 3x,
+against a narrowest measured gap between two field classes of 5.1x (attachment
+against subject): familiarity and freshness reorder comparable matches and never
+promote a passing mention over a subject line.
+
+`pgRecencyBoostCeiling` is the largest bucket *any* bias produces, not the
+largest of the chosen one, and the difference is the whole setting. Dividing
+each bias by its own peak maps the freshest bucket of every profile to exactly
+1.0, so `light` and `strong` become one curve and the recency-bias control stays
+visible while doing nothing. Both ceilings are read from the tables they bound
+rather than written down, so changing a bucket cannot leave a constant behind.
 
 Membership needs the same rule made structural rather than arithmetic. A row
 reached by similarity alone contributes up to 0.3 per term while an exact body

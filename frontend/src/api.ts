@@ -457,8 +457,11 @@ export const api = {
     if (attachments.length === 0) {
       // warning is set when SMTP already delivered the message but the local
       // copy could not be saved. The send succeeded, so this arrives on the
-      // success path and has to be surfaced from there.
-      return postJSON<{ ok: boolean; message_id: number; archived_mailbox?: string; warning?: string }>("/api/compose", csrf, payload);
+      // success path and has to be surfaced from there. That is also the one
+      // response carrying no message_id -- there is no local row to name when
+      // saving it is what failed -- so the field is optional rather than a
+      // number the caller is promised and would read as undefined.
+      return postJSON<{ ok: boolean; message_id?: number; archived_mailbox?: string; warning?: string }>("/api/compose", csrf, payload);
     }
     const body = new FormData();
     body.append("payload", JSON.stringify({
@@ -473,7 +476,7 @@ export const api = {
       }))
     }));
     attachments.forEach((attachment) => body.append(attachment.field, attachment.file, attachment.filename));
-    return postForm<{ ok: boolean; message_id: number; archived_mailbox?: string; warning?: string }>("/api/compose", csrf, body);
+    return postForm<{ ok: boolean; message_id?: number; archived_mailbox?: string; warning?: string }>("/api/compose", csrf, body);
   },
   saveDraft: (csrf: string, form: ComposeForm, attachments: ComposeAttachmentUpload[] = []) => {
     const payload = composeSendPayload(form);
