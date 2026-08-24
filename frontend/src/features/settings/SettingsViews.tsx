@@ -23,7 +23,7 @@ import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/Ad
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
 import { SMTPTrafficPanel } from "./SMTPTraffic";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
-import { GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
+import { GmailSubmissionPortField, GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
 import { loadGoogleConnections, type GoogleConnection } from "./googleConnections";
 import { SettingsEmpty, SettingsError, SettingsIndex, SettingsIndexRow, SettingsLoading, SettingsPage, SettingsShell } from "./SettingsUI";
 import type { SettingsSectionID } from "./SettingsUI";
@@ -3012,7 +3012,9 @@ export function SettingsView({
             <section>
               <SignInMethodField configured={googleConfigured} value={smtpForm.auth_type} onChange={(value) => setSMTPField("auth_type", value)} />
               <Field label="Label" value={smtpForm.label} onChange={(value) => setSMTPField("label", value)} />
-              {smtpUsesGoogleSignIn ? null : (
+              {smtpUsesGoogleSignIn ? (
+                <GmailSubmissionPortField value={smtpForm.port} onChange={(value) => setSMTPField("port", value)} />
+              ) : (
                 <>
                   <Field label="Host" value={smtpForm.host} onChange={(value) => setSMTPField("host", value)} />
                   <Field label="Port" value={smtpForm.port} onChange={(value) => setSMTPField("port", value)} type="number" />

@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// The Gmail endpoint is pinned rather than typed, so an account saved before
-// submission moved to 587 keeps a port its owner cannot correct in the
-// settings. Migration 0003 moves those rows in both tables that hold a
-// submission endpoint, and only those: a host somebody entered themselves is
-// theirs, whatever port it names.
+// The Gmail endpoint is written by the server rather than typed, so an account
+// saved before submission moved to 587 carries a port its owner never chose.
+// Migration 0003 moves those rows in both tables that hold a submission
+// endpoint, and only those: a host somebody entered themselves is theirs,
+// whatever port it names.
 func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 	db := mustOpenTestStore(t)
 	ctx := context.Background()
@@ -38,9 +38,9 @@ func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 	ownGmail := insert("Gmail with a password", "smtp.gmail.com", 465, "password", 0)
 	alreadyMoved := insert("Google on 587", "smtp.gmail.com", 587, AuthTypeGoogleOAuth, 1)
 
-	// mail_accounts.smtp_* is the second place the pin lands: it is the
-	// endpoint store.MailAccount hands the sender, and the one an outgoing
-	// server is seeded from when an incoming account has none yet.
+	// mail_accounts.smtp_* is the second place the endpoint lands: it is
+	// copied into a new outgoing server when a user who has none saves a
+	// mailbox, so a stale port there reaches sending later on.
 	insertMailAccount := func(email, smtpHost string, smtpPort int, authType string) int64 {
 		t.Helper()
 		var id int64
@@ -73,7 +73,7 @@ func TestGmailSubmissionPortMigrationMovesOnlyThePinnedRows(t *testing.T) {
 		{"smtp_accounts", typedHost, 465, "a host the user typed is left alone"},
 		{"smtp_accounts", ownGmail, 465, "Gmail reached with a password is the user's own setting"},
 		{"smtp_accounts", alreadyMoved, 587, "a row already on the new port is untouched"},
-		{"mail_accounts", pinnedIncoming, 587, "the endpoint an incoming Google account submits through moves too"},
+		{"mail_accounts", pinnedIncoming, 587, "the endpoint a new outgoing server would be built from moves too"},
 		{"mail_accounts", passwordIncoming, 465, "an incoming account with a password keeps what it was given"},
 	} {
 		column := "port"

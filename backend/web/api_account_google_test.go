@@ -47,23 +47,38 @@ func TestSavingAGoogleAccountUsesGmailEndpointsAndStoresNoPassword(t *testing.T)
 	}
 }
 
-// The submission endpoint is pinned, so the port it names is the only one a
-// Google account can ever use. It has to be 587: the sender opens TLS directly
-// only on 465 and upgrades with STARTTLS everywhere else (backend/smtpclient/
-// sender.go), Google serves both, and 465 is the one hosters block against
-// spam from compromised machines -- which on such a network leaves a pinned
-// account timing out with nothing its owner can change.
-func TestGmailSubmissionIsPinnedToTheSTARTTLSPort(t *testing.T) {
-	var host string
-	var port int
-	var useTLS bool
-	password := "kept"
-	applyGmailSMTPEndpoint(&host, &port, &useTLS, &password)
-	if host != "smtp.gmail.com" || port != 587 || !useTLS {
-		t.Fatalf("pinned submission endpoint = %s:%d tls=%t, want smtp.gmail.com:587 with TLS", host, port, useTLS)
-	}
-	if password != "" {
-		t.Fatalf("a pinned Google endpoint kept a password: %q", password)
+// The submission host is fixed and the port defaults to 587: the sender opens
+// TLS directly only on 465 and upgrades with STARTTLS everywhere else
+// (backend/smtpclient/sender.go), Google serves both, and 465 is the one
+// hosters block against spam -- which on such a network left an account timing
+// out with nothing its owner could change. The choice stays available, because
+// a network that blocks 587 instead would be the same dead end reversed, and
+// it is a choice between Google's two ports rather than a free field: a third
+// port would be a typo, not a setting.
+func TestGmailSubmissionDefaultsTo587AndKeeps465WhenAsked(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		submitted int
+		want      int
+	}{
+		{name: "nothing chosen", submitted: 0, want: 587},
+		{name: "the default", submitted: 587, want: 587},
+		{name: "implicit TLS", submitted: 465, want: 465},
+		{name: "a port Google does not serve", submitted: 25, want: 587},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := "typed.example.test"
+			port := test.submitted
+			var useTLS bool
+			password := "kept"
+			applyGmailSMTPEndpoint(&host, &port, &useTLS, &password)
+			if host != "smtp.gmail.com" || port != test.want || !useTLS {
+				t.Fatalf("endpoint = %s:%d tls=%t, want smtp.gmail.com:%d with TLS", host, port, useTLS, test.want)
+			}
+			if password != "" {
+				t.Fatalf("a Google endpoint kept a password: %q", password)
+			}
+		})
 	}
 }
 

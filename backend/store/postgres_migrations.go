@@ -64,20 +64,22 @@ var postgresMigrations = []postgresMigration{
 	},
 	{
 		// Gmail submission moves from implicit TLS on 465 to STARTTLS on 587
-		// (gmailSMTPPort, backend/web/api_account.go). The endpoint is pinned
-		// rather than typed, so a server saved before this change keeps a port
-		// its owner cannot correct in the settings, and on a network that
+		// (gmailSMTPPort, backend/web/api_account.go). The endpoint was written
+		// by the server rather than typed, so an account saved before this
+		// change carries a port its owner never chose, and on a network that
 		// blocks 465 it fails with a connection that times out. Only rows that
-		// still carry the pinned endpoint are moved: a host somebody typed
-		// themselves is theirs.
+		// still carry the written endpoint are moved: a host somebody entered
+		// themselves is theirs. The move is not a one-way door -- 465 is
+		// offered in the settings for the network where it is 587 that is
+		// blocked -- so a row this puts on the wrong port can be put back.
 		//
-		// Both tables hold the endpoint. smtp_accounts is the outgoing server
-		// the settings page manages; mail_accounts.smtp_* is the submission
-		// endpoint an incoming account was saved with, which is what
-		// store.MailAccount hands the sender and what seeds a new outgoing
-		// server from an incoming one (seedSMTPAccountsFromMailAccounts).
-		// Moving one without the other would send on the old port, or copy it
-		// back into a freshly seeded row.
+		// Both tables hold the endpoint. smtp_accounts is the outgoing server,
+		// and it is the row every send builds its envelope from.
+		// mail_accounts.smtp_* is what an incoming account was saved with, and
+		// it is copied into a new outgoing server when a user who has none
+		// saves a mailbox (ensureMailAccountOnboarding, api_account.go).
+		// Moving only the first would let the old port arrive in smtp_accounts
+		// afterwards, through a row this migration can no longer reach.
 		Version: "0003-gmail-submission-port",
 		Statements: []string{
 			`UPDATE smtp_accounts SET port = 587
