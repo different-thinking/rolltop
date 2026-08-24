@@ -127,12 +127,17 @@ async function trimAssetCache(cache, limit) {
     const target = limit === null ? Math.max(MIN_CACHED_ASSETS, Math.floor(keys.length / 2)) : limit;
     let removable = keys.length - target;
     if (removable <= 0) return;
+    // Issued together rather than awaited one at a time: the keys are distinct,
+    // so the deletes are independent, and the pressure path can be dropping a
+    // dozen at once while waitUntil holds the worker open for all of them.
+    const deletions = [];
     for (const key of keys) {
       if (removable <= 0) break;
       if (isStaticAsset(new URL(key.url))) continue;
-      await cache.delete(key);
+      deletions.push(cache.delete(key));
       removable--;
     }
+    await Promise.all(deletions);
   } catch {
     // A cache that cannot be read or pruned still serves the page from the
     // network; there is nothing to recover here and nobody to report it to.
