@@ -26,6 +26,8 @@ import type {
   MessageOriginalSource,
   PluginSetting,
   SMTPAccount,
+  SMTPLogSession,
+  SMTPTestResult,
   ScopeMoveResponse,
   SearchExplanation,
   SearchIndexReport,
@@ -630,6 +632,14 @@ export const api = {
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/search-index/purge`, csrf),
   purgeFolderLocalReferences: (csrf: string, id: number) =>
     postJSON<{ ok: boolean; queued: boolean; run_id: number }>(`/api/account/folders/${id}/local-references/purge`, csrf),
+  // The SMTP tail is read while a send is failing, so it answers without an
+  // ETag and every call reaches the server: a revalidated answer would show
+  // the attempt before the one the reader just made.
+  smtpLog: (accountID = 0, limit = 10) =>
+    getJSON<{ sessions: SMTPLogSession[] }>(
+      `/api/smtp-log?limit=${limit}${accountID ? `&account_id=${accountID}` : ""}`),
+  testSMTPAccount: (csrf: string, id: number) =>
+    postJSON<SMTPTestResult>(`/api/account/smtp/${id}/test`, csrf),
   duplicateCopies: () => getJSON<DuplicateCopyReport>("/api/account/duplicates"),
   rescanDuplicateCopies: (csrf: string, after = "") =>
     postJSON<DuplicateScanResult>("/api/account/duplicates/rescan", csrf, { after }),

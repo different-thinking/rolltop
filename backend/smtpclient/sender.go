@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"net"
 	"net/mail"
@@ -23,6 +22,7 @@ import (
 	"rolltop/backend/buildinfo"
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/googletoken"
+	"rolltop/backend/smtplog"
 	"rolltop/backend/store"
 	"rolltop/backend/xoauth2"
 )
@@ -73,7 +73,17 @@ type Sender struct {
 	// Tokens mints Google access tokens for accounts that authenticate with
 	// OAuth. Nil only fails accounts that actually need it.
 	Tokens googletoken.TokenSource
+	// Log records the conversation of every attempt so the settings page can
+	// show why a send failed. A nil recorder records nothing, which is what a
+	// test that only asserts on delivery wants.
+	Log *smtplog.Recorder
 }
+
+// smtpHelloName is what Rolltop calls itself in EHLO. Submission servers
+// authenticate the client rather than trusting this name, and a made-up
+// hostname is likelier to be refused than the loopback name every client
+// library sends by default.
+const smtpHelloName = "localhost"
 
 type smtpIdleDeadlineConn struct {
 	net.Conn
@@ -111,34 +121,98 @@ func (s *Sender) Send(ctx context.Context, account store.MailAccount, msg Messag
 }
 
 // SendRaw sends an already-built RFC822 payload to all recipients using the configured SMTP account.
-func (s *Sender) SendRaw(ctx context.Context, account store.MailAccount, recipients []string, raw []byte) error {
+//
+// The whole attempt is recorded as one session even when it authenticates
+// twice: a refreshed token is a second login on a second connection, and a
+// reader looking at why their mail did not leave needs to see that as one
+// story rather than as two unexplained halves.
+func (s *Sender) SendRaw(ctx context.Context, account store.MailAccount, recipients []string, raw []byte) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	trace := s.Log.Start(smtplog.Session{
+		UserID:    account.UserID,
+		AccountID: account.SMTPAccountID,
+		Kind:      smtplog.KindSend,
+		Host:      account.SMTPHost,
+		Port:      account.SMTPPort,
+		Username:  account.SMTPUsername,
+		From:      account.Email,
+	})
+	defer func() { trace.Finish(err) }()
+	trace.Note(fmt.Sprintf("sending %d bytes to %d recipient(s)", len(raw), len(recipients)))
 	if len(recipients) == 0 {
 		return errors.New("message has no recipients")
 	}
 	if account.UsesGoogleOAuth() {
-		return s.sendWithGoogleToken(ctx, account, recipients, raw)
+		return s.sendWithGoogleToken(ctx, account, recipients, raw, trace)
 	}
 	password, err := mmcrypto.DecryptString(s.MasterKey, account.EncryptedSMTPPassword)
 	if err != nil {
 		return fmt.Errorf("decrypt SMTP password: %w", err)
 	}
-	return s.dialAndSend(ctx, account, passwordAuth(account, password), recipients, raw)
+	return s.dialAndSend(ctx, account, passwordAuth(account, password), recipients, raw, trace)
+}
+
+// Verify runs the half of a send that a misconfigured account fails in --
+// connect, greet, upgrade, authenticate -- and stops before offering a
+// message, so pressing the button in settings cannot deliver mail. It returns
+// the id of the recorded session so the page can show the conversation that
+// just happened rather than the newest one, which on a busy account is
+// somebody else's.
+func (s *Sender) Verify(ctx context.Context, account store.MailAccount) (sessionID int64, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	trace := s.Log.Start(smtplog.Session{
+		UserID:    account.UserID,
+		AccountID: account.SMTPAccountID,
+		Kind:      smtplog.KindTest,
+		Host:      account.SMTPHost,
+		Port:      account.SMTPPort,
+		Username:  account.SMTPUsername,
+		From:      account.Email,
+	})
+	defer func() { trace.Finish(err) }()
+	trace.Note("connection test: no message is offered")
+	if strings.TrimSpace(account.SMTPHost) == "" {
+		return trace.Ref(), errors.New("this outgoing server has no host configured")
+	}
+	if account.UsesGoogleOAuth() {
+		username, nameErr := smtpAuthUsername(account)
+		if nameErr != nil {
+			return trace.Ref(), nameErr
+		}
+		err = googletoken.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
+			func(token string) error {
+				return s.dialAndVerify(ctx, account, xoauth2.NewSMTPAuth(username, token), trace)
+			})
+		return trace.Ref(), err
+	}
+	password, decryptErr := mmcrypto.DecryptString(s.MasterKey, account.EncryptedSMTPPassword)
+	if decryptErr != nil {
+		return trace.Ref(), fmt.Errorf("decrypt SMTP password: %w", decryptErr)
+	}
+	err = s.dialAndVerify(ctx, account, passwordAuth(account, password), trace)
+	return trace.Ref(), err
 }
 
 // sendWithGoogleToken mirrors the IMAP path: one retry against a forcibly
 // refreshed token. Retrying is safe because authentication precedes MAIL FROM,
 // so a rejected login cannot have delivered anything.
-func (s *Sender) sendWithGoogleToken(ctx context.Context, account store.MailAccount, recipients []string, raw []byte) error {
+func (s *Sender) sendWithGoogleToken(ctx context.Context, account store.MailAccount, recipients []string, raw []byte, trace *smtplog.Recording) error {
 	username, err := smtpAuthUsername(account)
 	if err != nil {
 		return err
 	}
+	attempts := 0
 	return googletoken.WithFreshToken(ctx, s.Tokens, account.UserID, account.GoogleConnectionID,
 		func(token string) error {
-			return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(username, token), recipients, raw)
+			attempts++
+			if attempts > 1 {
+				trace.Note("retrying on a new connection with a refreshed Google token")
+			}
+			return s.dialAndSend(ctx, account, xoauth2.NewSMTPAuth(username, token), recipients, raw, trace)
 		})
 }
 
@@ -167,86 +241,124 @@ func smtpAuthUsername(account store.MailAccount) (string, error) {
 	return name, nil
 }
 
-func (s *Sender) dialAndSend(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte) error {
+func (s *Sender) dialAndSend(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte, trace *smtplog.Recording) error {
+	conn, err := s.dial(ctx, account, trace)
+	if err != nil {
+		return err
+	}
+	return sendRawOnConn(ctx, account, auth, recipients, raw, conn, trace)
+}
+
+// dialAndVerify is the connection test: the same login the send path performs,
+// ended with QUIT instead of a message.
+func (s *Sender) dialAndVerify(ctx context.Context, account store.MailAccount, auth smtp.Auth, trace *smtplog.Recording) error {
+	conn, err := s.dial(ctx, account, trace)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	stopContext := watchSMTPContext(ctx, conn)
+	defer stopContext()
+	conversation, err := startConversation(account, auth, conn, trace)
+	if err != nil {
+		return err
+	}
+	conversation.quit()
+	return nil
+}
+
+// dial opens the connection and, for implicit TLS, completes the handshake.
+// Both the dial and the handshake are recorded: an account pointed at a port
+// that answers nothing, or one speaking TLS to a plaintext port, fails here and
+// has nothing else to show for it.
+func (s *Sender) dial(ctx context.Context, account store.MailAccount, trace *smtplog.Recording) (net.Conn, error) {
 	timeout := s.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
 	addr := net.JoinHostPort(account.SMTPHost, fmt.Sprintf("%d", account.SMTPPort))
+	trace.Note("connecting to " + addr)
 	dialer := &net.Dialer{Timeout: timeout}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("connect to SMTP server %s: %w", addr, err)
+		trace.Note("connect failed: " + err.Error())
+		return nil, fmt.Errorf("connect to SMTP server %s: %w", addr, err)
 	}
+	trace.Note("connected")
 	deadlineConn := &smtpIdleDeadlineConn{Conn: rawConn, timeout: timeout}
-	var conn net.Conn = deadlineConn
-	if account.SMTPUseTLS && account.SMTPPort == 465 {
-		// net/smtp recognizes implicit TLS only when it receives the concrete
-		// *tls.Conn. Keep the deadline wrapper underneath the TLS connection.
-		tlsConn := tls.Client(deadlineConn, &tls.Config{ServerName: account.SMTPHost, MinVersion: tls.VersionTLS12})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			_ = tlsConn.Close()
-			return fmt.Errorf("start SMTP TLS: %w", err)
-		}
-		conn = tlsConn
+	if !account.SMTPUseTLS || account.SMTPPort != 465 {
+		return deadlineConn, nil
 	}
-	return sendRawOnConn(ctx, account, auth, recipients, raw, conn)
+	// Implicit TLS: the handshake precedes the greeting, so it is done here
+	// rather than by the conversation. The deadline wrapper stays underneath
+	// the TLS connection so a stalled handshake is still bounded.
+	tlsConn := tls.Client(deadlineConn, &tls.Config{ServerName: account.SMTPHost, MinVersion: tls.VersionTLS12})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		trace.Note("TLS handshake failed: " + err.Error())
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("start SMTP TLS: %w", err)
+	}
+	trace.Note("TLS established: " + tlsSummary(tlsConn.ConnectionState()))
+	return tlsConn, nil
 }
 
-func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte, conn net.Conn) error {
+func sendRawOnConn(ctx context.Context, account store.MailAccount, auth smtp.Auth, recipients []string, raw []byte, conn net.Conn, trace *smtplog.Recording) error {
 	defer conn.Close()
 	stopContext := watchSMTPContext(ctx, conn)
 	defer stopContext()
 
-	c, err := smtp.NewClient(conn, account.SMTPHost)
+	conversation, err := startConversation(account, auth, conn, trace)
 	if err != nil {
-		return fmt.Errorf("initialize SMTP client for %s: %w", account.SMTPHost, err)
-	}
-	defer c.Close()
-	if err := c.Hello("localhost"); err != nil {
-		return fmt.Errorf("SMTP hello: %w", err)
-	}
-	if account.SMTPUseTLS && account.SMTPPort != 465 {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: account.SMTPHost, MinVersion: tls.VersionTLS12}); err != nil {
-				return fmt.Errorf("start SMTP TLS: %w", err)
-			}
-		} else {
-			return errors.New("SMTP server does not advertise STARTTLS")
-		}
-	}
-	if auth != nil {
-		if err := c.Auth(auth); err != nil {
-			return googletoken.AuthError{Err: fmt.Errorf("authenticate to SMTP server: %w", err)}
-		}
+		return err
 	}
 	fromAddr, err := firstAddress(account.Email)
 	if err != nil {
 		return err
 	}
-	if err := c.Mail(fromAddr); err != nil {
-		return fmt.Errorf("SMTP MAIL FROM: %w", err)
+	if err := conversation.mail(fromAddr); err != nil {
+		return err
 	}
 	for _, recipient := range recipients {
-		if err := c.Rcpt(recipient); err != nil {
-			return fmt.Errorf("SMTP RCPT TO: %w", err)
+		if err := conversation.rcpt(recipient); err != nil {
+			return err
 		}
 	}
-	w, err := c.Data()
+	// The reply to the end of DATA is the server's acceptance. Closing the
+	// session without waiting for a QUIT reply avoids a round trip that cannot
+	// change the outcome and cannot misreport an accepted message as failed.
+	return conversation.data(raw)
+}
+
+// startConversation is everything both a send and a connection test do before
+// they differ: greeting, EHLO, the TLS upgrade the account asks for, and
+// authentication.
+func startConversation(account store.MailAccount, auth smtp.Auth, conn net.Conn, trace *smtplog.Recording) (*conversation, error) {
+	// Whether the connection is already encrypted is asked of the connection
+	// itself rather than re-derived from the port, so the answer cannot drift
+	// from what dial actually did.
+	_, encrypted := conn.(*tls.Conn)
+	conversation, err := newConversation(conn, account.SMTPHost, encrypted, trace)
 	if err != nil {
-		return fmt.Errorf("SMTP DATA: %w", err)
+		return nil, err
 	}
-	if _, err := io.Copy(w, bytes.NewReader(raw)); err != nil {
-		_ = w.Close()
-		return fmt.Errorf("write SMTP message: %w", err)
+	if err := conversation.hello(smtpHelloName); err != nil {
+		return nil, err
 	}
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("finish SMTP message: %w", err)
+	if account.SMTPUseTLS && !conversation.tls {
+		if _, ok := conversation.supports("STARTTLS"); !ok {
+			return nil, errors.New("SMTP server does not advertise STARTTLS")
+		}
+		config := &tls.Config{ServerName: account.SMTPHost, MinVersion: tls.VersionTLS12}
+		if err := conversation.startTLS(config, smtpHelloName); err != nil {
+			return nil, err
+		}
 	}
-	// A successful DATA close includes the server's final acceptance response.
-	// Closing the session via the deferred client close avoids waiting on QUIT
-	// after delivery and cannot misreport an accepted message as failed.
-	return nil
+	if auth != nil {
+		if err := conversation.auth(auth); err != nil {
+			return nil, googletoken.AuthError{Err: err}
+		}
+	}
+	return conversation, nil
 }
 
 func watchSMTPContext(ctx context.Context, conn net.Conn) func() {

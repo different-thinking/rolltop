@@ -1989,3 +1989,135 @@
   gap: 10px;
   margin-top: 16px;
 }
+
+// SMTP traffic panel. The transcript is read the way a terminal is read, so it
+// keeps a monospaced grid: timestamp, who spoke, what was said. Direction is
+// carried by colour and by the arrow beside it, never by colour alone.
+.smtp-traffic {
+  h2 {
+    margin: 0 0 4px;
+    font-size: 14px;
+  }
+}
+
+.smtp-traffic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.smtp-traffic-result.is-ok {
+  color: var(--ok);
+}
+
+.smtp-traffic-sessions {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+
+  > li {
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  > li:first-child {
+    border-top: 0;
+  }
+}
+
+.smtp-traffic-session {
+  display: grid;
+  // The state and the time are fixed columns so a list of attempts reads down
+  // its own edge instead of stepping in and out with each host name.
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  time {
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+}
+
+.smtp-traffic-session-title {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smtp-traffic-session-state {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.smtp-traffic-sessions > li.is-bad .smtp-traffic-session-state {
+  color: var(--danger);
+}
+
+.smtp-traffic-sessions > li.is-ok .smtp-traffic-session-state {
+  color: var(--ok);
+}
+
+.smtp-traffic-session-error {
+  margin: 2px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.smtp-traffic-lines {
+  max-height: 420px;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  list-style: none;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+
+  li {
+    display: grid;
+    grid-template-columns: minmax(0, 11em) 1.2em minmax(0, 1fr);
+    gap: 8px;
+    padding: 2px 0;
+  }
+
+  li.is-server {
+    color: var(--ok);
+  }
+
+  li.is-note {
+    color: var(--muted);
+  }
+
+  time {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  pre {
+    margin: 0;
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.smtp-traffic-arrow {
+  color: var(--muted);
+}
