@@ -59,6 +59,16 @@ type StorageStats struct {
 	// brings them back, and a page that does not say so leaves a number that
 	// never moves with no explanation.
 	FoldersPurged int64
+	// UnsyncedSearchFolders counts folders included in search that hold no mail
+	// here and are only synced on request, and UnsyncedSearchMessages is what
+	// those folders last reported holding on the server. They are not part of the shortfall below and
+	// cannot be: coverage compares the index against the messages table, and
+	// mail that was never fetched is in neither, so a mailbox missing whole
+	// folders reports full coverage. UnsyncedSearchFolderNames names a few of
+	// them, because the answer here is a folder setting rather than a rebuild.
+	UnsyncedSearchFolders     int64
+	UnsyncedSearchMessages    int64
+	UnsyncedSearchFolderNames []string
 	// SearchCoverageMeasured says both sides of the shortfall - the documents in
 	// the index and the mail that should be in it - were actually read. A page
 	// that announces a shortfall built from a figure that failed is announcing a
@@ -208,6 +218,14 @@ func (s *Server) storageStatsForUser(userID int64) StorageStats {
 		stats.FoldersPurged, err = s.store.CountMailboxesWithPurgedSearchIndexForUser(context.Background(), userID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("folders with a purged search index: %v", err))
+		}
+		unsynced, err := s.store.ListUnsyncedSearchFoldersForUser(context.Background(), userID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("folders included in search but not synced: %v", err))
+		} else {
+			stats.UnsyncedSearchFolders = unsynced.Folders
+			stats.UnsyncedSearchMessages = unsynced.Messages
+			stats.UnsyncedSearchFolderNames = unsynced.Names
 		}
 	}
 	stats.BlobBytes, err = pathSize(blobPath)

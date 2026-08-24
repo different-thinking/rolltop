@@ -616,6 +616,21 @@ func normalizeSyncMode(mode string) string {
 	}
 }
 
+// archiveMailboxRoleBlocked reports whether a folder's role rules it out as an
+// Archive destination. Archive has no role of its own, so this blocks only the
+// roles that already mean something else (Inbox, Sent, Drafts, Trash, Junk);
+// a plain folder or one carrying "all" (Gmail's All Mail) both stay eligible.
+// The identity Archive picker and the swipe-settings Archive picker share this
+// so a folder valid in one is always valid in the other.
+func archiveMailboxRoleBlocked(role string) bool {
+	switch normalizeMailboxRole(role) {
+	case "inbox", "sent", "drafts", "trash", "junk":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeMailboxRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "inbox":
@@ -642,6 +657,161 @@ func normalizeMailboxIcon(icon string, name string, role string) string {
 		return icon
 	}
 	return defaultMailboxIcon(name, role)
+}
+
+// UnsyncedSearchFolders describes folders a reader has included in search that
+// no sync ever fills. Names carries a few of them so a page can say which.
+type UnsyncedSearchFolders struct {
+	Folders int64
+	// Messages is what those folders last reported holding on the server, and
+	// is a floor rather than a total: a folder whose status has never been
+	// checked reports nothing while still holding mail.
+	Messages int64
+	Names    []string
+}
+
+// maxUnsyncedSearchFolderNames bounds the names a page is handed. Someone with
+// forty manual folders needs the count and an example, not a list that is
+// longer than the panel it appears in.
+const maxUnsyncedSearchFolderNames = 5
+
+// ListUnsyncedSearchFoldersForUser reports the folders that are marked for
+// full-text search and are waiting for a sync that only happens on request.
+//
+// The two settings are independent and only one of them is on by default:
+// include_in_search starts true for every folder discovered, while
+// defaultMailboxSyncMode gives automatic sync to INBOX alone. A folder in that
+// state is included in a search of mail that never arrives, which is invisible
+// from every figure the storage page otherwise shows: coverage compares the
+// index against the messages table, and a folder that was never fetched has no
+// rows in it. Search reports full coverage of a mailbox missing whole folders.
+//
+// Two exclusions keep the answer actionable rather than merely true:
+//
+//   - Folders holding local mail. A manual folder someone syncs by hand is
+//     genuinely searchable up to its last sync, and naming it would tell them
+//     their sent mail cannot be found while they are looking at it.
+//   - Folders set to never. That is a decision rather than an oversight, and
+//     for the folders that carry it by default - Gmail's label views - it is
+//     the right one: their mail is already stored in the real folder it also
+//     appears in, so it is searchable, and syncing them would mirror most of
+//     the mailbox a second time. Reporting them would push a reader toward
+//     doubling their database to find mail they can already find.
+func (s *Store) ListUnsyncedSearchFoldersForUser(ctx context.Context, userID int64) (UnsyncedSearchFolders, error) {
+	var out UnsyncedSearchFolders
+	if userID <= 0 {
+		return out, fmt.Errorf("user id must be positive")
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return out, err
+	}
+	// Deliberately not joined to messages: a grouped count over the whole
+	// mailbox is the expensive half of the folder listing, and an EXISTS per
+	// folder answers the only question asked of it here.
+	//
+	// A folder the server has told us is empty is not a folder search is
+	// missing anything in. Without the status clause every empty folder someone
+	// keeps - and a status check is what proves it empty - reads as mail that
+	// cannot be found, which is the kind of false alarm that teaches a reader to
+	// ignore the whole notice. So: never checked (nothing is known about what it
+	// holds) or known to hold something.
+	rows, err := db.QueryContext(ctx, `SELECT mb.account_id, mb.name, mb.sync_mode, mb.remote_message_count
+		FROM mailboxes mb
+		WHERE mb.user_id = ? AND mb.include_in_search = 1
+			AND (mb.status_checked_at = 0 OR mb.remote_message_count > 0)
+			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.user_id = mb.user_id AND m.mailbox_id = mb.id)
+		ORDER BY mb.account_id, lower(mb.name)`, userID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	type candidate struct {
+		accountID int64
+		name      string
+		syncMode  string
+		remote    int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.accountID, &c.name, &c.syncMode, &c.remote); err != nil {
+			return out, err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	// inherit resolves against parent folders, and a parent is usually not a
+	// candidate itself - it holds mail. Every folder's mode is read in one go
+	// rather than one lookup per parent per candidate, which is a query count
+	// set by how deep someone nests folders. This is the mailboxes table with
+	// no join and no message access: one row per folder, and the same rows the
+	// query above already visited.
+	modes, err := mailboxSyncModesForUser(ctx, db, userID)
+	if err != nil {
+		return out, err
+	}
+	for _, c := range candidates {
+		if resolveInheritedSyncMode(c.name, modes[c.accountID]) != "manual" {
+			continue
+		}
+		out.Folders++
+		out.Messages += max(c.remote, 0)
+		if len(out.Names) < maxUnsyncedSearchFolderNames {
+			out.Names = append(out.Names, c.name)
+		}
+	}
+	return out, nil
+}
+
+// mailboxSyncModesForUser reads every folder's normalized sync mode, keyed by
+// account and name. One row per folder and no join: the whole table for a
+// tenant is what one page of folder settings already lists.
+func mailboxSyncModesForUser(ctx context.Context, db *sql.DB, userID int64) (map[int64]map[string]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT account_id, name, sync_mode FROM mailboxes WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	modes := make(map[int64]map[string]string, 1)
+	for rows.Next() {
+		var accountID int64
+		var name, mode string
+		if err := rows.Scan(&accountID, &name, &mode); err != nil {
+			return nil, err
+		}
+		if modes[accountID] == nil {
+			modes[accountID] = map[string]string{}
+		}
+		modes[accountID][name] = normalizeSyncMode(mode)
+	}
+	return modes, rows.Err()
+}
+
+// resolveInheritedSyncMode walks a folder's parents for the mode it inherits,
+// against a map holding every folder of that account. It is the in-memory twin
+// of EffectiveMailboxSyncMode and answers the same way: the first parent with a
+// mode of its own decides, a parent that does not exist is skipped, and a chain
+// that names nothing resolves to auto.
+func resolveInheritedSyncMode(name string, modes map[string]string) string {
+	mode := modes[name]
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode != "inherit" {
+		return mode
+	}
+	for _, parent := range mailboxParentNames(name) {
+		if parentMode, ok := modes[parent]; ok && parentMode != "inherit" {
+			return parentMode
+		}
+	}
+	return "auto"
 }
 
 func defaultMailboxSyncMode(name, role string, attributes []string) string {

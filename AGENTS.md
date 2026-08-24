@@ -366,6 +366,23 @@ site and in review.
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- **An attachment row keeps its ID for as long as the message holds that part.**
+  `/attachments/<id>/download`, the inline `cid:` rewrite and the
+  `attachment_preview` route all address an attachment by row ID, and a mail
+  view keeps those URLs for as long as it is open. Reindexing reparses the same
+  MIME parts, so rewriting the rows by deleting and inserting them renumbered
+  attachments nothing about had changed and turned every URL already on screen
+  into a 404 — while the attachment-index worker was running, which is most of a
+  first sync. `Store.ReplaceAttachmentsForMessage` is the only way to write a
+  reparsed message's rows: it matches rows to parts by position, so a reparse
+  updates in place and only a message that really gained or lost a part inserts
+  or deletes anything. Do not reintroduce a bulk delete of a message's
+  attachments ahead of recreating them. Rows follow the parse **down** as well:
+  a reparse that finds no files removes them, because a security plugin that
+  drops attachments (`transform.DropAttachments`) leaves mail stored before it
+  was enabled with rows for parts nothing means to serve any more. Only a parse
+  that *failed* is excluded — it decided nothing, so it must not be read as an
+  attachment-free message.
 - `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
   from stored data only. A pending row means one of two things and only the
   index can tell them apart, so the maintenance worker asks it
@@ -413,6 +430,19 @@ site and in review.
   holds must ask for a bigger page, not for more pages: every page re-ranks the
   whole match set, so the loops collecting conversations or resolving a
   whole-filter delete pay the full cost again on each round.
+- On the Postgres backend the ranking is what the text said; everything else
+  multiplies into it, bounded. `ts_rank_cd` answers on a scale the query's width
+  sets - a two-term query measures 0.51 with both terms in the subject and 0.033
+  for a body mention - so a sender-history boost of up to 8 or a recency bucket
+  of up to 1.6, added, is not a nudge but the ranking, and the result page
+  becomes the senders someone reads most with the search term acting as a
+  filter. Each nudge is normalized to at most one doubling and multiplied in, so
+  it reorders comparable matches and never promotes a passing mention over a
+  subject line. Membership follows the same rule structurally rather than
+  arithmetically: an exact lexeme match sorts ahead of one reached by
+  similarity, because a weight is allowed to be zero and the arithmetic would
+  have to be re-argued after every change to one. Never add a ranking term to
+  that score without deciding, in the same change, what bounds it.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the

@@ -70,27 +70,32 @@ func (s *Store) ArchiveMailboxesForUser(ctx context.Context, userID int64) ([]Sw
 	// The account comes from the chosen folder, not from the identity's IMAP
 	// server field: that field may be left on Automatic, and a choice that named
 	// a real folder would otherwise be stored and then silently ignored.
-	identityRows, err := db.QueryContext(ctx, `SELECT mb.account_id, i.archive_mailbox_id
+	//
+	// Eligibility is re-checked here in Go via archiveMailboxRoleBlocked, the
+	// same helper the save-time validators use, rather than a second copy of
+	// the blocked-role list in SQL: a folder that has since become Trash or
+	// Sent stops standing in as an Archive target either way, but there is
+	// only one place that says which roles disqualify it.
+	identityRows, err := db.QueryContext(ctx, `SELECT mb.account_id, i.archive_mailbox_id, mb.role
 		FROM mail_identities i
 		JOIN mailboxes mb ON mb.user_id = i.user_id AND mb.id = i.archive_mailbox_id
 			AND (i.imap_account_id = 0 OR mb.account_id = i.imap_account_id)
-			AND mb.role NOT IN ('inbox', 'sent', 'drafts', 'trash', 'junk')
 		WHERE i.user_id = ? AND i.archive_mailbox_id > 0
 		ORDER BY i.is_primary DESC, i.id ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
-	if err := scanAccountMailboxPairs(identityRows, byAccount); err != nil {
+	if err := scanArchiveMailboxCandidates(identityRows, byAccount); err != nil {
 		return nil, err
 	}
-	swipeRows, err := db.QueryContext(ctx, `SELECT sam.account_id, sam.mailbox_id
+	swipeRows, err := db.QueryContext(ctx, `SELECT sam.account_id, sam.mailbox_id, mb.role
 		FROM swipe_archive_mailboxes sam
-		JOIN mailboxes mb ON mb.user_id = sam.user_id AND mb.id = sam.mailbox_id AND mb.role = ''
+		JOIN mailboxes mb ON mb.user_id = sam.user_id AND mb.id = sam.mailbox_id
 		WHERE sam.user_id = ? ORDER BY sam.account_id`, userID)
 	if err != nil {
 		return nil, err
 	}
-	if err := scanAccountMailboxPairs(swipeRows, byAccount); err != nil {
+	if err := scanArchiveMailboxCandidates(swipeRows, byAccount); err != nil {
 		return nil, err
 	}
 	accountIDs := make([]int64, 0, len(byAccount))
@@ -105,14 +110,19 @@ func (s *Store) ArchiveMailboxesForUser(ctx context.Context, userID int64) ([]Sw
 	return out, nil
 }
 
-// scanAccountMailboxPairs fills in accounts the map does not cover yet, so the
-// first source scanned wins and later ones only fill gaps.
-func scanAccountMailboxPairs(rows *sql.Rows, byAccount map[int64]int64) error {
+// scanArchiveMailboxCandidates fills in accounts the map does not cover yet
+// with folders that still qualify as an Archive destination, so the first
+// source scanned wins and later ones only fill gaps.
+func scanArchiveMailboxCandidates(rows *sql.Rows, byAccount map[int64]int64) error {
 	defer rows.Close()
 	for rows.Next() {
 		var accountID, mailboxID int64
-		if err := rows.Scan(&accountID, &mailboxID); err != nil {
+		var role string
+		if err := rows.Scan(&accountID, &mailboxID, &role); err != nil {
 			return err
+		}
+		if archiveMailboxRoleBlocked(role) {
+			continue
 		}
 		if _, taken := byAccount[accountID]; !taken {
 			byAccount[accountID] = mailboxID
@@ -146,11 +156,12 @@ func (s *Store) GetSwipePreferences(ctx context.Context, userID int64) (SwipePre
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return SwipePreferences{}, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT mappings.account_id, mappings.mailbox_id
+	rows, err := db.QueryContext(ctx, `SELECT mappings.account_id, mappings.mailbox_id, mailboxes.role
 		FROM swipe_archive_mailboxes AS mappings
 		JOIN mailboxes ON mailboxes.user_id = mappings.user_id
 			AND mailboxes.account_id = mappings.account_id AND mailboxes.id = mappings.mailbox_id
-		WHERE mappings.user_id = ? AND mailboxes.role = '' ORDER BY mappings.account_id`, userID)
+		WHERE mappings.user_id = ?
+		ORDER BY mappings.account_id`, userID)
 	if err != nil {
 		return SwipePreferences{}, err
 	}
@@ -158,8 +169,14 @@ func (s *Store) GetSwipePreferences(ctx context.Context, userID int64) (SwipePre
 	prefs.ArchiveMailboxes = []SwipeArchiveMailbox{}
 	for rows.Next() {
 		var target SwipeArchiveMailbox
-		if err := rows.Scan(&target.AccountID, &target.MailboxID); err != nil {
+		var role string
+		if err := rows.Scan(&target.AccountID, &target.MailboxID, &role); err != nil {
 			return SwipePreferences{}, err
+		}
+		// Re-checked against archiveMailboxRoleBlocked rather than filtered in
+		// SQL, so this stays the one place that decides Archive eligibility.
+		if archiveMailboxRoleBlocked(role) {
+			continue
 		}
 		prefs.ArchiveMailboxes = append(prefs.ArchiveMailboxes, target)
 	}
@@ -288,7 +305,7 @@ func (s *Store) validateSwipeArchiveMailboxes(ctx context.Context, userID int64,
 		if mailbox.AccountID != account.ID {
 			return nil, fmt.Errorf("%w: archive mailbox belongs to another account", ErrInvalidSwipePreferences)
 		}
-		if mailbox.Role != "" {
+		if archiveMailboxRoleBlocked(mailbox.Role) {
 			return nil, fmt.Errorf("%w: archive destination must be a regular folder", ErrInvalidSwipePreferences)
 		}
 		byAccount[target.AccountID] = target.MailboxID
