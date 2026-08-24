@@ -366,6 +366,23 @@ site and in review.
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
+- **An attachment row keeps its ID for as long as the message holds that part.**
+  `/attachments/<id>/download`, the inline `cid:` rewrite and the
+  `attachment_preview` route all address an attachment by row ID, and a mail
+  view keeps those URLs for as long as it is open. Reindexing reparses the same
+  MIME parts, so rewriting the rows by deleting and inserting them renumbered
+  attachments nothing about had changed and turned every URL already on screen
+  into a 404 — while the attachment-index worker was running, which is most of a
+  first sync. `Store.ReplaceAttachmentsForMessage` is the only way to write a
+  reparsed message's rows: it matches rows to parts by position, so a reparse
+  updates in place and only a message that really gained or lost a part inserts
+  or deletes anything. Do not reintroduce a bulk delete of a message's
+  attachments ahead of recreating them. Rows follow the parse **down** as well:
+  a reparse that finds no files removes them, because a security plugin that
+  drops attachments (`transform.DropAttachments`) leaves mail stored before it
+  was enabled with rows for parts nothing means to serve any more. Only a parse
+  that *failed* is excluded — it decided nothing, so it must not be read as an
+  attachment-free message.
 - `attachment_indexed_at = 0` **is** a reindex queue, and one that publishes
   from stored data only. A pending row means one of two things and only the
   index can tell them apart, so the maintenance worker asks it
