@@ -122,7 +122,7 @@ RUN set -eu; \
 	for pid in $pids; do wait "$pid" || status=1; done; \
 	[ "$status" = 0 ] || exit "$status"; \
 	want="$(ls -d plugins/*/backend | wc -l)"; \
-	got="$(ls /out/plugins/*/backend/*.so | wc -l)"; \
+	got="$(ls /out/plugins/*/backend/*.so 2>/dev/null | wc -l)"; \
 	if [ "$want" != "$got" ]; then \
 		echo "expected $want plugin backends, built $got" >&2; \
 		exit 1; \

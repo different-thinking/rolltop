@@ -94,7 +94,18 @@ for (const entry of readdirSync(pluginsRoot, { withFileTypes: true })) {
     wanted.add("migrations");
   }
 
-  for (const relative of wanted) {
+  // A manifest can declare two files whose directories nest — `matrix_theme`
+  // names both `frontend_dist/index.js` and
+  // `frontend_dist/themes/matrix/theme.css`, so `frontend_dist` and the theme
+  // directory inside it both end up wanted, and the inner one would be copied
+  // once as part of its parent and once again on its own. Keep only the
+  // directories that no other wanted directory already contains.
+  const all = Array.from(wanted);
+  const outermost = all.filter(
+    (relative) => !all.some((other) => other !== relative && relative.startsWith(`${other}/`))
+  );
+
+  for (const relative of outermost) {
     const source = path.join(pluginsRoot, entry.name, relative);
     if (!existsSync(source)) {
       missing.push(`${entry.name}: ${relative}`);

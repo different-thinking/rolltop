@@ -26,7 +26,14 @@ function iconShimPlugin(): Plugin {
       // skipping it here costs nothing and removes any chance of a cycle.
       if (!importer || importer === shim) return null;
       const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      return resolved && path.resolve(resolved.id) === iconModule ? shim : null;
+      if (!resolved) return null;
+      // A resolved id can carry a `?import`-style suffix, and comparing one of
+      // those against a plain path fails quietly — which here would mean the
+      // whole Phosphor barrel back in the bundle with the redirect apparently
+      // in place. Same silent-bypass shape as the specifier pattern this
+      // replaced, so it is worth not relying on the suffix never appearing.
+      const file = resolved.id.split("?")[0].split("#")[0];
+      return path.resolve(file) === iconModule ? shim : null;
     }
   };
 }
