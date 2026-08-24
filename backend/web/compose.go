@@ -1157,6 +1157,7 @@ func smtpEnvelopeForIdentity(identity composeIdentity, account store.SMTPAccount
 	return store.MailAccount{
 		UserID:                account.UserID,
 		Email:                 identity.Email,
+		SMTPAccountID:         account.ID,
 		SMTPHost:              account.Host,
 		SMTPPort:              account.Port,
 		SMTPUsername:          account.Username,

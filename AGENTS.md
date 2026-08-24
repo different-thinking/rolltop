@@ -134,6 +134,32 @@ site and in review.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,
   authorization codes, session tokens, or raw message bodies.
+- **The SMTP conversation is recorded and shown to the user whose mail it is**
+  (`backend/smtplog`, the panel on the outgoing-server settings page). A failed
+  send used to exist for that user as one sentence in the composer, with the
+  reply that named the reason -- the `535`, the missing `STARTTLS`, the port
+  that answers nothing -- written only to a container log a hosted operator
+  cannot read. Three properties keep that safe and must survive any change to
+  it. Redaction happens in the recorder, not at its call sites, so no future
+  caller can forget it: an `AUTH` command keeps its mechanism and loses its
+  payload, the base64 blobs of the exchange are recorded as having been sent
+  and never as what they held, and a message payload is recorded as a byte
+  count -- the prohibition above is not relaxed because the text came off the
+  wire. Every read names a user, and a session id belonging to somebody else
+  reads back as a session that does not exist. And the tail is bounded per user
+  and lives only in memory: it is a diagnostic aid, dropped on restart, never a
+  row in the database.
+- `smtpclient` speaks the SMTP exchange itself rather than driving `net/smtp`,
+  and that is the whole reason the transcript exists. `net/smtp` performs the
+  `STARTTLS` upgrade inside itself and hands the plaintext to a connection no
+  wrapper can reach, so everything after the upgrade -- the second EHLO, the
+  `AUTH` result, the reply to `MAIL FROM` and to the message -- is invisible to
+  anything layered under it. The SASL loop still runs against a `net/smtp`
+  `Auth`, so `PlainAuth` and the XOAUTH2 mechanism are unchanged; do not
+  reintroduce `smtp.Client` for the sending path. The connection test
+  (`Sender.Verify`) is that same login stopped before `MAIL FROM`: a test that
+  offers a message would deliver one, and pressing a button in settings must
+  not write to anybody.
 - Keep IMAP credentials and OAuth tokens encrypted with `ROLLTOP_MASTER_KEY`.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.

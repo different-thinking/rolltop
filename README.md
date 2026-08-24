@@ -368,6 +368,30 @@ configuration is read, so a port conflict or an unusable `ROLLTOP_MASTER_KEY`
 also lands in `/data/crash.log`. The deliberate restart for search index
 recovery (below) is not a crash and is not recorded as one.
 
+### Outgoing mail that fails
+
+A send that fails answers the composer with one sentence and writes the reason
+to the container log, which on a hosted installation nobody can read. **Settings
+→ Mail → the outgoing server** therefore shows the SMTP conversation itself:
+
+- **Test connection** opens a connection to that server, upgrades it if TLS is
+  configured, and signs in — then hangs up without offering a message, so
+  pressing it cannot deliver mail to anybody. The transcript of that exchange
+  appears immediately.
+- Below it, the same page lists the recent attempts made by real sends,
+  newest first, each expanding into the conversation it produced: the greeting,
+  the extensions the server advertised, the TLS upgrade, the reply to `AUTH`,
+  and the reply to the message. That is where a rejected password (`535`), a
+  refused relay (`554`), a port that accepts a connection and says nothing, or
+  a server that does not offer `STARTTLS` names itself.
+
+The recorded traffic never contains a credential or a message: the `AUTH`
+exchange is redacted to its mechanism and the payload is recorded as a byte
+count. It is a diagnostic tail, not an audit trail — a short, per-user,
+in-memory record that is dropped when Rolltop restarts and is never written to
+the database. Each user sees only their own attempts; nothing here is an admin
+view.
+
 ### Database Unavailable
 
 When PostgreSQL is unreachable — restarting, failing over, or behind a broken

@@ -37,6 +37,7 @@ import (
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/smtpclient"
+	"rolltop/backend/smtplog"
 	"rolltop/backend/store"
 	"rolltop/backend/syncer"
 	"rolltop/backend/web"
@@ -937,12 +938,16 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	// way, over the same manager.
 	googleCalendar := googlecalendar.NewSyncer(db, googleAuth, googleAuth, googleauth.ScopeCalendar)
 	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
+	// One recorder for the whole process: a forward sent by the syncer and a
+	// message sent from the browser use different senders, and the page that
+	// shows why a send failed must not depend on which one made the attempt.
+	smtpTraffic := smtplog.NewRecorder()
 	syncSvc := &syncer.Service{
 		Store:         db,
 		Blobs:         blobStore,
 		Search:        searchSvc,
 		Fetcher:       imapFetcher,
-		Sender:        &smtpclient.Sender{MasterKey: cfg.MasterKey, Tokens: googleAuth},
+		Sender:        &smtpclient.Sender{MasterKey: cfg.MasterKey, Tokens: googleAuth, Log: smtpTraffic},
 		BlobRetention: cfg.BlobRetention,
 		PluginDir:     cfg.PluginDir,
 		MasterKey:     cfg.MasterKey,
@@ -955,6 +960,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		Search:           searchSvc,
 		Syncer:           syncSvc,
 		SyncRunner:       syncRunner,
+		SMTPLog:          smtpTraffic,
 		MasterKey:        cfg.MasterKey,
 		DataDir:          cfg.DataDir,
 		DatabaseTarget:   pgdsn.Describe(cfg.DatabaseURL),

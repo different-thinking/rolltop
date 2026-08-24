@@ -832,16 +832,24 @@ func firstPositive(values ...int) int {
 }
 
 func (s *Server) apiSMTPAccountPath(w http.ResponseWriter, r *http.Request, path string) {
-	id, err := strconv.ParseInt(strings.Trim(path, "/"), 10, 64)
+	head, rest, _ := strings.Cut(strings.Trim(path, "/"), "/")
+	id, err := strconv.ParseInt(head, 10, 64)
 	if err != nil || id <= 0 {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodDelete {
-		methodNotAllowed(w)
-		return
+	switch rest {
+	case "":
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		s.apiDeleteSMTPAccount(w, r, id)
+	case "test":
+		s.apiTestSMTPAccount(w, r, id)
+	default:
+		http.NotFound(w, r)
 	}
-	s.apiDeleteSMTPAccount(w, r, id)
 }
 
 func (s *Server) apiDeleteSMTPAccount(w http.ResponseWriter, r *http.Request, accountID int64) {

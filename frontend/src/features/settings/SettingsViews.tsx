@@ -21,6 +21,7 @@ import type { RuntimePlugin, RuntimePlugins } from "../../plugins/runtime";
 import { identitySecuritySettings } from "../../plugins/identitySecurity";
 import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/AdminRemoteImageBlocklist";
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
+import { SMTPTrafficPanel } from "./SMTPTraffic";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
 import { GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
 import { loadGoogleConnections, type GoogleConnection } from "./googleConnections";
@@ -3029,6 +3030,10 @@ export function SettingsView({
             ) : null}
           </div>
         </form>
+        {/* A server that has not been saved has nothing to test and no
+            recorded traffic: the test signs in as the stored account, not as
+            the half-filled form above it. */}
+        {selectedSMTP ? <SMTPTrafficPanel csrf={csrf} accountID={selectedSMTP.id} datePrefs={user} /> : null}
       </SettingsPage>
     );
   } else if (route.kind === "profile") {
