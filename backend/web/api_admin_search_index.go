@@ -24,8 +24,10 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"rolltop/backend/store"
@@ -67,6 +69,40 @@ type searchIndexReport struct {
 	// syncing or reindexing.
 	StartedRuns  int `json:"started_runs,omitempty"`
 	BusyAccounts int `json:"busy_accounts,omitempty"`
+	// Blocked says which mail servers those were and what held each one, so a
+	// half-started rebuild names the work to wait for instead of leaving the
+	// operator to guess which of a tenant's servers to try again.
+	Blocked []searchRebuildBlock `json:"blocked,omitempty"`
+}
+
+// searchRebuildBlock is one mail server that could not start, and why.
+type searchRebuildBlock struct {
+	Account string `json:"account"`
+	Reason  string `json:"reason"`
+}
+
+// describeSearchRebuildBlocks names the mail servers that did not start and why.
+// The reasons come from the runner, which is the only place that knows whether a
+// folder is held, a recovery is pending, or nothing is running at all, and each
+// one already carries its own next step.
+//
+// Servers sharing a reason are named together: the recovery gate is one gate for
+// the whole tenant, and repeating its sentence once per server would describe
+// several.
+func describeSearchRebuildBlocks(blocked []searchRebuildBlock) string {
+	order := make([]string, 0, len(blocked))
+	accounts := map[string][]string{}
+	for _, block := range blocked {
+		if _, seen := accounts[block.Reason]; !seen {
+			order = append(order, block.Reason)
+		}
+		accounts[block.Reason] = append(accounts[block.Reason], block.Account)
+	}
+	parts := make([]string, 0, len(order))
+	for _, reason := range order {
+		parts = append(parts, fmt.Sprintf("%s: %s", strings.Join(accounts[reason], ", "), reason))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) apiAdminSearchIndex(w http.ResponseWriter, r *http.Request) {
@@ -122,15 +158,15 @@ func (s *Server) apiAdminSearchIndexRebuild(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusServiceUnavailable, "Search indexing is not configured on this server.")
 		return
 	}
-	started, busy, err := s.startSearchRebuildForUser(ctx, in.UserID)
+	started, blocked, err := s.startSearchRebuildForUser(ctx, in.UserID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	if started == 0 {
-		if busy > 0 {
+		if len(blocked) > 0 {
 			writeAPIError(w, http.StatusConflict,
-				"Sync or full-text reindexing is already running for this user's mail servers.")
+				"Rebuilding did not start. "+describeSearchRebuildBlocks(blocked))
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "This user has no search-visible folders to rebuild.")
@@ -144,21 +180,25 @@ func (s *Server) apiAdminSearchIndexRebuild(w http.ResponseWriter, r *http.Reque
 	}
 	report.Rebuilt = in.UserID
 	report.StartedRuns = started
-	report.BusyAccounts = busy
+	report.BusyAccounts = len(blocked)
+	report.Blocked = blocked
 	writeJSON(w, report)
 }
 
 // startSearchRebuildForUser queues one rebuild run per mail account. Accounts
 // whose runner is busy are reported rather than waited on: the caller is an
-// HTTP request, and a sync that has just started can take hours.
-func (s *Server) startSearchRebuildForUser(ctx context.Context, userID int64) (started, busy int, err error) {
+// HTTP request, and a sync that has just started can take hours. Each one is
+// reported with what held it, because "busy" alone is a dead end — the operator
+// cannot tell a folder sync that ends in a minute from a recovery gate that
+// refuses every rebuild until it clears.
+func (s *Server) startSearchRebuildForUser(ctx context.Context, userID int64) (started int, blocked []searchRebuildBlock, err error) {
 	accounts, err := s.store.ListMailAccountsForUser(ctx, userID)
 	if err != nil {
-		return 0, 0, err
+		return 0, nil, err
 	}
 	summaries, err := s.store.ListMailboxesForUser(ctx, userID)
 	if err != nil {
-		return 0, 0, err
+		return 0, nil, err
 	}
 	for _, account := range accounts {
 		mailboxes := make([]store.Mailbox, 0)
@@ -184,16 +224,37 @@ func (s *Server) startSearchRebuildForUser(ctx context.Context, userID int64) (s
 				return nil
 			})
 		if startErr != nil {
-			return started, busy, startErr
+			return started, blocked, startErr
 		}
 		if !ok {
-			busy++
+			reason := s.syncRunner.AccountSearchRebuildBlockReason(userID, account.ID, mailboxes)
+			log.Printf("search index rebuild blocked user_id=%d account_id=%d reason=%q", userID, account.ID, reason)
+			blocked = append(blocked, searchRebuildBlock{
+				Account: searchRebuildAccountName(account),
+				Reason:  reason,
+			})
 			continue
 		}
 		started++
 	}
-	log.Printf("search index rebuild requested user_id=%d runs_started=%d accounts_busy=%d", userID, started, busy)
-	return started, busy, nil
+	log.Printf("search index rebuild requested user_id=%d runs_started=%d accounts_busy=%d", userID, started, len(blocked))
+	return started, blocked, nil
+}
+
+// searchRebuildAccountName is how a mail server is named in the refusal. It
+// prefers what the operator sees in settings and falls back to the host, so an
+// account with neither a label nor an address is still identifiable.
+func searchRebuildAccountName(account store.MailAccount) string {
+	if name := strings.TrimSpace(account.Label); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(account.Email); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(account.Host); name != "" {
+		return name
+	}
+	return "This mail server"
 }
 
 func (s *Server) searchIndexReport(ctx context.Context) (searchIndexReport, error) {

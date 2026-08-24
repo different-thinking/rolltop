@@ -1792,6 +1792,54 @@ func uniqueMailboxes(mailboxes []string) []string {
 	return out
 }
 
+// AccountSearchRebuildBlockReason explains why an account-wide search rebuild
+// could not be reserved, in the words the operator who pressed the button needs
+// to decide what to do next. The rebuild claims every search-visible folder at
+// once, so one busy folder refuses the whole account — and a tenant-wide
+// recovery gate refuses it with nothing running at all. Answering all of those
+// with "a sync is already running" sends an operator to Activity to look for
+// work that is not there.
+//
+// Each answer carries its own next step rather than leaving the caller to
+// append one, because the step differs: work that is listed in Activity is
+// waited out there, and the recovery gate is not listed at all.
+//
+// It reports the state it finds when it is asked, not the state at the instant
+// of the refusal. A folder released in between says so, which is the honest
+// answer to "why did that fail" once the cause has cleared.
+func (r *Runner) AccountSearchRebuildBlockReason(userID, accountID int64, mailboxes []store.Mailbox) string {
+	if r == nil {
+		return "The sync runner is unavailable."
+	}
+	if r.context().Err() != nil {
+		return "The server is shutting down."
+	}
+	names := mailboxNamesForReservation(mailboxes)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Checked in the order reserveAccountMailboxesForMaintenance checks it, so
+	// the reason named is the one that actually refused the reservation.
+	if r.generationRecoveryGatedLocked(userID) {
+		// Keyed on the user, not the account: one recovery holds every mail
+		// server this tenant has. Saying "this mail server" would read, once it
+		// has been repeated per server, as several independent recoveries.
+		return "Folder recovery is still pending for this user, and it holds every mail server until it finishes."
+	}
+	for _, name := range names {
+		key, reserved := r.reservedAccountMailboxKeyLocked(userID, accountID, name)
+		if !reserved {
+			continue
+		}
+		activity, tracked := r.workActivities[runnerMailboxWorkActivityKey(key)]
+		if !tracked {
+			return fmt.Sprintf("Another job holds the folder %q. Follow it in Activity, then try again.", name)
+		}
+		return fmt.Sprintf("%s is already running for the folder %q. Follow it in Activity, then try again.",
+			WorkerKindLabel(activity.kind), name)
+	}
+	return "Whatever held it has since been released — press rebuild again."
+}
+
 func (r *Runner) mailboxReservedByAnyAccountLocked(userID int64, mailbox string) bool {
 	for key := range r.mailboxRunning {
 		if reservationKeyMatchesMailbox(key, userID, mailbox) {
@@ -1802,7 +1850,23 @@ func (r *Runner) mailboxReservedByAnyAccountLocked(userID int64, mailbox string)
 }
 
 func (r *Runner) accountMailboxReservedLocked(userID, accountID int64, mailbox string) bool {
-	return r.mailboxRunning[mailboxKey(userID, mailbox)] || r.mailboxRunning[accountMailboxKey(userID, accountID, mailbox)]
+	_, reserved := r.reservedAccountMailboxKeyLocked(userID, accountID, mailbox)
+	return reserved
+}
+
+// reservedAccountMailboxKeyLocked answers accountMailboxReservedLocked's
+// question and also says which of the two keys carries the reservation. The
+// diagnostics need that key to look the holder's work activity up, and asking
+// through one function keeps "is it reserved" and "by which key" from ever
+// disagreeing.
+func (r *Runner) reservedAccountMailboxKeyLocked(userID, accountID int64, mailbox string) (string, bool) {
+	if key := mailboxKey(userID, mailbox); r.mailboxRunning[key] {
+		return key, true
+	}
+	if key := accountMailboxKey(userID, accountID, mailbox); r.mailboxRunning[key] {
+		return key, true
+	}
+	return "", false
 }
 
 func reservationKeyMatchesMailbox(key string, userID int64, mailbox string) bool {

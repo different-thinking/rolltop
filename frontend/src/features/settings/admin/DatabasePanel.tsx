@@ -28,12 +28,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { Icon } from "../../../components/Icon";
 import { messageFromError } from "../../../lib/errors";
-import { displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
+import { describeSearchRebuildBlocks, displayDateTime, displayLogTimestamp, formatBytes } from "../../../lib/format";
 import type { DatePrefs } from "../../../appTypes";
 import type {
   DatabaseOverview,
   DatabaseStatus,
   SearchIndexTenant,
+  SearchRebuildBlock,
   ServerLogLine
 } from "../../../types";
 
@@ -72,7 +73,7 @@ function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
   // Rebuilding is armed by a first click and performed by a second: it throws
   // an index away and re-reads a whole mailbox to build the next one.
   const [armedUser, setArmedUser] = useState(0);
-  const [queued, setQueued] = useState<{ runs: number; busy: number } | null>(null);
+  const [queued, setQueued] = useState<{ runs: number; blocked: SearchRebuildBlock[] } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -98,7 +99,7 @@ function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
     try {
       const report = await api.rebuildSearchIndex(csrf, userID);
       setTenants(report.tenants);
-      setQueued({ runs: report.started_runs || 0, busy: report.busy_accounts || 0 });
+      setQueued({ runs: report.started_runs || 0, blocked: report.blocked || [] });
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -138,8 +139,11 @@ function SearchIndexCard({ csrf, backend }: { csrf: string; backend: string }) {
         <p className="settings-hint">
           Rebuilding. {queued.runs} mail server{queued.runs === 1 ? "" : "s"} started reindexing — follow it in
           Activity.
-          {queued.busy > 0
-            ? ` ${queued.busy} more ${queued.busy === 1 ? "was" : "were"} already syncing; try those again once it finishes.`
+          {/* Each server that did not start is named with the reason the runner
+              gave. A count alone cannot say whether the operator should wait a
+              minute or go and look at something else. */}
+          {queued.blocked.length > 0
+            ? ` ${queued.blocked.length} did not start. ${describeSearchRebuildBlocks(queued.blocked)}`
             : ""}
         </p>
       ) : null}

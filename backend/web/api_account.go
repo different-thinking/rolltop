@@ -304,7 +304,8 @@ func (s *Server) apiRebuildIMAPAccountSearchIndex(w http.ResponseWriter, r *http
 		return nil
 	})
 	if !started && err == nil {
-		writeAPIError(w, http.StatusConflict, "Sync or full-text reindexing is already running for this IMAP server.")
+		writeAPIError(w, http.StatusConflict, "Rebuilding did not start. "+
+			s.syncRunner.AccountSearchRebuildBlockReason(cu.User.ID, account.ID, mailboxes))
 		return
 	}
 	if err != nil {
