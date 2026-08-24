@@ -720,17 +720,21 @@ func (s *Store) ListUnsyncedSearchFoldersForUser(ctx context.Context, userID int
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
-	// inherit resolves against parent folders, so the modes are read from the
-	// set already in hand rather than a query per folder.
-	modes := make(map[int64]map[string]string, 1)
-	for _, c := range candidates {
-		if modes[c.accountID] == nil {
-			modes[c.accountID] = map[string]string{}
-		}
-		modes[c.accountID][c.name] = normalizeSyncMode(c.syncMode)
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	// inherit resolves against parent folders, and a parent is usually not a
+	// candidate itself - it holds mail. Every folder's mode is read in one go
+	// rather than one lookup per parent per candidate, which is a query count
+	// set by how deep someone nests folders. This is the mailboxes table with
+	// no join and no message access: one row per folder, and the same rows the
+	// query above already visited.
+	modes, err := mailboxSyncModesForUser(ctx, db, userID)
+	if err != nil {
+		return out, err
 	}
 	for _, c := range candidates {
-		if resolveInheritedSyncMode(ctx, s, userID, c.accountID, c.name, modes[c.accountID]) != "manual" {
+		if resolveInheritedSyncMode(c.name, modes[c.accountID]) != "manual" {
 			continue
 		}
 		out.Folders++
@@ -742,13 +746,37 @@ func (s *Store) ListUnsyncedSearchFoldersForUser(ctx context.Context, userID int
 	return out, nil
 }
 
+// mailboxSyncModesForUser reads every folder's normalized sync mode, keyed by
+// account and name. One row per folder and no join: the whole table for a
+// tenant is what one page of folder settings already lists.
+func mailboxSyncModesForUser(ctx context.Context, db *sql.DB, userID int64) (map[int64]map[string]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT account_id, name, sync_mode FROM mailboxes WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	modes := make(map[int64]map[string]string, 1)
+	for rows.Next() {
+		var accountID int64
+		var name, mode string
+		if err := rows.Scan(&accountID, &name, &mode); err != nil {
+			return nil, err
+		}
+		if modes[accountID] == nil {
+			modes[accountID] = map[string]string{}
+		}
+		modes[accountID][name] = normalizeSyncMode(mode)
+	}
+	return modes, rows.Err()
+}
+
 // resolveInheritedSyncMode walks a folder's parents for the mode it inherits,
-// preferring the set already loaded and falling back to a lookup for a parent
-// that is not in it (a parent holding mail, so not a candidate itself). An
-// unreadable parent resolves to "auto", which counts the folder as synced and
-// keeps a failed lookup from inventing a warning.
-func resolveInheritedSyncMode(ctx context.Context, s *Store, userID, accountID int64, name string, loaded map[string]string) string {
-	mode := loaded[name]
+// against a map holding every folder of that account. It is the in-memory twin
+// of EffectiveMailboxSyncMode and answers the same way: the first parent with a
+// mode of its own decides, a parent that does not exist is skipped, and a chain
+// that names nothing resolves to auto.
+func resolveInheritedSyncMode(name string, modes map[string]string) string {
+	mode := modes[name]
 	if mode == "" {
 		mode = "auto"
 	}
@@ -756,20 +784,7 @@ func resolveInheritedSyncMode(ctx context.Context, s *Store, userID, accountID i
 		return mode
 	}
 	for _, parent := range mailboxParentNames(name) {
-		if parentMode, ok := loaded[parent]; ok {
-			if parentMode != "inherit" {
-				return parentMode
-			}
-			continue
-		}
-		mb, err := s.GetMailbox(ctx, userID, accountID, parent)
-		if IsNotFound(err) {
-			continue
-		}
-		if err != nil {
-			return "auto"
-		}
-		if parentMode := normalizeSyncMode(mb.SyncMode); parentMode != "inherit" {
+		if parentMode, ok := modes[parent]; ok && parentMode != "inherit" {
 			return parentMode
 		}
 	}

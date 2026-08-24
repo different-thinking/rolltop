@@ -306,6 +306,39 @@ func TestStorageStatsNameFoldersSearchedButNeverSynced(t *testing.T) {
 		t.Fatalf("named folders = %v, want just Sent", stats.UnsyncedSearchFolderNames)
 	}
 
+	// A folder inheriting its mode from a parent that holds mail. The parent is
+	// not itself reportable - it has local mail - so resolving the child means
+	// reading the mode of a folder outside the reported set. Every folder's
+	// mode is read for that, and a version that only read the candidates'
+	// would resolve this child to auto and drop it silently.
+	archive, err := f.db.GetOrCreateMailbox(f.ctx, f.owner.ID, f.mailbox.AccountID, "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.owner.ID, archive.ID, store.MailboxSettings{
+		SyncMode: "manual", ShowInSidebar: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	archived := f.mailbox
+	f.mailbox = archive
+	f.seedMessage(t, 3, "already fetched into Archive")
+	f.mailbox = archived
+	year, err := f.db.GetOrCreateMailbox(f.ctx, f.owner.ID, f.mailbox.AccountID, "Archive/2025")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateMailboxSettings(f.ctx, f.owner.ID, year.ID, store.MailboxSettings{
+		SyncMode: "inherit", ShowInSidebar: true, IncludeInSearch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.server.invalidateStorageStats(f.owner.ID)
+	stats = f.server.storageStatsForUser(f.owner.ID)
+	if stats.UnsyncedSearchFolders != 2 {
+		t.Fatalf("folders searched but never synced = %d, want Sent and the folder inheriting manual from Archive", stats.UnsyncedSearchFolders)
+	}
+
 	// Gmail's label views carry sync mode never by default, and their mail is
 	// already stored in the real folder it also appears in. Reporting one would
 	// push a reader toward mirroring most of their mailbox a second time to
@@ -320,8 +353,8 @@ func TestStorageStatsNameFoldersSearchedButNeverSynced(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.server.invalidateStorageStats(f.owner.ID)
-	if stats := f.server.storageStatsForUser(f.owner.ID); stats.UnsyncedSearchFolders != 1 {
-		t.Fatalf("folders searched but never synced = %d, want the label view left out", stats.UnsyncedSearchFolders)
+	if stats := f.server.storageStatsForUser(f.owner.ID); stats.UnsyncedSearchFolders != 2 {
+		t.Fatalf("folders searched but never synced = %d, want the label view left out of the two already reported", stats.UnsyncedSearchFolders)
 	}
 
 	// A manual folder someone has synced by hand is searchable up to that sync,
@@ -330,8 +363,18 @@ func TestStorageStatsNameFoldersSearchedButNeverSynced(t *testing.T) {
 	f.mailbox = sent
 	f.seedMessage(t, 2, "fetched by hand")
 	f.server.invalidateStorageStats(f.owner.ID)
-	if stats := f.server.storageStatsForUser(f.owner.ID); stats.UnsyncedSearchFolders != 0 {
-		t.Fatalf("folders searched but never synced = %d after a manual sync, want none", stats.UnsyncedSearchFolders)
+	stats = f.server.storageStatsForUser(f.owner.ID)
+	if stats.UnsyncedSearchFolders != 1 {
+		t.Fatalf("folders searched but never synced = %d after a manual sync, want Sent dropped and the inheriting folder kept",
+			stats.UnsyncedSearchFolders)
+	}
+	for _, name := range stats.UnsyncedSearchFolderNames {
+		if name == "Sent" {
+			t.Fatalf("named folders = %v, want Sent gone once it holds mail", stats.UnsyncedSearchFolderNames)
+		}
+	}
+	if stats.UnsyncedSearchMessages != 0 {
+		t.Fatalf("messages in those folders = %d, want none: only Sent had a server count", stats.UnsyncedSearchMessages)
 	}
 	if other := f.server.storageStatsForUser(f.other.ID); other.UnsyncedSearchFolders != 0 {
 		t.Fatalf("another tenant's folders leaked: %+v", other)
