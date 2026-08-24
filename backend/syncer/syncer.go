@@ -1673,6 +1673,23 @@ func (r *syncProgressReporter) commit(ctx context.Context) error {
 	return r.service.updateSyncProgress(ctx, r.userID, r.runID, *r.progress)
 }
 
+// failSyncRunInit best-effort finalizes a sync run whose worker never started
+// because setting up its initial progress failed. Without this the row
+// CreateSyncRun already inserted stays "running" until stale-run recovery
+// notices it, which can be far later than a request that failed synchronously
+// -- and unlike the recovery sweep, this runs immediately and names the real
+// cause instead of a generic "stopped making progress" message.
+//
+// It uses a background context deliberately: the request context that failed
+// the initial write is often the same one this finalization would otherwise
+// inherit, and a context already broken that way must not also block marking
+// the run failed.
+func (s *Service) failSyncRunInit(userID, runID int64, progress store.SyncProgress, initErr error) {
+	if err := s.Store.FinishSyncRun(context.Background(), userID, runID, "failed", progress, initErr.Error()); err != nil {
+		log.Printf("finalize sync run after failed init user_id=%d run_id=%d: %v", userID, runID, err)
+	}
+}
+
 // updateSyncProgress persists a progress snapshot and immediately notifies the
 // event hub, which is what drives the sidebar and settings sync indicators.
 func (s *Service) updateSyncProgress(ctx context.Context, userID, runID int64, progress store.SyncProgress) error {

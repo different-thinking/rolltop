@@ -59,7 +59,8 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sent, err := s.sendCompose(r.Context(), cu, form)
-		if err != nil {
+		var incomplete *composeSentIncompleteError
+		if err != nil && !errors.As(err, &incomplete) {
 			// A send failure otherwise exists only in the browser's console: the
 			// error text already names the SMTP host and the underlying network or
 			// auth failure, which is exactly what is needed to tell a one-off blip
@@ -70,6 +71,15 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 		}
 		archived := s.archiveRepliedMessage(r.Context(), cu.User.ID, form)
 		s.notifyUserChanged(cu.User.ID)
+		if incomplete != nil {
+			// SMTP already accepted the message: the mail is gone, whatever went
+			// wrong after that. Answering this like a failed request would invite
+			// the client to retry sendCompose and hand the recipient a duplicate,
+			// so the response reports success and only warns about the local copy.
+			log.Printf("send compose incomplete after SMTP accepted user_id=%d: %v", cu.User.ID, incomplete.err)
+			writeJSON(w, map[string]any{"ok": true, "sent": true, "warning": incomplete.Error(), "archived_mailbox": archived})
+			return
+		}
 		writeJSON(w, map[string]any{"ok": true, "message_id": sent.ID, "archived_mailbox": archived})
 	default:
 		methodNotAllowed(w)
@@ -505,12 +515,34 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 	if err != nil {
 		return store.MessageRecord{}, err
 	}
+	// The message has left through SMTP. Every error from here on describes a
+	// local bookkeeping failure, not a failed send, and must not be reported as
+	// one: the caller answers a request that already delivered the mail.
 	fetched, err := s.appendSentMessage(ctx, imapAccount, sentMailbox, raw, msg.MessageID, msg.Date)
 	if err != nil {
-		return store.MessageRecord{}, fmt.Errorf("message sent through SMTP, but could not save it to %s: %w", sentMailbox.Name, err)
+		return store.MessageRecord{}, &composeSentIncompleteError{
+			err: fmt.Errorf("message sent through SMTP, but could not save it to %s: %w", sentMailbox.Name, err),
+		}
 	}
-	return s.storeSentMessage(ctx, cu.User.ID, imapAccount, sentMailbox, msg, form, fetched)
+	sentMsg, err := s.storeSentMessage(ctx, cu.User.ID, imapAccount, sentMailbox, msg, form, fetched)
+	if err != nil {
+		return store.MessageRecord{}, &composeSentIncompleteError{
+			err: fmt.Errorf("message sent through SMTP and saved to %s, but could not be recorded locally: %w", sentMailbox.Name, err),
+		}
+	}
+	return sentMsg, nil
 }
+
+// composeSentIncompleteError wraps a failure that happened only after SMTP
+// already accepted the message for delivery. The distinction matters to every
+// caller: reporting this the same way as a send failure would let a retry
+// resend a message that already reached its recipient.
+type composeSentIncompleteError struct {
+	err error
+}
+
+func (e *composeSentIncompleteError) Error() string { return e.err.Error() }
+func (e *composeSentIncompleteError) Unwrap() error  { return e.err }
 
 // archiveRepliedMessage files the message a reply answered, and names the folder
 // it landed in so the browser can say so. It runs after the send, never before:

@@ -1314,3 +1314,29 @@ func TestMoveRefreshMailboxNamesIncludesSourceAndDestination(t *testing.T) {
 		}
 	}
 }
+
+// A bulk move is one IMAP MOVE within one account's connection: there is no
+// cross-account destination for it, unlike copy. Starting the walk on a
+// selection spanning accounts let messages from the caller's own account move
+// while every other account's messages failed one by one deep inside the run,
+// so the check has to happen before anything starts.
+func TestMessagesAccountScopeRejectsASelectionCrossingAccounts(t *testing.T) {
+	messages := []store.MessageRecord{
+		{ID: 1, AccountID: 10},
+		{ID: 2, AccountID: 10},
+		{ID: 3, AccountID: 11},
+	}
+	if err := messagesAccountScope(messages, 10); err != errBulkMoveCrossesAccounts {
+		t.Fatalf("messagesAccountScope error = %v, want errBulkMoveCrossesAccounts", err)
+	}
+}
+
+func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
+	messages := []store.MessageRecord{
+		{ID: 1, AccountID: 10},
+		{ID: 2, AccountID: 10},
+	}
+	if err := messagesAccountScope(messages, 10); err != nil {
+		t.Fatalf("messagesAccountScope error = %v, want nil", err)
+	}
+}

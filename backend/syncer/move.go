@@ -115,6 +115,7 @@ func (s *Service) StartMoveMessages(ctx context.Context, userID int64, messageID
 		LatestNewSubject: "Moving messages",
 	}
 	if err := s.Store.UpdateSyncRunProgress(ctx, userID, run.ID, progress); err != nil {
+		s.failSyncRunInit(userID, run.ID, progress, err)
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)

@@ -792,6 +792,32 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 }
 
 func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, messageIDs []int64, dest store.Mailbox) ([]string, error) {
+	messages, err := s.store.ListMessagesByIDsForUser(ctx, userID, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	return s.moveRefreshMailboxNamesForMessages(ctx, userID, messages, dest)
+}
+
+// errBulkMoveCrossesAccounts reports a bulk move whose selection spans more
+// than one account. A move is an IMAP MOVE within one account's connection;
+// unlike copy, there is no cross-account destination for it, and starting the
+// walk anyway lets messages from the caller's own account move while every
+// other account's messages fail one by one deep inside the run.
+var errBulkMoveCrossesAccounts = errors.New("select messages from a single account to move them together")
+
+// messagesAccountScope reports whether every message belongs to accountID, so
+// a bulk move can be rejected up front rather than partially completing.
+func messagesAccountScope(messages []store.MessageRecord, accountID int64) error {
+	for _, msg := range messages {
+		if msg.AccountID != accountID {
+			return errBulkMoveCrossesAccounts
+		}
+	}
+	return nil
+}
+
+func (s *Server) moveRefreshMailboxNamesForMessages(ctx context.Context, userID int64, messages []store.MessageRecord, dest store.Mailbox) ([]string, error) {
 	seen := map[string]bool{}
 	names := make([]string, 0, 2)
 	add := func(name string) {
@@ -802,10 +828,6 @@ func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, mess
 		}
 		seen[key] = true
 		names = append(names, name)
-	}
-	messages, err := s.store.ListMessagesByIDsForUser(ctx, userID, messageIDs)
-	if err != nil {
-		return nil, err
 	}
 	mailboxes := map[int64]store.Mailbox{}
 	for _, msg := range messages {
@@ -901,7 +923,16 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	refreshMailboxes, err := s.moveRefreshMailboxNames(r.Context(), cu.User.ID, in.MessageIDs, dest)
+	messages, err := s.store.ListMessagesByIDsForUser(r.Context(), cu.User.ID, in.MessageIDs)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := messagesAccountScope(messages, dest.AccountID); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	refreshMailboxes, err := s.moveRefreshMailboxNamesForMessages(r.Context(), cu.User.ID, messages, dest)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
