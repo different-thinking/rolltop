@@ -197,7 +197,7 @@ func (f emptyTrashFixture) runEmpty(t *testing.T) store.SyncRun {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.service.runEmptyTrash(ctx, f.userID, f.account, f.trash, run.ID, store.SyncProgress{}, nil)
+	f.service.runEmptyTrash(ctx, f.userID, f.account, f.trash, run.ID, store.SyncProgress{}, nil, nil)
 	finished, err := f.store.GetSyncRunForUser(ctx, f.userID, run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -231,6 +231,29 @@ func TestEmptyTrashDeletesRemoteMailAndTheLocalMirror(t *testing.T) {
 		if _, err := fixture.store.GetMessageForUser(ctx, fixture.userID, message.ID); !store.IsNotFound(err) {
 			t.Fatalf("local row for uid %d = %v, want it removed with the remote message", uid, err)
 		}
+	}
+}
+
+// TestEmptyTrashReleasesForegroundBeforeLocalCleanup guards the fix for a
+// purge that blocked every other foreground mail action — sending, moving —
+// for as long as its local reconciliation took. releaseForeground must run
+// once the remote delete is settled, strictly before onDone, which only runs
+// once local cleanup (reconcileMailboxUIDs) has finished.
+func TestEmptyTrashReleasesForegroundBeforeLocalCleanup(t *testing.T) {
+	fixture := newEmptyTrashFixture(t, []uint32{61, 62})
+	ctx := context.Background()
+	run, err := fixture.store.CreateSyncRun(ctx, fixture.userID, fixture.account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var order []string
+	fixture.service.runEmptyTrash(ctx, fixture.userID, fixture.account, fixture.trash, run.ID, store.SyncProgress{},
+		func() { order = append(order, "release") },
+		func() { order = append(order, "done") })
+
+	if len(order) != 2 || order[0] != "release" || order[1] != "done" {
+		t.Fatalf("callback order = %v, want [release done]: releasing the foreground reservation only after local cleanup blocks every other foreground mail action for as long as that cleanup takes", order)
 	}
 }
 
@@ -300,7 +323,7 @@ func TestStartEmptyTrashOnlyAcceptsATrashFolder(t *testing.T) {
 	fixture := newEmptyTrashFixture(t, []uint32{41})
 	ctx := context.Background()
 
-	if _, err := fixture.service.StartEmptyTrash(ctx, fixture.userID, fixture.inbox.ID, nil); err == nil {
+	if _, err := fixture.service.StartEmptyTrash(ctx, fixture.userID, fixture.inbox.ID, nil, nil); err == nil {
 		t.Fatal("emptying the inbox was accepted")
 	}
 }
@@ -310,7 +333,7 @@ func TestStartEmptyTrashRequiresAFetcherThatCanDelete(t *testing.T) {
 	fixture.service.Fetcher = &moveTestFetcher{}
 	ctx := context.Background()
 
-	_, err := fixture.service.StartEmptyTrash(ctx, fixture.userID, fixture.trash.ID, nil)
+	_, err := fixture.service.StartEmptyTrash(ctx, fixture.userID, fixture.trash.ID, nil, nil)
 	if !errors.Is(err, ErrEmptyTrashUnsupported) {
 		t.Fatalf("error = %v, want ErrEmptyTrashUnsupported", err)
 	}

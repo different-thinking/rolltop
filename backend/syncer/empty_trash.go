@@ -54,7 +54,15 @@ var ErrEmptyTrashUnsupported = errors.New("this IMAP connection cannot delete me
 // The folder is emptied as the server currently sees it, not as the local
 // mirror does: mail that was never mirrored (an account with a sync start date,
 // a folder still syncing) is part of what the user asked to throw away.
-func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, onDone func()) (store.SyncRun, error) {
+//
+// releaseForeground, when set, is called once the remote deletion is settled
+// (deleted, failed, or interrupted) and before local cleanup starts — freeing
+// whatever exclusive foreground slot the caller is holding so it does not also
+// block every other foreground mail action (sending, moving) for however long
+// a large folder's local reconciliation takes. onDone runs once at the very
+// end, after that reconciliation, for work that wants the finished state — a
+// mailbox listing refresh, for instance.
+func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, releaseForeground, onDone func()) (store.SyncRun, error) {
 	if s.Fetcher == nil {
 		return store.SyncRun{}, errors.New("sync fetcher is not configured")
 	}
@@ -86,12 +94,12 @@ func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, 
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
-	go s.runEmptyTrash(s.backgroundContext(), userID, account, mailbox, run.ID, progress, onDone)
+	go s.runEmptyTrash(s.backgroundContext(), userID, account, mailbox, run.ID, progress, releaseForeground, onDone)
 	return run, nil
 }
 
 func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox,
-	runID int64, progress store.SyncProgress, onDone func()) {
+	runID int64, progress store.SyncProgress, releaseForeground, onDone func()) {
 	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
 	defer finishRun()
 	status := "ok"
@@ -119,6 +127,13 @@ func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store
 		// Whatever did go is still gone remotely, so the local mirror is cleaned
 		// up for it either way. A failure here only means the folder is not empty.
 		log.Printf("empty trash user_id=%d run_id=%d mailbox_id=%d deleted=%d: %v", userID, runID, mailbox.ID, deleted, err)
+	}
+	// The remote side is settled either way: what follows only touches the local
+	// mirror. Releasing here, rather than holding it through however long that
+	// mirror cleanup takes, is what keeps a large purge from also blocking every
+	// other foreground mail action — sending, moving — for its whole duration.
+	if releaseForeground != nil {
+		releaseForeground()
 	}
 	if deleted == 0 {
 		return
