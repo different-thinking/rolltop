@@ -1125,7 +1125,7 @@ func TestReconcileMailboxRecordsFingerprintBeforeDeletingSource(t *testing.T) {
 	}
 	fixture.service.Fetcher = fetcher
 
-	if err := fixture.service.reconcileMailboxUIDs(context.Background(), fixture.userID, fixture.account, fixture.source); err != nil {
+	if err := fixture.service.reconcileMailboxUIDs(context.Background(), fixture.userID, fixture.account, fixture.source, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, fixture.message.ID); !store.IsNotFound(err) {

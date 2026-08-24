@@ -60,9 +60,8 @@ func (s *Server) apiEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		s.apiError(w, r, http.StatusServiceUnavailable, "could not schedule emptying the Trash", err)
 		return
 	}
-	run, err := s.syncer.StartEmptyTrash(r.Context(), cu.User.ID, mailbox.ID, func() {
+	run, err := s.syncer.StartEmptyTrash(r.Context(), cu.User.ID, mailbox.ID, finishForeground, func() {
 		s.startMoveRefresh(cu.User.ID, mailbox.AccountID, []string{mailbox.Name})
-		finishForeground()
 	})
 	if err != nil {
 		finishForeground()

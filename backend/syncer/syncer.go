@@ -1244,7 +1244,7 @@ func (s *Service) syncAccountTurn(ctx context.Context, userID int64, account sto
 			// the reader's screen, and nothing else ever removes it — a large folder
 			// used to keep every message deleted elsewhere, forever.
 			if since, due := s.mailboxReconcileDue(userID, mailbox, planned); due {
-				if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox); err != nil {
+				if err := s.reconcileMailboxUIDs(ctx, userID, account, mailbox, nil); err != nil {
 					log.Printf("reconcile mailbox user_id=%d mailbox=%s: %v", userID, mailboxName, err)
 				} else {
 					s.recordMailboxReconciled(userID, mailbox)
