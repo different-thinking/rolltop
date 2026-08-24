@@ -620,3 +620,28 @@ Docker frontend stage copies into the image, so it has to stay ahead of the
 Docker build; and neither the workflow nor the `Dockerfile` may go back to a
 hand-maintained plugin list — both derive the set from `plugins/*/backend`,
 because the hardcoded lists had already drifted apart.
+
+The same rule now covers the frontend half. `npm run build:plugins` is
+`scripts/build-plugins.mjs`, which derives its targets from the plugins whose
+`manifest.json` declares `frontend.module` — the same field the server reads to
+serve the bundle, so a plugin cannot be built without being served or the
+reverse. It builds several at a time; `ROLLTOP_BUILD_JOBS` bounds that, because
+concurrency here is limited by memory rather than cores. A plugin's stylesheet
+step must stay sequential *after* its own Vite build, since `emptyOutDir` wipes
+the directory both write into, and a new stylesheet needs an entry in that
+file's `cssScripts` map. Forgetting is not silent: the script fails on any
+manifest-declared file no step produced.
+
+The image gets an assembled plugin tree, not the source tree —
+`scripts/assemble-plugin-dist.mjs` copies each `manifest.json`, the directories
+its declared assets live in, and `migrations/`. Those migrations are the trap:
+they are read at startup and applied to the tenant schema, so a plugin tree
+assembled without them starts a server whose plugin tables never appear. Theme
+CSS is the other one — `LoadManifests` stats it and the process refuses to boot
+when it is missing. Both are covered by deriving the copy set from the manifest;
+keep it derived.
+
+Sourcemaps are off in the image (`ROLLTOP_BUILD_SOURCEMAPS=0`) and on
+everywhere else. They outweigh the bundles they describe, and the plugin asset
+route serves whole bundle directories, so shipping them also published the
+sources.

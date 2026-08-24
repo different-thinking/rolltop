@@ -67,6 +67,11 @@ if (!selected) {
   throw new Error(`Unknown plugin build target: ${target}`);
 }
 
+// See `vite.config.ts`: sourcemaps outweigh the bundles they describe, nothing
+// serves them, and the image build pays for them twice. Off in the
+// `Dockerfile`, on everywhere else.
+const sourcemap = process.env.ROLLTOP_BUILD_SOURCEMAPS !== "0";
+
 export default defineConfig({
   root: ".",
   plugins: [react()],
@@ -84,7 +89,7 @@ export default defineConfig({
   build: {
     outDir: selected.outDir,
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap,
     lib: {
       entry: selected.entry,
       formats: ["es"],
