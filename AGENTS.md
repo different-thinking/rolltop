@@ -670,6 +670,20 @@ The same rule now covers the frontend half. `npm run build:plugins` is
 serve the bundle, so a plugin cannot be built without being served or the
 reverse.
 
+**The Go stage builds everything in one step and throws its caches away in the
+same one** (`scripts/build-go.sh`). Kaniko keeps a layer per `RUN` in memory,
+and split into download/build/build-plugins this stage retained ~760 MB of
+module cache and ~610 MB of build cache for the rest of a build capped at 4 GB
+— against a final image of ~400 MB, so the caches, not the image, were the
+memory. Ending the step with the cache directories removed leaves a layer
+holding `/out` and the sources. The paths are resolved into variables *before*
+the builds because the cleanup must not invoke `go` again: where the toolchain
+itself lives under `GOMODCACHE`, `go clean -modcache` deletes the toolchain it
+is running from and the next `go` call puts 214 MB straight back. The cost is
+that `go mod download` has no layer of its own to cache across builds, which is
+free while the builder runs without `--cache`; split it back apart if caching is
+switched on and memory stops being the binding constraint.
+
 **Build concurrency is bounded by memory, not cores, and the ceiling is a hard
 one.** Both the plugin bundles and the `.so` links size their job count from the
 cgroup memory limit — `os.totalmem()` and `nproc` report the host, which on a

@@ -45,8 +45,6 @@ FROM golang:1.25-alpine AS build
 RUN apk add --no-cache build-base
 
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
 
 # Only the trees the Go build reads. The previous `COPY . .` pulled in
 # `frontend/`, `android/`, `docs/` and the rest, so editing a stylesheet
@@ -54,79 +52,24 @@ RUN go mod download
 # still carries its own frontend sources, so a plugin's UI change does rebuild
 # the backend; splitting that too needs a directory layout change, not a
 # Dockerfile one.
+COPY go.mod go.sum ./
+COPY scripts/build-go.sh ./scripts/
 COPY backend ./backend
 COPY cmd ./cmd
 COPY internal ./internal
 COPY plugins ./plugins
 
 # Below the source copies on purpose: these change on every commit, and above
-# them they would invalidate `go mod download` and the source layers each time.
+# them they would invalidate the source layers each time.
 ARG ROLLTOP_VERSION=latest
 ARG ROLLTOP_BUILD_DATE=
 ARG ROLLTOP_COMMIT=
-RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w -X rolltop/backend/buildinfo.Version=${ROLLTOP_VERSION} -X rolltop/backend/buildinfo.BuildDate=${ROLLTOP_BUILD_DATE} -X rolltop/backend/buildinfo.Commit=${ROLLTOP_COMMIT}" -o /out/rolltop ./cmd/rolltop
 
-# Derived from the directories in the build context, not a hand-maintained
-# list, so a new plugin backend cannot be silently left out of the image.
-#
-# Built a few at a time rather than one after another: each `.so` links the
-# whole shared dependency graph, and linking is the part that does not use the
-# machine. The first one is built alone deliberately — `-buildmode=plugin`
-# compiles packages differently from the main binary above, so its cache is
-# cold, and starting all of them together would have every process compiling
-# the same shared packages at once instead of reusing the first one's work.
-#
-# How many run together is bounded by the builder's *memory*, not its cores.
-# A Go link holds its output in memory, and `language_search` links a 124 MB
-# embedded model set, so a few of those at once is gigabytes. Overshooting a
-# memory-capped builder does not make the build slow, it makes the kernel kill
-# it — so a builder with 2 GB gets one job, and nothing here goes wide by
-# default on a machine that cannot afford it. `ROLLTOP_BUILD_JOBS` is the
-# equivalent override for the frontend half.
-RUN set -eu; \
-	jobs="$(nproc 2>/dev/null || echo 2)"; \
-	if [ "$jobs" -gt 4 ]; then jobs=4; fi; \
-	limit=""; \
-	if [ -r /sys/fs/cgroup/memory.max ]; then \
-		limit="$(cat /sys/fs/cgroup/memory.max)"; \
-	elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then \
-		limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"; \
-	fi; \
-	case "$limit" in ""|max|*[!0-9]*) limit="" ;; esac; \
-	if [ -n "$limit" ]; then \
-		bymem=$((limit / 2147483648)); \
-		if [ "$bymem" -lt 1 ]; then bymem=1; fi; \
-		if [ "$jobs" -gt "$bymem" ]; then jobs="$bymem"; fi; \
-	fi; \
-	echo "building plugin backends, $jobs at a time"; \
-	build_one() { \
-		plugin="$(basename "$(dirname "$1")")"; \
-		mkdir -p "/out/plugins/${plugin}/backend"; \
-		CGO_ENABLED=1 GOOS=linux go build -buildmode=plugin -trimpath -ldflags="-s -w" -o "/out/plugins/${plugin}/backend/${plugin}.so" "./$1"; \
-	}; \
-	status=0; pids=""; running=0; first=1; \
-	for backend in plugins/*/backend; do \
-		if [ "$first" = 1 ]; then \
-			first=0; \
-			build_one "$backend"; \
-			continue; \
-		fi; \
-		build_one "$backend" & \
-		pids="$pids $!"; \
-		running=$((running + 1)); \
-		if [ "$running" -ge "$jobs" ]; then \
-			for pid in $pids; do wait "$pid" || status=1; done; \
-			pids=""; running=0; \
-		fi; \
-	done; \
-	for pid in $pids; do wait "$pid" || status=1; done; \
-	[ "$status" = 0 ] || exit "$status"; \
-	want="$(ls -d plugins/*/backend | wc -l)"; \
-	got="$(ls /out/plugins/*/backend/*.so 2>/dev/null | wc -l)"; \
-	if [ "$want" != "$got" ]; then \
-		echo "expected $want plugin backends, built $got" >&2; \
-		exit 1; \
-	fi
+# Download, both builds and the cache cleanup are one step because Kaniko keeps
+# a layer per RUN in memory: split up, this stage retained ~760 MB of module
+# cache and ~610 MB of build cache for the rest of the build. See the script
+# for what that trades away.
+RUN sh scripts/build-go.sh /out
 
 FROM alpine:3.22
 
