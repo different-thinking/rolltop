@@ -63,6 +63,26 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * nonAPIErrorMessage names a failure whose body is not the JSON every Rolltop
+ * route answers with. That body comes from something in front of the app -- a
+ * proxy, the hosting platform, a gateway that timed out -- and is a whole HTML
+ * document, which a toast used to print verbatim: a screenful of markup instead
+ * of a reason. Its title is the one sentence in it worth reading, so that is
+ * what is kept beside the status the response really carried.
+ */
+function nonAPIErrorMessage(res: Response, body: string): string {
+  const status = res.statusText ? `${res.status} ${res.statusText}` : String(res.status);
+  const trimmed = body.trim();
+  if (!trimmed) return status;
+  if (trimmed.startsWith("<")) {
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(trimmed)?.[1]?.trim();
+    return title ? `${status}: ${title}` : `${status}: the server did not answer with a Rolltop response.`;
+  }
+  const firstLine = trimmed.split("\n", 1)[0].trim();
+  return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+}
+
 // All API helpers flow through parse so callers see typed payloads on success
 // and a consistent ApiError on backend validation/session failures.
 async function parse<T>(res: Response): Promise<T> {
@@ -73,7 +93,7 @@ async function parse<T>(res: Response): Promise<T> {
       data = JSON.parse(text);
     } catch (err) {
       if (!res.ok) {
-        throw new ApiError(res.status, text || res.statusText);
+        throw new ApiError(res.status, nonAPIErrorMessage(res, text));
       }
       throw err;
     }

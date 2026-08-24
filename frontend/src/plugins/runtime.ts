@@ -48,6 +48,27 @@ export type RuntimeMessageDetailsPlugin = RuntimePlugin & {
   renderMessageDetails?: (context: RuntimeMessageDetailsContext) => ReactNode;
 };
 
+/**
+ * RuntimeMessageQuickActionContext is what an icon-only button sitting beside
+ * Reply, Archive and Delete gets. The toolbar it joins owns the look, so it
+ * hands the plugin the class its own buttons wear and whether they are
+ * currently accepting clicks -- a plugin button that stayed live while the row
+ * was being moved would act on a message that has already left the list.
+ */
+export type RuntimeMessageQuickActionContext = {
+  message: Message;
+  location: "message-list" | "thread";
+  buttonClassName: string;
+  disabled: boolean;
+  navigate: Navigate;
+  addToast: AddToast;
+};
+
+/** RuntimeMessageQuickActionPlugin contributes buttons to a message's action toolbar. */
+export type RuntimeMessageQuickActionPlugin = RuntimePlugin & {
+  renderMessageQuickActions?: (context: RuntimeMessageQuickActionContext) => ReactNode;
+};
+
 export type RuntimePlugins = {
   all: RuntimePlugin[];
   byID: Record<string, RuntimePlugin>;

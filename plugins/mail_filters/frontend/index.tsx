@@ -6,7 +6,7 @@ import type { DatePrefs, LocationState, Toast } from "../../../frontend/src/appT
 import { Icon } from "../../../frontend/src/components/Icon";
 import { SettingsEmpty, SettingsError, SettingsLoading, SettingsPage } from "../../../frontend/src/features/settings/SettingsUI";
 import { displayDateTime } from "../../../frontend/src/lib/format";
-import type { AccountSettingsRuntimePlugin } from "../../../frontend/src/plugins/runtime";
+import type { AccountSettingsRuntimePlugin, RuntimeMessageQuickActionContext } from "../../../frontend/src/plugins/runtime";
 import type { Mailbox, ThreadMessage, User } from "../../../frontend/src/types";
 import "./styles.css";
 
@@ -824,6 +824,32 @@ export default {
       <Icon name="label" />Create filter
     </button>
   ),
+  // A list row and the open message both carry the toolbar Reply and Archive
+  // sit in, and a filter is written from a message far more often than from a
+  // search box. One click has no menu to pick a condition from, so it makes the
+  // rule people actually write from mail in front of them -- this sender -- and
+  // the editor it lands in is where a subject or an age is added instead.
+  renderMessageQuickActions: ({ message, buttonClassName, disabled, navigate, addToast }: RuntimeMessageQuickActionContext) => {
+    const address = senderAddress(message.from_addr || "");
+    return (
+      <button
+        className={buttonClassName}
+        type="button"
+        disabled={disabled}
+        title={address ? `Create a filter for ${address}` : "Create a filter for this sender"}
+        aria-label="Create a filter for this sender"
+        onClick={() => {
+          if (!address) {
+            addToast("This message has no sender to filter on.", "error");
+            return;
+          }
+          navigate(`/settings/account/plugins/filters?query=${encodeURIComponent(`from:${quoteValue(address)}`)}`);
+        }}
+      >
+        <Icon name="filter" />
+      </button>
+    );
+  },
   renderMessageMenuActions: ({ item, navigate, activePanel, openPanel, closePanel, addToast }: MessageActionContext) => {
     // The editor already reads a query out of the URL and lifts from: and
     // subject: back into its own fields, so an open message only has to hand it
