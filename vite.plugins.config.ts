@@ -7,11 +7,13 @@ import react from "@vitejs/plugin-react";
 const fromRoot = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 const target = (process.env.ROLLTOP_PLUGIN_TARGET || "client_side_pgp").trim();
+// `attachment_preview` is deliberately absent. Its UI is part of the
+// application bundle — `ThreadView` imports `AttachmentPreviewSlot` directly
+// and the slot gates itself on the plugin being enabled — so the runtime bundle
+// it used to emit was loaded by every user, registered, and never read by
+// anything. It carried PDFium as a 6 MB base64 data URI. See the note in
+// AGENTS.md before adding a `frontend` block back to its manifest.
 const pluginConfig: Record<string, { entry: string; outDir: string }> = {
-  attachment_preview: {
-    entry: "plugins/attachment_preview/frontend/index.tsx",
-    outDir: "plugins/attachment_preview/frontend_dist"
-  },
   client_side_pgp: {
     entry: "plugins/client_side_pgp/frontend/index.ts",
     outDir: "plugins/client_side_pgp/frontend/dist"
@@ -80,6 +82,13 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      // Matches the whole specifier, however deep the plugin sits — Vite
+      // replaces only what the pattern covers, so an unanchored one would
+      // splice the shim path into the middle of the import. Host modules a
+      // plugin pulls in reach `components/Icon` by their own relative path and
+      // are aliased by the same rule, which is the point: Phosphor's 4,543
+      // modules must not enter a plugin bundle by any route.
+      { find: /^.*\/components\/Icon$/, replacement: fromRoot("./frontend/src/plugins/shared/iconShim.ts") },
       { find: /^react$/, replacement: fromRoot("./frontend/src/plugins/shared/reactShim.ts") },
       { find: /^react-dom$/, replacement: fromRoot("./frontend/src/plugins/shared/reactDOMShim.ts") },
       { find: /^react\/jsx-runtime$/, replacement: fromRoot("./frontend/src/plugins/shared/reactJSXRuntimeShim.ts") },

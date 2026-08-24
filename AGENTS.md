@@ -645,3 +645,37 @@ Sourcemaps are off in the image (`ROLLTOP_BUILD_SOURCEMAPS=0`) and on
 everywhere else. They outweigh the bundles they describe, and the plugin asset
 route serves whole bundle directories, so shipping them also published the
 sources.
+
+**A plugin must never reach `@phosphor-icons/react`.** Its barrel is 4,543
+modules, so importing it — directly, or through `components/Icon`, or through a
+host module like `SettingsUI` that a plugin pulls in — made every plugin build
+transform all of them to keep a handful of glyphs, and shipped a second copy of
+the host's icons. One plugin measured 4,548 modules and 222 kB before, 8 modules
+and 12 kB after. `vite.plugins.config.ts` therefore aliases any specifier ending
+in `components/Icon` to `frontend/src/plugins/shared/iconShim.ts`, which reads
+the components the host installs in `main.tsx` — the same arrangement React
+already had. Render icons in plugin code as `<Icon name="lock" />`; if a glyph
+is missing, add it to the host's map in `frontend/src/components/Icon.tsx`
+rather than importing it where you need it. The alias pattern is anchored at
+both ends because Vite substitutes only the part a regular expression matches.
+
+**`attachment_preview` has no `frontend` block in its manifest, on purpose.**
+Its UI is part of the application bundle: `ThreadView` imports
+`AttachmentPreviewSlot` directly, and the slot gates itself on
+`enabled_plugins`, which comes from the plugin settings table and is unrelated
+to whether a manifest declares a frontend module. The runtime bundle it used to
+emit was 15 MB — PDFium inlined as a 6 MB base64 data URI — and was loaded by
+every user, registered in `byID`, and read by nothing: no `getRuntimePlugin`
+call exists, and the module exposed neither `accountSettingsRoutes` nor
+`renderMessageDetails`. Adding the block back means building and serving that
+again for no reader. It is also coupled to the entry file: `index.tsx` has no
+default export, so a manifest that declares a module would make
+`loadRuntimePlugins` report "could not load" in settings.
+
+Nothing in `plugins/attachment_preview/frontend/index.tsx` may reference
+`./AttachmentPreviewAction` statically. That module reaches PDFium, and a static
+import — or a re-export of the same binding, which is what the old
+`export { AttachmentPreviewAction, PdfAttachmentViewer }` was — pins it into the
+entry chunk and makes the `lazy()` beside it decorative. Vite reports this as
+"dynamically imported by index.tsx but also statically imported"; treat that
+warning as a build failure in review.

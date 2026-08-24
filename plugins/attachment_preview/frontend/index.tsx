@@ -3,9 +3,13 @@
 import { lazy, Suspense } from "react";
 import type { Attachment } from "../../../frontend/src/types";
 import { pluginEnabled, pluginIDs, type PluginSet } from "../../../frontend/src/plugins/registry";
-import { AttachmentPreviewAction } from "./AttachmentPreviewAction";
-import { PdfAttachmentViewer } from "./PdfAttachmentViewer";
 
+// Nothing here may reference `./AttachmentPreviewAction` statically. It reaches
+// PDFium, and a static import — or a re-export of the same binding — puts the
+// viewer back in the entry chunk and reduces the `lazy()` below to ceremony,
+// which is exactly what the earlier `export { AttachmentPreviewAction,
+// PdfAttachmentViewer }` did. Vite says so out loud when it happens:
+// "dynamically imported by index.tsx but also statically imported".
 const LazyAttachmentPreviewAction = lazy(() =>
   import("./AttachmentPreviewAction").then((module) => ({ default: module.AttachmentPreviewAction }))
 );
@@ -20,10 +24,3 @@ export function AttachmentPreviewSlot({ attachment, plugins }: { attachment: Att
   );
 }
 
-export { AttachmentPreviewAction, PdfAttachmentViewer };
-
-export default {
-  AttachmentPreviewSlot,
-  AttachmentPreviewAction,
-  PdfAttachmentViewer
-};
