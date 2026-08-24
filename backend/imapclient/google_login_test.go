@@ -33,6 +33,8 @@ type fakeIMAPServer struct {
 	// SINCE, so a test can tell the two snapshot searches apart by result.
 	allUIDs   []uint32
 	sinceUIDs []uint32
+	// missingMailboxes are the folders STATUS refuses as not existing.
+	missingMailboxes map[string]bool
 }
 
 func startFakeIMAPServer(t *testing.T, acceptedTokens ...string) *fakeIMAPServer {
@@ -96,6 +98,8 @@ func (s *fakeIMAPServer) handle(conn net.Conn) {
 			fmt.Fprintf(conn, "%s OK logged in\r\n", tag)
 		case "AUTHENTICATE":
 			s.authenticate(conn, reader, tag, fields)
+		case "STATUS":
+			s.status(conn, tag, line)
 		case "SELECT", "EXAMINE":
 			fmt.Fprintf(conn, "* 5 EXISTS\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 99]\r\n%s OK [READ-ONLY] selected\r\n", tag)
 		case "UID":
@@ -155,6 +159,49 @@ func (s *fakeIMAPServer) authenticate(conn net.Conn, reader *bufio.Reader, tag s
 		return
 	}
 	fmt.Fprintf(conn, "%s NO [AUTHENTICATIONFAILED] Invalid credentials\r\n", tag)
+}
+
+// status answers STATUS, which is where a folder the account does not have is
+// refused. The wording is Dovecot's, timings included: the response code that
+// would say this in one word never reaches the caller, so the text is what
+// there is to recognize it by.
+func (s *fakeIMAPServer) status(conn net.Conn, tag, line string) {
+	raw := statusMailboxArgument(line)
+	name := strings.Trim(raw, `"`)
+	s.mu.Lock()
+	missing := s.missingMailboxes[name]
+	s.mu.Unlock()
+	if missing {
+		fmt.Fprintf(conn, "%s NO Mailbox doesn't exist: %s (0.002 + 0.000 secs).\r\n", tag, name)
+		return
+	}
+	fmt.Fprintf(conn, "* STATUS %s (MESSAGES 3 UNSEEN 1 UIDNEXT 12 UIDVALIDITY 44)\r\n%s OK status completed\r\n", raw, tag)
+}
+
+// statusMailboxArgument returns the mailbox token of a STATUS command as the
+// client wrote it, quotes included, so the untagged reply can echo it back.
+func statusMailboxArgument(line string) string {
+	rest := strings.TrimSpace(line)
+	if index := strings.Index(strings.ToUpper(rest), "STATUS "); index >= 0 {
+		rest = strings.TrimSpace(rest[index+len("STATUS "):])
+	}
+	if strings.HasPrefix(rest, `"`) {
+		if end := strings.Index(rest[1:], `"`); end >= 0 {
+			return rest[:end+2]
+		}
+		return rest
+	}
+	return strings.Fields(rest)[0]
+}
+
+// setMissingMailboxes names the folders this server has no folder for.
+func (s *fakeIMAPServer) setMissingMailboxes(names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.missingMailboxes = map[string]bool{}
+	for _, name := range names {
+		s.missingMailboxes[name] = true
+	}
 }
 
 func (s *fakeIMAPServer) account(t *testing.T) store.MailAccount {

@@ -61,6 +61,25 @@ site and in review.
   through the one definition of "no longer on the server" that everything else
   uses.
 - Read-state sync is intentionally allowed to update only the IMAP `\Seen` flag.
+- **A folder job carries a name, not an account, so every account is asked for
+  names only its siblings have.** `AutoMailboxNames` unions the folders of all of
+  a user's accounts and the runner then reserves and syncs each name across every
+  one of them, which is what lets a folder present on two accounts cost one job.
+  The cost is that a Gmail account's `[Gmail]/Gesendet` was asked of three plain
+  IMAP hosts, and each of them recorded a local folder row for it and then failed
+  its **whole** run on the STATUS refusal — every poll, forever, for a folder it
+  was never going to have, with the folders behind it in the plan left unvisited.
+  Two things keep that from happening and both must stay: an account only accepts
+  a requested name it already has (`accountHasMailbox`, bypassed while an account
+  knows no folders at all, so a first sync still works), and a STATUS refused
+  because the folder does not exist (`syncer.IsMailboxGone`, recognized from the
+  server's wording in `imapclient.mailboxMissing` because go-imap drops the
+  NONEXISTENT response code) skips that folder instead of failing the run. The
+  skip also drops the local row the name left behind, which is the only place
+  folder rows are ever deleted and stays that narrow: `DeleteUnsyncedMailbox`
+  removes a row only while it holds no message and no status has ever been read
+  for it, so a folder that ever really existed survives a server that answers
+  wrongly once.
 - A move of many messages is one IMAP command, not one per message. Each message
   used to pay its own SELECT, UID SEARCH and UID MOVE — three network round
   trips against a server that also rate limits them — which is why a

@@ -1622,6 +1622,18 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 		}
 		status, err := s.Fetcher.MailboxStatus(ctx, account, name)
 		if err != nil {
+			if IsMailboxGone(err) {
+				// A folder job carries a name, not an account: one name is asked
+				// of every account the user has, and a name only one of them has
+				// -- "[Gmail]/Gesendet" next to three plain IMAP hosts -- is
+				// refused by the rest. Failing the run on that refusal reported
+				// every other account as broken, every poll, over a folder they
+				// were never going to have; and the folders behind it in the
+				// plan were not visited at all. So the account skips what it
+				// does not have and syncs what it does.
+				s.forgetMissingMailbox(ctx, account, name)
+				continue
+			}
 			plans = append(plans, MailboxPlan{Name: name, LastUID: lastUIDs[name]})
 			return plans, fmt.Errorf("read IMAP status for mailbox %q: %w", name, err)
 		}
@@ -1635,6 +1647,24 @@ func (s *Service) planMailboxes(ctx context.Context, account store.MailAccount, 
 		plans = append(plans, MailboxPlan{Name: name, Status: status, LastUID: lastUIDs[name], Pending: pending})
 	}
 	return plans, nil
+}
+
+// forgetMissingMailbox drops the local row a skipped folder left behind. The
+// name reached this account from another one's folder list and was recorded
+// here before any server was asked about it, which is how folders belonging to
+// one account came to be listed under all of them. Only a row that never held a
+// message and never had a status read survives that check, so nothing a server
+// once answered for is removed; a folder still on its own account keeps its row
+// there, because this only runs for the account that was refused.
+func (s *Service) forgetMissingMailbox(ctx context.Context, account store.MailAccount, name string) {
+	deleted, err := s.Store.DeleteUnsyncedMailbox(ctx, account.UserID, account.ID, name)
+	if err != nil {
+		log.Printf("forget missing mailbox user_id=%d account_id=%d mailbox=%q: %v",
+			account.UserID, account.ID, name, err)
+		return
+	}
+	log.Printf("skip mailbox user_id=%d account_id=%d mailbox=%q reason=not-on-server row_removed=%t",
+		account.UserID, account.ID, name, deleted)
 }
 
 // syncRunProgressInterval bounds how often a run publishes the tally it keeps

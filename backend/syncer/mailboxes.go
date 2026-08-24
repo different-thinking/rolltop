@@ -44,6 +44,10 @@ func (s *Service) mailboxesToSync(ctx context.Context, account store.MailAccount
 }
 
 func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAccount, requested []string) ([]string, error) {
+	known, err := s.Store.MailboxNamesForAccount(ctx, account.UserID, account.ID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(requested))
 	seen := map[string]bool{}
 	for _, raw := range requested {
@@ -53,6 +57,9 @@ func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAcco
 			continue
 		}
 		seen[key] = true
+		if !accountHasMailbox(known, name) {
+			continue
+		}
 		mb, err := s.Store.GetOrCreateMailbox(ctx, account.UserID, account.ID, name)
 		if err != nil {
 			return nil, err
@@ -73,6 +80,27 @@ func (s *Service) requestedMailboxes(ctx context.Context, account store.MailAcco
 		out = append(out, mb.Name)
 	}
 	return prioritizeInbox(out), nil
+}
+
+// accountHasMailbox reports whether a requested folder is one this account has.
+// Folder jobs are scheduled by name across every account, so each account is
+// asked for names that only its siblings have; creating a row for one of those
+// gave the account a folder in the sidebar that no server would ever answer
+// for. An account that has not been discovered yet knows no names at all, and
+// filtering it down to nothing would leave a new account unable to make its
+// first pass -- there, the name is tried as before and planning drops it if the
+// server has no such folder. INBOX is always allowed for the same reason: every
+// account has one, whatever the mirror has recorded so far.
+func accountHasMailbox(known []string, name string) bool {
+	if len(known) == 0 || strings.EqualFold(name, "INBOX") {
+		return true
+	}
+	for _, candidate := range known {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 func prioritizeInbox(mailboxes []string) []string {
