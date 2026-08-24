@@ -21,7 +21,12 @@ const EMPTY_PDF_FONT_FALLBACK = { fonts: {} } satisfies NonNullable<PDFViewerCon
 // because the failure was reported inside the worker. Resolving it against the
 // document first is what makes it fetchable from there; an absolute URL, which
 // is what a bundler that inlines the wasm emits instead, is returned unchanged.
-const PDFIUM_WASM_URL = new URL(pdfiumWasmUrl, window.location.href).href;
+//
+// Guarded the same way the sibling preload guards `document`, so importing this
+// module somewhere without a DOM stays a no-op rather than a ReferenceError.
+// Nothing renders in that case, so the unresolved value is never fetched.
+const PDFIUM_WASM_URL =
+  typeof window === "undefined" ? pdfiumWasmUrl : new URL(pdfiumWasmUrl, window.location.href).href;
 
 type PdfAttachmentViewerProps = {
   src: string;
