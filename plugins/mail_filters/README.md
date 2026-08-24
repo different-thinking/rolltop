@@ -44,7 +44,10 @@ swipe mapping -- so the plugin asks the host for it
 (`StoredMessageHost.ArchiveMailboxID`) rather than looking for a role that does
 not exist. That keeps a filter archiving to the same folder the header's Archive
 button uses. An account with no Trash, or none with an Archive chosen, records
-an action failure; it does not quietly count as a match that moved nothing.
+an action failure; it does not quietly count as a match that moved nothing. A
+failure is terminal for that message until the rule is saved again -- saving is
+what puts already-decided mail back in front of the rule -- and Backfill is what
+walks it; the scheduled worker only picks up rows still waiting on age.
 
 Filters read the mail the whole-account lists show -- folders that opt into All
 Mail, never Junk, never a hidden cross-account duplicate -- so Sent, Drafts and

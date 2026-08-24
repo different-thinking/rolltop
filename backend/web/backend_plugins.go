@@ -182,6 +182,10 @@ func (s *Server) FetchRawMessage(ctx context.Context, userID, messageID int64) (
 
 var _ plugins.RawMessageFetchHost = (*Server)(nil)
 
+// The plugin side reaches these through a runtime type assertion that degrades
+// to a 503 rather than a build failure, so the compiler is told here instead.
+var _ plugins.StoredMessageHost = (*Server)(nil)
+
 func (s *Server) StarMessage(ctx context.Context, userID, messageID int64, starred bool) error {
 	if s == nil || s.syncer == nil {
 		return errors.New("sync service is not configured")

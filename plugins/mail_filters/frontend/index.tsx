@@ -299,6 +299,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
   const strandedAccounts = destinationFolder
     ? accounts.filter((account) => account.id !== destinationFolder.account_id && ruleAccountIDs.includes(account.id))
     : [];
+  const destinationMissing = draft.actions.move_mailbox_id > 0 && !destinationFolder;
 
   async function load(quiet = false) {
     if (!quiet) {
@@ -531,6 +532,13 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
                     {group.folders.map((folder) => <option value={`mailbox:${folder.id}`} key={folder.id}>{folder.name}</option>)}
                   </optgroup>
                 ))}
+                {destinationMissing ? (
+                  // A folder the rule still names but the account no longer has
+                  // needs an option of its own, or the select falls back to its
+                  // first entry and shows "leave it where it is" over a rule
+                  // that is in fact still trying to move mail into it.
+                  <option value={`mailbox:${draft.actions.move_mailbox_id}`}>A folder that is gone</option>
+                ) : null}
               </select>
             </label>
             <label className="mail-filter-forward">
@@ -538,6 +546,11 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
               <input type="email" value={draft.actions.forward_to} onChange={(event) => setAction({ forward_to: event.target.value })} placeholder="name@example.com" />
             </label>
           </div>
+          {destinationMissing ? (
+            <p className="error-text">
+              This filter moves mail into a folder this account no longer has, so every move it makes fails. Choose another destination.
+            </p>
+          ) : null}
           {draft.actions.move_role === "trash" ? (
             <p className="muted">
               Deleting puts mail in the account&rsquo;s own Trash, the same as deleting it by hand. Rolltop never erases mail on the server.
@@ -545,7 +558,7 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
           ) : null}
           {draft.actions.move_role === "archive" ? (
             <p className="muted">
-              Archiving uses each account&rsquo;s chosen Archive folder &mdash; the one its identity settings name. An account without one records a failure rather than guessing; name the folder, then save this filter again to reconsider that mail.
+              Archiving uses each account&rsquo;s chosen Archive folder &mdash; the one its identity settings name. An account without one records a failure rather than guessing. Name the folder, save this filter again, then press Backfill: saving is what puts already-decided mail back in front of the rule, and Backfill is what walks it.
             </p>
           ) : null}
           {strandedAccounts.length > 0 ? (
