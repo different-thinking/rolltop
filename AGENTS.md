@@ -424,6 +424,31 @@ site and in review.
   holds of its own mail separately: those are two real messages on one server and
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
+- **A mirrored label view is collapsed out of a rendered thread, and nowhere
+  else.** An account that mirrors Gmail's All Mail holds two rows per delivery,
+  and the thread rendered both - the same mail, twice, one above the other.
+  `collapseLabelViewCopies` drops the view's row when the same account holds the
+  same Message-ID in a real folder, and `ListThreadMessagesForUser` is the only
+  caller. It writes no duplicate pointer, takes nothing out of a folder list, and
+  changes nothing about what the account is reported to hold, so it does not
+  pre-empt the cross-account rule above: copies of two accounts are two
+  deliveries and are left to it, and two real folders of one account are two
+  places the reader filed the message and keep both rows. A group that is only
+  views is left alone as well, because hiding the last copy of a message is never
+  right - archived Gmail mail carries no other label and lives in All Mail alone.
+  The row the reader opened always wins its group: the message view reads its own
+  row back out of the thread it rendered, and the lists reach a view's copy often
+  enough for this to be ordinary rather than a corner, since a view mirrored after
+  the folder it duplicates holds the higher id and that is what breaks the tie
+  when a conversation picks the row it prints.
+- **Do not collapse copies on the conversation path.** `summarizeConversation`
+  already dedupes by Message-ID for what a list row prints
+  (`dedupeConversationMessages`), and it does so *after*
+  `conversationTransferIDs` has read the ids on purpose: `message_ids` is what a
+  conversation-level Move, Archive or Trash acts on, and it has to name every
+  physical copy. Shrinking that set - by collapsing inside
+  `ListThreadMessagesByKeysForUser`, or by moving the dedupe ahead of it - leaves
+  the All Mail copy behind on a Trash the reader believed emptied the thread.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - **An attachment row keeps its ID for as long as the message holds that part.**
   `/attachments/<id>/download`, the inline `cid:` rewrite and the
