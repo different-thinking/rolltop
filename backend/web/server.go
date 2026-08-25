@@ -228,6 +228,10 @@ type threadMessageView struct {
 	ImageBlockRules          []string
 	Expanded                 bool
 	CanReplyAll              bool
+	// CopyIDs names every physical row this drawn message stands for, itself
+	// included, and is empty unless a label view's copy was hidden behind it.
+	// Marking the drawn message unread has to reach all of them.
+	CopyIDs []int64
 }
 
 type conversationView struct {

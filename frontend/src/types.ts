@@ -246,6 +246,13 @@ export type ThreadMessage = {
   expanded: boolean;
   reply_subject: string;
   can_reply_all: boolean;
+  /**
+   * copy_ids names every physical message row this drawn message stands for,
+   * itself included. It is absent unless a mirrored label view (Gmail's All
+   * Mail) held a second copy that the thread hid behind this one, and read-state
+   * changes have to reach all of them.
+   */
+  copy_ids?: number[];
 };
 
 

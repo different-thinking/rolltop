@@ -430,6 +430,7 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 			Expanded:           view.Expanded,
 			ReplySubject:       replySubject(view.Message.Subject),
 			CanReplyAll:        view.CanReplyAll,
+			CopyIDs:            view.CopyIDs,
 		})
 	}
 	return out

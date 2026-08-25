@@ -1129,12 +1129,31 @@ func (s *Server) apiSetMessageStarred(w http.ResponseWriter, r *http.Request, id
 		s.serverError(w, r, err)
 		return
 	}
-	go func(userID, messageID int64) {
-		if err := s.syncer.SyncStarStateForMessage(context.Background(), userID, messageID); err != nil {
-			log.Printf("sync starred flag user_id=%d message_id=%d: %v", userID, messageID, err)
+	// A mirrored label view holds the same Gmail message a second time, and a
+	// thread draws the two as one row. \Flagged belongs to the message rather
+	// than to one of its labels, so the star has to reach the copy the reader
+	// cannot see: left behind, it keeps the conversation starred in the lists,
+	// which OR the flag across the copies, with no row left to clear it from.
+	starIDs := []int64{msg.ID}
+	if copies, copyErr := s.store.LabelViewCopyIDsForMessage(r.Context(), cu.User.ID, msg.ID); copyErr != nil {
+		log.Printf("label view copies user_id=%d message_id=%d: %v", cu.User.ID, msg.ID, copyErr)
+	} else {
+		for _, copyID := range copies {
+			if _, starErr := s.syncer.SetStarredForMessage(r.Context(), cu.User.ID, copyID, in.Starred); starErr != nil {
+				log.Printf("star label view copy user_id=%d message_id=%d: %v", cu.User.ID, copyID, starErr)
+				continue
+			}
+			starIDs = append(starIDs, copyID)
+		}
+	}
+	go func(userID int64, messageIDs []int64) {
+		for _, messageID := range messageIDs {
+			if err := s.syncer.SyncStarStateForMessage(context.Background(), userID, messageID); err != nil {
+				log.Printf("sync starred flag user_id=%d message_id=%d: %v", userID, messageID, err)
+			}
 		}
 		s.notifyUserChanged(userID)
-	}(cu.User.ID, msg.ID)
+	}(cu.User.ID, starIDs)
 	s.notifyUserChanged(cu.User.ID)
 	writeJSON(w, map[string]any{"ok": true, "message": apiMessageFromRecord(msg, msg.BodyText)})
 }
@@ -1308,6 +1327,29 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 		}
 		stop()
 	}
+	// Every physical row is read above before any of them is hidden: a label
+	// view's copy is the same Gmail message, and leaving its \Seen behind would
+	// keep the conversation unread in the list the reader just read it from.
+	if timing != nil {
+		stop = timing.measure(&timing.thread)
+	}
+	collapse, err := s.store.CollapseLabelViewCopies(ctx, cu.User.ID, threadMessages)
+	stop()
+	if err != nil {
+		return nil, msg, err
+	}
+	threadMessages = collapse.Messages
+	// The caller opens a row by id and reads it back out of what was rendered.
+	// A row hidden here is followed to the one drawn in its place, so the thread
+	// still expands the message that was asked for.
+	if standIn, ok := collapse.StandIn[msg.ID]; ok {
+		for _, threadMsg := range threadMessages {
+			if threadMsg.ID == standIn {
+				msg = threadMsg
+				break
+			}
+		}
+	}
 	messageIDs := make([]int64, 0, len(threadMessages))
 	for _, threadMsg := range threadMessages {
 		messageIDs = append(messageIDs, threadMsg.ID)
@@ -1424,6 +1466,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 			ImageBlockRules:          imageBlockRules,
 			Expanded:                 expanded,
 			CanReplyAll:              canReplyAll(threadMsg, threadMessages, own),
+			CopyIDs:                  collapse.CopyIDs[threadMsg.ID],
 		})
 		previousBodies = append(previousBodies, sourceText)
 		if threadMsg.ID == msg.ID {

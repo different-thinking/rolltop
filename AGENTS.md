@@ -424,6 +424,46 @@ site and in review.
   holds of its own mail separately: those are two real messages on one server and
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
+- **A mirrored label view is collapsed when a thread is drawn, never when it is
+  loaded.** Gmail's All Mail is a view over mail that already lives in a real
+  folder, so an account mirroring it holds two rows per delivery and a rendered
+  thread showed both. `ListThreadMessagesForUser` keeps returning every physical
+  row - read state, star state, mailbox filters in search, and conversation-level
+  moves are all decided from it, and collapsing there took rows away from callers
+  that have to reach them. `Store.CollapseLabelViewCopies` runs in
+  `threadViewsForMessageTimed` instead, *after* every row has been marked read,
+  and only it decides what is drawn. The narrow rule: a row is hidden only
+  because it sits in a view over a row the thread already draws. Real folders
+  always survive - two of them are two places the reader filed the message - and
+  a group that is nothing but views still draws one, because archived Gmail mail
+  carries no label at all and hiding the last copy of a message is never right.
+  Copies two accounts hold are two deliveries and stay with the detection in
+  `message_duplicates.go` that judges who was addressed.
+- **A drawn message has to name the rows it stands for.**
+  `ThreadCopyCollapse.CopyIDs` reaches the client as `copy_ids`, and
+  `markThreadUnread` marks all of them: the rows are one Gmail message, and
+  leaving one read keeps the conversation read in the list the reader just
+  returned to. `StandIn` maps a hidden row to the one drawn in its place, which
+  the message view follows so a reader who opened the hidden copy still gets a
+  thread containing what they asked for. That is the common path rather than a
+  corner: the lists pick the newest row by date and id, and a folder mirrored
+  after the one it duplicates holds the higher id.
+- **A drawn row's flags are the flags of every row behind it.** It carries the
+  hidden rows' state merged the way `dedupeConversationMessages` merges it - read
+  only when every copy is read, starred when any of them is - or the thread would
+  contradict the conversation row that was clicked to reach it. A star set on a
+  drawn message fans out to the hidden copies (`LabelViewCopyIDsForMessage`):
+  `\Flagged` belongs to the Gmail message rather than to one of its labels, and a
+  star left on a row nothing draws is one the lists keep showing and the reader
+  cannot clear.
+- **Do not collapse copies on the conversation path.** `summarizeConversation`
+  already dedupes by Message-ID for what a list row prints
+  (`dedupeConversationMessages`), and it does so *after*
+  `conversationTransferIDs` has read the ids on purpose: `message_ids` is what a
+  conversation-level Move, Archive or Trash acts on, and it has to name every
+  physical copy. Shrinking that set - by collapsing inside
+  `ListThreadMessagesByKeysForUser`, or by moving the dedupe ahead of it - leaves
+  the All Mail copy behind on a Trash the reader believed emptied the thread.
 - New attachment bodies should be indexed from raw `.eml` data and then discarded, not saved as separate attachment blobs.
 - **An attachment row keeps its ID for as long as the message holds that part.**
   `/attachments/<id>/download`, the inline `cid:` rewrite and the
