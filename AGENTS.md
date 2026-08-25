@@ -594,6 +594,17 @@ site and in review.
   must always be a prefix of that list, so editing a shipped entry, renumbering
   one, or leaving a gap is refused at startup rather than guessed at. Add a
   migration; never edit the baseline for a database that already exists.
+- Plugins carry their own migrations, recorded the same way in
+  `plugin_migrations` (`backend/store/plugins.go`). A shipped migration's SQL is
+  immutable for the same reason: the recorded checksum is how a start tells
+  "already applied" from "someone edited what ran". Reformatting one is safe —
+  the checksum hashes each statement's whitespace-separated words, so
+  indentation is not part of a migration's identity — but any change to what it
+  says needs a new migration id. A row written before that normalisation existed
+  is recognised and rewritten in place rather than refused; the one migration
+  whose text was reformatted while the checksum was still byte-exact is
+  grandfathered by hash in `supersededPluginMigrationChecksums`, and that list
+  only ever grows for a formatting-only change to an already-released migration.
 - SQL is written with `?` placeholders and translated to `$1..$n` in the driver
   (`backend/pgbind`). That is deliberate: many statements are assembled at run
   time from fragments, and numbering them in the source would mean every

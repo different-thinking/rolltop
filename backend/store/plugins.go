@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -243,10 +244,25 @@ func (s *Store) applyPluginMigration(ctx context.Context, migration plugins.Migr
 	err := s.db.QueryRowContext(ctx, `SELECT checksum FROM plugin_migrations WHERE plugin_id = ? AND migration_id = ?`,
 		migration.PluginID, migration.ID).Scan(&existing)
 	if err == nil {
-		if existing != checksum {
-			return fmt.Errorf("plugin migration checksum mismatch for %s/%s", migration.PluginID, migration.ID)
+		switch pluginMigrationChecksumState(existing, migration) {
+		case pluginChecksumCurrent:
+			return nil
+		case pluginChecksumSuperseded:
+			// The migration already ran; only the way we fingerprint it moved
+			// on. Rewriting the row is what stops every later start from
+			// re-recognising it, and unlike applying a migration it is safe
+			// off the schema lock: two servers doing it concurrently write the
+			// same value to a row that already exists.
+			if _, err := s.db.ExecContext(ctx, `UPDATE plugin_migrations SET checksum = ?
+				WHERE plugin_id = ? AND migration_id = ?`, checksum, migration.PluginID, migration.ID); err != nil {
+				return err
+			}
+			log.Printf("plugin migrations: re-recorded %s/%s under the current checksum (was %s)",
+				migration.PluginID, migration.ID, existing)
+			return nil
+		default:
+			return pluginMigrationChecksumMismatch(migration, existing, checksum)
 		}
-		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -291,28 +307,122 @@ func (s *Store) applyPluginMigration(ctx context.Context, migration plugins.Migr
 	return tx.Commit()
 }
 
+// pluginMigrationChecksum fingerprints what a migration does to the schema, so
+// that editing a migration someone has already applied is caught rather than
+// silently ignored.
+//
+// SQL is reduced to its whitespace-separated words before hashing: how a
+// statement is laid out in the source is not part of what it does. That is not
+// tidiness. The byte-exact version of this function treated a re-indented
+// literal as a changed migration, and one gofmt re-wrap — adding a second
+// migration to the slice indented the first one's CREATE TABLE by a tab — was
+// enough to refuse startup on every install that had already applied it.
 func pluginMigrationChecksum(m plugins.Migration) string {
+	return pluginMigrationDigest(m, normalizePluginMigrationSQL)
+}
+
+// pluginMigrationChecksumLegacy reproduces the byte-exact checksum that earlier
+// builds recorded, so a row written by one can be recognised as this same
+// migration instead of read as a conflict. Its output is never stored.
+func pluginMigrationChecksumLegacy(m plugins.Migration) string {
+	return pluginMigrationDigest(m, strings.TrimSpace)
+}
+
+func pluginMigrationDigest(m plugins.Migration, normalize func(string) string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(m.PluginID))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(m.ID))
 	for _, column := range m.EnsureColumns {
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(column.Table)))
+		_, _ = h.Write([]byte(normalize(column.Table)))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(column.Column)))
+		_, _ = h.Write([]byte(normalize(column.Column)))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(column.DDL)))
+		_, _ = h.Write([]byte(normalize(column.DDL)))
 	}
 	for _, stmt := range m.Statements {
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(stmt)))
+		_, _ = h.Write([]byte(normalize(stmt)))
 	}
 	if m.Apply != nil {
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte("custom"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// normalizePluginMigrationSQL collapses every run of whitespace to one space.
+// Two statements that differ only in indentation or line breaks reduce to the
+// same string; anything that changes a keyword, an identifier or punctuation
+// still changes it.
+func normalizePluginMigrationSQL(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// pluginMigrationChecksumStatus is what a recorded checksum says about the
+// compiled migration carrying the same id.
+type pluginMigrationChecksumStatus int
+
+const (
+	// pluginChecksumCurrent: the row was written by this checksum function.
+	pluginChecksumCurrent pluginMigrationChecksumStatus = iota
+	// pluginChecksumSuperseded: the row belongs to this migration but was
+	// written by an older build, and should be rewritten in place.
+	pluginChecksumSuperseded
+	// pluginChecksumConflict: the row belongs to a migration whose content has
+	// since changed, which is what the checksum exists to catch.
+	pluginChecksumConflict
+)
+
+// pluginMigrationChecksumState classifies a recorded checksum.
+//
+// Recognising an older build's checksum is deliberately narrow: only the
+// byte-exact hash of the migration as it stands today, or a hash listed in
+// supersededPluginMigrationChecksums. A checksum that is neither is a real
+// disagreement about what ran, and stays a refusal.
+func pluginMigrationChecksumState(stored string, m plugins.Migration) pluginMigrationChecksumStatus {
+	stored = strings.TrimSpace(stored)
+	if stored == pluginMigrationChecksum(m) {
+		return pluginChecksumCurrent
+	}
+	if stored == pluginMigrationChecksumLegacy(m) {
+		return pluginChecksumSuperseded
+	}
+	for _, superseded := range supersededPluginMigrationChecksums[m.PluginID+"/"+m.ID] {
+		if stored == superseded {
+			return pluginChecksumSuperseded
+		}
+	}
+	return pluginChecksumConflict
+}
+
+// supersededPluginMigrationChecksums lists checksums that shipped builds wrote
+// for a migration whose source text has since been reformatted without its SQL
+// changing. Normalised hashing means no future reformat needs an entry here;
+// these are the ones recorded before it existed, and each is the hash of a
+// specific historical text, so nothing else can slip through.
+//
+// Add an entry only for a formatting-only change to an already-released
+// migration. A migration whose SQL genuinely changed needs a new migration id,
+// not a line here.
+var supersededPluginMigrationChecksums = map[string][]string{
+	plugins.RemoteImageBlocklist + "/001_create_rules": {
+		// Adding 002_seed_default_patterns to the slice literal made gofmt
+		// indent this migration's CREATE TABLE by one more tab. Identical SQL,
+		// different bytes: every install that had applied 001 under the
+		// byte-exact checksum refused to start on the next release.
+		"95c1b828f35a50c7593520f3e57903c31ab04d2b63b89c9d56d7807115a7a91a",
+	},
+}
+
+// pluginMigrationChecksumMismatch reports a migration that was edited after it
+// ran. It names both checksums because the operator's next question is whether
+// the database or the build is the odd one out.
+func pluginMigrationChecksumMismatch(m plugins.Migration, stored, want string) error {
+	return fmt.Errorf("plugin migration checksum mismatch for %s/%s: recorded %s, compiled %s "+
+		"(the migration was edited after it ran; give the change a new migration id)",
+		m.PluginID, m.ID, stored, want)
 }
 
 func (s *Store) applyPluginMigrationsForScope(ctx context.Context, scope string) error {
@@ -337,7 +447,9 @@ const undefinedTable = "42P01"
 //
 // A checksum that disagrees is reported here rather than deferred to the locked
 // pass: it is a refusal, not work to be done, and taking a global lock to
-// produce it helps nobody.
+// produce it helps nobody. A checksum an older build wrote for the same
+// migration is the opposite — it needs rewriting, which is a write, so it
+// counts as outstanding work and goes through the lock like any other.
 func (s *Store) pluginMigrationsUpToDate(ctx context.Context) (bool, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT plugin_id, migration_id, checksum FROM plugin_migrations`)
 	if err != nil {
@@ -368,8 +480,14 @@ func (s *Store) pluginMigrationsUpToDate(ctx context.Context) (bool, error) {
 			if !ok {
 				return false, nil
 			}
-			if existing != pluginMigrationChecksum(migration) {
-				return false, fmt.Errorf("plugin migration checksum mismatch for %s/%s", migration.PluginID, migration.ID)
+			switch pluginMigrationChecksumState(existing, migration) {
+			case pluginChecksumCurrent:
+			case pluginChecksumSuperseded:
+				// Recognised, but the row needs rewriting. That is a write, so
+				// it belongs to the locked pass like any other outstanding work.
+				return false, nil
+			default:
+				return false, pluginMigrationChecksumMismatch(migration, existing, pluginMigrationChecksum(migration))
 			}
 		}
 	}
