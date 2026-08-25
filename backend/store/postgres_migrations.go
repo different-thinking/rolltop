@@ -97,10 +97,17 @@ var postgresMigrations = []postgresMigration{
 		// in Inbox and in Relevant, as mail waiting on them.
 		//
 		// The ledger is what makes the copy recognisable: a Message-ID this
-		// installation generated, remembered per account for as long as it takes
-		// the copy to be mirrored. It is deliberately not "mail from my own
-		// address" -- a printer, an alarm system or a spoof can send as the
-		// reader, and hiding that would hide real mail.
+		// installation generated, remembered for the account it was sent from.
+		// It is deliberately not "mail from my own address" -- a printer, an
+		// alarm system or a spoof can send as the reader, and hiding that would
+		// hide real mail.
+		//
+		// The rows are kept rather than expired. A folder whose UIDVALIDITY the
+		// server resets is re-imported from scratch, years after the fact, and
+		// every one of those arrivals has to reach the same conclusion as the
+		// first import did -- a window that had closed by then would flood the
+		// lists with mail the reader sent. They go with their account and with
+		// their user, which is what the two cascades are for.
 		Version: "0004-own-outgoing-copies",
 		Statements: []string{
 			`CREATE TABLE outgoing_message_ids (
@@ -108,10 +115,10 @@ var postgresMigrations = []postgresMigration{
 				account_id bigint NOT NULL,
 				message_id_header text COLLATE "C" NOT NULL,
 				created_at bigint NOT NULL,
-				expires_at bigint NOT NULL,
 				PRIMARY KEY (user_id, account_id, message_id_header)
 			)`,
-			`CREATE INDEX idx_outgoing_message_ids_expiry ON outgoing_message_ids (user_id, expires_at)`,
+			`ALTER TABLE outgoing_message_ids ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+			`ALTER TABLE outgoing_message_ids ADD FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE`,
 			`ALTER TABLE messages ADD COLUMN own_outgoing_copy bigint NOT NULL DEFAULT 0`,
 		},
 	},

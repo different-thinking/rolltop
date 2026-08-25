@@ -100,6 +100,12 @@ npm run build:plugins
 
 ## Notes
 
+Only one scheduled row may wait for a given rule and message, and that row keeps
+the phase it was written in when that phase was the arrival: saving an edited
+rule puts waiting mail back in front of the rule through the backfill, and mail
+this rule watched arrive must not become mail it merely found -- a rule that
+forwards new mail only would stop forwarding it.
+
 `older_than:` is the one term that is not a search. It names when the rule may
 act rather than something to find in the message, so it is taken out of the
 query and answered from the message's own date; what is left decides whether the

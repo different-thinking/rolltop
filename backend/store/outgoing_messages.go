@@ -1,5 +1,5 @@
-// File overview: The Message-IDs this Rolltop sent, remembered per account for
-// as long as it takes the provider's own copy of them to be mirrored back.
+// File overview: The Message-IDs this Rolltop sent, remembered per account so
+// the provider's own copy of them is recognised whenever it is mirrored.
 //
 // Every list that shows "mail still in play" already keeps Sent out of itself,
 // but it does so through the folder (`show_in_all_mail`), and a Gmail account
@@ -19,20 +19,19 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"time"
 )
-
-// outgoingMessageIDRetention is how long a sent Message-ID stays recognisable.
-// The copy is normally mirrored within minutes; the window is generous because
-// an account that is not polled for a while has not been mirrored yet either,
-// and the rows are a few dozen bytes each.
-const outgoingMessageIDRetention = 30 * 24 * time.Hour
 
 // RecordOutgoingMessageID remembers a Message-ID this installation is about to
 // send. It is called before the send rather than after: the provider can file
 // its copy the moment the message is accepted, and a sync that reaches it first
 // would store it as ordinary incoming mail. A recorded id whose send then fails
 // costs nothing -- no message will ever carry it.
+//
+// The row is kept for as long as the account is, and goes with it. A copy is
+// not mirrored only once: a folder whose UIDVALIDITY the server resets is
+// re-imported from scratch, and an arrival years later has to reach the same
+// conclusion the first one did. An expiring window would have quietly put every
+// older send back into the reader's lists the next time that happened.
 func (s *Store) RecordOutgoingMessageID(ctx context.Context, userID, accountID int64, messageIDHeader string) error {
 	messageIDHeader = strings.TrimSpace(messageIDHeader)
 	if userID <= 0 || accountID <= 0 {
@@ -45,11 +44,8 @@ func (s *Store) RecordOutgoingMessageID(ctx context.Context, userID, accountID i
 	if err != nil {
 		return err
 	}
-	now := nowUnix()
-	expires := time.Unix(now, 0).UTC().Add(outgoingMessageIDRetention).Unix()
-	_, err = db.ExecContext(ctx, `INSERT INTO outgoing_message_ids (user_id, account_id, message_id_header, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (user_id, account_id, message_id_header)
-		DO UPDATE SET expires_at = EXCLUDED.expires_at`, userID, accountID, messageIDHeader, now, expires)
+	_, err = db.ExecContext(ctx, `INSERT INTO outgoing_message_ids (user_id, account_id, message_id_header, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (user_id, account_id, message_id_header) DO NOTHING`, userID, accountID, messageIDHeader, nowUnix())
 	return err
 }

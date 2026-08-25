@@ -216,14 +216,26 @@ site and in review.
   (`Store.RecordOutgoingMessageID`, before the send -- the provider can file its
   copy the moment it accepts the message), `CreateMessage` resolves that once
   into `messages.own_outgoing_copy`, and `inPlayMailScope` drops those rows.
-  Three properties keep it honest. The test is what **this installation sent**,
-  never "mail from my own address": a printer, an alarm system or a spoof can
-  send as the reader, and hiding that hides real mail. The ledger is keyed by
-  the **sending account**, so the same message delivered to another account of
-  theirs is mail that account really received and stays visible. And the Sent
-  role is exempt, because a reader who puts Sent back into these lists is asking
-  for exactly this mail. Rows stay in their own folder's list either way --
-  keeping mail out of the combined lists is not hiding it.
+  Five properties keep it from hiding real mail, and each of them is a way it
+  did. The test is what **this installation sent**, never "mail from my own
+  address": a printer, an alarm system or a spoof can send as the reader. The
+  ledger is keyed by the **account the mail leaves through** -- the identity's,
+  which `forwardIdentity`'s fallback pass can put on a different account from
+  the forwarded message's -- so the same message delivered to another account of
+  theirs is mail that account really received and stays visible. **Sent and
+  Inbox are exempt**: a reader who puts Sent back into these lists is asking for
+  exactly this mail, and a copy the server delivered into the Inbox is mail that
+  arrived however it was sent -- a note to oneself and a Bcc to one's own
+  address are indistinguishable from the All Mail copy by Message-ID alone.
+  Detection may neither hide a copy behind one of these rows nor hide one of
+  them behind a copy (`duplicateCopyShowsInLists`): two accounts of one reader
+  both mirroring All Mail put the sender's copy and the delivery in one group,
+  and the older row winning took the delivery out of every list. And the ledger
+  rows are **kept, not expired**: a folder whose UIDVALIDITY resets is
+  re-imported from scratch years later, and a window that had closed by then
+  would put every older send back into the lists. Rows stay in their own
+  folder's list throughout -- keeping mail out of the combined lists is not
+  hiding it.
 - A conversation row is the message its list selected - the seed the list query
   returned - and `conversationView.ListDate` is that message's date. Threads are
   hydrated in full, so a row's thread carries messages the list excludes; taking

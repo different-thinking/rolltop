@@ -72,3 +72,54 @@ func TestForwardRecordsItsMessageIDBeforeSending(t *testing.T) {
 		t.Fatal("the forward's Message-ID was not recorded before the send, so the provider's copy of it comes back as incoming mail")
 	}
 }
+
+// The identity a forward leaves through is preferably the message's own
+// account's, but the fallback pass takes any identity with an outgoing server.
+// It is the account the mail actually leaves through that keeps the copy, so
+// that is the account the id has to be recorded for -- recorded against the
+// forwarded message's account instead, the copy comes back unrecognised.
+func TestForwardRecordsItsMessageIDForTheSendingAccount(t *testing.T) {
+	ctx := context.Background()
+	fixture := newMoveTestFixture(t)
+	fixture.service.Blobs = blob.New(t.TempDir())
+	message := storeRawForMessage(t, ctx, fixture, fixture.service.Blobs, fixture.message,
+		[]byte("From: studio@example.test\r\nTo: reader@example.test\r\nSubject: Receipt\r\n\r\nBody\r\n"))
+	sending, err := fixture.store.CreateMailAccount(ctx, store.MailAccount{
+		UserID: fixture.userID, Email: "sender@example.test", Host: "imap.example.test", Port: 993,
+		Username: "sender", EncryptedPassword: "encrypted-test-value", UseTLS: true, Mailbox: store.DefaultMailboxPattern,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	smtpAccount, err := fixture.store.CreateSMTPAccount(ctx, store.SMTPAccount{
+		UserID: fixture.userID, Label: "Outgoing", Host: "smtp.example.test", Port: 587,
+		Username: "sender@example.test", EncryptedPassword: "encrypted-test-value", UseTLS: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The only identity there is belongs to the other account, so the fallback
+	// pass is what answers -- the message's own account has none.
+	if _, err := fixture.store.CreateMailIdentityForUser(ctx, fixture.userID, store.MailIdentity{
+		Email: "sender@example.test", DisplayName: "Sender",
+		IMAPAccountID: sending.ID, SMTPAccountID: smtpAccount.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := &forwardTestSender{store: fixture.store, userID: fixture.userID, accountID: sending.ID}
+	fixture.service.Sender = sender
+
+	if err := fixture.service.ForwardMessage(ctx, fixture.userID, message.ID, "books@example.test", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(sender.sent))
+	}
+	if !sender.knownAtSend[0] {
+		t.Fatal("the id was not recorded for the account the forward left through")
+	}
+	if outgoingMessageIDRecorded(ctx, fixture.store, fixture.userID, fixture.account.ID, sender.sent[0].MessageID) {
+		t.Fatal("the id was recorded for the forwarded message's account, which never sees the copy")
+	}
+}

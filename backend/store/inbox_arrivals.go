@@ -1029,12 +1029,6 @@ func pruneArrivalCorrelationRows(ctx context.Context, tx *sql.Tx, userID, now in
 		WHERE user_id = ? AND state IN ('failed', 'consumed') AND expires_at <= ?`, userID, now); err != nil {
 		return err
 	}
-	// A sent Message-ID is only needed until the provider's copy of it has been
-	// mirrored, which is minutes, not the window it is kept for.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM outgoing_message_ids
-		WHERE user_id = ? AND expires_at <= ?`, userID, now); err != nil {
-		return err
-	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM expunged_message_fingerprints
 		WHERE user_id = ? AND expires_at <= ? AND NOT EXISTS (
 			SELECT 1 FROM message_transfers transfer

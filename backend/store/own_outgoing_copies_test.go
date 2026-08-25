@@ -190,3 +190,80 @@ func TestMailDeliveredToAnotherAccountIsNotAnOutgoingCopy(t *testing.T) {
 		t.Fatalf("all mail = %v, want the delivered message %d", messageIDsOf(all), delivered.ID)
 	}
 }
+
+// A note the reader mails to themselves, and a Bcc to their own address, are
+// delivered into the Inbox and are addressed to them. The ledger cannot tell
+// that copy apart from the one the provider files under All Mail -- both carry
+// the Message-ID this Rolltop generated -- so the Inbox role is what does.
+func TestMailSentToYourselfStaysInTheLists(t *testing.T) {
+	ctx := context.Background()
+	f := newOutgoingCopyFixture(t)
+	inbox, err := f.db.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "INBOX", "inbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordOutgoingMessageID(ctx, f.user.ID, f.account.ID, "<note-to-self@example.test>"); err != nil {
+		t.Fatal(err)
+	}
+	note := f.create(t, inbox, 4, "<note-to-self@example.test>", "mail@example.test")
+
+	for _, tt := range []struct {
+		name string
+		list func() ([]MessageRecord, error)
+	}{
+		{"all mail", func() ([]MessageRecord, error) {
+			return f.db.ListLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+		}},
+		{"inbox", func() ([]MessageRecord, error) {
+			return f.db.ListUnarchivedLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+		}},
+		{"relevant", func() ([]MessageRecord, error) {
+			return f.db.ListCategoryLatestThreadMessagesForUser(ctx, f.user.ID, mailparse.CategoryRelevant, 10, 0, ThreadListNewestFirst)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			messages, err := tt.list()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 || messages[0].ID != note.ID {
+				t.Fatalf("%s = %v, want the delivered note %d", tt.name, messageIDsOf(messages), note.ID)
+			}
+		})
+	}
+}
+
+// A copy is not mirrored only once. A folder whose UIDVALIDITY the server resets
+// is re-imported from scratch, and the arrival that re-creates the row has to
+// reach the same conclusion the first one did -- an expiring ledger would have
+// put every older send back into the lists the next time that happened.
+func TestOutgoingCopyIsStillRecognisedWhenTheFolderIsReimported(t *testing.T) {
+	ctx := context.Background()
+	f := newOutgoingCopyFixture(t)
+	allMail, err := f.db.GetOrCreateMailbox(ctx, f.user.ID, f.account.ID, "[Gmail]/All Mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordOutgoingMessageID(ctx, f.user.ID, f.account.ID, "<reimported@example.test>"); err != nil {
+		t.Fatal(err)
+	}
+	first := f.create(t, allMail, 5, "<reimported@example.test>", "mail@example.test")
+	// What a generation reset does to the row, years later: the message is gone
+	// and comes back under a new UID, long after any window would have closed.
+	if _, err := f.db.DB().ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, f.user.ID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.DB().ExecContext(ctx, `UPDATE outgoing_message_ids SET created_at = ? WHERE user_id = ?`,
+		time.Now().AddDate(-3, 0, 0).Unix(), f.user.ID); err != nil {
+		t.Fatal(err)
+	}
+	again := f.create(t, allMail, 6, "<reimported@example.test>", "mail@example.test")
+
+	all, err := f.db.ListLatestThreadMessagesForUser(ctx, f.user.ID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("all mail = %v, want the re-imported outgoing copy %d left out", messageIDsOf(all), again.ID)
+	}
+}

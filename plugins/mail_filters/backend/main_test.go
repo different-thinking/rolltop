@@ -975,3 +975,38 @@ func insertWait(t *testing.T, db *sql.DB, userID, ruleID, accountID, mailboxID, 
 		t.Fatal(err)
 	}
 }
+
+// Saving an edited rule puts every message back in front of it, backfill
+// included, and a message still waiting on its age is one of them. The wait
+// keeps the phase it was written in when that phase was the arrival: mail this
+// rule watched arrive does not become mail it merely found because the rule was
+// edited while the mail waited, and a rule that forwards new mail only would
+// otherwise stop forwarding it.
+func TestAWaitThatBeganOnArrivalKeepsItsOriginThroughABackfill(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "wait-origin@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{
+		ForwardTo: "bookkeeping@example.test", ForwardNewOnly: true,
+	})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 410, time.Now().UTC().Add(-24*time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var phase string
+	if err := db.QueryRowContext(ctx, `SELECT phase FROM plugin_mail_filter_evaluations
+		WHERE user_id = ? AND rule_id = ? AND message_id = ? AND status = ?`,
+		user.ID, rule.ID, msg.MessageID, statusScheduled).Scan(&phase); err != nil {
+		t.Fatal(err)
+	}
+	if phase != phaseInbound {
+		t.Fatalf("wait phase = %q, want the arrival it began as", phase)
+	}
+}

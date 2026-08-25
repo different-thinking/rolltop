@@ -68,8 +68,11 @@ const (
 // The copies of mail this Rolltop sent are out too, and for a forwarding rule
 // they are the mail it would reach first: the provider files a copy of every
 // forward, and a rule matching on the original's sender or subject matches that
-// copy as readily as the original.
-const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0 AND m.own_outgoing_copy = 0`
+// copy as readily as the original. The Sent and Inbox exemptions are the lists'
+// (Store.inPlayMailScope) and are repeated here for the same reason the rest of
+// this predicate is: a filter reads the mail the lists show, and mail delivered
+// into the Inbox is mail that arrived whoever sent it.
+const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0 AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))`
 
 type mailFiltersBackend struct {
 	mu     sync.Mutex
@@ -718,7 +721,15 @@ func scheduleEvaluation(ctx context.Context, db *sql.DB, evalID int64, rule Rule
 		(user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, '{}', '', ?)
 		ON CONFLICT (user_id, rule_id, message_id) WHERE status = 'scheduled'
-		DO UPDATE SET phase = EXCLUDED.phase, due_at = EXCLUDED.due_at, evaluated_at = EXCLUDED.evaluated_at,
+		-- An arrival is not un-seen by a later pass over the same message. The
+		-- wait keeps the phase it was written in when that phase was the
+		-- arrival, or a rule edited while mail waits on its age -- which puts
+		-- every message back in front of the rule, backfill included -- would
+		-- turn mail this rule watched arrive into mail it merely found, and a
+		-- rule that forwards new mail only would then not forward it.
+		DO UPDATE SET phase = CASE WHEN plugin_mail_filter_evaluations.phase = 'inbound'
+				THEN plugin_mail_filter_evaluations.phase ELSE EXCLUDED.phase END,
+			due_at = EXCLUDED.due_at, evaluated_at = EXCLUDED.evaluated_at,
 			terms_json = EXCLUDED.terms_json, fields_json = EXCLUDED.fields_json, error = ''`,
 		msg.UserID, rule.ID, msg.MessageID, msg.AccountID, msg.MailboxID, phase, statusScheduled,
 		unixOrZero(dueAt), now, mustJSON(result.Terms), mustJSON(result.Fields), now)
