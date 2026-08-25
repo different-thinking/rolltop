@@ -439,15 +439,16 @@ site and in review.
   carries no label at all and hiding the last copy of a message is never right.
   Copies two accounts hold are two deliveries and stay with the detection in
   `message_duplicates.go` that judges who was addressed.
-- **A drawn message that stands for several rows has to carry them with it.**
+- **A drawn message has to name the rows it stands for.**
   `ThreadCopyCollapse.CopyIDs` reaches the client as `copy_ids`, and
   `markThreadUnread` marks all of them: the rows are one Gmail message, and
   leaving one read keeps the conversation read in the list the reader just
   returned to. `StandIn` maps a hidden row to the one drawn in its place, which
   the message view follows so a reader who opened the hidden copy still gets a
-  thread containing what they asked for - the lists reach a view's copy routinely,
-  because a folder mirrored later holds the higher id and that breaks the tie
-  when a conversation picks the row it prints. The drawn row also carries the
+  thread containing what they asked for. That is the common path rather than a
+  corner: the lists pick the newest row by date and id, and a folder mirrored
+  after the one it duplicates holds the higher id.
+- **A drawn row's flags are the flags of every row behind it.** It carries the
   hidden rows' state merged the way `dedupeConversationMessages` merges it - read
   only when every copy is read, starred when any of them is - or the thread would
   contradict the conversation row that was clicked to reach it. A star set on a
