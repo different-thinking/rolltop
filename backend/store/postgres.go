@@ -365,8 +365,8 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 		return err
 	}
 
-	checksum := baselineChecksum()
-	state, err := readPostgresSchemaState(ctx, conn, checksum, postgresMigrations)
+	baseline := baselineIdentity()
+	state, err := readPostgresSchemaState(ctx, conn, baseline, postgresMigrations)
 	if err != nil {
 		return err
 	}
@@ -383,7 +383,7 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 
 	// Another process may have created or advanced the schema while this one
 	// waited on the lock.
-	state, err = readPostgresSchemaState(ctx, conn, checksum, postgresMigrations)
+	state, err = readPostgresSchemaState(ctx, conn, baseline, postgresMigrations)
 	if err != nil {
 		return err
 	}
@@ -401,7 +401,7 @@ func (s *Store) ensurePostgresSchema(ctx context.Context, progress MigrationRepo
 				describeBlockingObjects(blocking))
 		}
 		reportMigration(progress, MigrationProgress{Scope: postgresSchemaScope, Migration: postgresSchemaVersion, Step: "create schema", Done: 0, Total: 1 + len(state.Outstanding)})
-		if err := applyPostgresBaseline(ctx, conn, checksum); err != nil {
+		if err := applyPostgresBaseline(ctx, conn, baseline.current); err != nil {
 			return err
 		}
 	}
@@ -595,11 +595,24 @@ func quoteSQLLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-// baselineChecksum fingerprints the baseline as schema_migrations records it.
-// A mismatch at open means baseline.sql was edited after a database was built
-// from it, which is the one thing the row exists to catch.
+// baselineIdentity is the baseline text's checksum under every algorithm a
+// shipped build has recorded it with: what a start writes today, and what one
+// before normalizeSQL wrote. Both are the same baseline, so both are accepted.
+//
+// This matters more here than anywhere else. A baseline mismatch is the one
+// refusal with no upgrade path — the message says so — so a reformat of
+// baseline.sql that changed its checksum would strand every existing database
+// with no way back short of another release or hand-editing schema_migrations.
+func baselineIdentity() checksumIdentity {
+	return checksumIdentity{
+		current: schemaChecksum(postgresSchemaScope, postgresSchemaVersion, pgschema.Baseline),
+		legacy:  schemaChecksumLegacy(postgresSchemaScope, postgresSchemaVersion, pgschema.Baseline),
+	}
+}
+
+// baselineChecksum is what a fresh database records for its baseline.
 func baselineChecksum() string {
-	return schemaChecksum(postgresSchemaScope, postgresSchemaVersion, pgschema.Baseline)
+	return baselineIdentity().current
 }
 
 // pinPostgresSearchPath makes unqualified names resolve to the schema the

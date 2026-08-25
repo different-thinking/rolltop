@@ -170,7 +170,18 @@ var postgresMigrations = []postgresMigration{
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {
-	return schemaChecksum(postgresSchemaScope, m.Version, m.Statements...)
+	return postgresMigrationIdentity(m).current
+}
+
+// postgresMigrationIdentity is the migration's checksum under both algorithms,
+// so a row an older build recorded is recognised as this same migration rather
+// than read as an edit to a shipped one. See checksumRecognised for why the row
+// is left as it is instead of being rewritten.
+func postgresMigrationIdentity(m postgresMigration) checksumIdentity {
+	return checksumIdentity{
+		current: schemaChecksum(postgresSchemaScope, m.Version, m.Statements...),
+		legacy:  schemaChecksumLegacy(postgresSchemaScope, m.Version, m.Statements...),
+	}
 }
 
 // postgresSchemaState is what one read of schema_migrations says about this
@@ -190,7 +201,7 @@ type postgresSchemaState struct {
 // readPostgresSchemaState classifies the database in a single query, so the
 // every-restart fast path stays one read: baseline row and migration rows come
 // back together, and only a database with work to do takes the schema lock.
-func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baselineChecksum string, migrations []postgresMigration) (postgresSchemaState, error) {
+func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baseline checksumIdentity, migrations []postgresMigration) (postgresSchemaState, error) {
 	var table sql.NullString
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1)::text`,
 		schemaMigrationsQualified()).Scan(&table); err != nil {
@@ -216,14 +227,14 @@ func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baselineChecks
 	if err := rows.Err(); err != nil {
 		return postgresSchemaState{}, postgresError("read the schema version", err)
 	}
-	return classifyPostgresSchemaState(applied, baselineChecksum, migrations)
+	return classifyPostgresSchemaState(applied, baseline, migrations)
 }
 
 // classifyPostgresSchemaState turns the recorded rows into a decision. It is
 // split from the read so the refusal cases can be tested without a database.
-func classifyPostgresSchemaState(applied map[string]string, baselineChecksum string, migrations []postgresMigration) (postgresSchemaState, error) {
+func classifyPostgresSchemaState(applied map[string]string, baseline checksumIdentity, migrations []postgresMigration) (postgresSchemaState, error) {
 	recorded, baselinePresent := applied[postgresSchemaVersion]
-	if baselinePresent && recorded != baselineChecksum {
+	if baselinePresent && !baseline.recognises(recorded) {
 		return postgresSchemaState{}, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two")
 	}
 	if !baselinePresent {
@@ -260,7 +271,7 @@ func classifyPostgresSchemaState(applied map[string]string, baselineChecksum str
 		if firstOutstanding >= 0 {
 			return postgresSchemaState{}, fmt.Errorf("postgres: migration %s is applied but earlier migration %s is not; the migration history of this database cannot be explained", m.Version, migrations[firstOutstanding].Version)
 		}
-		if checksum != postgresMigrationChecksum(m) {
+		if !postgresMigrationIdentity(m).recognises(checksum) {
 			return postgresSchemaState{}, fmt.Errorf("postgres: migration %s was edited after this database applied it; shipped migrations are immutable", m.Version)
 		}
 	}
