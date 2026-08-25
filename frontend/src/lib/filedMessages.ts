@@ -102,19 +102,16 @@ function readStored(userID: number): Map<number, StoredRecord> {
 
 /**
  * commit writes this tab's map back, merged with whatever another tab has
- * stored since it was last read. `filed` and `released` say what this tab just
- * decided, so the merge can tell a record another tab added - which is kept -
- * from one this tab removed, which must not come back through the merge.
+ * stored since it was last read. What this tab just filed is already in
+ * `records` and wins the merge by being copied over the stored copy; what it
+ * just released has to be named, because it is gone from `records` and the
+ * stored copy would otherwise put it straight back.
  */
-function commit(filed: Set<number>, released: Set<number>) {
+function commit(released: Set<number>) {
   if (activeUserID <= 0) return;
   const merged = readStored(activeUserID);
   records.forEach((record, id) => merged.set(id, record));
   released.forEach((id) => merged.delete(id));
-  filed.forEach((id) => {
-    const own = records.get(id);
-    if (own) merged.set(id, own);
-  });
   records = prune(merged);
   try {
     localStorage.setItem(storageKey(activeUserID), JSON.stringify({
@@ -187,11 +184,16 @@ export function clearFiledMessages(userID: number) {
 export function clearOtherFiledMessages(keepUserID: number) {
   if (!Number.isInteger(keepUserID) || keepUserID <= 0) return;
   try {
+    // Collected before anything is removed: the order `localStorage` reports
+    // keys in is the browser's business and may shift as entries go, so
+    // deleting while walking it by index can skip one.
     const keep = storageKey(keepUserID);
-    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const dropped: string[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
       const key = localStorage.key(index);
-      if (key && key.startsWith(storagePrefix) && key !== keep) localStorage.removeItem(key);
+      if (key && key.startsWith(storagePrefix) && key !== keep) dropped.push(key);
     }
+    dropped.forEach((key) => localStorage.removeItem(key));
   } catch {
     // Best-effort cleanup for storage-restricted browsers.
   }
@@ -217,7 +219,7 @@ export function recordFiledMessages(entries: FiledMessage[]): number[] {
     taken.add(entry.id);
   });
   if (taken.size === 0) return [];
-  commit(taken, new Set());
+  commit(new Set());
   notify();
   return Array.from(taken);
 }
@@ -229,7 +231,7 @@ export function releaseFiledMessages(ids: number[]) {
     if (records.delete(id)) released.add(id);
   });
   if (released.size === 0) return;
-  commit(new Set(), released);
+  commit(released);
   notify();
 }
 
@@ -256,31 +258,42 @@ export function messageIsFiled(messageID: number, mailboxID: number): boolean {
 }
 
 /**
- * filterFiledConversations drops the rows a filing is still hiding, and lets go
- * of the records the rows themselves have answered. A row stands for its own
- * seed message, which is the message the filing named, so that is what decides
- * it - the same message the list's own dismissal keys on.
+ * filterFiledConversations drops the rows a filing is still hiding. A row stands
+ * for its own seed message, which is the message the filing named, so that is
+ * what decides it - the same message the list's own dismissal keys on.
  *
- * Releasing here rather than in a mutation is what makes a record self-clearing:
- * the row arriving in Trash, or being put back by anything at all, is the proof,
- * and it reaches every list. Nothing re-renders on it - a released record only
- * ever unhides, and the caller is computing the unhidden list as it asks - so
- * this stays safe to call while rendering.
+ * Pure, and it has to stay pure: a list calls it while rendering, and a render
+ * that writes to `localStorage` blocks the main thread and happens again on
+ * every render React discards. Letting go of the answered records is the other
+ * half and lives in `releaseAnsweredFilings`, which callers reach outside the
+ * render.
  */
 export function filterFiledConversations<T extends Conversation>(conversations: T[]): T[] {
   if (records.size === 0) return conversations;
+  return conversations.filter((conversation) => !messageIsFiled(conversation.message.id, conversation.message.mailbox_id));
+}
+
+/**
+ * releaseAnsweredFilings lets go of the records these rows have answered: the
+ * message arriving where it was filed to, or turning up anywhere other than the
+ * folder it was filed out of. That is what makes a record self-clearing, and
+ * why nothing has to be cleared when a move lands.
+ *
+ * It is called where a page of rows is settled rather than drawn - a list
+ * response coming back, an effect after the rows are on screen - never during a
+ * render. Reading the same rows twice is free: a record is released once and is
+ * not there to release again.
+ */
+export function releaseAnsweredFilings(conversations: readonly Conversation[]) {
+  if (records.size === 0) return;
   const answered = new Set<number>();
-  const kept = conversations.filter((conversation) => {
+  conversations.forEach((conversation) => {
     const { id, mailbox_id: mailboxID } = conversation.message;
-    if (messageIsFiled(id, mailboxID)) return false;
-    if (records.has(id)) answered.add(id);
-    return true;
+    if (records.has(id) && !messageIsFiled(id, mailboxID)) answered.add(id);
   });
-  if (answered.size > 0) {
-    answered.forEach((id) => records.delete(id));
-    commit(new Set(), answered);
-  }
-  return kept;
+  if (answered.size === 0) return;
+  answered.forEach((id) => records.delete(id));
+  commit(answered);
 }
 
 function positiveMailboxID(value: number | undefined): number {

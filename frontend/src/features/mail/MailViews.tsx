@@ -11,7 +11,7 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
-import { filterFiledConversations, recordFiledMessages, releaseFiledMessages, subscribeFiledMessages } from "../../lib/filedMessages";
+import { filterFiledConversations, recordFiledMessages, releaseAnsweredFilings, releaseFiledMessages, subscribeFiledMessages } from "../../lib/filedMessages";
 import type { FiledMessage } from "../../lib/filedMessages";
 import { dateGroupLabel, displaySnoozeUntil, displayTime, localDayKey, messageCountLabel } from "../../lib/format";
 import { displayInitial, stableHash } from "../../lib/senderIdentity";
@@ -1631,6 +1631,16 @@ function MessageList({
   // by this view's own mutations and by a message view that found its message
   // gone from the server.
   useEffect(() => subscribeFiledMessages(() => setFiledGeneration((current) => current + 1)), []);
+
+  // The rows on screen answer their own filings: a message drawn where it was
+  // filed to, or anywhere other than the folder it left, has settled the
+  // question the record was asking. `visible` decides that while rendering and
+  // must stay pure, so letting the records go happens here, once the rows are
+  // up - and for rows this view was handed rather than fetched, which is the
+  // set the request paths never see.
+  useEffect(() => {
+    releaseAnsweredFilings(conversations);
+  }, [conversations]);
 
   useEffect(() => {
     return () => {

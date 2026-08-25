@@ -42,7 +42,7 @@ import type {
   User
 } from "./types";
 import { clearMailSnapshots, clearOtherMailSnapshots, forgetMessagesInSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
-import { clearFiledMessages, clearOtherFiledMessages, filedMessageIDs, filterFiledConversations, setFiledMessagesUser } from "./lib/filedMessages";
+import { clearFiledMessages, clearOtherFiledMessages, filedMessageIDs, filterFiledConversations, releaseAnsweredFilings, setFiledMessagesUser } from "./lib/filedMessages";
 import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
 import type { MailSortOrder } from "./lib/mailSort";
 import type { MailView } from "./lib/routes";
@@ -342,6 +342,15 @@ function withoutFiledConversations<T extends MailListResponse>(page: T): T {
   return conversations.length === page.conversations.length ? page : { ...page, conversations };
 }
 
+// answeredFiledConversations is that plus letting go of the records these rows
+// have answered - a message drawn where it was filed to, or anywhere other than
+// the folder it left. Only the network paths do it: `cachedMail` is read while
+// a view renders, and releasing a record writes to `localStorage`.
+function answeredFiledConversations<T extends MailListResponse>(page: T): T {
+  releaseAnsweredFilings(page.conversations);
+  return withoutFiledConversations(page);
+}
+
 async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = ""): Promise<MailListResponse> {
   const url = mailListURL(mailboxID, page, order, view);
   const epoch = mailCacheEpoch(userID);
@@ -349,7 +358,7 @@ async function loadMail(userID: number, mailboxID: string | null, page: number, 
   // Filed rows come off the page before it is stored, not only before it is
   // handed back: a snapshot written with them outlives the filing that hides
   // them, and would paint deleted mail again once the filing expired.
-  const data = withoutFiledConversations(await getJSON<MailListResponse>(url, key));
+  const data = answeredFiledConversations(await getJSON<MailListResponse>(url, key));
   if (mailCacheEpoch(userID) !== epoch) {
     getCache.delete(key);
     return data;
@@ -460,14 +469,14 @@ export const api = {
   retainMailCacheForUser,
   forgetMessages,
   snoozes: (page: number) => getJSON<SnoozeListResponse>(`/api/snoozes?${new URLSearchParams({ page: String(page) })}`)
-    .then(withoutFiledConversations),
+    .then(answeredFiledConversations),
   snoozeMessage: (csrf: string, id: number, until: Date, options?: MutationRequestOptions) =>
     putJSON<{ ok: boolean; snoozed: boolean; snooze: MessageSnooze }>(`/api/messages/${id}/snooze`, csrf, { until: until.toISOString() }, options),
   unsnoozeMessage: (csrf: string, id: number, options?: MutationRequestOptions) =>
     deleteJSON<{ ok: boolean; snoozed: boolean }>(`/api/messages/${id}/snooze`, csrf, options),
   search: (query: string, page: number) =>
     getJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page))
-      .then(withoutFiledConversations),
+      .then(answeredFiledConversations),
   prefetchSearch: (query: string, page: number) =>
     prefetchJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page)),
   brandIcons: (domains: string[]) => {
