@@ -16,6 +16,10 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type oneClickUnsubscribeHook struct{}
 
+// Compile-time proof the hook satisfies the host interface, so a missing method
+// is a build error rather than a silent fail-open at the runtime type assertion.
+var _ plugins.OneClickUnsubscribeHook = oneClickUnsubscribeHook{}
+
 func (oneClickUnsubscribeHook) LatestOneClickSend(ctx context.Context, db *sql.DB, userID, messageID int64, target string, since time.Time) (plugins.OneClickUnsubscribeSend, error) {
 	send, err := history.LatestSend(ctx, db, userID, messageID, target, since)
 	return plugins.OneClickUnsubscribeSend{SentAt: send.SentAt}, err

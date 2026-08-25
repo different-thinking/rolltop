@@ -130,10 +130,20 @@ func scanBlobCleanupQueueEntry(row blobCleanupScanDest) (BlobCleanupQueueEntry, 
 	return entry, err
 }
 
-// CompleteBlobCleanup holds SQLite's writer lock while it rechecks references
-// and path ownership, deletes the file, and removes metadata plus the journal.
-// deletePath must not access this Store. Callback or commit failure leaves the
-// SQLite metadata and queue entry available for an idempotent retry.
+// CompleteBlobCleanup rechecks references and path ownership under a row lock,
+// removes the blob metadata and the journal entry, and only then deletes the
+// file. deletePath must not access this Store.
+//
+// Ordering is load-bearing on PostgreSQL, which (unlike the SQLite this code was
+// written for) has no global writer lock. The blob row is taken FOR UPDATE
+// before the reference recheck: a concurrent message/attachment insert takes a
+// FOR KEY SHARE lock on that row through its foreign key, which conflicts with
+// FOR UPDATE, so re-references are blocked until this transaction ends and the
+// recheck cannot miss one that is about to commit. The filesystem delete then
+// runs after the metadata DELETE has committed, so a crash in between leaves a
+// harmless orphan file rather than a metadata row pointing at a deleted file
+// (which the sync would treat as a cached body and never refetch). Commit
+// failure leaves the metadata and queue entry for an idempotent retry.
 func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64, deletePath func(string) error) error {
 	if userID <= 0 || cleanupID <= 0 {
 		return errors.New("invalid blob cleanup entry")
@@ -165,10 +175,14 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 		return err
 	}
 
+	// deleteFileAfterCommit is the path to remove from disk once the metadata
+	// DELETE has committed; empty means nothing to delete (a skip path).
+	deleteFileAfterCommit := ""
+
 	var currentPath, currentSHA string
 	var currentSize, currentCreatedAt int64
 	err = tx.QueryRowContext(ctx, `SELECT path, sha256, size, created_at FROM blobs
-		WHERE user_id = ? AND id = ?`, userID, entry.BlobID).
+		WHERE user_id = ? AND id = ? FOR UPDATE`, userID, entry.BlobID).
 		Scan(&currentPath, &currentSHA, &currentSize, &currentCreatedAt)
 	switch {
 	case err == nil:
@@ -183,13 +197,8 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 		if referenced {
 			return finishBlobCleanupTx(ctx, tx, userID, cleanupID)
 		}
-		if entry.BlobPath != "" {
-			if deletePath == nil {
-				return errors.New("blob cleanup requires filesystem callback")
-			}
-			if err := deletePath(entry.BlobPath); err != nil {
-				return err
-			}
+		if entry.BlobPath != "" && deletePath == nil {
+			return errors.New("blob cleanup requires filesystem callback")
 		}
 		result, err := tx.ExecContext(ctx, `DELETE FROM blobs
 			WHERE user_id = ? AND id = ? AND path = ? AND sha256 = ? AND size = ? AND created_at = ?`,
@@ -203,6 +212,9 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 		}
 		if rowsAffected != 1 {
 			return errors.New("blob metadata changed during cleanup")
+		}
+		if entry.BlobPath != "" {
+			deleteFileAfterCommit = entry.BlobPath
 		}
 	case errors.Is(err, sql.ErrNoRows):
 		var pathOwnerID int64
@@ -218,14 +230,23 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 			if deletePath == nil {
 				return errors.New("blob cleanup requires filesystem callback")
 			}
-			if err := deletePath(entry.BlobPath); err != nil {
-				return err
-			}
+			deleteFileAfterCommit = entry.BlobPath
 		}
 	default:
 		return err
 	}
-	return finishBlobCleanupTx(ctx, tx, userID, cleanupID)
+	if err := finishBlobCleanupTx(ctx, tx, userID, cleanupID); err != nil {
+		return err
+	}
+	// The transaction has committed; the metadata is gone and no new reference
+	// can point at this blob. Removing the file now is safe, and a failure here
+	// only orphans the file rather than stranding a live reference.
+	if deleteFileAfterCommit != "" {
+		if err := deletePath(deleteFileAfterCommit); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func blobReferencedTx(ctx context.Context, tx *sql.Tx, userID, blobID int64) (bool, error) {

@@ -74,7 +74,10 @@ type Options struct {
 	PluginDir        string
 	SessionTTL       time.Duration
 	CookieSecure     bool
-	WebhookToken     string
+	// PublicURL is the external origin (scheme+host) used to build links in
+	// outgoing mail; empty falls back to the request Host header.
+	PublicURL    string
+	WebhookToken string
 	// Google carries the validated OAuth client settings from config.Load.
 	Google config.GoogleConfig
 	// GoogleAuth overrides the manager built from Google. Tests set it to point
@@ -122,6 +125,7 @@ type Server struct {
 	startedBackendPlugins     map[string]plugins.BackendPlugin
 	sessionTTL                time.Duration
 	cookieSecure              bool
+	publicURL                 string
 	webhookToken              string
 	googleAuth                *googleauth.Manager
 	googleContacts            *googlepeople.Syncer
@@ -403,6 +407,7 @@ func New(opts Options) (*Server, error) {
 		startedBackendPlugins: map[string]plugins.BackendPlugin{},
 		sessionTTL:            opts.SessionTTL,
 		cookieSecure:          opts.CookieSecure,
+		publicURL:             strings.TrimSpace(opts.PublicURL),
 		webhookToken:          strings.TrimSpace(opts.WebhookToken),
 		googleAuth:            opts.GoogleAuth,
 		googleContacts:        opts.GoogleContacts,

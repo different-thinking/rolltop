@@ -88,6 +88,41 @@ var postgresMigrations = []postgresMigration{
 				WHERE auth_type = 'google_oauth' AND smtp_host = 'smtp.gmail.com' AND smtp_port = 465`,
 		},
 	},
+	{
+		// Index the foreign keys that point at messages(id) and blobs(id). The
+		// baseline declares these references but no index led by the referencing
+		// column, so PostgreSQL's referential-integrity check for every ON DELETE
+		// CASCADE / SET NULL ran as a sequential (or wrong-order index) scan of
+		// the child table once per deleted parent row. Emptying a Trash folder of
+		// tens of thousands of messages therefore went quadratic — each deleted
+		// message re-scanning attachments, locations and the rest — and every
+		// DELETE FROM blobs (RESTRICT) and blob reference recheck scanned all of
+		// the tenant's messages/attachments. The existing composite indexes lead
+		// with user_id (or other columns), which the RI check, keyed on the
+		// foreign-key column alone, cannot use. IF NOT EXISTS so an operator who
+		// added one by hand is not an error. CREATE INDEX (not CONCURRENTLY)
+		// because a migration runs inside a transaction.
+		Version: "0004-fk-indexes",
+		Statements: []string{
+			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_message_id ON attachments (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_blob_id ON attachments (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_messages_blob_id ON messages (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_contact_icons_blob_id ON contact_icons (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_locations_message_id ON locations (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_snoozes_message_id ON message_snoozes (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_new_mail_events_message_id ON new_mail_events (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_pending_inbox_arrivals_message_id ON pending_inbox_arrivals (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_plugin_language_messages_message_id ON plugin_language_messages (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_snooze_reminder_events_message_id ON snooze_reminder_events (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_one_click_unsubscribe_message_id ON plugin_one_click_unsubscribe_sends (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_pending_move_notifications_consumed_message_id ON pending_move_notifications (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_expunged_fingerprints_consumed_message_id ON expunged_message_fingerprints (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_transfers_source_message_id ON message_transfers (source_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_transfers_consumed_message_id ON message_transfers (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_spam_classifications_user_message_id ON plugin_experimental_spam_classifications (user_id, message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_spam_feedback_user_message_id ON plugin_experimental_spam_feedback (user_id, message_id)`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

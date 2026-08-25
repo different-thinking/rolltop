@@ -969,6 +969,7 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 		PluginDir:        cfg.PluginDir,
 		SessionTTL:       cfg.SessionTTL,
 		CookieSecure:     cfg.CookieSecure,
+		PublicURL:        cfg.PublicURL,
 		WebhookToken:     cfg.WebhookToken,
 		Google:           cfg.Google,
 		GoogleAuth:       googleAuth,
