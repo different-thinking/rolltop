@@ -63,12 +63,10 @@ func normalizeSQL(sql string) string {
 			emit(sql[i:end])
 			i = end
 		default:
-			if end, ok := endOfDollarQuoted(sql, i); ok {
-				emit(sql[i:end])
-				i = end
-				break
+			end, ok := endOfDollarQuoted(sql, i)
+			if !ok {
+				end = endOfWord(sql, i)
 			}
-			end := endOfWord(sql, i)
 			emit(sql[i:end])
 			i = end
 		}
