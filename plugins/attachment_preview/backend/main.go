@@ -14,6 +14,10 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type attachmentPreviewHook struct{}
 
+// Compile-time proof the hook satisfies the host interface, so a missing method
+// is a build error rather than a silent fail-open at the runtime type assertion.
+var _ plugins.AttachmentPreviewHook = attachmentPreviewHook{}
+
 func (attachmentPreviewHook) PreviewForAttachment(att plugins.AttachmentPreviewInput) (plugins.AttachmentPreviewResult, bool) {
 	result, ok := preview.ForAttachment(preview.Attachment{ID: att.ID, Filename: att.Filename, ContentType: att.ContentType})
 	if !ok {

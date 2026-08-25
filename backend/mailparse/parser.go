@@ -148,7 +148,7 @@ func Parse(raw []byte) (ParsedMessage, error) {
 	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
 		parsed.Date = d.UTC()
 	}
-	if err := parsePart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed); err != nil {
+	if err := parsePart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed, 0); err != nil {
 		if isTolerableEOF(err) {
 			parsed.Text = cleanIndexedText(parsed.Text)
 			parsed.Sanitize()
@@ -169,7 +169,7 @@ func ParseDisplayBody(r io.Reader) (string, string, error) {
 		return "", "", err
 	}
 	var parsed ParsedMessage
-	if err := parseDisplayPart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed); err != nil {
+	if err := parseDisplayPart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed, 0); err != nil {
 		if isTolerableEOF(err) {
 			parsed.Sanitize()
 			return normalizeDisplayText(parsed.Text), parsed.HTML, nil
@@ -180,16 +180,28 @@ func ParseDisplayBody(r io.Reader) (string, string, error) {
 	return normalizeDisplayText(parsed.Text), parsed.HTML, nil
 }
 
+// maxMIMEDepth bounds how deep the multipart recursion in parsePart and
+// parseDisplayPart descends. Each level holds a live multipart.Reader (with its
+// own buffer) for the whole recursion, so a message of a few hundred thousand
+// nested multipart parts — well under the 16 MB fetch cap in raw bytes — can
+// otherwise inflate to well over a gigabyte of live heap and OOM-kill the sync
+// mid-turn, then reparse and crash again on restart. Legitimate mail nests only
+// a handful of levels; a part below the limit is left unwalked rather than opened.
+const maxMIMEDepth = 50
+
 // parsePart recursively walks the MIME tree for indexing. Attachments keep their
 // decoded data long enough for search extraction; text/html parts feed the message
 // body fields used for search and previews.
-func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessage) error {
+func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessage, depth int) error {
 	contentType := header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || mediaType == "" {
 		mediaType = "text/plain"
 	}
 	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		if depth >= maxMIMEDepth {
+			return nil
+		}
 		mr := multipart.NewReader(body, params["boundary"])
 		for {
 			part, err := mr.NextPart()
@@ -202,7 +214,7 @@ func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessag
 			if err != nil {
 				return err
 			}
-			if err := parsePart(part.Header, part, parsed); err != nil {
+			if err := parsePart(part.Header, part, parsed, depth+1); err != nil {
 				if isTolerableEOF(err) {
 					return nil
 				}
@@ -284,7 +296,7 @@ func isInlineMIMEFile(disposition, mediaType, contentID string) bool {
 
 // parseDisplayPart mirrors parsePart but discards attachment streams immediately,
 // avoiding unnecessary memory use when the caller only needs renderable body text.
-func parseDisplayPart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessage) error {
+func parseDisplayPart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessage, depth int) error {
 	contentType := header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || mediaType == "" {
@@ -292,6 +304,9 @@ func parseDisplayPart(header textproto.MIMEHeader, body io.Reader, parsed *Parse
 	}
 	lowerMediaType := strings.ToLower(mediaType)
 	if strings.HasPrefix(lowerMediaType, "multipart/") {
+		if depth >= maxMIMEDepth {
+			return nil
+		}
 		mr := multipart.NewReader(body, params["boundary"])
 		for {
 			part, err := mr.NextPart()
@@ -304,7 +319,7 @@ func parseDisplayPart(header textproto.MIMEHeader, body io.Reader, parsed *Parse
 			if err != nil {
 				return err
 			}
-			if err := parseDisplayPart(part.Header, part, parsed); err != nil {
+			if err := parseDisplayPart(part.Header, part, parsed, depth+1); err != nil {
 				if isTolerableEOF(err) {
 					return nil
 				}
@@ -516,6 +531,19 @@ func cleanIndexedText(value string) string {
 }
 
 func removeIndexedCSSRules(value string) string {
+	// Fast path: a body with no '{' has no rules to strip, so skip the scan and
+	// the match map entirely (the common case for plain text).
+	if strings.IndexByte(value, '{') < 0 {
+		return value
+	}
+	// A body with an absurd number of braces is never real CSS; skip stripping
+	// rather than build an O(n) match map that would amplify a crafted input into
+	// a large transient allocation. The debris then stays in the indexed text,
+	// which is cosmetic — the point is to bound both time and memory.
+	if strings.Count(value, "{") > maxIndexedCSSBraces {
+		return value
+	}
+	closes := matchIndexedCSSBraces(value)
 	var b strings.Builder
 	for i := 0; i < len(value); {
 		openRel := strings.Index(value[i:], "{")
@@ -524,8 +552,8 @@ func removeIndexedCSSRules(value string) string {
 			break
 		}
 		open := i + openRel
-		close := indexedCSSRuleClose(value, open)
-		if close < 0 {
+		close, ok := closes[open]
+		if !ok {
 			b.WriteString(value[i:])
 			break
 		}
@@ -546,25 +574,37 @@ func removeIndexedCSSRules(value string) string {
 	return b.String()
 }
 
-func indexedCSSRuleClose(value string, open int) int {
-	depth := 0
-	for i := open; i < len(value); {
-		r, size := utf8.DecodeRuneInString(value[i:])
-		if r == utf8.RuneError && size == 0 {
-			break
-		}
-		switch r {
+// maxIndexedCSSBraces caps how many opening braces removeIndexedCSSRules will
+// process. Real CSS in a mail body has at most a few thousand rules; beyond this
+// the input is debris and stripping is skipped so the match map cannot grow
+// without bound. The cap also bounds the matcher's stack, so nesting depth needs
+// no separate limit (which previously mispaired braces past its cutoff).
+const maxIndexedCSSBraces = 20000
+
+// matchIndexedCSSBraces returns, for each '{' byte position in value, the byte
+// position of its balanced '}' (or no entry when it has none), computed in a
+// single linear pass. removeIndexedCSSRules used to rescan from every '{' to its
+// close, which is O(n^2) on nested braces: a text/plain body of a few hundred
+// thousand nested braces made a single Parse run for minutes and stalled the
+// sync of the folder holding it. Callers gate this on maxIndexedCSSBraces, so
+// the map and stack stay bounded. '{' and '}' are single-byte ASCII that cannot
+// appear inside a multi-byte UTF-8 rune, so a byte scan is equivalent to the old
+// rune-by-rune walk.
+func matchIndexedCSSBraces(value string) map[int]int {
+	closes := make(map[int]int)
+	stack := make([]int, 0, 64)
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
 		case '{':
-			depth++
+			stack = append(stack, i)
 		case '}':
-			depth--
-			if depth == 0 {
-				return i
+			if n := len(stack); n > 0 {
+				closes[stack[n-1]] = i
+				stack = stack[:n-1]
 			}
 		}
-		i += size
 	}
-	return -1
+	return closes
 }
 
 func indexedCSSSelectorStart(value string, open int) int {

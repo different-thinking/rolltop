@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"io"
 	"time"
 
 	"rolltop/backend/plugins"
@@ -16,6 +17,14 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type gravatarSenderIconsHook struct{}
 
+// Compile-time proof the hook satisfies both host interfaces, so a missing
+// method is a build error rather than a silent fail-open at the runtime type
+// assertion.
+var (
+	_ plugins.GravatarHook          = gravatarSenderIconsHook{}
+	_ plugins.GravatarImageMetaHook = gravatarSenderIconsHook{}
+)
+
 func (gravatarSenderIconsHook) NormalizeHash(value string) string {
 	return gravatar.NormalizeHash(value)
 }
@@ -26,6 +35,9 @@ func (gravatarSenderIconsHook) ErrorTTL(now time.Time) time.Time    { return gra
 func (gravatarSenderIconsHook) MissingTTL(now time.Time) time.Time  { return gravatar.MissingTTL(now) }
 func (gravatarSenderIconsHook) PositiveTTL(now time.Time) time.Time { return gravatar.PositiveTTL(now) }
 func (gravatarSenderIconsHook) MaxImageBytes() int64                { return gravatar.MaxImageBytes }
+func (gravatarSenderIconsHook) ReadLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	return gravatar.ReadLimited(r, maxBytes)
+}
 
 func (gravatarSenderIconsHook) GetImage(ctx context.Context, db *sql.DB, userID int64, emailHash string) (plugins.GravatarImage, error) {
 	image, err := gravatar.GetImage(ctx, db, userID, emailHash)

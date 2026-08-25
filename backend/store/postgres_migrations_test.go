@@ -15,7 +15,7 @@ func testMigration(version string, statements ...string) postgresMigration {
 }
 
 func TestClassifyPostgresSchemaState(t *testing.T) {
-	baseline := "baseline-checksum"
+	baseline := checksumIdentity{current: "baseline-checksum", legacy: "baseline-checksum-legacy"}
 	m1 := testMigration("0001-first", `CREATE TABLE first (id bigint)`)
 	m2 := testMigration("0002-second", `CREATE TABLE second (id bigint)`)
 	list := []postgresMigration{m1, m2}
@@ -35,7 +35,7 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("up to date answers with nothing outstanding", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion: baseline,
+			postgresSchemaVersion: baseline.current,
 			m1.Version:            postgresMigrationChecksum(m1),
 			m2.Version:            postgresMigrationChecksum(m2),
 		}
@@ -50,7 +50,7 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("older database gets the suffix", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion: baseline,
+			postgresSchemaVersion: baseline.current,
 			m1.Version:            postgresMigrationChecksum(m1),
 		}
 		state, err := classifyPostgresSchemaState(applied, baseline, list)
@@ -72,7 +72,7 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("edited applied migration is refused", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion: baseline,
+			postgresSchemaVersion: baseline.current,
 			m1.Version:            "stale-checksum",
 		}
 		_, err := classifyPostgresSchemaState(applied, baseline, list)
@@ -83,7 +83,7 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("unknown applied version is refused as newer", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion:  baseline,
+			postgresSchemaVersion:  baseline.current,
 			"0009-from-the-future": "whatever",
 		}
 		_, err := classifyPostgresSchemaState(applied, baseline, list)
@@ -94,12 +94,41 @@ func TestClassifyPostgresSchemaState(t *testing.T) {
 
 	t.Run("gap in the history is refused", func(t *testing.T) {
 		applied := map[string]string{
-			postgresSchemaVersion: baseline,
+			postgresSchemaVersion: baseline.current,
 			m2.Version:            postgresMigrationChecksum(m2),
 		}
 		_, err := classifyPostgresSchemaState(applied, baseline, list)
 		if err == nil || !strings.Contains(err.Error(), "cannot be explained") {
 			t.Fatalf("err = %v, want unexplainable-history refusal", err)
+		}
+	})
+
+	t.Run("a baseline recorded by an older build is accepted", func(t *testing.T) {
+		// The checksum algorithm changed; the baseline text did not. Refusing
+		// here is the one refusal with no upgrade path, so it must not fire on
+		// a database this binary's own predecessor created.
+		applied := map[string]string{postgresSchemaVersion: baseline.legacy}
+		state, err := classifyPostgresSchemaState(applied, baseline, list)
+		if err != nil {
+			t.Fatalf("a baseline an older build recorded was refused: %v", err)
+		}
+		if !state.BaselinePresent {
+			t.Fatal("baseline reported absent")
+		}
+	})
+
+	t.Run("a migration recorded by an older build is accepted", func(t *testing.T) {
+		applied := map[string]string{
+			postgresSchemaVersion: baseline.current,
+			m1.Version:            postgresMigrationIdentity(m1).legacy,
+			m2.Version:            postgresMigrationIdentity(m2).legacy,
+		}
+		state, err := classifyPostgresSchemaState(applied, baseline, list)
+		if err != nil {
+			t.Fatalf("migrations an older build recorded were refused: %v", err)
+		}
+		if !state.BaselinePresent || len(state.Outstanding) != 0 {
+			t.Fatalf("state = %+v, want baseline present and nothing outstanding", state)
 		}
 	})
 
@@ -147,7 +176,7 @@ func TestApplyPostgresMigrationIsAtomicAndRecorded(t *testing.T) {
 	// shipped-plus-test: rows must stay a prefix of the list they are read
 	// against.
 	expected := append(append([]postgresMigration{}, postgresMigrations...), good)
-	state, err := readPostgresSchemaState(ctx, conn, baselineChecksum(), expected)
+	state, err := readPostgresSchemaState(ctx, conn, baselineIdentity(), expected)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -225,5 +254,62 @@ func TestEnsurePostgresSchemaAppliesOutstandingMigrations(t *testing.T) {
 	}
 	if checksum != postgresMigrationChecksum(postgresMigrations[0]) {
 		t.Fatal("recorded checksum does not match the applied migration")
+	}
+}
+
+// TestSchemaChecksumIgnoresLayout is the core-schema half of the guarantee
+// sqlnorm.go exists for. The baseline and the shipped migration list are both
+// hand-owned text, and a checksum that changed when someone reflowed a
+// statement would refuse every database built from the previous formatting —
+// for the baseline, with no upgrade path at all.
+func TestSchemaChecksumIgnoresLayout(t *testing.T) {
+	packed := `CREATE TABLE t (
+	id bigint PRIMARY KEY,
+	name text NOT NULL
+)`
+	reflowed := `CREATE TABLE t (
+			id bigint PRIMARY KEY,
+			name text NOT NULL
+		)`
+	if schemaChecksum("postgres", "0001-x", packed) != schemaChecksum("postgres", "0001-x", reflowed) {
+		t.Fatal("re-indenting a shipped migration changed its checksum")
+	}
+	// The guard itself still works: an edit to what the statement says is a
+	// different migration, and so is the same text under a different version.
+	edited := `CREATE TABLE t (
+	id bigint PRIMARY KEY,
+	name text
+)`
+	if schemaChecksum("postgres", "0001-x", packed) == schemaChecksum("postgres", "0001-x", edited) {
+		t.Fatal("dropping NOT NULL did not change the checksum")
+	}
+	if schemaChecksum("postgres", "0001-x", packed) == schemaChecksum("postgres", "0002-x", packed) {
+		t.Fatal("two versions of the same text share a checksum")
+	}
+	// Splitting one statement into two must not hash like the join of both.
+	if schemaChecksum("postgres", "0001-x", "SELECT 1 SELECT 2") == schemaChecksum("postgres", "0001-x", "SELECT 1", "SELECT 2") {
+		t.Fatal("a statement split hashes like the text it was split from")
+	}
+}
+
+// TestBaselineIdentityCoversBothAlgorithms pins that the baseline this binary
+// carries is recognised under the checksum every shipped build recorded it
+// with. A database created before normalizeSQL holds the legacy value, and the
+// baseline refusal is the one with no way back.
+func TestBaselineIdentityCoversBothAlgorithms(t *testing.T) {
+	baseline := baselineIdentity()
+	if baseline.current == "" || baseline.legacy == "" {
+		t.Fatal("the baseline identity is incomplete")
+	}
+	if !baseline.recognises(baseline.current) || !baseline.recognises(baseline.legacy) {
+		t.Fatal("the baseline does not recognise a checksum it defines")
+	}
+	if baseline.recognises("someone-elses-baseline") {
+		t.Fatal("an unrelated checksum was accepted as this baseline")
+	}
+	// The baseline is full of comments and one dollar-quoted function body, so
+	// this is also the check that normalizeSQL survives the real file.
+	if baseline.current == baseline.legacy {
+		t.Fatal("the two algorithms agree on baseline.sql, so this test proves nothing about either")
 	}
 }

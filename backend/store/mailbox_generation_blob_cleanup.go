@@ -82,9 +82,13 @@ func (s *Store) ListMailboxGenerationBlobCleanup(ctx context.Context, userID, ac
 
 // CompleteMailboxGenerationBlobCleanup removes one queued blob only after
 // proving that no current tenant row references it. deletePath must not access
-// this Store: the callback runs while a SQLite writer lock prevents a message
-// from reattaching the blob between the reference check and metadata deletion.
-// A callback or commit failure leaves the journal entry available for retry.
+// this Store.
+//
+// As in CompleteBlobCleanup, the blob row is taken FOR UPDATE before the
+// reference recheck so a concurrent foreign-key insert (which takes FOR KEY
+// SHARE) blocks rather than slipping a new reference past the check, and
+// deletePath runs inside the transaction so a failure rolls the whole thing back
+// and leaves the journal entry for an idempotent retry.
 func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID, cleanupID int64, deletePath func(string) error) error {
 	if userID <= 0 || cleanupID <= 0 {
 		return errors.New("invalid mailbox generation blob cleanup entry")
@@ -121,7 +125,7 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 	}
 
 	var currentPath string
-	err = tx.QueryRowContext(ctx, `SELECT path FROM blobs WHERE user_id = ? AND id = ?`, userID, blobID).Scan(&currentPath)
+	err = tx.QueryRowContext(ctx, `SELECT path FROM blobs WHERE user_id = ? AND id = ? FOR UPDATE`, userID, blobID).Scan(&currentPath)
 	switch {
 	case err == nil && currentPath != queuedPath:
 		return finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID)

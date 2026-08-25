@@ -16,6 +16,16 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type remoteImageBlocklistHook struct{}
 
+// Compile-time proof that the hook satisfies the host interface. Without it a
+// missing method (as SeedRemoteImageRules once was) compiles fine and only fails
+// the runtime type assertion in the host — silently disabling the whole plugin
+// (fail-open: every tracker URL allowed) with no log line.
+var _ plugins.RemoteImageBlocklistHook = remoteImageBlocklistHook{}
+
+func (remoteImageBlocklistHook) SeedRemoteImageRules(ctx context.Context, db *sql.DB) error {
+	return rules.SeedRules(ctx, db)
+}
+
 func (remoteImageBlocklistHook) ListRemoteImageRules(ctx context.Context, db *sql.DB) ([]plugins.RemoteImageRule, error) {
 	rows, err := rules.ListRules(ctx, db)
 	if err != nil {

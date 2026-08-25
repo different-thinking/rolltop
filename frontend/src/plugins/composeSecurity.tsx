@@ -246,6 +246,7 @@ export function useComposeSecurity({
 
   return {
     active,
+    encrypt,
     attachPublicKey,
     transform,
     setTransform,

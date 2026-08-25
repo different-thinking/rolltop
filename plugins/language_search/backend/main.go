@@ -12,6 +12,10 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type languageSearchHook struct{}
 
+// Compile-time proof the hook satisfies the host interface, so a missing method
+// is a build error rather than a silent fail-open at the runtime type assertion.
+var _ plugins.LanguageSearchHook = languageSearchHook{}
+
 func (languageSearchHook) DetectLanguage(subject, body string) string {
 	return detector.DetectCode(subject, body)
 }

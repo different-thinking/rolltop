@@ -122,10 +122,66 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE messages ADD COLUMN own_outgoing_copy bigint NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// Index the foreign keys that point at messages(id) and blobs(id). The
+		// baseline declares these references but no index led by the referencing
+		// column, so PostgreSQL's referential-integrity check for every ON DELETE
+		// CASCADE / SET NULL ran as a sequential (or wrong-order index) scan of
+		// the child table once per deleted parent row. Emptying a Trash folder of
+		// tens of thousands of messages therefore went quadratic — each deleted
+		// message re-scanning attachments, locations and the rest — and every
+		// DELETE FROM blobs (RESTRICT) and blob reference recheck scanned all of
+		// the tenant's messages/attachments. The existing composite indexes lead
+		// with user_id (or other columns), which the RI check, keyed on the
+		// foreign-key column alone, cannot use. IF NOT EXISTS so an operator who
+		// added one by hand is not an error. CREATE INDEX (not CONCURRENTLY)
+		// because a migration runs inside a transaction; that is acceptable here
+		// because migrations run only after this process has acquired the
+		// exclusive instance lock (OpenPostgres takes it before ensurePostgresSchema,
+		// and a rolling deploy waits for the previous server to release it), so
+		// there is no concurrent writer for the index build's lock to block. The
+		// only cost is a one-time startup delay while the indexes build on a large
+		// existing database, before the server begins serving.
+		//
+		// Numbered 0005 because 0004-own-outgoing-copies landed on main first, and
+		// the migration list is append-only: a database that already applied 0004
+		// must find the applied versions as a prefix of this list.
+		Version: "0005-fk-indexes",
+		Statements: []string{
+			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_message_id ON attachments (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_blob_id ON attachments (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_messages_blob_id ON messages (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_contact_icons_blob_id ON contact_icons (blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_locations_message_id ON locations (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_snoozes_message_id ON message_snoozes (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_new_mail_events_message_id ON new_mail_events (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_pending_inbox_arrivals_message_id ON pending_inbox_arrivals (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_plugin_language_messages_message_id ON plugin_language_messages (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_snooze_reminder_events_message_id ON snooze_reminder_events (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_one_click_unsubscribe_message_id ON plugin_one_click_unsubscribe_sends (message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_pending_move_notifications_consumed_message_id ON pending_move_notifications (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_expunged_fingerprints_consumed_message_id ON expunged_message_fingerprints (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_transfers_source_message_id ON message_transfers (source_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_message_transfers_consumed_message_id ON message_transfers (consumed_message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_spam_classifications_user_message_id ON plugin_experimental_spam_classifications (user_id, message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_fk_spam_feedback_user_message_id ON plugin_experimental_spam_feedback (user_id, message_id)`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {
-	return schemaChecksum(postgresSchemaScope, m.Version, m.Statements...)
+	return postgresMigrationIdentity(m).current
+}
+
+// postgresMigrationIdentity is the migration's checksum under both algorithms,
+// so a row an older build recorded is recognised as this same migration rather
+// than read as an edit to a shipped one. See checksumRecognised for why the row
+// is left as it is instead of being rewritten.
+func postgresMigrationIdentity(m postgresMigration) checksumIdentity {
+	return checksumIdentity{
+		current: schemaChecksum(postgresSchemaScope, m.Version, m.Statements...),
+		legacy:  schemaChecksumLegacy(postgresSchemaScope, m.Version, m.Statements...),
+	}
 }
 
 // postgresSchemaState is what one read of schema_migrations says about this
@@ -145,7 +201,7 @@ type postgresSchemaState struct {
 // readPostgresSchemaState classifies the database in a single query, so the
 // every-restart fast path stays one read: baseline row and migration rows come
 // back together, and only a database with work to do takes the schema lock.
-func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baselineChecksum string, migrations []postgresMigration) (postgresSchemaState, error) {
+func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baseline checksumIdentity, migrations []postgresMigration) (postgresSchemaState, error) {
 	var table sql.NullString
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1)::text`,
 		schemaMigrationsQualified()).Scan(&table); err != nil {
@@ -171,14 +227,14 @@ func readPostgresSchemaState(ctx context.Context, conn *sql.Conn, baselineChecks
 	if err := rows.Err(); err != nil {
 		return postgresSchemaState{}, postgresError("read the schema version", err)
 	}
-	return classifyPostgresSchemaState(applied, baselineChecksum, migrations)
+	return classifyPostgresSchemaState(applied, baseline, migrations)
 }
 
 // classifyPostgresSchemaState turns the recorded rows into a decision. It is
 // split from the read so the refusal cases can be tested without a database.
-func classifyPostgresSchemaState(applied map[string]string, baselineChecksum string, migrations []postgresMigration) (postgresSchemaState, error) {
+func classifyPostgresSchemaState(applied map[string]string, baseline checksumIdentity, migrations []postgresMigration) (postgresSchemaState, error) {
 	recorded, baselinePresent := applied[postgresSchemaVersion]
-	if baselinePresent && recorded != baselineChecksum {
+	if baselinePresent && !baseline.recognises(recorded) {
 		return postgresSchemaState{}, errors.New("postgres: schema baseline checksum mismatch: this database was created from a different baseline than the running binary carries, and there is no upgrade path between the two")
 	}
 	if !baselinePresent {
@@ -215,7 +271,7 @@ func classifyPostgresSchemaState(applied map[string]string, baselineChecksum str
 		if firstOutstanding >= 0 {
 			return postgresSchemaState{}, fmt.Errorf("postgres: migration %s is applied but earlier migration %s is not; the migration history of this database cannot be explained", m.Version, migrations[firstOutstanding].Version)
 		}
-		if checksum != postgresMigrationChecksum(m) {
+		if !postgresMigrationIdentity(m).recognises(checksum) {
 			return postgresSchemaState{}, fmt.Errorf("postgres: migration %s was edited after this database applied it; shipped migrations are immutable", m.Version)
 		}
 	}

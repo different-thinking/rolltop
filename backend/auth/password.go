@@ -52,6 +52,32 @@ func HashPasswordWithParams(password string, p Argon2idParams) (string, error) {
 		p.Memory, p.Iterations, p.Parallelism, enc.EncodeToString(salt), enc.EncodeToString(hash)), nil
 }
 
+// dummyPasswordHash is a hash of a random secret nobody holds. Verifying a
+// login attempt against it spends the same work as a genuine check while never
+// matching, so a sign-in for an address with no account costs the same
+// wall-clock time as one for an existing user. Computed once at startup.
+var dummyPasswordHash = func() string {
+	buf := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return ""
+	}
+	h, err := HashPasswordWithParams(base64.RawStdEncoding.EncodeToString(buf), DefaultArgon2idParams)
+	if err != nil {
+		return ""
+	}
+	return h
+}()
+
+// VerifyDummyPassword spends one password verification's worth of work and
+// discards the result. Callers use it on the "no such user" branch of a login
+// so the response time does not reveal whether an address is registered.
+func VerifyDummyPassword(password string) {
+	if dummyPasswordHash == "" {
+		return
+	}
+	_, _ = VerifyPassword(dummyPasswordHash, password)
+}
+
 // VerifyPassword checks a candidate password against the stored hash format used by HashPassword.
 func VerifyPassword(encoded, password string) (bool, error) {
 	p, salt, expected, err := decodeHash(encoded)

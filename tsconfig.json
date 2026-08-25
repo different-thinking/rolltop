@@ -16,5 +16,20 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["frontend/src", "plugins/client_side_pgp/frontend", "plugins/mail_filters/frontend", "plugins/experimental_spam_filter/frontend"]
+  "include": [
+    "frontend/src",
+    "plugins/attachment_preview/frontend",
+    "plugins/bimi_brand_icons/frontend",
+    "plugins/client_side_pgp/frontend",
+    "plugins/experimental_spam_filter/frontend",
+    "plugins/gravatar_sender_icons/frontend",
+    "plugins/language_search/frontend",
+    "plugins/mail_filters/frontend",
+    "plugins/mail_mcp/frontend",
+    "plugins/matrix_theme/frontend",
+    "plugins/one_click_unsubscribe/frontend",
+    "plugins/remote_image_blocklist/frontend",
+    "plugins/remote_imap_sync/frontend",
+    "plugins/trusted_image_sources/frontend"
+  ]
 }

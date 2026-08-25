@@ -32,14 +32,34 @@ func (s *Server) apiPasswordResetRequest(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	// Throttle by client IP and target address. A reset request sends mail and
+	// always answers "ok" regardless of whether the account exists, so there is
+	// no failure signal to key on -- every accepted request advances the backoff,
+	// which bounds both brute-force probing and mail-bombing one victim.
+	gateKey := clientIP(r) + "\x00" + strings.ToLower(strings.TrimSpace(in.Email))
+	now := time.Now()
+	if allowed, retryAfter := s.passwordResetGate.allow(gateKey, now); !allowed {
+		writeRetryAfter(w, retryAfter, "Too many password reset requests. Try again later.")
+		return
+	}
+	s.passwordResetGate.recordFailure(gateKey, now)
 	user, err := s.store.GetUserByEmail(r.Context(), in.Email)
 	if err == nil && strings.TrimSpace(user.BackupEmail) != "" {
 		if token, tokenErr := auth.NewOpaqueToken(); tokenErr == nil {
 			tokenHash := mmcrypto.TokenHash(token)
 			expires := time.Now().Add(45 * time.Minute)
 			if createErr := s.store.CreatePasswordResetToken(r.Context(), user.ID, tokenHash, expires); createErr == nil {
-				link := passwordResetLink(r, token)
-				_ = s.sendPasswordResetEmail(r.Context(), user, link, expires)
+				link := s.passwordResetLink(r, token)
+				// Send on a detached context so the response returns without
+				// waiting on the SMTP round-trip. Blocking here would make a
+				// request for a real account (which sends mail) measurably slower
+				// than one for an unknown address (which does not), enumerating
+				// registered addresses despite the constant "ok" body.
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+				go func() {
+					defer cancel()
+					_ = s.sendPasswordResetEmail(ctx, user, link, expires)
+				}()
 			}
 		}
 	}
@@ -82,12 +102,22 @@ func (s *Server) apiPasswordResetComplete(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func passwordResetLink(r *http.Request, token string) string {
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "https"
+func (s *Server) passwordResetLink(r *http.Request, token string) string {
+	u := url.URL{Path: "/reset-password"}
+	// A configured public URL is trusted; the request Host header is not (a
+	// client can set it, which would otherwise send the victim a reset link
+	// pointing at an attacker-controlled origin). Fall back to the header only
+	// when no public URL is configured, preserving single-host deployments.
+	if base, err := url.Parse(s.publicURL); s.publicURL != "" && err == nil {
+		u.Scheme = base.Scheme
+		u.Host = base.Host
+	} else {
+		u.Scheme = "http"
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			u.Scheme = "https"
+		}
+		u.Host = r.Host
 	}
-	u := url.URL{Scheme: scheme, Host: r.Host, Path: "/reset-password"}
 	q := u.Query()
 	q.Set("token", token)
 	u.RawQuery = q.Encode()

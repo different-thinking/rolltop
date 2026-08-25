@@ -7,6 +7,8 @@ import (
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -14,6 +16,24 @@ import (
 )
 
 const MaxImageBytes = 512 * 1024
+
+// ReadLimited reads an image body with a hard byte ceiling so a hostile or
+// misbehaving Gravatar endpoint cannot make the fetch load an unbounded body
+// into memory. It is kept here rather than borrowed from the attachment-preview
+// plugin so a deployment without that plugin still has a working reader.
+func ReadLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = MaxImageBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("gravatar image exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
 
 // Image is the cached Gravatar result for one user/email hash pair.
 type Image struct {

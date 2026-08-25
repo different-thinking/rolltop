@@ -15,6 +15,14 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type bimiBrandIconsHook struct{}
 
+// Compile-time proof the hook satisfies both host interfaces, so a missing
+// method is a build error rather than a silent fail-open at the runtime type
+// assertion.
+var (
+	_ plugins.BIMIHook         = bimiBrandIconsHook{}
+	_ plugins.BIMIIconMetaHook = bimiBrandIconsHook{}
+)
+
 func (bimiBrandIconsHook) NormalizeDomain(value string) string {
 	return bimi.NormalizeDomain(value)
 }

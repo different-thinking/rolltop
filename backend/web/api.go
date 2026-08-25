@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
@@ -238,4 +240,19 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": message})
+}
+
+// writeRetryAfter answers 429 with a Retry-After header rounded up to whole
+// seconds (the header has no sub-second form), so a throttled client is told how
+// long to wait instead of guessing.
+func writeRetryAfter(w http.ResponseWriter, wait time.Duration, message string) {
+	seconds := int(wait / time.Second)
+	if wait%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeAPIError(w, http.StatusTooManyRequests, message)
 }

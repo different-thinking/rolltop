@@ -153,7 +153,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		return store.MessageRecord{}, parsed, nil, err
 	}
 	generationRecoveryPhase(ctx, "plugin-incoming-message", "discover")
-	if err := s.importIncomingMessageHooks(ctx, userID, item.Raw, parsed.From); err != nil {
+	if err := s.importIncomingMessageHooks(ctx, userID, item.Raw, parsed.From, mailbox.Role == "junk"); err != nil {
 		return store.MessageRecord{}, parsed, nil, err
 	}
 	searchVisible := mailbox.IncludeInSearch && s.Search != nil
