@@ -84,13 +84,11 @@ func (s *Store) ListMailboxGenerationBlobCleanup(ctx context.Context, userID, ac
 // proving that no current tenant row references it. deletePath must not access
 // this Store.
 //
-// As in CompleteBlobCleanup, the ordering is load-bearing on PostgreSQL: the
-// blob row is taken FOR UPDATE before the reference recheck (so a concurrent
-// message insert, which takes FOR KEY SHARE through its foreign key, blocks
-// rather than slipping a new reference past the check), and the file is deleted
-// only after the metadata DELETE has committed (so a crash leaves an orphan file
-// rather than a metadata row pointing at a deleted file). A callback or commit
-// failure leaves the journal entry available for retry.
+// As in CompleteBlobCleanup, the blob row is taken FOR UPDATE before the
+// reference recheck so a concurrent foreign-key insert (which takes FOR KEY
+// SHARE) blocks rather than slipping a new reference past the check, and
+// deletePath runs inside the transaction so a failure rolls the whole thing back
+// and leaves the journal entry for an idempotent retry.
 func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID, cleanupID int64, deletePath func(string) error) error {
 	if userID <= 0 || cleanupID <= 0 {
 		return errors.New("invalid mailbox generation blob cleanup entry")
@@ -126,11 +124,6 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 		return err
 	}
 
-	// deleteFileAfterCommit is the path to remove from disk once the metadata
-	// DELETE has committed; empty means nothing to delete (a skip path, or no
-	// filesystem callback supplied).
-	deleteFileAfterCommit := ""
-
 	var currentPath string
 	err = tx.QueryRowContext(ctx, `SELECT path FROM blobs WHERE user_id = ? AND id = ? FOR UPDATE`, userID, blobID).Scan(&currentPath)
 	switch {
@@ -149,6 +142,11 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 		if referenced {
 			return finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID)
 		}
+		if deletePath != nil && queuedPath != "" {
+			if err := deletePath(queuedPath); err != nil {
+				return err
+			}
+		}
 		result, err := tx.ExecContext(ctx, `DELETE FROM blobs WHERE user_id = ? AND id = ? AND path = ?`, userID, blobID, queuedPath)
 		if err != nil {
 			return err
@@ -160,9 +158,6 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 		if rowsAffected != 1 {
 			return errors.New("mailbox generation blob metadata changed during cleanup")
 		}
-		if deletePath != nil && queuedPath != "" {
-			deleteFileAfterCommit = queuedPath
-		}
 	case errors.Is(err, sql.ErrNoRows):
 		var pathOwnerID int64
 		pathErr := tx.QueryRowContext(ctx, `SELECT id FROM blobs WHERE user_id = ? AND path = ?`, userID, queuedPath).Scan(&pathOwnerID)
@@ -173,24 +168,15 @@ func (s *Store) CompleteMailboxGenerationBlobCleanup(ctx context.Context, userID
 			return pathErr
 		}
 		if deletePath != nil && queuedPath != "" {
-			deleteFileAfterCommit = queuedPath
+			if err := deletePath(queuedPath); err != nil {
+				return err
+			}
 		}
 	default:
 		return err
 	}
 
-	if err := finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID); err != nil {
-		return err
-	}
-	// The transaction has committed; the metadata is gone and no new reference
-	// can point at this blob, so removing the file now is safe and a failure
-	// here only orphans the file rather than stranding a live reference.
-	if deleteFileAfterCommit != "" {
-		if err := deletePath(deleteFileAfterCommit); err != nil {
-			return err
-		}
-	}
-	return nil
+	return finishMailboxGenerationBlobCleanupTx(ctx, tx, userID, cleanupID)
 }
 
 func finishMailboxGenerationBlobCleanupTx(ctx context.Context, tx *sql.Tx, userID, cleanupID int64) error {

@@ -5,6 +5,7 @@ package rules
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
@@ -36,12 +37,13 @@ func Migrations() []plugins.Migration {
 		},
 		{
 			// Seed the built-in tracker patterns once, so a fresh install blocks
-			// known trackers before any admin edit. The patterns go through the
-			// Apply hook rather than literal Statements on purpose: they contain
-			// '?' (e.g. "(?i)"), which the '?'-placeholder rewriter on the
-			// statement path would misread as bind parameters. As bind arguments
-			// here the '?' is data, and ON CONFLICT keeps admin edits and reruns
-			// harmless.
+			// known trackers before any admin edit. Only when the table is empty:
+			// on an existing install an admin may have curated the list (including
+			// deleting some defaults), and this migration must not resurrect what
+			// they removed. The patterns go through the Apply hook rather than
+			// literal Statements on purpose: they contain '?' (e.g. "(?i)"), which
+			// the '?'-placeholder rewriter on the statement path would misread as
+			// bind parameters. As bind arguments here the '?' is data.
 			Scope:    plugins.ScopeSystem,
 			PluginID: plugins.RemoteImageBlocklist,
 			ID:       "002_seed_default_patterns",
@@ -54,7 +56,15 @@ func Migrations() []plugins.Migration {
 
 // seedDefaultPatternsTx inserts DefaultPatterns inside a migration transaction
 // using bound parameters (see the migration comment for why literals are unsafe).
+// It is a no-op when the table already holds any rows, so an admin-curated list
+// on an existing install is left exactly as the admin left it.
 func seedDefaultPatternsTx(ctx context.Context, tx *sql.Tx) error {
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM plugin_remote_image_blocklist_rules LIMIT 1`).Scan(&existing); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	ts := nowUnix()
 	for _, pattern := range DefaultPatterns {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_remote_image_blocklist_rules (pattern, enabled, created_at, updated_at)

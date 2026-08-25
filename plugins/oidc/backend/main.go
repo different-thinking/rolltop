@@ -177,12 +177,31 @@ func (p *oidcPlugin) callback(host plugins.APIHost, _ string, w http.ResponseWri
 		return
 	}
 	// emailVerified tracks the verification flag from whichever source supplied
-	// the email — the ID token, or the userinfo endpoint when the token omits it.
+	// the email. Consult userinfo when the ID token lacks the email, or lacks the
+	// verification status we are about to require — some providers put email in
+	// the ID token but email_verified only in userinfo, and without this a valid,
+	// verified user would be wrongly rejected.
 	emailVerified := claims.EmailVerified
-	if claims.Email == "" && discovery.UserinfoEndpoint != "" && token.AccessToken != "" {
-		var userinfoVerified *bool
-		claims.Email, claims.Name, userinfoVerified, _ = fetchUserinfo(r.Context(), discovery.UserinfoEndpoint, token.AccessToken)
-		emailVerified = userinfoVerified
+	needEmail := claims.Email == ""
+	needVerification := emailVerified == nil && !cfg.AllowUnverifiedEmail
+	if (needEmail || needVerification) && discovery.UserinfoEndpoint != "" && token.AccessToken != "" {
+		uiEmail, uiName, uiVerified, uiErr := fetchUserinfo(r.Context(), discovery.UserinfoEndpoint, token.AccessToken)
+		if uiErr != nil {
+			// A userinfo failure is not the same as an unverified or missing
+			// address; report the real (often transient, retriable) cause rather
+			// than a misleading rejection.
+			host.WriteAPIError(w, http.StatusBadGateway, "OIDC userinfo lookup failed: "+uiErr.Error())
+			return
+		}
+		if claims.Email == "" {
+			claims.Email = uiEmail
+		}
+		if claims.Name == "" {
+			claims.Name = uiName
+		}
+		if emailVerified == nil {
+			emailVerified = uiVerified
+		}
 	}
 	email, err := normalizeEmail(claims.Email)
 	if err != nil {

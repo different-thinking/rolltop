@@ -101,7 +101,13 @@ var postgresMigrations = []postgresMigration{
 		// with user_id (or other columns), which the RI check, keyed on the
 		// foreign-key column alone, cannot use. IF NOT EXISTS so an operator who
 		// added one by hand is not an error. CREATE INDEX (not CONCURRENTLY)
-		// because a migration runs inside a transaction.
+		// because a migration runs inside a transaction; that is acceptable here
+		// because migrations run only after this process has acquired the
+		// exclusive instance lock (OpenPostgres takes it before ensurePostgresSchema,
+		// and a rolling deploy waits for the previous server to release it), so
+		// there is no concurrent writer for the index build's lock to block. The
+		// only cost is a one-time startup delay while the indexes build on a large
+		// existing database, before the server begins serving.
 		Version: "0004-fk-indexes",
 		Statements: []string{
 			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_message_id ON attachments (message_id)`,

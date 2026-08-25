@@ -531,6 +531,18 @@ func cleanIndexedText(value string) string {
 }
 
 func removeIndexedCSSRules(value string) string {
+	// Fast path: a body with no '{' has no rules to strip, so skip the scan and
+	// the match map entirely (the common case for plain text).
+	if strings.IndexByte(value, '{') < 0 {
+		return value
+	}
+	// A body with an absurd number of braces is never real CSS; skip stripping
+	// rather than build an O(n) match map that would amplify a crafted input into
+	// a large transient allocation. The debris then stays in the indexed text,
+	// which is cosmetic — the point is to bound both time and memory.
+	if strings.Count(value, "{") > maxIndexedCSSBraces {
+		return value
+	}
 	closes := matchIndexedCSSBraces(value)
 	var b strings.Builder
 	for i := 0; i < len(value); {
@@ -562,17 +574,20 @@ func removeIndexedCSSRules(value string) string {
 	return b.String()
 }
 
-// maxIndexedCSSDepth bounds how deeply matchIndexedCSSBraces tracks nesting.
-// Real CSS never nests this far; anything deeper is crafted debris, and refusing
-// to record a match for it keeps the stack (and the work) bounded.
-const maxIndexedCSSDepth = 1024
+// maxIndexedCSSBraces caps how many opening braces removeIndexedCSSRules will
+// process. Real CSS in a mail body has at most a few thousand rules; beyond this
+// the input is debris and stripping is skipped so the match map cannot grow
+// without bound. The cap also bounds the matcher's stack, so nesting depth needs
+// no separate limit (which previously mispaired braces past its cutoff).
+const maxIndexedCSSBraces = 20000
 
 // matchIndexedCSSBraces returns, for each '{' byte position in value, the byte
 // position of its balanced '}' (or no entry when it has none), computed in a
 // single linear pass. removeIndexedCSSRules used to rescan from every '{' to its
 // close, which is O(n^2) on nested braces: a text/plain body of a few hundred
 // thousand nested braces made a single Parse run for minutes and stalled the
-// sync of the folder holding it. '{' and '}' are single-byte ASCII that cannot
+// sync of the folder holding it. Callers gate this on maxIndexedCSSBraces, so
+// the map and stack stay bounded. '{' and '}' are single-byte ASCII that cannot
 // appear inside a multi-byte UTF-8 rune, so a byte scan is equivalent to the old
 // rune-by-rune walk.
 func matchIndexedCSSBraces(value string) map[int]int {
@@ -581,9 +596,7 @@ func matchIndexedCSSBraces(value string) map[int]int {
 	for i := 0; i < len(value); i++ {
 		switch value[i] {
 		case '{':
-			if len(stack) < maxIndexedCSSDepth {
-				stack = append(stack, i)
-			}
+			stack = append(stack, i)
 		case '}':
 			if n := len(stack); n > 0 {
 				closes[stack[n-1]] = i

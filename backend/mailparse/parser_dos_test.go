@@ -11,22 +11,33 @@ import (
 
 // TestRemoveIndexedCSSRulesDeepNestingTerminates guards the O(n) brace matching.
 // The old rescan-per-brace made this input take minutes; it must now finish
-// near-instantly. The assertion is generous (a whole second) so it flags only a
-// return to quadratic behavior, not ordinary timing noise.
+// near-instantly. Two shapes are checked: one just under the brace cap (which
+// exercises the real matcher) and one far over it (which must take the bail-out
+// path and still return fast). The assertion is generous (a whole second) so it
+// flags only a return to quadratic behavior, not ordinary timing noise.
 func TestRemoveIndexedCSSRulesDeepNestingTerminates(t *testing.T) {
-	const pairs = 100_000
-	input := strings.Repeat("{", pairs) + strings.Repeat("}", pairs)
-
-	done := make(chan string, 1)
-	start := time.Now()
-	go func() { done <- removeIndexedCSSRules(input) }()
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatalf("removeIndexedCSSRules did not finish within 1s for %d nested braces (quadratic regression)", pairs)
+	for _, pairs := range []int{maxIndexedCSSBraces - 1000, maxIndexedCSSBraces * 10} {
+		input := strings.Repeat("{", pairs) + strings.Repeat("}", pairs)
+		done := make(chan string, 1)
+		start := time.Now()
+		go func() { done <- removeIndexedCSSRules(input) }()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("removeIndexedCSSRules did not finish within 1s for %d nested braces (quadratic regression)", pairs)
+		}
+		if elapsed := time.Since(start); elapsed > 1*time.Second {
+			t.Fatalf("removeIndexedCSSRules took %s for %d nested braces", elapsed, pairs)
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 1*time.Second {
-		t.Fatalf("removeIndexedCSSRules took %s for %d nested braces", elapsed, pairs)
+}
+
+// TestRemoveIndexedCSSRulesNoBracesIsUnchanged checks the fast path returns the
+// input untouched (and, implicitly, without allocating a match map).
+func TestRemoveIndexedCSSRulesNoBraces(t *testing.T) {
+	in := "plain body with no css rules at all, just text and punctuation!?;"
+	if got := removeIndexedCSSRules(in); got != in {
+		t.Fatalf("no-brace body changed: %q", got)
 	}
 }
 

@@ -14,8 +14,11 @@ ROLLTOP_OIDC_SCOPES="openid email profile"
 ROLLTOP_OIDC_ALLOWED_DOMAINS=example.com
 ROLLTOP_OIDC_ALLOWED_EMAILS=person@example.com
 ROLLTOP_OIDC_AUTO_CREATE=false
+ROLLTOP_OIDC_ALLOW_UNVERIFIED_EMAIL=false
 ```
 
 `ROLLTOP_OIDC_REDIRECT_URL` is optional when reverse-proxy headers provide the correct public scheme and host. The plugin derives `/api/plugins/oidc/callback`.
 
 By default, OIDC sign-in only works for existing Rolltop users whose email matches the verified OIDC email claim. Set `ROLLTOP_OIDC_AUTO_CREATE=true` to create users automatically; the first auto-created user becomes admin.
+
+Sign-in requires a positive `email_verified`. The plugin reads it from the ID token, and falls back to the userinfo endpoint when the token omits either the email or the verification status. An **absent** `email_verified` is treated as unverified and rejected, because an identity provider that lets a user set an arbitrary, unverified email could otherwise be used to sign in as another Rolltop user. If your provider never sends `email_verified` and you trust it to issue only verified addresses, set `ROLLTOP_OIDC_ALLOW_UNVERIFIED_EMAIL=true` to opt out of the check. This is a behavior change: providers that omit the claim previously signed in and now need this flag.
