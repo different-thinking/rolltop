@@ -77,7 +77,7 @@ func TestBundledPluginMigrationsRespectDatabaseScope(t *testing.T) {
 	assertTableExists(t, ctx, db.DB(), "plugin_remote_image_blocklist_rules", true)
 	assertTableExists(t, ctx, db.DB(), "identity_pgp_private_keys", true)
 	assertTableExists(t, ctx, userDB, "identity_pgp_private_keys", true)
-	assertPluginMigrationCount(t, ctx, db.DB(), plugins.RemoteImageBlocklist, 1)
+	assertPluginMigrationCount(t, ctx, db.DB(), plugins.RemoteImageBlocklist, 2)
 	assertPluginMigrationCount(t, ctx, db.DB(), plugins.ClientSidePGP, 5)
 }
 
