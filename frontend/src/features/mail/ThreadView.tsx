@@ -1804,7 +1804,11 @@ export function ThreadView({
     if (markUnreadBusy) return;
     // Opening the conversation marked every message in it read, across folders
     // and accounts, so marking unread has to reach exactly as far to undo that.
-    const ids = thread.map((item) => item.message.id);
+    // A drawn message can stand for more than one row - a mirrored label view
+    // holds Gmail's second copy of it - and copy_ids names them, so the copy the
+    // thread hid is marked unread with the one it was hidden behind. Leaving it
+    // read would keep the conversation read in the list this returns to.
+    const ids = [...new Set(thread.flatMap((item) => item.copy_ids ?? [item.message.id]))];
     if (ids.length === 0) return;
     setMarkUnreadBusy(true);
     try {

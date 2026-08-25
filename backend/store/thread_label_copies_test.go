@@ -1,7 +1,6 @@
 // File overview: Tests for collapsing a mirrored label view's second copy out of
-// a rendered thread - which copy the thread keeps, which the reader gets when
-// they opened the view's copy themselves, and the placements that are left
-// exactly as they are.
+// a rendered thread - which copy is drawn, which physical rows the drawn one
+// still stands for, and the placements that are left exactly as they are.
 
 package store
 
@@ -90,6 +89,21 @@ func (f *labelViewFixture) storeCopy(t *testing.T, mailboxID int64, header, thre
 	return msg
 }
 
+// collapseThread runs the whole path a rendered thread takes: load every row,
+// then decide what to draw.
+func (f *labelViewFixture) collapseThread(t *testing.T, msg MessageRecord) ThreadCopyCollapse {
+	t.Helper()
+	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapse, err := f.db.CollapseLabelViewCopies(f.ctx, f.userID, thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return collapse
+}
+
 func threadIDs(messages []MessageRecord) []int64 {
 	out := make([]int64, 0, len(messages))
 	for _, msg := range messages {
@@ -98,98 +112,174 @@ func threadIDs(messages []MessageRecord) []int64 {
 	return out
 }
 
-// The reader opened the copy in the folder the mail was delivered to. The copy
-// All Mail holds of it is the same delivery listed a second time, so the thread
-// renders one message rather than two.
-func TestThreadDropsTheAllMailCopyOfAnOpenedInboxMessage(t *testing.T) {
+func sameIDs(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// The thread query keeps returning every physical row. Read state, star state
+// and conversation-level moves are all decided from it, so collapsing there
+// would take rows away from callers that have to reach them.
+func TestThreadQueryStillReturnsEveryCopy(t *testing.T) {
 	f := newLabelViewFixture(t)
 	sent := time.Now().UTC().Truncate(time.Second)
 	inbox := f.storeCopy(t, f.inbox, "<milan@crowdfarming.test>", "msgid:milan", sent)
-	f.storeCopy(t, f.allMail, "<milan@crowdfarming.test>", "msgid:milan", sent)
+	view := f.storeCopy(t, f.allMail, "<milan@crowdfarming.test>", "msgid:milan", sent)
 
 	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, inbox)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(thread) != 1 || thread[0].ID != inbox.ID {
-		t.Fatalf("thread = %v, want only the Inbox copy %d", threadIDs(thread), inbox.ID)
+	if got := threadIDs(thread); !sameIDs(got, []int64{inbox.ID, view.ID}) {
+		t.Fatalf("thread = %v, want both physical rows %v", got, []int64{inbox.ID, view.ID})
 	}
 }
 
-// The lists reach the All Mail copy on their own - it is mirrored after the
-// Inbox copy and therefore carries the higher id, which is what breaks the tie
-// when a conversation picks the row it prints. Opening it has to render a thread
-// that contains it, so here the All Mail copy is the one that stays.
-func TestThreadKeepsTheAllMailCopyTheReaderOpened(t *testing.T) {
+// The copy All Mail holds of an Inbox message is the same delivery listed a
+// second time, so the thread draws one message rather than two - and the drawn
+// row says which physical rows it stands for.
+func TestCollapseDrawsOneRowForAnInboxMessageAllMailRepeats(t *testing.T) {
 	f := newLabelViewFixture(t)
 	sent := time.Now().UTC().Truncate(time.Second)
-	f.storeCopy(t, f.inbox, "<milan@crowdfarming.test>", "msgid:milan", sent)
+	inbox := f.storeCopy(t, f.inbox, "<milan@crowdfarming.test>", "msgid:milan", sent)
 	view := f.storeCopy(t, f.allMail, "<milan@crowdfarming.test>", "msgid:milan", sent)
 
-	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, view)
-	if err != nil {
-		t.Fatal(err)
+	collapse := f.collapseThread(t, inbox)
+	if got := threadIDs(collapse.Messages); !sameIDs(got, []int64{inbox.ID}) {
+		t.Fatalf("drawn = %v, want only the Inbox copy %d", got, inbox.ID)
 	}
-	if len(thread) != 1 || thread[0].ID != view.ID {
-		t.Fatalf("thread = %v, want only the opened copy %d", threadIDs(thread), view.ID)
+	if got := collapse.CopyIDs[inbox.ID]; !sameIDs(got, []int64{inbox.ID, view.ID}) {
+		t.Fatalf("copy ids = %v, want both rows %v", got, []int64{inbox.ID, view.ID})
 	}
-}
-
-// Every message of a real conversation is collapsed, not just the one that was
-// opened.
-func TestThreadCollapsesEveryMessageItHoldsTwice(t *testing.T) {
-	f := newLabelViewFixture(t)
-	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	second := first.Add(30 * time.Minute)
-	opened := f.storeCopy(t, f.inbox, "<first@crowdfarming.test>", "msgid:first", first)
-	f.storeCopy(t, f.allMail, "<first@crowdfarming.test>", "msgid:first", first)
-	reply := f.storeCopy(t, f.inbox, "<second@crowdfarming.test>", "msgid:first", second)
-	f.storeCopy(t, f.allMail, "<second@crowdfarming.test>", "msgid:first", second)
-
-	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, opened)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []int64{opened.ID, reply.ID}
-	if got := threadIDs(thread); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("thread = %v, want the two Inbox copies %v", got, want)
+	if collapse.StandIn[view.ID] != inbox.ID {
+		t.Fatalf("stand-in for the hidden copy = %d, want the Inbox copy %d", collapse.StandIn[view.ID], inbox.ID)
 	}
 }
 
-// A message the account holds only in All Mail - archived mail, which in Gmail
-// is exactly mail that carries no other label - is still the only copy there is.
-func TestThreadKeepsAMessageHeldOnlyInAllMail(t *testing.T) {
+// Real folders are places the reader filed the message and are never decided
+// away, not even when a view of the same message is in the thread beside them.
+func TestCollapseKeepsEveryRealFolderCopy(t *testing.T) {
 	f := newLabelViewFixture(t)
+	label := f.mailbox(t, "Rechnungen", "")
 	sent := time.Now().UTC().Truncate(time.Second)
-	only := f.storeCopy(t, f.allMail, "<archived@crowdfarming.test>", "msgid:archived", sent)
-	f.storeCopy(t, f.inbox, "<other@crowdfarming.test>", "msgid:archived", sent.Add(time.Minute))
+	inbox := f.storeCopy(t, f.inbox, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
+	filed := f.storeCopy(t, label, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
+	view := f.storeCopy(t, f.allMail, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
 
-	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, only)
-	if err != nil {
-		t.Fatal(err)
+	collapse := f.collapseThread(t, inbox)
+	if got := threadIDs(collapse.Messages); !sameIDs(got, []int64{inbox.ID, filed.ID}) {
+		t.Fatalf("drawn = %v, want both filed copies %v", got, []int64{inbox.ID, filed.ID})
 	}
-	if len(thread) != 2 {
-		t.Fatalf("thread = %v, want both messages", threadIDs(thread))
+	if collapse.StandIn[view.ID] != inbox.ID {
+		t.Fatalf("stand-in for the hidden view copy = %d, want %d", collapse.StandIn[view.ID], inbox.ID)
 	}
 }
 
-// Two real folders of one account are two places the user filed the message,
-// and neither is a view over the other. Collapsing them would take away a copy
-// they can see and act on, so the thread leaves both exactly as they are.
-func TestThreadKeepsCopiesTwoRealFoldersHold(t *testing.T) {
+// Two real folders with no view among them are left entirely alone.
+func TestCollapseLeavesTwoRealFoldersAlone(t *testing.T) {
 	f := newLabelViewFixture(t)
 	label := f.mailbox(t, "Rechnungen", "")
 	sent := time.Now().UTC().Truncate(time.Second)
 	inbox := f.storeCopy(t, f.inbox, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
 	filed := f.storeCopy(t, label, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
 
-	thread, err := f.db.ListThreadMessagesForUser(f.ctx, f.userID, inbox)
+	collapse := f.collapseThread(t, inbox)
+	if got := threadIDs(collapse.Messages); !sameIDs(got, []int64{inbox.ID, filed.ID}) {
+		t.Fatalf("drawn = %v, want both rows %v", got, []int64{inbox.ID, filed.ID})
+	}
+	if len(collapse.CopyIDs) != 0 || len(collapse.StandIn) != 0 {
+		t.Fatalf("collapse hid something: copies=%v standIn=%v", collapse.CopyIDs, collapse.StandIn)
+	}
+}
+
+// A reader who mirrors two of Gmail's views holds the message in both and in no
+// real folder at all - archived mail carries no label. One of them is drawn, so
+// the message is neither repeated nor hidden.
+//
+// The second view is named in English on purpose. Gmail advertises \All on All
+// Mail whatever the account's language is and the syncer stores that as a role,
+// but \Flagged and \Important carry no role of their own and the attributes
+// are not kept, so those two are recognized here only by name.
+func TestCollapseDrawsOneRowWhenEveryCopyIsAView(t *testing.T) {
+	f := newLabelViewFixture(t)
+	starred := f.mailbox(t, "[Gmail]/Starred", "")
+	sent := time.Now().UTC().Truncate(time.Second)
+	inAllMail := f.storeCopy(t, f.allMail, "<archived@crowdfarming.test>", "msgid:archived", sent)
+	inStarred := f.storeCopy(t, starred, "<archived@crowdfarming.test>", "msgid:archived", sent)
+
+	collapse := f.collapseThread(t, inAllMail)
+	if got := threadIDs(collapse.Messages); !sameIDs(got, []int64{inAllMail.ID}) {
+		t.Fatalf("drawn = %v, want one of the two view copies", got)
+	}
+	if got := collapse.CopyIDs[inAllMail.ID]; !sameIDs(got, []int64{inAllMail.ID, inStarred.ID}) {
+		t.Fatalf("copy ids = %v, want both view rows", got)
+	}
+}
+
+// A message held only in All Mail is the only copy there is and keeps its row.
+func TestCollapseKeepsAMessageHeldOnlyInAllMail(t *testing.T) {
+	f := newLabelViewFixture(t)
+	sent := time.Now().UTC().Truncate(time.Second)
+	only := f.storeCopy(t, f.allMail, "<archived@crowdfarming.test>", "msgid:thread", sent)
+	other := f.storeCopy(t, f.inbox, "<reply@crowdfarming.test>", "msgid:thread", sent.Add(time.Minute))
+
+	collapse := f.collapseThread(t, only)
+	if got := threadIDs(collapse.Messages); !sameIDs(got, []int64{only.ID, other.ID}) {
+		t.Fatalf("drawn = %v, want both messages %v", got, []int64{only.ID, other.ID})
+	}
+}
+
+// The drawn row carries the state of the copies behind it, the same way the
+// conversation row the reader clicked was built from them: read only when every
+// copy is read, starred when any of them is.
+func TestCollapseMergesReadAndStarStateOntoTheDrawnRow(t *testing.T) {
+	f := newLabelViewFixture(t)
+	sent := time.Now().UTC().Truncate(time.Second)
+	inbox := f.storeCopy(t, f.inbox, "<milan@crowdfarming.test>", "msgid:milan", sent)
+	view := f.storeCopy(t, f.allMail, "<milan@crowdfarming.test>", "msgid:milan", sent)
+	if err := f.db.MarkMessagesReadForUser(f.ctx, f.userID, []int64{inbox.ID}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.MarkMessageStarredForUser(f.ctx, f.userID, view.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+
+	collapse := f.collapseThread(t, inbox)
+	if len(collapse.Messages) != 1 {
+		t.Fatalf("drawn = %v, want one row", threadIDs(collapse.Messages))
+	}
+	drawn := collapse.Messages[0]
+	if drawn.IsRead {
+		t.Fatal("drawn row reads as read while the All Mail copy is still unread")
+	}
+	if !drawn.IsStarred {
+		t.Fatal("drawn row reads as unstarred while the All Mail copy is starred")
+	}
+}
+
+// Starring a drawn message has to reach the copy behind it, so the lookup the
+// star handler uses names the view's row and nothing else.
+func TestLabelViewCopyIDsNamesTheViewCopy(t *testing.T) {
+	f := newLabelViewFixture(t)
+	label := f.mailbox(t, "Rechnungen", "")
+	sent := time.Now().UTC().Truncate(time.Second)
+	inbox := f.storeCopy(t, f.inbox, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
+	f.storeCopy(t, label, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
+	view := f.storeCopy(t, f.allMail, "<invoice@crowdfarming.test>", "msgid:invoice", sent)
+
+	copies, err := f.db.LabelViewCopyIDsForMessage(f.ctx, f.userID, inbox.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []int64{inbox.ID, filed.ID}
-	if got := threadIDs(thread); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("thread = %v, want both filed copies %v", got, want)
+	if !sameIDs(copies, []int64{view.ID}) {
+		t.Fatalf("copies = %v, want only the All Mail row %d", copies, view.ID)
 	}
 }
 
@@ -200,9 +290,9 @@ func TestCollapseLeavesMessagesWithoutAMessageIDAlone(t *testing.T) {
 		{ID: 1, AccountID: 7, MailboxID: 100},
 		{ID: 2, AccountID: 7, MailboxID: 200},
 	}
-	labelView := map[int64]bool{200: true}
-	if got := collapseLabelViewCopies(messages, labelView, 1); len(got) != 2 {
-		t.Fatalf("collapsed to %v, want both rows kept", threadIDs(got))
+	collapse := collapseLabelViewCopies(messages, threadCopyGroups(messages), map[int64]bool{200: true})
+	if len(collapse.Messages) != 2 {
+		t.Fatalf("drawn = %v, want both rows", threadIDs(collapse.Messages))
 	}
 }
 
@@ -214,8 +304,8 @@ func TestCollapseLeavesCopiesOfTwoAccountsAlone(t *testing.T) {
 		{ID: 1, AccountID: 7, MailboxID: 100, MessageIDHeader: "<x@test>"},
 		{ID: 2, AccountID: 8, MailboxID: 200, MessageIDHeader: "<x@test>"},
 	}
-	labelView := map[int64]bool{200: true}
-	if got := collapseLabelViewCopies(messages, labelView, 1); len(got) != 2 {
-		t.Fatalf("collapsed to %v, want both accounts' rows kept", threadIDs(got))
+	collapse := collapseLabelViewCopies(messages, threadCopyGroups(messages), map[int64]bool{200: true})
+	if len(collapse.Messages) != 2 {
+		t.Fatalf("drawn = %v, want both accounts' rows", threadIDs(collapse.Messages))
 	}
 }

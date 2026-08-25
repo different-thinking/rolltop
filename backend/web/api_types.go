@@ -321,6 +321,10 @@ type apiThreadMessage struct {
 	Expanded           bool                          `json:"expanded"`
 	ReplySubject       string                        `json:"reply_subject"`
 	CanReplyAll        bool                          `json:"can_reply_all"`
+	// CopyIDs names every physical row this drawn message stands for, itself
+	// included. It is absent unless a mirrored label view's copy was hidden
+	// behind it, and marking the message unread has to reach all of them.
+	CopyIDs []int64 `json:"copy_ids,omitempty"`
 }
 
 type apiMessageSecurityIndicators struct {

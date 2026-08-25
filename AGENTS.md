@@ -424,23 +424,37 @@ site and in review.
   holds of its own mail separately: those are two real messages on one server and
   detection never judges them, which a user looking at mail they see twice cannot
   otherwise tell from a group it never considered.
-- **A mirrored label view is collapsed out of a rendered thread, and nowhere
-  else.** An account that mirrors Gmail's All Mail holds two rows per delivery,
-  and the thread rendered both - the same mail, twice, one above the other.
-  `collapseLabelViewCopies` drops the view's row when the same account holds the
-  same Message-ID in a real folder, and `ListThreadMessagesForUser` is the only
-  caller. It writes no duplicate pointer, takes nothing out of a folder list, and
-  changes nothing about what the account is reported to hold, so it does not
-  pre-empt the cross-account rule above: copies of two accounts are two
-  deliveries and are left to it, and two real folders of one account are two
-  places the reader filed the message and keep both rows. A group that is only
-  views is left alone as well, because hiding the last copy of a message is never
-  right - archived Gmail mail carries no other label and lives in All Mail alone.
-  The row the reader opened always wins its group: the message view reads its own
-  row back out of the thread it rendered, and the lists reach a view's copy often
-  enough for this to be ordinary rather than a corner, since a view mirrored after
-  the folder it duplicates holds the higher id and that is what breaks the tie
-  when a conversation picks the row it prints.
+- **A mirrored label view is collapsed when a thread is drawn, never when it is
+  loaded.** Gmail's All Mail is a view over mail that already lives in a real
+  folder, so an account mirroring it holds two rows per delivery and a rendered
+  thread showed both. `ListThreadMessagesForUser` keeps returning every physical
+  row - read state, star state, mailbox filters in search, and conversation-level
+  moves are all decided from it, and collapsing there took rows away from callers
+  that have to reach them. `Store.CollapseLabelViewCopies` runs in
+  `threadViewsForMessageTimed` instead, *after* every row has been marked read,
+  and only it decides what is drawn. The narrow rule: a row is hidden only
+  because it sits in a view over a row the thread already draws. Real folders
+  always survive - two of them are two places the reader filed the message - and
+  a group that is nothing but views still draws one, because archived Gmail mail
+  carries no label at all and hiding the last copy of a message is never right.
+  Copies two accounts hold are two deliveries and stay with the detection in
+  `message_duplicates.go` that judges who was addressed.
+- **A drawn message that stands for several rows has to carry them with it.**
+  `ThreadCopyCollapse.CopyIDs` reaches the client as `copy_ids`, and
+  `markThreadUnread` marks all of them: the rows are one Gmail message, and
+  leaving one read keeps the conversation read in the list the reader just
+  returned to. `StandIn` maps a hidden row to the one drawn in its place, which
+  the message view follows so a reader who opened the hidden copy still gets a
+  thread containing what they asked for - the lists reach a view's copy routinely,
+  because a folder mirrored later holds the higher id and that breaks the tie
+  when a conversation picks the row it prints. The drawn row also carries the
+  hidden rows' state merged the way `dedupeConversationMessages` merges it - read
+  only when every copy is read, starred when any of them is - or the thread would
+  contradict the conversation row that was clicked to reach it. A star set on a
+  drawn message fans out to the hidden copies (`LabelViewCopyIDsForMessage`):
+  `\Flagged` belongs to the Gmail message rather than to one of its labels, and a
+  star left on a row nothing draws is one the lists keep showing and the reader
+  cannot clear.
 - **Do not collapse copies on the conversation path.** `summarizeConversation`
   already dedupes by Message-ID for what a list row prints
   (`dedupeConversationMessages`), and it does so *after*

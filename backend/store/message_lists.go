@@ -842,17 +842,7 @@ func (s *Store) ListThreadMessagesForUser(ctx context.Context, userID int64, msg
 		return nil, err
 	}
 	defer rows.Close()
-	messages, err := scanMessages(rows)
-	if err != nil {
-		return nil, err
-	}
-	// A mirrored label view holds its own row for mail that already sits in a
-	// real folder, so without this the thread renders that message twice.
-	labelView, err := s.labelViewCopiesInThread(ctx, userID, messages)
-	if err != nil {
-		return nil, err
-	}
-	return collapseLabelViewCopies(messages, labelView, msg.ID), nil
+	return scanMessages(rows)
 }
 
 func (s *Store) threadMessageIDProbe(ctx context.Context, db *sql.DB, userID int64, key string) ([]int64, error) {
