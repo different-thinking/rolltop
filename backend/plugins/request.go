@@ -39,7 +39,21 @@ func RequestBaseURL(r *http.Request) string {
 // RequestIsHTTPS reports whether the browser reached the server over TLS, either
 // directly or through a proxy that terminated it and forwarded the scheme.
 func RequestIsHTTPS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	if r.TLS != nil {
+		return true
+	}
+	return forwardedProtoIsHTTPS(r.Header.Get("X-Forwarded-Proto"))
+}
+
+// forwardedProtoIsHTTPS reads an X-Forwarded-Proto value, which may be a
+// comma-separated chain ("https, http") whose first entry is the client-facing
+// hop, and may carry surrounding whitespace. Both must be handled or a genuine
+// HTTPS request reads as plain HTTP.
+func forwardedProtoIsHTTPS(value string) bool {
+	if comma := strings.IndexByte(value, ','); comma >= 0 {
+		value = value[:comma]
+	}
+	return strings.EqualFold(strings.TrimSpace(value), "https")
 }
 
 // canonicalPublicBase reads ROLLTOP_PUBLIC_URL and returns its scheme+host

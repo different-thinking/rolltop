@@ -29,6 +29,7 @@ func TestPrivateIPBlocksInternalAndSpecialPurpose(t *testing.T) {
 		"fc00::1",         // IPv6 ULA
 		"::ffff:10.0.0.1", // IPv4-mapped private
 		"64:ff9b::7f00:1", // NAT64 wrapping 127.0.0.1
+		"2002:a00:1::1",   // 6to4 wrapping 10.0.0.1
 		"2001:db8::1",     // IPv6 documentation
 	}
 	for _, s := range blocked {

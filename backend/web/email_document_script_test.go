@@ -39,6 +39,19 @@ func TestEmailDocumentDropsMetaRefresh(t *testing.T) {
 	}
 }
 
+func TestEmailDocumentDropsUnclosedMetaRefresh(t *testing.T) {
+	// A body truncated at an unclosed <meta ... (no '>') is exactly where the
+	// tag-matching regex would miss it, yet a browser auto-closes the tag at EOF
+	// and still fires the refresh. Everything from the opening tag on is dropped.
+	doc := emailDocument(`<p>Hi</p><meta http-equiv="refresh" content="0;url=https://tracker.test/beacon`, "", true)
+	if strings.Contains(strings.ToLower(doc), "refresh") || strings.Contains(doc, "tracker.test") {
+		t.Fatalf("document kept an unclosed meta refresh: %q", doc)
+	}
+	if !strings.Contains(doc, "<p>Hi</p>") {
+		t.Fatalf("document lost body text before the meta: %q", doc)
+	}
+}
+
 func TestEmailDocumentDropsUnclosedScriptElement(t *testing.T) {
 	// A truncated or malformed body is exactly the case where a leftover tag
 	// would still make the browser try, and log, a blocked execution. Whatever

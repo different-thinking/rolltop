@@ -35,9 +35,17 @@ type backoffState struct {
 	lastSeen     time.Time
 }
 
-// backoffGateSweep bounds the state map: expired entries are dropped once there
-// are more of them than a plausible number of distinct callers in flight.
-const backoffGateSweep = 1024
+const (
+	// backoffGateSweep triggers the decay-based cleanup once the map holds more
+	// entries than a plausible number of distinct callers in flight.
+	backoffGateSweep = 1024
+	// backoffGateHardCap is the absolute ceiling on the map. An attacker can vary
+	// the keyed part freely (the reset gate keys on the submitted email), so a
+	// flood of distinct keys would otherwise grow the map for the whole decay
+	// window before any entry is old enough to sweep. Past this ceiling, entries
+	// are evicted regardless of decay so the map cannot grow without bound.
+	backoffGateHardCap = 8192
+)
 
 func newBackoffGate(burst int, base, max, decay time.Duration) *backoffGate {
 	return &backoffGate{
@@ -117,14 +125,28 @@ func (g *backoffGate) sweepLocked(now time.Time) {
 			delete(g.state, key)
 		}
 	}
+	if len(g.state) <= backoffGateHardCap {
+		return
+	}
+	// Still over the ceiling after dropping decayed entries: an active flood of
+	// fresh, distinct keys. Evict until back under the cap. Map iteration order
+	// is randomized, so this is not adversarially targetable, and under a flood
+	// the evicted entries are overwhelmingly the attacker's own (which never
+	// exceeded the burst anyway). It can cut a genuine block short, but only
+	// under an attack the operator is already under, and bounded memory wins.
+	for key := range g.state {
+		if len(g.state) <= backoffGateHardCap {
+			break
+		}
+		delete(g.state, key)
+	}
 }
 
 // clientIP returns the network address of the direct peer. It deliberately
 // ignores X-Forwarded-For: that header is set by the client and trusting it
 // would let an attacker rotate it to sidestep the gate. Behind a reverse proxy
-// this collapses to the proxy address, which is why the rate-limit keys also
-// include the submitted email -- per-account brute force stays throttled even
-// when every request shares one upstream IP.
+// this collapses to the proxy address, which is a deliberate trade-off -- see
+// loginGateKey for why login throttles per IP rather than per account.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

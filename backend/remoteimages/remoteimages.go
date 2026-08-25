@@ -296,6 +296,7 @@ var blockedIPNets = parseCIDRs(
 	"203.0.113.0/24",  // TEST-NET-3 (documentation)
 	"240.0.0.0/4",     // reserved / future use (includes 255.255.255.255)
 	// IPv6 -- IANA IPv6 Special-Purpose Address Registry
+	"2002::/16",     // 6to4 (embeds an IPv4 target that could be internal)
 	"64:ff9b::/96",  // NAT64 (embeds an IPv4 target that could be internal)
 	"100::/64",      // discard-only
 	"2001:db8::/32", // documentation

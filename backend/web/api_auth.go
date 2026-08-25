@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"rolltop/backend/auth"
@@ -295,7 +294,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	gateKey := loginGateKey(r, in.Email)
+	gateKey := loginGateKey(r)
 	if allowed, retryAfter := s.loginGate.allow(gateKey, time.Now()); !allowed {
 		writeRetryAfter(w, retryAfter, "Too many sign-in attempts. Try again later.")
 		return
@@ -330,12 +329,17 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// loginGateKey scopes the login rate limit to the client and the address being
-// tried. Keying on the email too keeps per-account brute force throttled even
-// when a reverse proxy makes every request share one IP, and keeps one victim's
-// failures from throttling logins to unrelated accounts from the same network.
-func loginGateKey(r *http.Request, email string) string {
-	return clientIP(r) + "\x00" + strings.ToLower(strings.TrimSpace(email))
+// loginGateKey scopes the login rate limit to the client address only,
+// deliberately not the submitted email. Keying on the email would let an
+// attacker who knows a victim's address lock that account out with a handful of
+// wrong-password requests -- and behind a reverse proxy, where every request
+// shares the proxy IP, the email would be the only distinguishing part, so the
+// lockout would be trivially targeted. Per-IP throttling still slows password
+// guessing (a guesser works from some address) without turning a known email
+// into a denial-of-service lever. A trusted-proxy client-IP source would let
+// per-account keying return safely; until then, per-IP is the safer default.
+func loginGateKey(r *http.Request) string {
+	return clientIP(r)
 }
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {

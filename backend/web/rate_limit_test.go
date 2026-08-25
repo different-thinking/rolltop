@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -64,6 +65,24 @@ func TestBackoffGateCapsAtMax(t *testing.T) {
 	}
 	if _, wait := g.allow("k", base); wait != 4*time.Second {
 		t.Fatalf("backoff = %v, want the 4s cap", wait)
+	}
+}
+
+func TestBackoffGateBoundsMapUnderKeyFlood(t *testing.T) {
+	base := time.UnixMilli(0)
+	g := newBackoffGate(0, time.Second, time.Minute, time.Hour)
+	// A flood of distinct, fresh keys within the decay window: none are old
+	// enough for the decay sweep, so only the hard cap keeps the map bounded.
+	for i := 0; i < backoffGateHardCap*3; i++ {
+		g.recordFailure(strconv.Itoa(i), base)
+		// allow() runs the sweep; call it each iteration as the handlers do.
+		g.allow(strconv.Itoa(i), base)
+	}
+	g.mu.Lock()
+	size := len(g.state)
+	g.mu.Unlock()
+	if size > backoffGateHardCap {
+		t.Fatalf("gate map grew to %d, want <= hard cap %d", size, backoffGateHardCap)
 	}
 }
 

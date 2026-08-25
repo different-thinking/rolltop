@@ -50,7 +50,16 @@ func (s *Server) apiPasswordResetRequest(w http.ResponseWriter, r *http.Request)
 			expires := time.Now().Add(45 * time.Minute)
 			if createErr := s.store.CreatePasswordResetToken(r.Context(), user.ID, tokenHash, expires); createErr == nil {
 				link := s.passwordResetLink(r, token)
-				_ = s.sendPasswordResetEmail(r.Context(), user, link, expires)
+				// Send on a detached context so the response returns without
+				// waiting on the SMTP round-trip. Blocking here would make a
+				// request for a real account (which sends mail) measurably slower
+				// than one for an unknown address (which does not), enumerating
+				// registered addresses despite the constant "ok" body.
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+				go func() {
+					defer cancel()
+					_ = s.sendPasswordResetEmail(ctx, user, link, expires)
+				}()
 			}
 		}
 	}

@@ -393,12 +393,6 @@ func (p *mailMCPPlugin) exchangeRefresh(host plugins.APIHost, w http.ResponseWri
 		host.WriteAPIError(w, http.StatusUnauthorized, "invalid_grant")
 		return
 	}
-	// Rotate: a refresh token is single-use. Deleting it before minting the
-	// replacement means a stolen token stops working the moment the legitimate
-	// client next refreshes -- and a second presentation of an already-used
-	// token (the classic sign of theft) fails as invalid_grant instead of
-	// minting a parallel, long-lived session.
-	delete(p.refresh, refreshKey)
 	st, ok := host.Store().(*store.Store)
 	if !ok || st == nil {
 		host.ServerError(w, errors.New("store is not available"))
@@ -411,6 +405,13 @@ func (p *mailMCPPlugin) exchangeRefresh(host plugins.APIHost, w http.ResponseWri
 		host.WriteAPIError(w, http.StatusUnauthorized, "invalid_grant")
 		return
 	}
+	// Rotate only once the request is committed to succeeding: a refresh token is
+	// single-use, so deleting it before the grant check would let a transient
+	// store error consume a legitimate client's only token and force it back
+	// through the full authorization flow. Deleting here still makes a replayed
+	// (already-used) token fail as invalid_grant -- the classic sign of theft --
+	// and stops a stolen token the moment the real client next refreshes.
+	delete(p.refresh, refreshKey)
 	p.writeTokenResponseLocked(host, w, stored.UserID, stored.GrantID, stored.ClientID, stored.Scope)
 }
 

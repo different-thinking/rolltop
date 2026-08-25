@@ -433,11 +433,12 @@ func New(opts Options) (*Server, error) {
 		snoozePushDirty:           map[int64]bool{},
 		snoozeSchedulerWake:       make(chan struct{}, 1),
 		startedAt:                 time.Now().UTC(),
-		// Login tolerates a short burst of typos, then backs off per client IP
-		// and email so password guessing gets slow fast without ever locking an
-		// address out for good. A password-reset request is far more expensive
-		// (it sends mail) and never fails visibly, so it throttles sooner.
-		loginGate:         newBackoffGate(5, time.Second, 15*time.Minute, time.Hour),
+		// Login backs off per client IP (not per account -- see loginGateKey), so
+		// the burst is a little roomier to absorb a few users' typos behind a
+		// shared address before throttling sets in. A password-reset request is
+		// far more expensive (it sends mail) and never fails visibly, so it
+		// throttles sooner and per (IP, address) to bound mail-bombing one victim.
+		loginGate:         newBackoffGate(10, time.Second, 15*time.Minute, time.Hour),
 		passwordResetGate: newBackoffGate(3, 30*time.Second, time.Hour, 2*time.Hour),
 	}
 	if opts.Syncer != nil {
@@ -1155,8 +1156,12 @@ func boundedPercent(done, total int) int {
 // requestIsHTTPS reports whether the browser reached the server over TLS,
 // either directly or through a proxy that terminated it and forwarded the
 // original scheme.
+// requestIsHTTPS defers to the shared plugin helper so the core cookie/HSTS
+// logic and the plugins agree on when a request counts as HTTPS -- including a
+// forwarded-proto value with surrounding whitespace or a proxy chain, which a
+// bare EqualFold on the raw header would misread as plain HTTP.
 func requestIsHTTPS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return plugins.RequestIsHTTPS(r)
 }
 
 // cookieSecureFor decides whether to mark a cookie Secure. An explicit
