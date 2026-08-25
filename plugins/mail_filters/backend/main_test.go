@@ -211,7 +211,7 @@ func TestBackfillSchedulesMailThatIsNotOldEnoughYet(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 100, time.Now().UTC().Add(-2*24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -239,7 +239,7 @@ func TestAgeOnlyRuleSchedulesWithoutSearching(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "older_than:30d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 101, time.Now().UTC().Add(-24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -264,7 +264,7 @@ func TestRepeatedSchedulingKeepsOneWaitingRow(t *testing.T) {
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 102, time.Now().UTC().Add(-24*time.Hour))
 
 	for range 3 {
-		if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -290,7 +290,7 @@ func TestDueMessageMatchesOnTheRemainingQueryAndActs(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{ForwardTo: "archive@example.test"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 103, time.Now().UTC().Add(-30*24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "scheduled", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, scheduledPass(phaseInbound), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -317,7 +317,7 @@ func TestMessageWithoutADateLeavesTheAgeToTheIndex(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 104, time.Time{})
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -438,7 +438,7 @@ func TestQueryWithNoConditionMatchesNothing(t *testing.T) {
 	}
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 105, time.Now().UTC().Add(-24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -597,7 +597,7 @@ func TestPurgeClearsWaitsWhoseMessageIsGone(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 340, time.Now().UTC().Add(-24*time.Hour))
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 340, time.Now().UTC().Add(-24*time.Hour))
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, user.ID, 340); err != nil {
@@ -628,7 +628,7 @@ func TestRecentActionsShowFailures(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{})
 	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 350, time.Now().UTC().Add(-24*time.Hour))
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 350, time.Now().UTC().Add(-24*time.Hour))
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -709,7 +709,7 @@ func TestDeleteMovesMailIntoTheAccountsOwnTrash(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 300, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -733,7 +733,7 @@ func TestArchiveMovesMailIntoTheFolderTheAccountChose(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 301, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -755,7 +755,7 @@ func TestArchiveWithoutAChosenFolderIsRecordedAsAFailure(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 302, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -781,7 +781,7 @@ func TestDeleteWithoutATrashFolderIsRecordedAsAFailure(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 303, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -819,5 +819,159 @@ func TestARuleRefusesADestinationTheEngineCannotResolve(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("saved a rule naming a destination the engine cannot resolve")
+	}
+}
+
+// evaluationActions reads what a rule recorded about the actions it took, which
+// is where a forward that was deliberately skipped has to leave a trace: the
+// row otherwise says "matched" and nothing about why nothing was sent.
+func evaluationActions(t *testing.T, db *sql.DB, userID, ruleID, messageID int64) string {
+	t.Helper()
+	var text string
+	if err := db.QueryRowContext(context.Background(), `SELECT actions_json FROM plugin_mail_filter_evaluations
+		WHERE user_id = ? AND rule_id = ? AND message_id = ? ORDER BY id DESC LIMIT 1`,
+		userID, ruleID, messageID).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	return text
+}
+
+// A rule that forwards new mail only must not forward the mail that was already
+// in the mailbox when it was written. The rest of the rule still runs over it:
+// the backfill matches, moves, and records, which is the whole reason the option
+// is not simply "do not backfill this rule".
+func TestForwardNewOnlyLeavesTheBackfillsMailUnforwarded(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "forward-new-only@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, user.ID, account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{
+		ForwardTo: "bookkeeping@example.test", ForwardNewOnly: true, MoveRole: moveRoleTrash,
+	})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 400, time.Now().UTC().Add(-400*24*time.Hour))
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.forwards) != 0 {
+		t.Fatalf("forwards = %v, want mail already in the mailbox left unforwarded", host.forwards)
+	}
+	if len(host.movedTo) != 1 || host.movedTo[0] != trash.ID {
+		t.Fatalf("moved to %v, want the backfill to still move the message", host.movedTo)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusMatched {
+		t.Fatalf("status = %q, want %q", status, statusMatched)
+	}
+	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, forwardSkippedNew) {
+		t.Fatalf("actions = %q, want the skipped forward recorded", actions)
+	}
+}
+
+// The same rule still forwards what arrives after it was written -- that is the
+// half the option keeps.
+func TestForwardNewOnlyStillForwardsMailAsItArrives(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "forward-arrival@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{
+		ForwardTo: "bookkeeping@example.test", ForwardNewOnly: true,
+	})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 401, time.Now().UTC())
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.forwards) != 1 || host.forwards[0] != "bookkeeping@example.test" {
+		t.Fatalf("forwards = %v, want newly arrived mail forwarded", host.forwards)
+	}
+}
+
+// A message that arrived while the rule was running and then waited on an age
+// condition is still mail this rule saw arrive, so the release forwards it. The
+// wait carries the phase it was written in for exactly this reason.
+func TestForwardNewOnlyForwardsAWaitThatBeganOnArrival(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "forward-wait@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{
+		ForwardTo: "bookkeeping@example.test", ForwardNewOnly: true,
+	})
+	arrival := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 402, arrival)
+	insertWait(t, db, user.ID, rule.ID, account.ID, mailbox.ID, 402, phaseInbound, arrival.Add(7*24*time.Hour))
+
+	if _, err := runScheduled(ctx, host, db, user.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.forwards) != 1 || host.forwards[0] != "bookkeeping@example.test" {
+		t.Fatalf("forwards = %v, want the wait that began on arrival forwarded", host.forwards)
+	}
+}
+
+// A wait the backfill wrote is the mail the option exists to leave alone, and
+// waiting for an age does not turn it into new mail.
+func TestForwardNewOnlyLeavesAWaitTheBackfillWroteUnforwarded(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "forward-wait-backfill@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{
+		ForwardTo: "bookkeeping@example.test", ForwardNewOnly: true,
+	})
+	sent := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 403, sent)
+	insertWait(t, db, user.ID, rule.ID, account.ID, mailbox.ID, 403, phaseBackfill, sent.Add(7*24*time.Hour))
+
+	if _, err := runScheduled(ctx, host, db, user.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.forwards) != 0 {
+		t.Fatalf("forwards = %v, want a wait the backfill wrote left unforwarded", host.forwards)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, 403); status != statusMatched {
+		t.Fatalf("status = %q, want the release still recorded as a match", status)
+	}
+}
+
+// A rule that names no forward address has nothing to limit, so the flag is not
+// stored: a saved rule says what it does and nothing else.
+func TestForwardNewOnlyIsNotStoredWithoutAForwardAddress(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	user, _, _ := mailFilterFixture(t, st, "forward-flag-only@example.test")
+	rule, err := saveRule(context.Background(), db, user.ID, Rule{
+		Name: "no forward", Query: "from:studio@example.test", Enabled: true,
+		Actions: Actions{ForwardNewOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.Actions.ForwardNewOnly {
+		t.Fatal("stored a new-mail-only forward on a rule that forwards nothing")
+	}
+}
+
+func insertWait(t *testing.T, db *sql.DB, userID, ruleID, accountID, mailboxID, messageID int64, phase string, dueAt time.Time) {
+	t.Helper()
+	now := time.Now().UTC().Unix()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO plugin_mail_filter_evaluations
+		(user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '[]', '[]', '{}', '', ?)`,
+		userID, ruleID, messageID, accountID, mailboxID, phase, statusScheduled, dueAt.Unix(), now, now); err != nil {
+		t.Fatal(err)
 	}
 }

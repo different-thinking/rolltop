@@ -645,6 +645,21 @@ site and in review.
   forwards it twice. The backfill walk skips what the rule already decided on
   since the rule's own `updated_at`, which also keeps one audit row per message
   rather than one per run, and still reconsiders everything after an edit.
+- **Forwarding is the one filter action that leaves the account, so a rule may
+  limit it to the mail it saw arrive** (`Actions.ForwardNewOnly`, the default
+  for a rule written in the editor). The mailbox behind a new rule holds years
+  of mail, and the first Backfill of a forwarding rule without this sent a copy
+  of every one of those messages - each of which the sending provider files in
+  its own Sent copy, so they all came back into the reader's lists. It is not
+  "do not backfill this rule": the backfill still walks that mail, matches it,
+  moves it and records it. Only the forward is skipped, and the audit row says
+  so (`forward: skipped_existing_mail`) rather than showing a match that sent
+  nothing. Which pass a message reached the rule in is therefore load-bearing,
+  not just something the audit displays, and a wait released from the age queue
+  answers with the pass it was **written** in (`pass.Origin`): mail that arrived
+  while the rule was running and then waited on `older_than:` is still mail this
+  rule saw arrive. An origin that cannot be read as an arrival counts as a
+  backfill, because the conservative answer is the one that does not forward.
 
 ## Checks
 

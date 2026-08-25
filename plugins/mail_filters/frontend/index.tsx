@@ -19,6 +19,10 @@ type Actions = {
   move_mailbox_id: number;
   move_role: string;
   forward_to: string;
+  // forward_new_only limits the forward to mail that reaches the rule as it
+  // arrives. Everything else about the rule is unchanged: Backfill still walks
+  // the mail already in the mailbox, matches it, moves it and records it.
+  forward_new_only: boolean;
 };
 
 type Rule = {
@@ -34,6 +38,7 @@ type Rule = {
 
 type Evaluation = {
   id: number;
+  actions_json: string;
   rule_id: number;
   message_id: number;
   phase: string;
@@ -209,7 +214,9 @@ function destinationActions(value: string): Pick<Actions, "move_role" | "move_ma
 // the list answers "what will this actually do to my mail" without opening it.
 function actionSummary(actions: Actions, mailboxes: Mailbox[]) {
   const parts: string[] = [];
-  if (actions.forward_to.trim()) parts.push(`Forward to ${actions.forward_to.trim()}`);
+  if (actions.forward_to.trim()) {
+    parts.push(actions.forward_new_only ? `Forward new mail to ${actions.forward_to.trim()}` : `Forward to ${actions.forward_to.trim()}`);
+  }
   if (actions.move_role === "trash") parts.push("Delete");
   else if (actions.move_role === "archive") parts.push("Archive");
   else if (actions.move_mailbox_id > 0) {
@@ -240,7 +247,11 @@ const blankRule: Rule = {
   enabled: true,
   scope_mode: "all_accounts",
   account_ids: [],
-  actions: { move_mailbox_id: 0, move_role: "", forward_to: "" },
+  // A new rule forwards new mail only. A mailbox holds years of mail and a
+  // forward is the one action that leaves the account, so the first Backfill of
+  // a rule written without thinking about it must not send hundreds of copies of
+  // mail the reader dealt with long ago. Turning it off is one click.
+  actions: { move_mailbox_id: 0, move_role: "", forward_to: "", forward_new_only: true },
   position: 0
 };
 
@@ -546,6 +557,19 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
               <input type="email" value={draft.actions.forward_to} onChange={(event) => setAction({ forward_to: event.target.value })} placeholder="name@example.com" />
             </label>
           </div>
+          {draft.actions.forward_to.trim() ? (
+            <label className="mail-filter-forward-scope">
+              <input type="checkbox" checked={draft.actions.forward_new_only} onChange={(event) => setAction({ forward_new_only: event.target.checked })} />
+              <span>Forward new mail only</span>
+            </label>
+          ) : null}
+          {draft.actions.forward_to.trim() ? (
+            <p className="muted">
+              {draft.actions.forward_new_only
+                ? "Only mail that arrives from now on is forwarded. Backfill still walks the mail already in the mailbox \u2014 it matches it, moves it and records it, it just does not send a copy of it."
+                : "Everything this filter matches is forwarded, the mail already in the mailbox included, the next time you press Backfill. Your provider keeps its own copy of every forward, so a walk over years of mail puts all of them back in your lists."}
+            </p>
+          ) : null}
           {destinationMissing ? (
             <p className="error-text">
               This filter moves mail into a folder this account no longer has, so every move it makes fails. Choose another destination.
@@ -740,6 +764,19 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
+// forwardWasSkipped reads the one action outcome that is neither a success nor
+// a failure: a rule that forwards new mail only, reached by mail that was
+// already in the mailbox when the rule got to it.
+function forwardWasSkipped(ev: Evaluation) {
+  if (!ev.actions_json) return false;
+  try {
+    const actions = JSON.parse(ev.actions_json) as Record<string, string>;
+    return actions.forward === "skipped_existing_mail";
+  } catch {
+    return false;
+  }
+}
+
 function evaluationDetail(ev: Evaluation, datePrefs: DatePrefs) {
   // A scheduled row is recorded with matched = false because its rule has not
   // acted yet, not because the message failed to match -- it matched everything
@@ -750,7 +787,10 @@ function evaluationDetail(ev: Evaluation, datePrefs: DatePrefs) {
     ev.phase ? statusLabel(ev.phase) : "",
     ev.evaluated_at ? `evaluated ${displayDateTime(new Date(ev.evaluated_at * 1000).toISOString(), datePrefs)}` : "",
     ev.due_at ? `due ${displayDateTime(new Date(ev.due_at * 1000).toISOString(), datePrefs)}` : "",
-    outcome
+    outcome,
+    // A row that matched and forwarded nothing has to say why, or the audit
+    // reads as a forward that quietly failed.
+    forwardWasSkipped(ev) ? "forward skipped \u2014 this mail was already in the mailbox" : ""
   ].filter(Boolean);
   return parts.join(" · ");
 }

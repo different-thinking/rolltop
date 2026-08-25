@@ -28,6 +28,18 @@ through the user's configured SMTP identity; forwarded mail receives an opaque
 `X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message
 that already carries the same marker.
 
+A forward may be limited to the mail the rule saw arrive (`forward_new_only`,
+which the editor turns on for a new rule). The mailbox behind a rule written
+today holds years of mail, and forwarding is the one action a rule takes that
+leaves the account -- every copy is also filed by the sending provider, which
+mirrors it back into the reader's own lists. So the option exists, and it is not
+"do not backfill this rule": Backfill still walks the mail already in the
+mailbox, still matches it, still moves it and still records what it decided. Only
+the forward is skipped, and the audit row says so instead of showing a match that
+sent nothing. Mail that arrived while the rule was running and then waited on
+`older_than:` is still forwarded when its wait is released -- the waiting row
+carries the pass it was written in for exactly that reason.
+
 A move names its destination in one of two ways, and never both:
 
 - **Delete** (`move_role: "trash"`) and **Archive** (`move_role: "archive"`) are
