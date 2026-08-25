@@ -172,9 +172,10 @@ export function messageBackURL(location: LocationState, fallback = "/mail"): str
  * get the separator right as well: `/compose` carries no query of its own until
  * something is being replied to.
  */
-export function composeURL(options: { replyID?: number; draftID?: number; backURL?: string }): string {
+export function composeURL(options: { replyID?: number; forwardID?: number; draftID?: number; backURL?: string }): string {
   const params = new URLSearchParams();
   if (options.replyID) params.set("reply", String(options.replyID));
+  if (options.forwardID) params.set("forward", String(options.forwardID));
   if (options.draftID) params.set("draft", String(options.draftID));
   if (options.backURL) params.set("back", safeInternalURL(options.backURL));
   const query = params.toString();

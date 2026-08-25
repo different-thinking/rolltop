@@ -32,6 +32,7 @@ import {
   FileText,
   Flame,
   Folder,
+  Funnel,
   GearSix,
   GraduationCap,
   Heart,
@@ -106,6 +107,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   error: WarningCircle,
   expand_more: CaretDown,
   file_text: FileText,
+  filter: Funnel,
   flame: Flame,
   folder: Folder,
   forum: ChatsCircle,
@@ -158,6 +160,7 @@ const iconMap: Record<string, PhosphorIcon> = {
 
 const iconAliases: Record<string, string> = {
   drafts: "draft",
+  rule: "filter",
   sent: "send",
   spam: "report",
   trash: "delete"
