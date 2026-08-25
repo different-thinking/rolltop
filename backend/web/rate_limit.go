@@ -104,14 +104,17 @@ func (g *backoffGate) recordSuccess(key string) {
 // backoffFor returns base*2^(n-1) capped at max, without overflowing the shift.
 func (g *backoffGate) backoffFor(n int) time.Duration {
 	d := g.base
+	// Cap before the loop so a base already at or past max returns immediately;
+	// this also covers n <= 1, where the loop never runs. Inside the loop, the
+	// same check stops the doubling, so past this point d is always below max.
+	if d >= g.max {
+		return g.max
+	}
 	for i := 1; i < n; i++ {
 		d *= 2
 		if d >= g.max {
 			return g.max
 		}
-	}
-	if d > g.max {
-		return g.max
 	}
 	return d
 }
@@ -134,11 +137,13 @@ func (g *backoffGate) sweepLocked(now time.Time) {
 	// the evicted entries are overwhelmingly the attacker's own (which never
 	// exceeded the burst anyway). It can cut a genuine block short, but only
 	// under an attack the operator is already under, and bounded memory wins.
+	toEvict := len(g.state) - backoffGateHardCap
 	for key := range g.state {
-		if len(g.state) <= backoffGateHardCap {
+		if toEvict <= 0 {
 			break
 		}
 		delete(g.state, key)
+		toEvict--
 	}
 }
 
