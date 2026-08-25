@@ -1,3 +1,4 @@
+import { Fragment, createElement } from "react";
 import type { ReactNode } from "react";
 import type { AddToast, DatePrefs, LocationState, Navigate } from "../appTypes";
 import type { SettingsSectionID } from "../features/settings/SettingsUI";
@@ -47,6 +48,46 @@ export type RuntimeMessageDetailsContext = {
 export type RuntimeMessageDetailsPlugin = RuntimePlugin & {
   renderMessageDetails?: (context: RuntimeMessageDetailsContext) => ReactNode;
 };
+
+/**
+ * RuntimeMessageQuickActionContext is what an icon-only button sitting beside
+ * Reply, Archive and Delete gets. The toolbar it joins owns the look, so it
+ * hands the plugin the class its own buttons wear and whether they are
+ * currently accepting clicks -- a plugin button that stayed live while the row
+ * was being moved would act on a message that has already left the list.
+ */
+export type RuntimeMessageQuickActionContext = {
+  message: Message;
+  location: "message-list" | "thread";
+  buttonClassName: string;
+  disabled: boolean;
+  navigate: Navigate;
+  addToast: AddToast;
+};
+
+/** RuntimeMessageQuickActionPlugin contributes buttons to a message's action toolbar. */
+export type RuntimeMessageQuickActionPlugin = RuntimePlugin & {
+  renderMessageQuickActions?: (context: RuntimeMessageQuickActionContext) => ReactNode;
+};
+
+/**
+ * messageQuickActionNodes renders the hook for every plugin that answers it.
+ * Both toolbars carrying these buttons -- a list row and an open conversation
+ * -- call it, so it lives beside the hook it reads rather than as a copy in
+ * each view: the keys, the plugin order and the empty-node filter are one
+ * decision about this hook, not two that can drift apart.
+ */
+export function messageQuickActionNodes(
+  plugins: readonly RuntimePlugin[],
+  context: RuntimeMessageQuickActionContext
+): ReactNode[] {
+  return (plugins as readonly RuntimeMessageQuickActionPlugin[])
+    .map((plugin, index) => {
+      const node = plugin.renderMessageQuickActions?.(context);
+      return node ? createElement(Fragment, { key: `message-quick-action-${index}` }, node) : null;
+    })
+    .filter((node) => node !== null);
+}
 
 export type RuntimePlugins = {
   all: RuntimePlugin[];

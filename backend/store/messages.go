@@ -94,7 +94,7 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 	}
 	var id int64
 	err = tx.QueryRowContext(ctx, `INSERT INTO messages
-			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, import_completed_at, created_at, updated_at)
+			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, own_outgoing_copy, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, import_completed_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			-- A correction the user made for this sender outranks what the
 			-- headers say, so incoming mail lands where they put the sender's
@@ -103,6 +103,13 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 			-- before any category, corrected or not, can apply to it.
 			COALESCE((SELECT o.category FROM category_sender_overrides o
 				WHERE o.user_id = ? AND o.sender = ? AND ? <> ''), ?),
+			-- The provider's copy of mail this Rolltop sent is not mail waiting
+			-- on the reader. Deciding it here, once, is what lets the lists
+			-- filter on a column instead of re-asking the ledger per query --
+			-- and what keeps the decision with the arrival that is already
+			-- writing the row.
+			COALESCE((SELECT 1 FROM outgoing_message_ids sent
+				WHERE sent.user_id = ? AND sent.account_id = ? AND sent.message_id_header = ?), 0),
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		-- The conflict is handled rather than raised. Recovering from the error
 		-- would mean continuing inside a transaction PostgreSQL has already
@@ -110,7 +117,8 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 		-- through an empty RETURNING instead.
 		ON CONFLICT (user_id, account_id, mailbox_id, uid) DO NOTHING
 		RETURNING id`,
-		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, m.UserID, senderAddress, category, category, m.ToAddr, m.CCAddr,
+		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, m.UserID, senderAddress, category, category,
+		m.UserID, m.AccountID, strings.TrimSpace(m.MessageIDHeader), m.ToAddr, m.CCAddr,
 		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), importCompletedAt, ts, ts).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -26,6 +26,7 @@ import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
 import { displayInitial } from "../../lib/senderIdentity";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
+import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
 import { SnoozeControl } from "./SnoozeControl";
@@ -1913,6 +1914,14 @@ export function ThreadView({
             >
               <Icon name="spam" />
             </button>
+            {messageQuickActionNodes(messageSecurityPlugins, {
+              message: headerActionItem.message,
+              location: "thread",
+              buttonClassName: "thread-head-action",
+              disabled: headerActionsBusy,
+              navigate,
+              addToast
+            })}
           </div>
         ) : null}
       </div>

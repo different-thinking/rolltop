@@ -330,6 +330,51 @@ func TestDuplicateScanNeverHidesASentCopy(t *testing.T) {
 	}
 }
 
+// One account forwarding to another the reader also mirrors puts two rows with
+// one Message-ID in front of detection. The sender's own copy is not one the
+// lists show, so it may not stand in for the delivery: letting it -- which is
+// what happened while detection judged it on its folder alone, the copy being
+// the older row and neither account being named in the recipients -- pointed
+// the real delivery at a row nothing displays and took the message out of every
+// list it belonged in.
+func TestDuplicateScanNeverHidesADeliveryBehindOurOwnSentCopy(t *testing.T) {
+	f := newDuplicateFixture(t)
+	allMail, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.aggregate, "[Gmail]/All Mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordOutgoingMessageID(f.ctx, f.userID, f.aggregate, "<forward@rolltop.test>"); err != nil {
+		t.Fatal(err)
+	}
+	// Both accounts mirror All Mail, which is the setup this whole area exists
+	// for, so neither copy sits in an Inbox that placement could prefer. The
+	// sender's own copy is mirrored first and is therefore the older row -- the
+	// tie detection falls back on when the recipients name neither account.
+	deliveredAllMail, err := f.db.GetOrCreateMailbox(f.ctx, f.userID, f.original, "[Gmail]/All Mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentCopy := f.storeMessage(t, f.aggregate, allMail.ID, 7, "<forward@rolltop.test>", "books@other.test")
+	delivered := f.storeMessage(t, f.original, deliveredAllMail.ID, 7, "<forward@rolltop.test>", "books@other.test")
+
+	if _, err := f.db.RefreshDuplicateCopiesForUser(f.ctx, f.userID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if pointer := f.duplicatePointer(t, delivered.ID); pointer != 0 {
+		t.Fatalf("delivered copy points at %d, want the delivery left visible", pointer)
+	}
+	if pointer := f.duplicatePointer(t, sentCopy.ID); pointer != 0 {
+		t.Fatalf("sent copy points at %d, want a row the lists never showed left alone", pointer)
+	}
+	messages, err := f.db.ListLatestThreadMessagesForUser(f.ctx, f.userID, 10, 0, ThreadListNewestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != delivered.ID {
+		t.Fatalf("all mail = %v, want the delivery %d", messageIDsOf(messages), delivered.ID)
+	}
+}
+
 // Hiding a message behind a pointer is only safe while the pointer resolves.
 // Deleting the original has to bring its copy back, whichever code path does the
 // deleting, which is why the invariant lives in a trigger.

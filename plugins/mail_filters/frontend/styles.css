@@ -155,3 +155,15 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* The forward's own scope sits under the address it qualifies rather than in
+   the row of destinations: it answers "which mail", not "where to". */
+.mail-filter-forward-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mail-filter-forward-scope input[type="checkbox"] {
+  width: auto;
+}

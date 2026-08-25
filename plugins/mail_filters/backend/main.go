@@ -35,6 +35,16 @@ const (
 	statusFailed     = "action_failed"
 	statusLoop       = "loop_prevented"
 	pluginID         = "mail_filters"
+	// The three passes a rule runs in. A pass is recorded on every evaluation
+	// row, and for a rule that only forwards newly arrived mail it is also what
+	// decides whether the forward happens at all.
+	phaseInbound   = "inbound"
+	phaseBackfill  = "backfill"
+	phaseScheduled = "scheduled"
+	// forwardSkippedNew is what the audit records instead of "ok" when a rule
+	// forwards new mail only and the message was already in the mailbox. It is
+	// not a failure: the rule matched, and its move -- if it has one -- ran.
+	forwardSkippedNew = "skipped_existing_mail"
 	// moveRoleTrash and moveRoleArchive are destinations named relative to the
 	// message's own account, so one rule can say "Trash" and mean each
 	// account's own Trash. Deleting mail is exactly this move: Rolltop never
@@ -55,7 +65,14 @@ const (
 // Trash" from emptying the reader's own Sent folder the first time they press
 // Backfill. A rule that names a mailbox to move mail into is unaffected; this
 // decides only what a rule reads.
-const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0`
+// The copies of mail this Rolltop sent are out too, and for a forwarding rule
+// they are the mail it would reach first: the provider files a copy of every
+// forward, and a rule matching on the original's sender or subject matches that
+// copy as readily as the original. The Sent and Inbox exemptions are the lists'
+// (Store.inPlayMailScope) and are repeated here for the same reason the rest of
+// this predicate is: a filter reads the mail the lists show, and mail delivered
+// into the Inbox is mail that arrived whoever sent it.
+const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0 AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))`
 
 type mailFiltersBackend struct {
 	mu     sync.Mutex
@@ -163,7 +180,7 @@ func (p *mailFiltersBackend) ImportStoredMessage(ctx context.Context, host plugi
 		return err
 	}
 	for _, rule := range rules {
-		moved, err := evaluateRule(ctx, host, db, rule, msg, "inbound", 0)
+		moved, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0)
 		if err != nil {
 			return err
 		}
@@ -345,6 +362,51 @@ type Actions struct {
 	MoveMailboxID int64  `json:"move_mailbox_id"`
 	MoveRole      string `json:"move_role"`
 	ForwardTo     string `json:"forward_to"`
+	// ForwardNewOnly limits forwarding to mail that reached the rule as it
+	// arrived. The rest of the rule is unaffected: Backfill still walks the mail
+	// already in the mailbox, still matches it, still moves it and still records
+	// what it decided -- it just does not forward it. A mailbox holding years of
+	// mail is the normal case, and a forward is the one action a rule takes that
+	// leaves the account: a first Backfill without this sent hundreds of copies
+	// of mail the reader had long since dealt with, and every copy came back
+	// through the sending account's own Sent copy.
+	ForwardNewOnly bool `json:"forward_new_only"`
+}
+
+// pass is which walk brought a message in front of a rule, and -- for a message
+// released from the age queue -- which walk first did. The two differ exactly
+// once: a message that arrived while the rule was running and then waited for
+// an age condition is released by the scheduled pass, and it is still mail this
+// rule saw arrive. Forwarding asks Origin for that reason; everything recorded
+// on the evaluation row uses Phase, so the audit still says which pass acted.
+type pass struct {
+	Phase  string
+	Origin string
+}
+
+func inboundPass() pass  { return pass{Phase: phaseInbound, Origin: phaseInbound} }
+func backfillPass() pass { return pass{Phase: phaseBackfill, Origin: phaseBackfill} }
+
+// scheduledPass carries the phase the waiting row was written in. A row from
+// before this field existed, or one whose phase is unreadable, is treated as a
+// backfill: the conservative answer is the one that does not forward mail the
+// reader may never have wanted forwarded.
+func scheduledPass(origin string) pass {
+	if strings.TrimSpace(origin) != phaseInbound {
+		origin = phaseBackfill
+	}
+	return pass{Phase: phaseScheduled, Origin: origin}
+}
+
+// forwards reports whether these actions may forward in this pass.
+func (a Actions) forwards(p pass) bool {
+	if strings.TrimSpace(a.ForwardTo) == "" {
+		return false
+	}
+	if !a.ForwardNewOnly {
+		return true
+	}
+	return p.Origin == phaseInbound
 }
 
 type Rule struct {
@@ -490,6 +552,10 @@ func saveRule(ctx context.Context, db *sql.DB, userID int64, in Rule) (Rule, err
 	default:
 		return Rule{}, errors.New("a filter moves mail to Trash, to Archive, or to a folder you name")
 	}
+	in.Actions.ForwardTo = strings.TrimSpace(in.Actions.ForwardTo)
+	if in.Actions.ForwardTo == "" {
+		in.Actions.ForwardNewOnly = false
+	}
 	if in.Actions.MoveMailboxID < 0 {
 		return Rule{}, errors.New("invalid destination folder")
 	}
@@ -565,7 +631,8 @@ func deleteRule(ctx context.Context, db *sql.DB, userID, id int64) error {
 // prevent. And a rule whose only term is the age matches every message its
 // scope reaches, because the age was the entire condition; asking the search
 // index for the empty string that remains would answer no to all of them.
-func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, phase string, evalID int64) (bool, error) {
+func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, p pass, evalID int64) (bool, error) {
+	phase := p.Phase
 	if rule.ScopeMode == "selected_accounts" && !containsID(rule.AccountIDs, msg.AccountID) {
 		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusSkipped, false, time.Time{}, nil, nil, "{}", "")
 	}
@@ -594,7 +661,7 @@ func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	if !result.Matched {
 		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
 	}
-	actionJSON, moved, status, errText := applyActions(ctx, host, db, rule, msg)
+	actionJSON, moved, status, errText := applyActions(ctx, host, db, rule, msg, p)
 	if errText != "" {
 		status = statusFailed
 	}
@@ -654,7 +721,15 @@ func scheduleEvaluation(ctx context.Context, db *sql.DB, evalID int64, rule Rule
 		(user_id, rule_id, message_id, account_id, mailbox_id, phase, status, matched, due_at, evaluated_at, terms_json, fields_json, actions_json, error, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, '{}', '', ?)
 		ON CONFLICT (user_id, rule_id, message_id) WHERE status = 'scheduled'
-		DO UPDATE SET phase = EXCLUDED.phase, due_at = EXCLUDED.due_at, evaluated_at = EXCLUDED.evaluated_at,
+		-- An arrival is not un-seen by a later pass over the same message. The
+		-- wait keeps the phase it was written in when that phase was the
+		-- arrival, or a rule edited while mail waits on its age -- which puts
+		-- every message back in front of the rule, backfill included -- would
+		-- turn mail this rule watched arrive into mail it merely found, and a
+		-- rule that forwards new mail only would then not forward it.
+		DO UPDATE SET phase = CASE WHEN plugin_mail_filter_evaluations.phase = 'inbound'
+				THEN plugin_mail_filter_evaluations.phase ELSE EXCLUDED.phase END,
+			due_at = EXCLUDED.due_at, evaluated_at = EXCLUDED.evaluated_at,
 			terms_json = EXCLUDED.terms_json, fields_json = EXCLUDED.fields_json, error = ''`,
 		msg.UserID, rule.ID, msg.MessageID, msg.AccountID, msg.MailboxID, phase, statusScheduled,
 		unixOrZero(dueAt), now, mustJSON(result.Terms), mustJSON(result.Fields), now)
@@ -695,9 +770,10 @@ func moveDestination(ctx context.Context, host plugins.StoredMessageHost, db *sq
 	return 0, fmt.Errorf("unknown move destination %q", actions.MoveRole)
 }
 
-func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext) (string, bool, string, string) {
+func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, p pass) (string, bool, string, string) {
 	results := map[string]string{}
-	if strings.TrimSpace(rule.Actions.ForwardTo) != "" {
+	switch {
+	case rule.Actions.forwards(p):
 		forwarderID, err := ensureForwarderID(ctx, db, msg.UserID, msg.AccountID)
 		if err != nil {
 			results["forward"] = "failed"
@@ -712,6 +788,11 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 			return mustJSON(results), false, statusFailed, err.Error()
 		}
 		results["forward"] = "ok"
+	case strings.TrimSpace(rule.Actions.ForwardTo) != "":
+		// The rule forwards new mail only and this message was already in the
+		// mailbox. Recording the skip is the point: the audit otherwise shows a
+		// match that forwarded nothing and says nothing about why.
+		results["forward"] = forwardSkippedNew
 	}
 	destID, err := moveDestination(ctx, host, db, rule.Actions, msg)
 	if err != nil {
@@ -836,7 +917,7 @@ func backfillRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	processed := 0
 	next := from
 	for _, msg := range messages {
-		if _, err := evaluateRule(ctx, host, db, rule, msg, "backfill", 0); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
 			return processed, next, false, err
 		}
 		processed++
@@ -897,7 +978,7 @@ func storedDateUnix(date time.Time) int64 {
 }
 
 func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, userID int64, now time.Time) (int, error) {
-	rows, err := db.QueryContext(ctx, `SELECT e.id, e.rule_id, m.id, m.user_id, m.account_id, m.mailbox_id, m.subject, m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.uid, m.is_read, m.is_starred
+	rows, err := db.QueryContext(ctx, `SELECT e.id, e.rule_id, e.phase, m.id, m.user_id, m.account_id, m.mailbox_id, m.subject, m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.uid, m.is_read, m.is_starred
 		FROM plugin_mail_filter_evaluations e
 		JOIN plugin_mail_filter_rules r ON r.id = e.rule_id AND r.user_id = e.user_id
 		JOIN messages m ON m.id = e.message_id AND m.user_id = e.user_id
@@ -910,6 +991,10 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	type due struct {
 		evalID int64
 		ruleID int64
+		// origin is the phase the wait was written in. A rule that forwards new
+		// mail only still forwards a message that arrived while the rule was
+		// running and then waited on its age; one the backfill found does not.
+		origin string
 		msg    plugins.StoredMessageContext
 	}
 	var dueRows []due
@@ -917,7 +1002,7 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		var item due
 		var dateUnix int64
 		var read, starred int
-		if err := rows.Scan(&item.evalID, &item.ruleID, &item.msg.MessageID, &item.msg.UserID, &item.msg.AccountID, &item.msg.MailboxID, &item.msg.Subject, &item.msg.From, &item.msg.To, &item.msg.CC, &dateUnix, &item.msg.UID, &read, &starred); err != nil {
+		if err := rows.Scan(&item.evalID, &item.ruleID, &item.origin, &item.msg.MessageID, &item.msg.UserID, &item.msg.AccountID, &item.msg.MailboxID, &item.msg.Subject, &item.msg.From, &item.msg.To, &item.msg.CC, &dateUnix, &item.msg.UID, &read, &starred); err != nil {
 			return 0, err
 		}
 		if dateUnix > 0 {
@@ -936,7 +1021,7 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		if err != nil {
 			return processed, err
 		}
-		if _, err := evaluateRule(ctx, host, db, rule, item.msg, "scheduled", item.evalID); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, item.msg, scheduledPass(item.origin), item.evalID); err != nil {
 			return processed, err
 		}
 		processed++

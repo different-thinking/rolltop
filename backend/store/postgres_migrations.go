@@ -89,6 +89,40 @@ var postgresMigrations = []postgresMigration{
 		},
 	},
 	{
+		// Mail this Rolltop sent, recognised when the provider's own copy of it
+		// comes back through sync. Keeping Sent out of the whole-account lists
+		// is a property of the *folder* (show_in_all_mail), and Gmail's All Mail
+		// is one folder holding both what arrived and what the user sent -- so a
+		// reader who mirrors it saw every reply and every filter forward turn up
+		// in Inbox and in Relevant, as mail waiting on them.
+		//
+		// The ledger is what makes the copy recognisable: a Message-ID this
+		// installation generated, remembered for the account it was sent from.
+		// It is deliberately not "mail from my own address" -- a printer, an
+		// alarm system or a spoof can send as the reader, and hiding that would
+		// hide real mail.
+		//
+		// The rows are kept rather than expired. A folder whose UIDVALIDITY the
+		// server resets is re-imported from scratch, years after the fact, and
+		// every one of those arrivals has to reach the same conclusion as the
+		// first import did -- a window that had closed by then would flood the
+		// lists with mail the reader sent. They go with their account and with
+		// their user, which is what the two cascades are for.
+		Version: "0004-own-outgoing-copies",
+		Statements: []string{
+			`CREATE TABLE outgoing_message_ids (
+				user_id bigint NOT NULL,
+				account_id bigint NOT NULL,
+				message_id_header text COLLATE "C" NOT NULL,
+				created_at bigint NOT NULL,
+				PRIMARY KEY (user_id, account_id, message_id_header)
+			)`,
+			`ALTER TABLE outgoing_message_ids ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+			`ALTER TABLE outgoing_message_ids ADD FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE`,
+			`ALTER TABLE messages ADD COLUMN own_outgoing_copy bigint NOT NULL DEFAULT 0`,
+		},
+	},
+	{
 		// Index the foreign keys that point at messages(id) and blobs(id). The
 		// baseline declares these references but no index led by the referencing
 		// column, so PostgreSQL's referential-integrity check for every ON DELETE
@@ -108,7 +142,11 @@ var postgresMigrations = []postgresMigration{
 		// there is no concurrent writer for the index build's lock to block. The
 		// only cost is a one-time startup delay while the indexes build on a large
 		// existing database, before the server begins serving.
-		Version: "0004-fk-indexes",
+		//
+		// Numbered 0005 because 0004-own-outgoing-copies landed on main first, and
+		// the migration list is append-only: a database that already applied 0004
+		// must find the applied versions as a prefix of this list.
+		Version: "0005-fk-indexes",
 		Statements: []string{
 			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_message_id ON attachments (message_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_fk_attachments_blob_id ON attachments (blob_id)`,

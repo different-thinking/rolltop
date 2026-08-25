@@ -63,6 +63,42 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * nonAPIErrorMessage names a failure whose body did not parse as the JSON every
+ * Rolltop route answers with. Something in front of the app answered instead --
+ * a proxy, the hosting platform, a gateway that timed out -- or the answer was
+ * cut off on the way. The body is then a whole HTML document or a fragment of a
+ * payload, which a toast used to print verbatim: a screenful of markup instead
+ * of a reason. The status the response really carried is the one thing every
+ * such failure has, so it is always said; what is added to it is whatever
+ * sentence the body actually holds, and nothing when it holds none.
+ */
+function nonAPIErrorMessage(res: Response, body: string): string {
+  // The reason phrase is read once and defended once. It is a string per the
+  // Fetch specification, but not in every stand-in for a Response, and a helper
+  // that only runs when something has already failed must not be what throws.
+  const statusText = (res.statusText || "").trim();
+  const status = statusText ? `${res.status} ${statusText}` : String(res.status);
+  const trimmed = body.trim();
+  if (!trimmed) return status;
+  if (trimmed.startsWith("<")) {
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(trimmed)?.[1]?.trim();
+    return `${status}: ${title || "the server did not answer with a Rolltop response."}`;
+  }
+  // A body that begins as JSON and does not parse is a payload the connection
+  // cut short, so there is no sentence in it to quote -- only the fragment that
+  // got through, which is what the raw dump used to be.
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return `${status}: the server's answer was cut short.`;
+  }
+  const firstLine = trimmed.split("\n", 1)[0].trim();
+  // A plain-text body that only repeats the status ("Bad Gateway") would
+  // otherwise be said twice in one sentence.
+  if (statusText && firstLine.toLowerCase() === statusText.toLowerCase()) return status;
+  const excerpt = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+  return `${status}: ${excerpt}`;
+}
+
 // All API helpers flow through parse so callers see typed payloads on success
 // and a consistent ApiError on backend validation/session failures.
 async function parse<T>(res: Response): Promise<T> {
@@ -73,7 +109,7 @@ async function parse<T>(res: Response): Promise<T> {
       data = JSON.parse(text);
     } catch (err) {
       if (!res.ok) {
-        throw new ApiError(res.status, text || res.statusText);
+        throw new ApiError(res.status, nonAPIErrorMessage(res, text));
       }
       throw err;
     }

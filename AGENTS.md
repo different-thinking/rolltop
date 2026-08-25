@@ -206,6 +206,36 @@ site and in review.
   migration's `After` step, which runs again on every startup and would overwrite
   that choice. Junk is the one folder the lists drop by role regardless, because
   Report spam promises the message is gone from them.
+- **The provider's own copy of mail this Rolltop sent is out of those lists too,
+  and the folder cannot be what says so.** Keeping Sent out of them is a
+  property of the folder, and Gmail's All Mail is one folder holding what
+  arrived and what was sent -- so a reader who mirrors it (against the default,
+  but it is their switch) saw every reply and every filter forward come back as
+  mail waiting on them. The message answers it instead: every send records the
+  Message-ID it is about to use for the account it sends from
+  (`Store.RecordOutgoingMessageID`, before the send -- the provider can file its
+  copy the moment it accepts the message), `CreateMessage` resolves that once
+  into `messages.own_outgoing_copy`, and `inPlayMailScope` drops those rows.
+  Five properties keep it from hiding real mail, and each of them is a way it
+  did. The test is what **this installation sent**, never "mail from my own
+  address": a printer, an alarm system or a spoof can send as the reader. The
+  ledger is keyed by the **account the mail leaves through** -- the identity's,
+  which `forwardIdentity`'s fallback pass can put on a different account from
+  the forwarded message's -- so the same message delivered to another account of
+  theirs is mail that account really received and stays visible. **Sent and
+  Inbox are exempt**: a reader who puts Sent back into these lists is asking for
+  exactly this mail, and a copy the server delivered into the Inbox is mail that
+  arrived however it was sent -- a note to oneself and a Bcc to one's own
+  address are indistinguishable from the All Mail copy by Message-ID alone.
+  Detection may neither hide a copy behind one of these rows nor hide one of
+  them behind a copy (`duplicateCopyShowsInLists`): two accounts of one reader
+  both mirroring All Mail put the sender's copy and the delivery in one group,
+  and the older row winning took the delivery out of every list. And the ledger
+  rows are **kept, not expired**: a folder whose UIDVALIDITY resets is
+  re-imported from scratch years later, and a window that had closed by then
+  would put every older send back into the lists. Rows stay in their own
+  folder's list throughout -- keeping mail out of the combined lists is not
+  hiding it.
 - A conversation row is the message its list selected - the seed the list query
   returned - and `conversationView.ListDate` is that message's date. Threads are
   hydrated in full, so a row's thread carries messages the list excludes; taking
@@ -645,6 +675,21 @@ site and in review.
   forwards it twice. The backfill walk skips what the rule already decided on
   since the rule's own `updated_at`, which also keeps one audit row per message
   rather than one per run, and still reconsiders everything after an edit.
+- **Forwarding is the one filter action that leaves the account, so a rule may
+  limit it to the mail it saw arrive** (`Actions.ForwardNewOnly`, the default
+  for a rule written in the editor). The mailbox behind a new rule holds years
+  of mail, and the first Backfill of a forwarding rule without this sent a copy
+  of every one of those messages - each of which the sending provider files in
+  its own Sent copy, so they all came back into the reader's lists. It is not
+  "do not backfill this rule": the backfill still walks that mail, matches it,
+  moves it and records it. Only the forward is skipped, and the audit row says
+  so (`forward: skipped_existing_mail`) rather than showing a match that sent
+  nothing. Which pass a message reached the rule in is therefore load-bearing,
+  not just something the audit displays, and a wait released from the age queue
+  answers with the pass it was **written** in (`pass.Origin`): mail that arrived
+  while the rule was running and then waited on `older_than:` is still mail this
+  rule saw arrive. An origin that cannot be read as an arrival counts as a
+  backfill, because the conservative answer is the one that does not forward.
 
 ## Checks
 

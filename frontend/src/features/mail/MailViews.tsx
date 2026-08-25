@@ -24,6 +24,7 @@ import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
+import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { SnoozeControl } from "./SnoozeControl";
@@ -2770,6 +2771,12 @@ function MessageList({
     navigate(composeURL({ replyID: conversation.message.id, backURL: returnURL }));
   }
 
+  function forwardConversation(conversation: Conversation) {
+    // A row forwards the message the row is, which is the seed the list
+    // returned -- the same message opening the row would show first.
+    navigate(composeURL({ forwardID: conversation.message.id, backURL: returnURL }));
+  }
+
   function moveConversationByRowAction(conversation: Conversation, action: RowMoveAction) {
     if (rowActionBlocked(conversation)) return;
     moveConversation(conversation, action, null);
@@ -3080,6 +3087,19 @@ function MessageList({
             <Icon name="reply" />
           </button>
         )}
+        {openAsDraft ? null : (
+          <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => forwardConversation(conversation)} title="Forward" aria-label="Forward">
+            <Icon name="forward" />
+          </button>
+        )}
+        {openAsDraft ? null : messageQuickActionNodes(messageSecurityPlugins, {
+          message: msg,
+          location: "message-list",
+          buttonClassName: "message-row-action",
+          disabled: rowActionsDisabled,
+          navigate,
+          addToast
+        })}
         {openAsDraft || snoozedView ? null : (
           <button className="message-row-action" type="button" disabled={rowActionsDisabled} onClick={() => moveConversationByRowAction(conversation, "archive")} title="Archive" aria-label="Archive">
             <Icon name="archive" />
