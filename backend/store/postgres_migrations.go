@@ -88,6 +88,33 @@ var postgresMigrations = []postgresMigration{
 				WHERE auth_type = 'google_oauth' AND smtp_host = 'smtp.gmail.com' AND smtp_port = 465`,
 		},
 	},
+	{
+		// Mail this Rolltop sent, recognised when the provider's own copy of it
+		// comes back through sync. Keeping Sent out of the whole-account lists
+		// is a property of the *folder* (show_in_all_mail), and Gmail's All Mail
+		// is one folder holding both what arrived and what the user sent -- so a
+		// reader who mirrors it saw every reply and every filter forward turn up
+		// in Inbox and in Relevant, as mail waiting on them.
+		//
+		// The ledger is what makes the copy recognisable: a Message-ID this
+		// installation generated, remembered per account for as long as it takes
+		// the copy to be mirrored. It is deliberately not "mail from my own
+		// address" -- a printer, an alarm system or a spoof can send as the
+		// reader, and hiding that would hide real mail.
+		Version: "0004-own-outgoing-copies",
+		Statements: []string{
+			`CREATE TABLE outgoing_message_ids (
+				user_id bigint NOT NULL,
+				account_id bigint NOT NULL,
+				message_id_header text COLLATE "C" NOT NULL,
+				created_at bigint NOT NULL,
+				expires_at bigint NOT NULL,
+				PRIMARY KEY (user_id, account_id, message_id_header)
+			)`,
+			`CREATE INDEX idx_outgoing_message_ids_expiry ON outgoing_message_ids (user_id, expires_at)`,
+			`ALTER TABLE messages ADD COLUMN own_outgoing_copy bigint NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

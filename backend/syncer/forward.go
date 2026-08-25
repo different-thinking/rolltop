@@ -86,6 +86,13 @@ func (s *Service) ForwardMessage(ctx context.Context, userID, messageID int64, t
 		AuthType:              smtpAccount.AuthType,
 		GoogleConnectionID:    smtpAccount.GoogleConnectionID,
 	}
+	// The account keeps its own copy of what it sends, and for a Gmail account
+	// that mirrors All Mail that copy comes straight back into the reader's
+	// lists. Recording the id before the send is what lets the mirror recognise
+	// it as their own outgoing mail rather than as something that arrived.
+	if err := s.Store.RecordOutgoingMessageID(ctx, userID, msg.AccountID, out.MessageID); err != nil {
+		return err
+	}
 	_, err = s.Sender.Send(ctx, envelope, out)
 	return err
 }

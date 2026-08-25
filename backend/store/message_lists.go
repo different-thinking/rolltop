@@ -317,6 +317,14 @@ const snoozeJoin = `LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 // A Junk folder is out regardless of its All Mail setting. Reporting spam
 // promises the message is gone from these lists, and a promise that a per-folder
 // toggle can quietly revoke is not one the Report spam button could make.
+//
+// The provider's copy of mail this Rolltop sent is out for the same reason Sent
+// is: it is not mail waiting on the reader. The folder cannot answer that one --
+// Gmail's All Mail holds what arrived and what was sent in a single folder, so a
+// reader who mirrors it saw every reply and every filter forward come back as
+// new mail -- so the message itself answers it (own_outgoing_copy, decided once
+// at arrival). The Sent role is exempt: a reader who deliberately puts Sent back
+// into these lists is asking for exactly this mail, and must still get it.
 func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchived bool, extra string, extraArgs ...any) (string, []any, error) {
 	exclusion, exclusionArgs, err := s.archivedMailboxExclusion(ctx, userID, excludeArchived)
 	if err != nil {
@@ -325,7 +333,8 @@ func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchiv
 	args := make([]any, 0, len(extraArgs)+len(exclusionArgs))
 	args = append(args, extraArgs...)
 	args = append(args, exclusionArgs...)
-	return extra + " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" + exclusion, args, nil
+	return extra + " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" +
+		" AND (m.own_outgoing_copy = 0 OR mb.role = 'sent')" + exclusion, args, nil
 }
 
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection

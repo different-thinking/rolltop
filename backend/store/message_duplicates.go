@@ -221,10 +221,15 @@ func (s *Store) CountWithinAccountDuplicatedMessagesForUser(ctx context.Context,
 	// of two accounts file twice is one message the reader sees more than once,
 	// and reporting it as two would describe their mailbox wrongly in exactly
 	// the way this number exists to avoid.
+	// The provider's copy of mail this Rolltop sent is left out: the lists
+	// already keep it out of sight, so it is not mail the reader sees twice,
+	// and counting it would answer a question nobody asked with a number that
+	// only grows as they use the app.
 	var messages int
 	err = db.QueryRowContext(ctx, `SELECT count(DISTINCT message_id_header) FROM (
 			SELECT message_id_header FROM messages
 			WHERE user_id = ? AND message_id_header <> '' AND duplicate_of_message_id = 0
+				AND own_outgoing_copy = 0
 			GROUP BY message_id_header, account_id
 			HAVING count(*) > 1
 		) AS repeated`, userID).Scan(&messages)

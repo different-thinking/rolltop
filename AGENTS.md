@@ -206,6 +206,24 @@ site and in review.
   migration's `After` step, which runs again on every startup and would overwrite
   that choice. Junk is the one folder the lists drop by role regardless, because
   Report spam promises the message is gone from them.
+- **The provider's own copy of mail this Rolltop sent is out of those lists too,
+  and the folder cannot be what says so.** Keeping Sent out of them is a
+  property of the folder, and Gmail's All Mail is one folder holding what
+  arrived and what was sent -- so a reader who mirrors it (against the default,
+  but it is their switch) saw every reply and every filter forward come back as
+  mail waiting on them. The message answers it instead: every send records the
+  Message-ID it is about to use for the account it sends from
+  (`Store.RecordOutgoingMessageID`, before the send -- the provider can file its
+  copy the moment it accepts the message), `CreateMessage` resolves that once
+  into `messages.own_outgoing_copy`, and `inPlayMailScope` drops those rows.
+  Three properties keep it honest. The test is what **this installation sent**,
+  never "mail from my own address": a printer, an alarm system or a spoof can
+  send as the reader, and hiding that hides real mail. The ledger is keyed by
+  the **sending account**, so the same message delivered to another account of
+  theirs is mail that account really received and stays visible. And the Sent
+  role is exempt, because a reader who puts Sent back into these lists is asking
+  for exactly this mail. Rows stay in their own folder's list either way --
+  keeping mail out of the combined lists is not hiding it.
 - A conversation row is the message its list selected - the seed the list query
   returned - and `conversationView.ListDate` is that message's date. Threads are
   hydrated in full, so a row's thread carries messages the list excludes; taking

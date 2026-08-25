@@ -61,6 +61,14 @@ failure is terminal for that message until the rule is saved again -- saving is
 what puts already-decided mail back in front of the rule -- and Backfill is what
 walks it; the scheduled worker only picks up rows still waiting on age.
 
+The copies the provider keeps of what a rule forwarded are out of the reader's
+lists, and out of the filters' own reach: every send records its Message-ID for
+the account it left from, and the mirror recognises that copy as the reader's own
+outgoing mail (`messages.own_outgoing_copy`). Without it a forwarding rule fed
+itself -- the copy of a forward matches the same sender or subject the original
+did -- and a Gmail account mirroring All Mail showed every forward back in Inbox
+and in the categories.
+
 Filters read the mail the whole-account lists show -- folders that opt into All
 Mail, never Junk, never a hidden cross-account duplicate -- so Sent, Drafts and
 Trash are out of reach of a rule by default. That is what keeps an age rule from

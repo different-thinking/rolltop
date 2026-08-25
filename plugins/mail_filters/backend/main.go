@@ -65,7 +65,11 @@ const (
 // Trash" from emptying the reader's own Sent folder the first time they press
 // Backfill. A rule that names a mailbox to move mail into is unaffected; this
 // decides only what a rule reads.
-const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0`
+// The copies of mail this Rolltop sent are out too, and for a forwarding rule
+// they are the mail it would reach first: the provider files a copy of every
+// forward, and a rule matching on the original's sender or subject matches that
+// copy as readily as the original.
+const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0 AND m.own_outgoing_copy = 0`
 
 type mailFiltersBackend struct {
 	mu     sync.Mutex
