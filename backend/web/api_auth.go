@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"rolltop/backend/auth"
@@ -294,6 +295,11 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	gateKey := loginGateKey(r, in.Email)
+	if allowed, retryAfter := s.loginGate.allow(gateKey, time.Now()); !allowed {
+		writeRetryAfter(w, retryAfter, "Too many sign-in attempts. Try again later.")
+		return
+	}
 	user, err := s.store.GetUserByEmail(r.Context(), in.Email)
 	if err != nil && !store.IsNotFound(err) {
 		// A store failure is not a credential verdict; reporting it as
@@ -302,19 +308,34 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Spend a password verification's worth of work on a missing account so
+		// its response time matches an existing one -- otherwise the gap between
+		// the two enumerates which addresses are registered.
+		auth.VerifyDummyPassword(in.Password)
+		s.loginGate.recordFailure(gateKey, time.Now())
 		writeAPIError(w, http.StatusUnauthorized, "Invalid email or password.")
 		return
 	}
 	ok, err := auth.VerifyPassword(user.PasswordHash, in.Password)
 	if err != nil || !ok {
+		s.loginGate.recordFailure(gateKey, time.Now())
 		writeAPIError(w, http.StatusUnauthorized, "Invalid email or password.")
 		return
 	}
+	s.loginGate.recordSuccess(gateKey)
 	if err := s.loginUser(w, r, user.ID); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// loginGateKey scopes the login rate limit to the client and the address being
+// tried. Keying on the email too keeps per-account brute force throttled even
+// when a reverse proxy makes every request share one IP, and keeps one victim's
+// failures from throttling logins to unrelated accounts from the same network.
+func loginGateKey(r *http.Request, email string) string {
+	return clientIP(r) + "\x00" + strings.ToLower(strings.TrimSpace(email))
 }
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +349,7 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.store.DeleteSession(r.Context(), mmcrypto.TokenHash(cookie.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecureFor(r)})
 	writeJSON(w, map[string]any{"ok": true})
 }
 

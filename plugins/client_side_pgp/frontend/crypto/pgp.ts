@@ -1389,8 +1389,14 @@ function pgpErrorMessage(err: unknown): string {
 async function sanitizeHTML(html: string): Promise<string> {
   const mod = await import("dompurify");
   const DOMPurify = mod.default;
+  // meta/base/link are forbidden explicitly: a <meta http-equiv="refresh"> in a
+  // decrypted body still fires inside the sandboxed iframe (it is navigation,
+  // not script) and would fetch an attacker URL, defeating remote-content
+  // blocking; <base> could rewrite where relative links resolve. DOMPurify drops
+  // these by default, but naming them keeps the guarantee if that default ever
+  // changes.
   return DOMPurify.sanitize(html, {
-    FORBID_TAGS: ["script", "style", "form", "iframe", "object", "embed"],
+    FORBID_TAGS: ["script", "style", "form", "iframe", "object", "embed", "meta", "base", "link"],
     FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "style"],
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|cid|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i
   });

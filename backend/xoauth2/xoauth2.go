@@ -37,6 +37,18 @@ func initialResponse(username, accessToken string) []byte {
 	return []byte("user=" + username + "\x01auth=Bearer " + accessToken + "\x01\x01")
 }
 
+// EnsureEncrypted refuses to proceed when a bearer token would travel over an
+// unencrypted link. tls reports whether the transport is already encrypted;
+// host is the peer, so a local relay or test server on loopback still works. It
+// is the single cleartext gate both the IMAP and SMTP adapters call, so neither
+// protocol can put an access token on the wire in the clear.
+func EnsureEncrypted(host string, tls bool) error {
+	if tls || isLoopback(host) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrCleartext, host)
+}
+
 func validate(username, accessToken string) error {
 	if strings.TrimSpace(username) == "" {
 		return errors.New("XOAUTH2 requires an account name")
@@ -103,8 +115,8 @@ func (a *smtpAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
 	if server == nil {
 		return "", nil, ErrCleartext
 	}
-	if !server.TLS && !isLoopback(server.Name) {
-		return "", nil, fmt.Errorf("%w: %s", ErrCleartext, server.Name)
+	if err := EnsureEncrypted(server.Name, server.TLS); err != nil {
+		return "", nil, err
 	}
 	// An empty advertisement means the caller reached Auth without an EHLO
 	// response to inspect; only a populated list that omits the mechanism is

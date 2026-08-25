@@ -70,15 +70,33 @@ export ROLLTOP_SHUTDOWN_TIMEOUT="10s"
 export ROLLTOP_SQLITE_ACCESS="auto"
 ```
 
-Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
+Session and CSRF cookies are marked `Secure` automatically on any request that
+arrives over HTTPS (directly or via `X-Forwarded-Proto: https` from a
+terminating proxy), and an HSTS header is sent on those same requests. A
+plain-HTTP local run still works, because a `Secure` cookie is silently dropped
+over `http://`. Set `ROLLTOP_COOKIE_SECURE=true` to force the flag on regardless
+of the detected scheme.
+
+Login and password-reset requests are rate-limited per client IP and target
+address with exponential backoff, so repeated password guessing and reset
+mail-bombing are throttled without ever locking an address out for good. A
+throttled request answers `429` with a `Retry-After` header.
 
 Set `ROLLTOP_PUBLIC_URL` to the external origin the app is reached at (scheme and
-host, e.g. `https://mail.example.com`). It is the trusted base for links in
-outgoing mail — currently the password-reset link. When it is unset, that link is
-built from the request `Host` header, which a client can set: an attacker who
-triggers a reset for a victim can then have the emailed link point at their own
-domain and capture the token. Setting this closes that, so configure it in any
-deployment that sends password-reset mail. A trailing path is ignored.
+host, e.g. `https://mail.example.com`). It is the trusted base for links the app
+builds back to itself — the password-reset link in outgoing mail, and the
+callback and discovery URLs the OIDC and Mail MCP plugins hand out. When it is
+unset, those are built from the request `Host`/`X-Forwarded-Host` header, which a
+client can set: an attacker who triggers a reset for a victim can then have the
+emailed link point at their own domain and capture the token, and the same
+spoofed host can steer an OAuth/OIDC redirect. Setting this closes that, so
+configure it in any deployment that sends password-reset mail or enables those
+plugins. A trailing path is ignored.
+
+`ROLLTOP_WEBHOOK_TOKEN` guards the `/webhooks/sync` trigger. Present it in the
+`X-Rolltop-Webhook-Token` header or an `Authorization: Bearer` header — a token
+in the URL query is no longer accepted, because query strings land in access and
+proxy logs.
 
 `ROLLTOP_MEMORY_LIMIT` is the soft ceiling the Go runtime is given for its heap.
 Without one the collector aims at roughly twice the live heap, so the first sync

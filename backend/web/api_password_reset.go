@@ -32,6 +32,17 @@ func (s *Server) apiPasswordResetRequest(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	// Throttle by client IP and target address. A reset request sends mail and
+	// always answers "ok" regardless of whether the account exists, so there is
+	// no failure signal to key on -- every accepted request advances the backoff,
+	// which bounds both brute-force probing and mail-bombing one victim.
+	gateKey := clientIP(r) + "\x00" + strings.ToLower(strings.TrimSpace(in.Email))
+	now := time.Now()
+	if allowed, retryAfter := s.passwordResetGate.allow(gateKey, now); !allowed {
+		writeRetryAfter(w, retryAfter, "Too many password reset requests. Try again later.")
+		return
+	}
+	s.passwordResetGate.recordFailure(gateKey, now)
 	user, err := s.store.GetUserByEmail(r.Context(), in.Email)
 	if err == nil && strings.TrimSpace(user.BackupEmail) != "" {
 		if token, tokenErr := auth.NewOpaqueToken(); tokenErr == nil {

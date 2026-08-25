@@ -1606,6 +1606,14 @@ func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Clien
 
 func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client) error {
 	return func(c *client.Client) error {
+		// Mirror the SMTP side: an access token is as good as the password it
+		// replaced, so it must never go out over an unencrypted connection. The
+		// SASL Start callback the go-imap client uses carries no transport
+		// information, so the gate lives here, on the real connection state
+		// rather than the configured intent.
+		if err := xoauth2.EnsureEncrypted(account.Host, c.IsTLS()); err != nil {
+			return err
+		}
 		supported, err := c.SupportAuth(xoauth2.Mechanism)
 		if err != nil {
 			return err

@@ -120,3 +120,20 @@ func TestSMTPAuthAnswersTheErrorChallengeOnce(t *testing.T) {
 		t.Fatalf("completed exchange returned %q/%v", response, err)
 	}
 }
+
+func TestEnsureEncryptedGuardsCleartext(t *testing.T) {
+	// The IMAP adapter has no ServerInfo to inspect, so it relies on this shared
+	// gate directly. A plain connection to a real host is refused; TLS or a
+	// loopback peer is allowed.
+	if err := EnsureEncrypted("imap.gmail.com", false); !errors.Is(err, ErrCleartext) {
+		t.Fatalf("plaintext to a remote host: err = %v, want ErrCleartext", err)
+	}
+	if err := EnsureEncrypted("imap.gmail.com", true); err != nil {
+		t.Fatalf("TLS connection was refused: %v", err)
+	}
+	for _, host := range []string{"localhost", "127.0.0.1", "127.0.0.1:143", "::1"} {
+		if err := EnsureEncrypted(host, false); err != nil {
+			t.Fatalf("loopback host %q was refused: %v", host, err)
+		}
+	}
+}

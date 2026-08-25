@@ -29,7 +29,7 @@ func TestDiscoverAutocryptHeadersStoresSenderKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := &Service{Store: db, PluginDir: testClientSidePGPPluginDir(t)}
-	if err := svc.importIncomingMessageHooks(ctx, user.ID, []byte(autocryptTestRaw), "Alice <alice@example.test>"); err != nil {
+	if err := svc.importIncomingMessageHooks(ctx, user.ID, []byte(autocryptTestRaw), "Alice <alice@example.test>", false); err != nil {
 		t.Fatal(err)
 	}
 	keys, err := keystore.ListAllPublicKeysForEmails(ctx, db, user.ID, []string{"alice@example.test"})
@@ -41,6 +41,32 @@ func TestDiscoverAutocryptHeadersStoresSenderKey(t *testing.T) {
 	}
 	if keys[0].Email != "alice@example.test" || !keys[0].IsPreferred || keys[0].PublicKeyArmored == "" {
 		t.Fatalf("stored key = %+v", keys[0])
+	}
+}
+
+func TestDiscoverAutocryptHeadersSkipsJunk(t *testing.T) {
+	ctx := context.Background()
+	db := autocryptTestStore(t)
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "me@example.test", "Me", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetPluginEnabled(ctx, plugins.ClientSidePGP, true); err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{Store: db, PluginDir: testClientSidePGPPluginDir(t)}
+	// A spoofed From lands in Junk; the header there must not teach the account a
+	// key.
+	if err := svc.importIncomingMessageHooks(ctx, user.ID, []byte(autocryptTestRaw), "Alice <alice@example.test>", true); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := keystore.ListAllPublicKeysForEmails(ctx, db, user.ID, []string{"alice@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("junk mail stored %d keys, want 0", len(keys))
 	}
 }
 
@@ -70,7 +96,7 @@ func TestDiscoverAutocryptHeadersRequiresPluginAndMatchingFrom(t *testing.T) {
 			if tc.enablePGP {
 				svc.PluginDir = testClientSidePGPPluginDir(t)
 			}
-			if err := svc.importIncomingMessageHooks(ctx, user.ID, []byte(autocryptTestRaw), tc.parsedFrom); err != nil {
+			if err := svc.importIncomingMessageHooks(ctx, user.ID, []byte(autocryptTestRaw), tc.parsedFrom, false); err != nil {
 				t.Fatal(err)
 			}
 			keys, err := keystore.ListAllPublicKeysForEmails(ctx, db, user.ID, []string{"alice@example.test"})

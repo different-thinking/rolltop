@@ -110,6 +110,8 @@ type Server struct {
 	smtpLog                   *smtplog.Recorder
 	smtpTestMu                sync.Mutex
 	smtpTestUntil             map[int64]time.Time
+	loginGate                 *backoffGate
+	passwordResetGate         *backoffGate
 	masterKey                 []byte
 	dataDir                   string
 	databaseTarget            string
@@ -431,6 +433,12 @@ func New(opts Options) (*Server, error) {
 		snoozePushDirty:           map[int64]bool{},
 		snoozeSchedulerWake:       make(chan struct{}, 1),
 		startedAt:                 time.Now().UTC(),
+		// Login tolerates a short burst of typos, then backs off per client IP
+		// and email so password guessing gets slow fast without ever locking an
+		// address out for good. A password-reset request is far more expensive
+		// (it sends mail) and never fails visibly, so it throttles sooner.
+		loginGate:         newBackoffGate(5, time.Second, 15*time.Minute, time.Hour),
+		passwordResetGate: newBackoffGate(3, 30*time.Second, time.Hour, 2*time.Hour),
 	}
 	if opts.Syncer != nil {
 		opts.Syncer.Notify = srv.notifyUserChanged
@@ -510,7 +518,18 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		info := buildinfo.Current()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'")
+		// frame-ancestors 'none' (with the legacy X-Frame-Options below for old
+		// browsers) forbids embedding the app in any frame, which is what stops a
+		// clickjacking page from overlaying it.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		// HSTS only over a secure connection: sending it over plain HTTP is
+		// ignored by browsers, and a local http:// deployment must not pin itself
+		// to HTTPS it cannot serve. Behind a TLS-terminating proxy the scheme
+		// arrives in X-Forwarded-Proto.
+		if requestIsHTTPS(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		w.Header().Set("Link", `<https://rolltop.app>; rel="home"`)
 		w.Header().Set("X-rolltop-Version", info.Version)
 		w.Header().Set("X-rolltop-Release", info.Label)
@@ -635,14 +654,13 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validWebhookToken(r *http.Request) bool {
+	// Header only: a token in the URL query lands in access logs, proxy logs,
+	// and Referer headers, so accepting it there leaks the credential.
 	got := strings.TrimSpace(r.Header.Get("X-Rolltop-Webhook-Token"))
 	if got == "" {
 		if authz := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(authz), "bearer ") {
 			got = strings.TrimSpace(authz[len("bearer "):])
 		}
-	}
-	if got == "" {
-		got = strings.TrimSpace(r.URL.Query().Get("token"))
 	}
 	if got == "" || s.webhookToken == "" {
 		return false
@@ -1134,6 +1152,22 @@ func boundedPercent(done, total int) int {
 	return (done * 100) / total
 }
 
+// requestIsHTTPS reports whether the browser reached the server over TLS,
+// either directly or through a proxy that terminated it and forwarded the
+// original scheme.
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// cookieSecureFor decides whether to mark a cookie Secure. An explicit
+// ROLLTOP_COOKIE_SECURE forces it on regardless of the request; otherwise it
+// tracks the request scheme, so an HTTPS deployment gets Secure cookies with no
+// configuration while a plain-HTTP local run still works (a browser silently
+// drops a Secure cookie sent over http://).
+func (s *Server) cookieSecureFor(r *http.Request) bool {
+	return s.cookieSecure || requestIsHTTPS(r)
+}
+
 func (s *Server) loginUser(w http.ResponseWriter, r *http.Request, userID int64) error {
 	token, err := auth.NewOpaqueToken()
 	if err != nil {
@@ -1150,9 +1184,9 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request, userID int64)
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cookieSecure,
+		Secure:   s.cookieSecureFor(r),
 	})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecureFor(r)})
 	return nil
 }
 
@@ -1239,7 +1273,7 @@ func (s *Server) csrfToken(w http.ResponseWriter, r *http.Request) string {
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
-			Secure:   s.cookieSecure,
+			Secure:   s.cookieSecureFor(r),
 		})
 	}
 	return s.csrfForBase(base)

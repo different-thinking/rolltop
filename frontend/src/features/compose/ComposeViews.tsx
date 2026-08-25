@@ -327,6 +327,14 @@ export function ComposeBox({
     addToast
   });
 
+  // A reply to an encrypted message carries the decrypted original in its quoted
+  // body, and an encrypted compose holds plaintext that is meant to leave the
+  // device only as ciphertext. Persisting either to localStorage would drop that
+  // cleartext onto disk unencrypted, so recovery is disabled while the compose is
+  // confidential -- initial.pgp_encrypted covers the reply-to-encrypted case even
+  // if the user later toggles encryption off, since the quote is already present.
+  const recoverySensitive = Boolean(initial.pgp_encrypted) || composeSecurity.encrypt;
+
   useEffect(() => {
     const initialForm = {
       ...initial,
@@ -398,6 +406,12 @@ export function ComposeBox({
     setDirty(contentChanged || attachmentsChanged);
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
     recoveryTimerRef.current = null;
+    // Never write confidential compose content to disk; also drop any entry a
+    // context left behind before it became sensitive.
+    if (recoverySensitive) {
+      clearComposeRecovery(userID, localComposeContext);
+      return;
+    }
     if (!contentChanged) {
       clearComposeRecovery(userID, localComposeContext);
       return;
@@ -406,7 +420,7 @@ export function ComposeBox({
       recoveryTimerRef.current = null;
       saveComposeRecovery(userID, localComposeContext, content);
     }, 650);
-  }, [attachments.length, editorRevision, form, localComposeContext, pendingRecovery, recoveryReady, userID]);
+  }, [attachments.length, editorRevision, form, localComposeContext, pendingRecovery, recoveryReady, recoverySensitive, userID]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -498,7 +512,7 @@ export function ComposeBox({
   }
 
   function flushComposeRecovery() {
-    if (!recoveryReady || pendingRecovery) return;
+    if (!recoveryReady || pendingRecovery || recoverySensitive) return;
     const content = currentLocalComposeContent(form, editorRef.current);
     if (baselineRef.current && !composeContentEqual(content, baselineRef.current)) {
       saveComposeRecovery(userID, localComposeContext, content);
@@ -1235,7 +1249,7 @@ function recoveryContent(recovery: LocalComposeRecovery): LocalComposeContent {
 function recoverableEditorHTML(html: string): string {
   const clean = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
-    FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+    FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "meta", "base", "link"],
     FORBID_ATTR: ["contenteditable"]
   });
   const template = document.createElement("template");

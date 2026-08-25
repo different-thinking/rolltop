@@ -604,24 +604,15 @@ func normalizeEmail(value string) (string, error) {
 	return email, nil
 }
 
+// requestBaseURL and requestIsHTTPS delegate to the shared host-side helper so
+// this plugin and mail_mcp derive callback/discovery origins the same way, with
+// a configured ROLLTOP_PUBLIC_URL overriding spoofable request headers.
 func requestBaseURL(r *http.Request) string {
-	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
-	if host == "" {
-		host = r.Host
-	}
-	return scheme + "://" + host
+	return plugins.RequestBaseURL(r)
 }
 
 func requestIsHTTPS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	return plugins.RequestIsHTTPS(r)
 }
 
 func csvSet(value string) map[string]bool {

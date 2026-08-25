@@ -120,11 +120,22 @@ func (s *Store) UpdateUserBackupEmail(ctx context.Context, userID int64, backupE
 	return updated, nil
 }
 
+// UpdateUserPasswordHash sets a new password hash and, in the same
+// transaction, revokes every session the user holds. Changing the password
+// while an old session cookie stays valid would let a compromised or shared
+// login survive the very reset meant to end it, so the two must commit together:
+// a failure to drop the sessions rolls the new password back rather than leaving
+// the account changed but still reachable through the old cookie.
 func (s *Store) UpdateUserPasswordHash(ctx context.Context, userID int64, passwordHash string) error {
 	if strings.TrimSpace(passwordHash) == "" {
 		return errors.New("password hash is required")
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, nowUnix(), userID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, nowUnix(), userID)
 	if err != nil {
 		return err
 	}
@@ -135,8 +146,10 @@ func (s *Store) UpdateUserPasswordHash(ctx context.Context, userID int64, passwo
 	if n == 0 {
 		return ErrNotFound
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
-	return err
+	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateUserDisplayPreferences preserves the existing search preferences while

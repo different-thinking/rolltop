@@ -21,6 +21,24 @@ func TestEmailDocumentDropsScriptElements(t *testing.T) {
 	}
 }
 
+func TestEmailDocumentDropsMetaRefresh(t *testing.T) {
+	// A <meta http-equiv="refresh"> in the body still fires inside the sandboxed
+	// iframe -- it is navigation, not script -- so it would reach an attacker URL
+	// even with remote images blocked. The renderer's own head still carries the
+	// CSP and referrer metas, so the test looks for the refresh specifically.
+	body := `<p>Hi</p><meta http-equiv="refresh" content="0;url=https://tracker.test/beacon"><p>Bye</p>`
+	doc := emailDocument(body, "", false)
+	if strings.Contains(strings.ToLower(doc), "http-equiv=\"refresh\"") || strings.Contains(strings.ToLower(doc), "refresh") {
+		t.Fatalf("document kept a meta refresh: %q", doc)
+	}
+	if strings.Contains(doc, "tracker.test") {
+		t.Fatalf("document kept the refresh target: %q", doc)
+	}
+	if !strings.Contains(doc, "<p>Hi</p>") || !strings.Contains(doc, "<p>Bye</p>") {
+		t.Fatalf("document lost body text around the meta: %q", doc)
+	}
+}
+
 func TestEmailDocumentDropsUnclosedScriptElement(t *testing.T) {
 	// A truncated or malformed body is exactly the case where a leftover tag
 	// would still make the browser try, and log, a blocked execution. Whatever

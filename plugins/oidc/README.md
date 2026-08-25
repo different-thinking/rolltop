@@ -17,7 +17,7 @@ ROLLTOP_OIDC_AUTO_CREATE=false
 ROLLTOP_OIDC_ALLOW_UNVERIFIED_EMAIL=false
 ```
 
-`ROLLTOP_OIDC_REDIRECT_URL` is optional when reverse-proxy headers provide the correct public scheme and host. The plugin derives `/api/plugins/oidc/callback`.
+`ROLLTOP_OIDC_REDIRECT_URL` is optional when the app's public origin is known. The plugin derives `/api/plugins/oidc/callback` against `ROLLTOP_PUBLIC_URL` when that is set (recommended — it is not client-controllable), and otherwise against the request's `X-Forwarded-Host`/`X-Forwarded-Proto`. Set `ROLLTOP_PUBLIC_URL` in any deployment where the incoming host header cannot be fully trusted, so a spoofed host cannot steer the OIDC redirect.
 
 By default, OIDC sign-in only works for existing Rolltop users whose email matches the verified OIDC email claim. Set `ROLLTOP_OIDC_AUTO_CREATE=true` to create users automatically; the first auto-created user becomes admin.
 
