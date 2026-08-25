@@ -119,3 +119,77 @@ func TestPGPMIMEEncryptedDisplayShowsCiphertextPart(t *testing.T) {
 		t.Fatalf("display text included PGP/MIME version part: %q", display.Body.Text)
 	}
 }
+
+func TestDetectIgnoresPGPTypeNamesQuotedInBody(t *testing.T) {
+	// A normal message that merely quotes the PGP/MIME type names in its body --
+	// a reply explaining how PGP works -- used to be declared encrypted by the
+	// substring heuristic, which then dropped its attachments. The structural
+	// detector reads the real Content-Type (text/plain) and leaves it alone.
+	raw := strings.Join([]string{
+		"From: sender@example.test",
+		"To: archive@example.test",
+		"Subject: Re: how PGP/MIME works",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"You asked how it looks on the wire. The outer part is",
+		`Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"`,
+		"and it wraps an application/pgp-encrypted control part plus an",
+		"application/pgp-signature is what a signed message carries. Hope it helps!",
+	}, "\r\n")
+	state := Detect([]byte(raw), plugins.MessageBody{Purpose: "storage", Text: "quoted the types above"})
+	if state.Encrypted || state.Signed {
+		t.Fatalf("a message merely quoting the PGP MIME types was flagged: %+v", state)
+	}
+}
+
+func TestDetectRecognizesPGPMIMEEncrypted(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: sender@example.test",
+		"To: rcpt@example.test",
+		"Subject: secret",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="b"`,
+		"",
+		"--b",
+		"Content-Type: application/pgp-encrypted",
+		"",
+		"Version: 1",
+		"--b",
+		"Content-Type: application/octet-stream",
+		"",
+		"-----BEGIN PGP MESSAGE-----",
+		"ciphertext",
+		"-----END PGP MESSAGE-----",
+		"--b--",
+	}, "\r\n")
+	state := Detect([]byte(raw), plugins.MessageBody{})
+	if !state.Encrypted {
+		t.Fatalf("PGP/MIME encrypted message not detected: %+v", state)
+	}
+}
+
+func TestDetectRecognizesPGPMIMESigned(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: sender@example.test",
+		"To: rcpt@example.test",
+		"Subject: signed",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/signed; protocol="application/pgp-signature"; micalg=pgp-sha256; boundary="b"`,
+		"",
+		"--b",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"hello",
+		"--b",
+		"Content-Type: application/pgp-signature",
+		"",
+		"-----BEGIN PGP SIGNATURE-----",
+		"sig",
+		"-----END PGP SIGNATURE-----",
+		"--b--",
+	}, "\r\n")
+	state := Detect([]byte(raw), plugins.MessageBody{})
+	if state.Encrypted || !state.Signed {
+		t.Fatalf("PGP/MIME signed message not detected as signed only: %+v", state)
+	}
+}

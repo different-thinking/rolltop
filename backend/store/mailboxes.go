@@ -607,6 +607,13 @@ func (s *Store) UpdateMailboxSettings(ctx context.Context, userID, mailboxID int
 		settings.SyncMode, settings.Role, settings.Icon, boolInt(settings.ShowInSidebar), boolInt(settings.ShowInAllMail), boolInt(settings.IncludeInSearch), nowUnix(), userID, mailboxID)
 	if err != nil {
 		_ = tx.Rollback()
+		// The read-then-write check above lost a race with a concurrent role
+		// assignment: the partial unique index (0006-mailbox-role-unique) is the
+		// backstop that turned it into a violation. Report the same domain error
+		// the check would have, not a raw driver error.
+		if IsUniqueConstraint(err) {
+			return fmt.Errorf("%w: %s is already assigned in this account", ErrDuplicateMailboxRole, settings.Role)
+		}
 		return err
 	}
 	n, err := res.RowsAffected()

@@ -167,6 +167,38 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX IF NOT EXISTS idx_fk_spam_feedback_user_message_id ON plugin_experimental_spam_feedback (user_id, message_id)`,
 		},
 	},
+	{
+		// Enforce at the database what GetOrCreateMailboxFromDiscovery and
+		// UpdateMailboxSettings only checked read-then-write: within one account a
+		// mail role (inbox, sent, drafts, trash, junk, all) names at most one
+		// folder. Two callers racing that check could both see the role as free
+		// and assign it to different folders, after which the UI picked one
+		// arbitrarily. A partial unique index makes the losing write fail instead.
+		// Roles are stored as '' when unassigned and any number of folders may be
+		// unassigned, so the index covers only rows that actually carry a role.
+		//
+		// An existing database may already hold a raced duplicate, which would make
+		// a plain unique index fail to build. The migration first demotes the extra
+		// rows in each duplicate group to '' -- keeping the lowest id, i.e. the
+		// folder discovered first -- so the index can be created. Like every
+		// migration this runs under the exclusive instance lock (see 0005-fk-indexes),
+		// so no concurrent writer can reintroduce a duplicate between the cleanup
+		// and the index build.
+		Version: "0006-mailbox-role-unique",
+		Statements: []string{
+			`UPDATE mailboxes AS m SET role = ''
+				FROM (
+					SELECT id, ROW_NUMBER() OVER (
+						PARTITION BY user_id, account_id, role ORDER BY id
+					) AS rn
+					FROM mailboxes
+					WHERE role <> ''
+				) dup
+				WHERE m.id = dup.id AND dup.rn > 1`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_account_role_unique
+				ON mailboxes (user_id, account_id, role) WHERE role <> ''`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

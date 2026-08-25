@@ -82,8 +82,16 @@ func (s *Store) UpsertMessageSearch(ctx context.Context, userID int64, docs []Me
 			values.WriteString("(?, ?, " + messageSearchVectorSQL + ", ?)")
 			args = append(args, doc.MessageID, doc.UserID, doc.TextA, doc.TextB, doc.TextC, doc.TextD, doc.Words)
 		}
+		// The WHERE guard keeps a message_id conflict from rewriting a row that
+		// belongs to another tenant: message_id is globally unique and its owner
+		// is fixed by the messages FK, so a collision under a different user_id is
+		// a data-integrity fault, not an ownership change. On that (impossible in
+		// normal operation) path the update is skipped rather than silently
+		// reassigning the row to this batch's user. user_id is therefore never
+		// reassigned in the SET clause -- it can only ever equal what is stored.
 		if _, err := db.ExecContext(ctx, `INSERT INTO message_search (message_id, user_id, tsv, words) VALUES `+values.String()+`
-			ON CONFLICT (message_id) DO UPDATE SET user_id = EXCLUDED.user_id, tsv = EXCLUDED.tsv, words = EXCLUDED.words`, args...); err != nil {
+			ON CONFLICT (message_id) DO UPDATE SET tsv = EXCLUDED.tsv, words = EXCLUDED.words
+			WHERE message_search.user_id = EXCLUDED.user_id`, args...); err != nil {
 			return err
 		}
 	}

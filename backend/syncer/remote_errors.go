@@ -43,6 +43,14 @@ func (k RemoteErrorKind) String() string {
 	}
 }
 
+// ErrFetchStalled reports a fetch whose connection stopped delivering bytes for
+// a whole idle window. It lives here, next to the retry policy, so the transport
+// layer (imapclient) can tag a stall while ClassifyRemoteError can recognise it
+// without imapclient having to import syncer's classifier the other way round.
+// A stall is network-shaped, so the doc comment on RemoteErrorTransient already
+// names it; matching the sentinel is what makes that promise true.
+var ErrFetchStalled = errors.New("IMAP fetch stalled")
+
 // ClassifyRemoteError decides the retry policy for one remote failure.
 func ClassifyRemoteError(err error) RemoteErrorKind {
 	if err == nil {
@@ -53,6 +61,9 @@ func ClassifyRemoteError(err error) RemoteErrorKind {
 		return RemoteErrorAuth
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return RemoteErrorTransient
+	}
+	if errors.Is(err, ErrFetchStalled) {
 		return RemoteErrorTransient
 	}
 	var netErr net.Error

@@ -52,19 +52,97 @@ func Transform(raw []byte, state plugins.MessageSecurityState, body plugins.Mess
 	return plugins.MessageBodyTransform{}
 }
 
+// maxPGPScanDepth bounds MIME recursion so a deeply nested message cannot turn
+// detection into a stack or time bomb. Real PGP structures are shallow.
+const maxPGPScanDepth = 20
+
+// detectPGP decides whether a message is PGP-encrypted or PGP-signed from its
+// actual MIME structure rather than from substrings anywhere in the raw bytes.
+// The old heuristic lowercased the whole message and matched "multipart/encrypted"
+// or "application/pgp-encrypted" as substrings, so an ordinary message that
+// merely quoted those type names -- a forwarded thread, a mailing-list digest, a
+// reply discussing PGP -- was declared encrypted, and Transform then dropped its
+// attachments. Parsing the tree restricts the type checks to real Content-Type
+// headers and the inline PGP-armor checks to real text parts, not attachment
+// bytes or quoted content.
 func detectPGP(raw []byte, fallback string) (encrypted bool, signed bool) {
-	lower := strings.ToLower(string(limitSecurityBytes(raw, 256*1024)))
-	if strings.TrimSpace(lower) == "" {
-		lower = strings.ToLower(limitString(fallback, 256*1024))
+	if msg, err := mail.ReadMessage(bytes.NewReader(raw)); err == nil {
+		encrypted, signed = scanPGPStructure(textproto.MIMEHeader(msg.Header), msg.Body, 0)
+	} else {
+		// A message that will not parse as MIME is exactly where structure is not
+		// available. Fall back to the previous whole-message scan rather than risk
+		// missing genuinely encrypted mail; an unparseable message is rare and is
+		// not the false-positive case the structural path targets.
+		lower := strings.ToLower(string(limitSecurityBytes(raw, 256*1024)))
+		if strings.Contains(lower, "multipart/encrypted") || strings.Contains(lower, "application/pgp-encrypted") || inlinePGPMessageRE.Match(raw) {
+			encrypted = true
+		}
+		if strings.Contains(lower, "application/pgp-signature") || inlinePGPSignedRE.Match(raw) {
+			signed = true
+		}
 	}
-	if strings.Contains(lower, "multipart/encrypted") || strings.Contains(lower, "application/pgp-encrypted") || inlinePGPMessageRE.Match(raw) || inlinePGPMessageRE.MatchString(fallback) {
+	// Inline PGP armor in the decoded, displayable body (never in attachment bytes
+	// or the raw envelope) is the remaining signal, and the only one available
+	// when the caller passed body text but no parseable raw.
+	if inlinePGPMessageRE.MatchString(fallback) {
 		encrypted = true
 	}
-	if strings.Contains(lower, "multipart/signed") && strings.Contains(lower, "application/pgp-signature") {
+	if inlinePGPSignedRE.MatchString(fallback) {
 		signed = true
 	}
-	if strings.Contains(lower, "application/pgp-signature") || inlinePGPSignedRE.Match(raw) || inlinePGPSignedRE.MatchString(fallback) {
-		signed = true
+	return encrypted, signed
+}
+
+// scanPGPStructure walks the MIME tree and reports PGP encryption or signing
+// from the Content-Type of each part: multipart/encrypted (RFC 3156, PGP
+// protocol) and a application/pgp-encrypted part mean encrypted; multipart/signed
+// with the PGP signature protocol and a application/pgp-signature part mean
+// signed. Only text parts are scanned for inline ASCII-armor markers, so a PGP
+// block quoted inside a normal reply's text is still honored while the same bytes
+// sitting in an attachment are not.
+func scanPGPStructure(header textproto.MIMEHeader, body io.Reader, depth int) (encrypted bool, signed bool) {
+	if depth > maxPGPScanDepth {
+		return false, false
+	}
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+	}
+	mediaType = strings.ToLower(mediaType)
+	switch mediaType {
+	case "application/pgp-encrypted":
+		return true, false
+	case "application/pgp-signature":
+		return false, true
+	}
+	if strings.HasPrefix(mediaType, "multipart/") {
+		protocol := strings.ToLower(strings.TrimSpace(params["protocol"]))
+		if mediaType == "multipart/encrypted" && (protocol == "" || protocol == "application/pgp-encrypted") {
+			encrypted = true
+		}
+		if mediaType == "multipart/signed" && protocol == "application/pgp-signature" {
+			signed = true
+		}
+		mr := multipart.NewReader(body, params["boundary"])
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			enc, sig := scanPGPStructure(part.Header, part, depth+1)
+			encrypted = encrypted || enc
+			signed = signed || sig
+		}
+		return encrypted, signed
+	}
+	if strings.HasPrefix(mediaType, "text/") {
+		decoded, _ := io.ReadAll(io.LimitReader(body, 256*1024))
+		if inlinePGPMessageRE.Match(decoded) {
+			encrypted = true
+		}
+		if inlinePGPSignedRE.Match(decoded) {
+			signed = true
+		}
 	}
 	return encrypted, signed
 }
@@ -240,13 +318,6 @@ func normalizeDisplayText(value string) string {
 }
 
 func limitSecurityBytes(value []byte, n int) []byte {
-	if len(value) <= n {
-		return value
-	}
-	return value[:n]
-}
-
-func limitString(value string, n int) string {
 	if len(value) <= n {
 		return value
 	}

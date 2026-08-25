@@ -5,11 +5,32 @@ package syncer
 import (
 	"context"
 	"errors"
+	"log"
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
 )
+
+// guardPluginHook runs one plugin hook so a misbehaving plugin can neither crash
+// the sync process nor abort the mail-sync operation that invoked it. A panic is
+// contained and logged with its value (a panic is a runtime fault, not
+// message-derived data) and then swallowed by returning nil, so dispatch
+// continues as if the plugin learned nothing from this message. A returned error
+// is handed back for the caller to log with its own user/message context -- the
+// error string is deliberately never logged there, because plugin errors can
+// carry derived message evidence. These hooks are advisory (peer-metadata
+// discovery, stored-message classification), so degrading to "this plugin did
+// nothing" is always preferable to a failed import or a downed process.
+func guardPluginHook(pluginID, phase string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("plugin hook panicked plugin_id=%s phase=%s panic=%v", pluginID, phase, r)
+			err = nil
+		}
+	}()
+	return fn()
+}
 
 func (s *Service) importIncomingMessageHooks(ctx context.Context, userID int64, raw []byte, parsedFrom string, junk bool) error {
 	// Incoming-message hooks discover peer metadata -- today, Autocrypt public
@@ -31,8 +52,13 @@ func (s *Service) importIncomingMessageHooks(ctx context.Context, userID int64, 
 			continue
 		}
 		generationRecoveryPhase(ctx, "plugin-incoming-message", backendPlugin.ID())
-		if err := hook.ImportIncomingMessage(ctx, host, userID, raw, parsedFrom); err != nil {
-			return err
+		// Advisory: peer-metadata discovery must never fail a message import or
+		// crash the process, so a hook error or panic is logged and dispatch
+		// moves on to the next plugin.
+		if err := guardPluginHook(backendPlugin.ID(), "incoming-message", func() error {
+			return hook.ImportIncomingMessage(ctx, host, userID, raw, parsedFrom)
+		}); err != nil && !errors.Is(err, plugins.ErrUnsupported) {
+			log.Printf("incoming-message hook failed plugin_id=%s user_id=%d error_type=%T", backendPlugin.ID(), userID, err)
 		}
 	}
 	return nil
@@ -60,8 +86,13 @@ func (s *Service) importStoredMessageHooks(ctx context.Context, hooks []plugins.
 	}
 	for _, hook := range hooks {
 		generationRecoveryPhase(ctx, "plugin-stored-message", hook.ID())
-		if err := hook.ImportStoredMessage(ctx, host, info); err != nil && !errors.Is(err, plugins.ErrUnsupported) {
-			return err
+		// Advisory, like the incoming-message hooks and the classifiers: the row
+		// is already stored, so a hook error or panic is logged and skipped rather
+		// than turned into a failed sync.
+		if err := guardPluginHook(hook.ID(), "stored-message", func() error {
+			return hook.ImportStoredMessage(ctx, host, info)
+		}); err != nil && !errors.Is(err, plugins.ErrUnsupported) {
+			log.Printf("stored-message hook failed plugin_id=%s user_id=%d message_id=%d error_type=%T", hook.ID(), info.UserID, info.MessageID, err)
 		}
 	}
 	return nil
