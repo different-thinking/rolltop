@@ -242,6 +242,21 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": message})
 }
 
+// messageGoneCode marks the one 404 a client may act on as "this message is not
+// here any more". A bare 404 cannot carry that: Go's own NotFound answers in
+// plain text, and so does every proxy, gateway and hosting platform in front of
+// the app, so a client reading the status alone would file mail away as gone
+// because something between it and Rolltop answered. The code is the promise
+// that Rolltop itself looked and found nothing.
+const messageGoneCode = "message_gone"
+
+// writeMessageGone answers for a message this user does not have.
+func writeMessageGone(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": "message not found", "code": messageGoneCode})
+}
+
 // writeRetryAfter answers 429 with a Retry-After header rounded up to whole
 // seconds (the header has no sub-second form), so a throttled client is told how
 // long to wait instead of guessing.

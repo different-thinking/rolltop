@@ -138,7 +138,11 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 	msg, err := s.store.GetMessageEnvelopeForUser(r.Context(), cu.User.ID, id)
 	stop()
 	if store.IsNotFound(err) {
-		http.NotFound(w, r)
+		// Named rather than answered with a bare 404, because the reader's view
+		// acts on it: a row that opens to nothing is a row no list should still
+		// be drawing, and it is filed away so it stops appearing. Only Rolltop
+		// having looked may say that.
+		writeMessageGone(w)
 		return
 	}
 	if err != nil {

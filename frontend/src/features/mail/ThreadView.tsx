@@ -847,6 +847,16 @@ function RangePager({
 }
 
 /**
+ * messageGone reports the one 404 the message view may act on: Rolltop itself
+ * saying it has no such message. A bare 404 is not enough - a proxy, a gateway
+ * or a service worker answers with one too, and acting on those would hide a
+ * message that is still there behind a failure that never reached the server.
+ */
+function messageGone(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404 && err.payload?.code === "message_gone";
+}
+
+/**
  * ThreadView loads a full conversation, requests status before slow IMAP/blob
  * hydration, renders plugin actions, maintains expanded/collapsed cards, and
  * prepares inline replies with the correct identity and recipient.
@@ -999,17 +1009,23 @@ export function ThreadView({
         void refreshChrome();
       } catch (err) {
         if (loadRequest !== loadRequestRef.current) return;
-        // The server has no such message, so the row that opened it is a row no
-        // list should still be drawing: a page this browser cached before the
-        // message left, or one another tab has already filed. Left alone it sat
-        // in the Inbox as mail that could not be opened and could not be deleted
-        // - deleting it asked the same server for the same missing message. It
-        // is filed as gone instead, which takes it out of every list and out of
-        // the stored pages, and the reader is put back where they came from.
-        if (err instanceof ApiError && err.status === 404 && currentMessageID > 0) {
+        // Rolltop itself looked and found no such message, so the row that
+        // opened it is a row no list should still be drawing: a page this
+        // browser cached before the message left, or one another tab has
+        // already filed. Left alone it sat in the Inbox as mail that could not
+        // be opened and could not be deleted - deleting it asked the same server
+        // for the same missing message. It is filed as gone instead, which takes
+        // it out of every list and out of the stored pages, and the reader is put
+        // back where they came from. The toast still carries the way back, and
+        // the filing ages out: hiding mail is never a decision made on a guess.
+        if (messageGone(err) && currentMessageID > 0) {
           recordFiledMessages([{ id: currentMessageID, toMailboxID: 0 }]);
           api.forgetMessages([currentMessageID]);
-          addToast("This message is no longer on the server. It has been removed from your lists.");
+          addToast("This message is no longer there. It has been removed from your lists.", "success", {
+            label: "Show again",
+            onUndo: () => releaseFiledMessages([currentMessageID]),
+            onCommit: () => undefined
+          });
           navigate(backURL);
           return;
         }
@@ -1509,13 +1525,22 @@ export function ThreadView({
     event.currentTarget.closest("details")?.removeAttribute("open");
     const trashMailbox = trashByAccount.get(item.message.account_id);
     if (!trashMailbox || item.message.mailbox_id === trashMailbox.id) return;
+    const ids = [item.message.id];
+    // Filed before the request, like every other path that files mail: the row
+    // this came from is drawn by lists and caches this function never sees, and
+    // the cached page is what used to hand the deleted message straight back.
+    fileMessages(ids, item.message.mailbox_id, trashMailbox.id);
     try {
       await api.moveMessage(csrf, item.message.id, trashMailbox.id);
       addToast(`Moved message to ${trashMailbox.name}.`);
       await refreshChrome();
       navigate(backURL);
     } catch (err) {
-      addToast(`Move to trash failed: ${messageFromError(err)}`, "error");
+      addToast(`Move to trash failed: ${messageFromError(err)}. It stays hidden until you show it again.`, "error", {
+        label: "Show again",
+        onUndo: () => releaseFiledMessages(ids),
+        onCommit: () => undefined
+      });
     }
   }
 
@@ -1787,7 +1812,7 @@ export function ThreadView({
     // filing is what makes the decision outlast them, and it names the folder
     // the mail is going to, so the row shows again by itself once any list
     // reports it has arrived there.
-    fileThreadMove(ids, target.id);
+    fileMessages(ids, undefined, target.id);
     addToast(`Moved ${messageCountLabel(ids.length)} to ${target.name}.`, "success", {
       onUndo: () => {
         releaseFiledMessages(ids);
@@ -1798,8 +1823,15 @@ export function ThreadView({
     navigate(backURL);
   }
 
-  function fileThreadMove(ids: number[], toMailboxID: number) {
-    recordFiledMessages(ids.map((id) => ({ id, toMailboxID })));
+  /**
+   * fileMessages records what this view filed away and takes it out of the
+   * cached pages. `fromMailboxID` is the folder the messages are leaving where
+   * the caller knows it - a header move covers a whole conversation and does
+   * not - and a record that knows it stops hiding the row as soon as anything
+   * reports the message somewhere else.
+   */
+  function fileMessages(ids: number[], fromMailboxID: number | undefined, toMailboxID: number) {
+    recordFiledMessages(ids.map((id) => ({ id, fromMailboxID, toMailboxID })));
     api.forgetMessages(ids);
   }
 

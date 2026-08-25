@@ -384,13 +384,18 @@ function forgetUserMail(userID: number) {
 }
 
 function retainMailCacheForUser(userID: number) {
+  const switchedUser = activeMailUserID !== userID;
   activeMailUserID = userID;
   setFiledMessagesUser(userID);
   clearOtherFiledMessages(userID);
-  // The stored pages are rewritten once per start rather than only filtered on
-  // the way out, so mail filed away in an earlier session is gone from them
-  // before its filing expires - a snapshot outlives the record that hides it.
-  forgetFiledMessages();
+  // Only when the signed-in user changes, which for a browser session means
+  // once. This walks every stored page and re-encodes the ones it rewrites, and
+  // it is reached from `refreshBootstrap` - the chrome refresh that also runs
+  // on every message open - so doing it per call spent that on the main thread
+  // over and over for an answer that cannot have changed. The rewrite exists so
+  // that mail filed away in an earlier session is out of the stored pages before
+  // its record expires; the read path filters the rest.
+  if (switchedUser) forgetFiledMessages();
   for (const cachedUserID of mailCacheEpochs.keys()) {
     if (cachedUserID !== userID) clearMailCache(cachedUserID);
   }

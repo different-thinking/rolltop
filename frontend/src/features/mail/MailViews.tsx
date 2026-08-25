@@ -1399,7 +1399,11 @@ type MessageListScope = {
 type TrashMoveGroup = {
   target: Mailbox;
   messageIDs: number[];
-  items: { rowID: number; messageIDs: number[] }[];
+  // `rowMailboxID` is the folder the row's own message is leaving, which is the
+  // only source folder a conversation row can speak for: the filing that hides
+  // the row is judged on that message, and a record that knows the folder it is
+  // leaving stops hiding the row the moment anything reports it elsewhere.
+  items: { rowID: number; rowMailboxID: number; messageIDs: number[] }[];
 };
 
 // The backend queues a background run for bulk moves above 5 message IDs and
@@ -1907,12 +1911,36 @@ function MessageList({
       // fails gives back exactly the mail it left where it was. A row belonging
       // to an account this pass started no run for is never cleared at all.
       const idsByAccount = new Map<number, number[]>();
+      // Filing is decided per account too, and unlike the watch it cannot be
+      // approximate: the watch only ever gives rows back, so a row named under
+      // an account it does not belong to costs nothing, while a filing that
+      // names the wrong account's Trash hides mail that has arrived in its own.
+      // So the watch keeps the row's whole id list per account and the filing
+      // takes each account's own messages (`conversationAccountMessageIDs`, the
+      // split every other delete path files by).
+      const filed: FiledMessage[] = [];
       if (wholeFilterTaken) {
         for (const conversation of visible) {
           const ids = [conversation.message.id, ...conversationTransferMessageIDs(conversation)];
           for (const accountID of conversationTransferAccountIDs(conversation)) {
             if (!runsByAccount.has(accountID)) continue;
             idsByAccount.set(accountID, [...(idsByAccount.get(accountID) || []), ...ids]);
+          }
+          for (const group of conversationAccountMessageIDs(conversation) || []) {
+            if (!runsByAccount.has(group.accountID)) continue;
+            // No Trash folder for this account means nothing to file against:
+            // a record with no destination hides the row everywhere, which is
+            // the answer for mail the server has lost and not for mail whose
+            // destination this client simply cannot name.
+            const target = trashMailboxForAccount(mailboxes, group.accountID);
+            if (!target) continue;
+            for (const id of group.messageIDs) {
+              filed.push({
+                id,
+                fromMailboxID: id === conversation.message.id ? conversation.message.mailbox_id : undefined,
+                toMailboxID: target.id
+              });
+            }
           }
         }
       }
@@ -1923,13 +1951,8 @@ function MessageList({
       const clearedIDs = uniquePositiveIDs(groups.flatMap((group) => group.ids));
       if (clearedIDs.length > 0) {
         // Filed under each account's own Trash, so a whole-filter delete hides
-        // its rows past this component the way a row delete does. An account
-        // with no Trash folder configured cannot be in this map at all: the
-        // server took its mail into one, so there is one to name.
-        fileMessages(Array.from(idsByAccount, ([accountID, ids]) => {
-          const target = trashMailboxForAccount(mailboxes, accountID);
-          return uniquePositiveIDs(ids).map((id) => ({ id, toMailboxID: target?.id || 0 }));
-        }).flat());
+        // its rows past this component the way a row delete does.
+        fileMessages(filed);
         optimisticallyDismiss(clearedIDs);
         void watchQueuedMove(groups, "Trash");
       }
@@ -2019,7 +2042,7 @@ function MessageList({
       }
       for (const entry of rowGroups) {
         const group = groups.get(entry.target.id) || { target: entry.target, messageIDs: [], items: [] };
-        group.items.push({ rowID: conversation.message.id, messageIDs: entry.messageIDs });
+        group.items.push({ rowID: conversation.message.id, rowMailboxID: conversation.message.mailbox_id, messageIDs: entry.messageIDs });
         group.messageIDs.push(...entry.messageIDs);
         groups.set(entry.target.id, group);
       }
@@ -2041,11 +2064,14 @@ function MessageList({
     // dismissal lapses when the list stops returning the message, and the list
     // goes on returning this one.
     const dismissIDs = uniquePositiveIDs(entries.flatMap((entry) => entry.messageIDs));
-    // Each message is filed under the Trash it is going to, so the row stays
-    // hidden everywhere it still claims the folder it is leaving and shows again
-    // by itself the moment any list reports it has arrived.
-    const filed: FiledMessage[] = entries.flatMap((entry) =>
-      entry.messageIDs.map((id) => ({ id, toMailboxID: entry.target.id })));
+    // Each message is filed under the Trash it is going to, and the row's own
+    // message also under the folder it is leaving - the one source folder a row
+    // can speak for. A sibling elsewhere in the thread is filed on the
+    // destination alone, which is what a caller that cannot name a source gets.
+    const filed: FiledMessage[] = entries.flatMap((entry) => {
+      const rowMailboxes = new Map(entry.items.map((item) => [item.rowID, item.rowMailboxID]));
+      return entry.messageIDs.map((id) => ({ id, fromMailboxID: rowMailboxes.get(id), toMailboxID: entry.target.id }));
+    });
     const totalMessages = entries.reduce((sum, entry) => sum + entry.messageIDs.length, 0);
     const registered = deferSwipeMutation(
       rowIDs[0],
@@ -2197,16 +2223,13 @@ function MessageList({
         await api.moveMessage(csrf, messageID, target.id);
         movedIDs.push(messageID);
       } catch (err) {
-        // A message this server no longer has is the outcome the request asked
-        // for, not a failure - the bulk endpoint has answered it that way for a
-        // while, and a lone move must not mean something different. A row a
-        // second tab already filed, or one reconciliation removed while a stale
-        // page was still showing it, produced "Delete failed: Not Found" and put
-        // the row back, which is the one row pressing Delete again cannot fix.
-        if (err instanceof ApiError && err.status === 404) {
-          movedIDs.push(messageID);
-          continue;
-        }
+        // A message the server no longer has is answered as success by the route
+        // itself, the way bulk-move has answered it for a while, so nothing here
+        // reads a status as "there was nothing to move". Reading 404 that way
+        // was wrong in the other direction: the same route answers 404 for a
+        // destination folder it cannot resolve, and for anything in front of the
+        // app that answers instead - reporting those as moved would file mail
+        // away on a request that never touched it.
         if (error === undefined) error = err;
       }
     }
@@ -2653,9 +2676,14 @@ function MessageList({
     const rowMoves = messageIDs.includes(conversation.message.id);
     const dismissedIDs = messageIDs;
     // Filed under the folder each account's copy is going to, the same way the
-    // bulk delete files its selection.
+    // bulk delete files its selection, with the row's own message also carrying
+    // the folder it is leaving.
     const filed: FiledMessage[] = moving.flatMap((entry) =>
-      entry.messageIDs.map((id) => ({ id, toMailboxID: entry.target.id })));
+      entry.messageIDs.map((id) => ({
+        id,
+        fromMailboxID: id === conversation.message.id ? conversation.message.mailbox_id : undefined,
+        toMailboxID: entry.target.id
+      })));
     const registered = deferSwipeMutation(
       conversation.message.id,
       `Moved ${messageCountLabel(messageIDs.length)} to ${destLabel}.`,

@@ -82,6 +82,58 @@ func TestMoveMessageAnswersMissingMessageAsNothingToMove(t *testing.T) {
 	}
 }
 
+// The reader's view files a message away for good when it opens to nothing, so
+// the answer that says so has to be one only Rolltop can give. A bare 404 is
+// not: Go's own NotFound answers in plain text and so does every proxy in front
+// of the app, and a client reading the status alone would hide mail that is
+// still there because a gateway answered for it.
+func TestMissingMessageIsNamedRatherThanAnsweredWithABare404(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner, err := db.CreateUser(ctx, "message-gone-owner@example.test", "Owner", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.CreateUser(ctx, "message-gone-other@example.test", "Other", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strangers := createNotificationTestMessage(t, ctx, db, other, 601, "Sender", "Other message")
+	server := &Server{store: db}
+
+	for _, tc := range []struct {
+		name      string
+		messageID int64
+	}{
+		{name: "no such message", messageID: strangers.ID + 100_000},
+		{name: "another tenant's message", messageID: strangers.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/messages/"+strconvInt64(tc.messageID), nil)
+			req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: owner}))
+			res := httptest.NewRecorder()
+			server.apiMessage(res, req, tc.messageID)
+			if res.Code != http.StatusNotFound {
+				t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+			}
+			var payload struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+				t.Fatalf("body did not parse as a Rolltop error: %v", err)
+			}
+			if payload.Code != messageGoneCode || payload.Error == "" {
+				t.Fatalf("payload = %+v, want code %q with a reason", payload, messageGoneCode)
+			}
+		})
+	}
+}
+
 func moveMessageRequest(t *testing.T, server *Server, user store.User, messageID int64, dest store.Mailbox) *httptest.ResponseRecorder {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{"mailbox_id": dest.ID})

@@ -1,5 +1,6 @@
 // File overview: what the reader filed out of a folder - deleted, reported as
-// spam, archived - remembered beyond the list they clicked in.
+// spam, archived, dragged somewhere - remembered beyond the list they clicked
+// in.
 //
 // A list's own dismissal (`MessageList`'s `dismissedIDs`) lives exactly as long
 // as the component holding it, and it only ever knew about the rows the server
@@ -12,20 +13,28 @@
 // not be deleted" that followed.
 //
 // So a filing is recorded here as well: user-scoped, persisted, and read by
-// every list before it draws. Three properties keep that from hiding real mail.
+// every list before it draws. Four properties keep that from hiding real mail.
 //
-//   - A record names the folder the message was filed *into*, and hides the row
-//     only while it still claims some other folder. Deleted mail is therefore
-//     hidden everywhere except the Trash it was moved to, and stops being hidden
-//     the moment any list reports it has arrived - no confirmation needed, and
-//     nothing to clear.
-//   - Records expire (`filedMessageTTLMS`). A filing whose move never happened
-//     is a row the reader has to get back eventually, whatever went wrong in the
-//     background and whatever this browser was told about it.
-//   - The set is bounded (`filedMessageLimit`); the oldest records go first.
+//   - A record is **self-releasing**. It names the folder the message left and
+//     the folder it is going to, and hides the row only while the row still
+//     claims the folder it left. Any list that reports the row anywhere else -
+//     arrived in Trash, or put back by the reader, another client, or a filter -
+//     drops the record on sight. Without that a record went on hiding a message
+//     that had since come back: it was filed out of the Inbox, reached Trash,
+//     was dragged back, and the rule "not in Trash means hidden" re-armed.
+//   - Records **expire** (`filedMessageTTLMS`), so a filing whose move never
+//     happened is a row the reader gets back eventually, whatever went wrong in
+//     the background and whatever this browser was told about it.
+//   - The set is **bounded** (`filedMessageLimit`); the oldest records go first.
+//   - Writes **merge with what is stored**. Two tabs are two copies of this map
+//     and a plain overwrite meant the second tab to file anything silently
+//     dropped the first tab's filings, so mail one tab deleted was drawn again
+//     after a reload. Tabs also follow each other's writes through the browser's
+//     `storage` event.
 //
-// A destination of 0 means the message is gone rather than moved - the server
-// answered for it with "no such message" - and hides it in every list.
+// A destination of 0 with no source folder means the message is gone rather
+// than moved - the server answered for it with "no such message" - and hides it
+// in every list. That is the row that could be neither opened nor deleted.
 
 import type { Conversation } from "../types";
 
@@ -35,14 +44,21 @@ const storagePrefix = `rolltop.mail.filed.v${storageVersion}.`;
 export const filedMessageTTLMS = 24 * 60 * 60 * 1000;
 const filedMessageLimit = 2000;
 
-/** FiledMessage is one message and the folder it was filed into (0: it is gone). */
-export type FiledMessage = { id: number; toMailboxID: number };
+/**
+ * FiledMessage is one message, the folder it is leaving, and the folder it is
+ * going to. `fromMailboxID` is optional because a caller may only know the
+ * destination - a drag holds the folder it dropped on, not the row's own -
+ * and a record without it falls back to "hidden until it arrives".
+ * `toMailboxID: 0` with no source means the message is gone from the server.
+ */
+export type FiledMessage = { id: number; fromMailboxID?: number; toMailboxID: number };
 
-type StoredRecord = { id: number; to: number; at: number };
+type StoredRecord = { id: number; from: number; to: number; at: number };
 
 let activeUserID = 0;
 let records = new Map<number, StoredRecord>();
 const listeners = new Set<() => void>();
+let storageWatcher: ((event: StorageEvent) => void) | null = null;
 
 function storageKey(userID: number) {
   return `${storagePrefix}${userID}`;
@@ -64,11 +80,12 @@ function validRecord(value: unknown): value is StoredRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === "number" && Number.isInteger(record.id) && record.id > 0 &&
+    typeof record.from === "number" && Number.isInteger(record.from) && record.from >= 0 &&
     typeof record.to === "number" && Number.isInteger(record.to) && record.to >= 0 &&
     typeof record.at === "number" && Number.isFinite(record.at) && record.at > 0;
 }
 
-function load(userID: number): Map<number, StoredRecord> {
+function readStored(userID: number): Map<number, StoredRecord> {
   const loaded = new Map<number, StoredRecord>();
   if (!Number.isInteger(userID) || userID <= 0) return loaded;
   try {
@@ -80,11 +97,25 @@ function load(userID: number): Map<number, StoredRecord> {
   } catch {
     // Storage may be unavailable or corrupt; nothing filed is nothing hidden.
   }
-  return prune(loaded);
+  return loaded;
 }
 
-function persist() {
+/**
+ * commit writes this tab's map back, merged with whatever another tab has
+ * stored since it was last read. `filed` and `released` say what this tab just
+ * decided, so the merge can tell a record another tab added - which is kept -
+ * from one this tab removed, which must not come back through the merge.
+ */
+function commit(filed: Set<number>, released: Set<number>) {
   if (activeUserID <= 0) return;
+  const merged = readStored(activeUserID);
+  records.forEach((record, id) => merged.set(id, record));
+  released.forEach((id) => merged.delete(id));
+  filed.forEach((id) => {
+    const own = records.get(id);
+    if (own) merged.set(id, own);
+  });
+  records = prune(merged);
   try {
     localStorage.setItem(storageKey(activeUserID), JSON.stringify({
       version: storageVersion,
@@ -105,6 +136,19 @@ function prune(source: Map<number, StoredRecord>): Map<number, StoredRecord> {
   return new Map(live.slice(0, filedMessageLimit).map((record) => [record.id, record]));
 }
 
+// watchStorage follows the other tabs of this browser. A filing made in one tab
+// is a decision about the same mailbox the others are showing, so they hide the
+// row too rather than each holding their own answer until a reload.
+function watchStorage() {
+  if (storageWatcher || typeof window === "undefined") return;
+  storageWatcher = (event: StorageEvent) => {
+    if (activeUserID <= 0 || event.key !== storageKey(activeUserID)) return;
+    records = prune(readStored(activeUserID));
+    notify();
+  };
+  window.addEventListener("storage", storageWatcher);
+}
+
 /**
  * setFiledMessagesUser points this module at the signed-in user. Called from the
  * one place that already decides which user's mail caches are the live ones, so
@@ -114,12 +158,14 @@ export function setFiledMessagesUser(userID: number) {
   const next = Number.isInteger(userID) && userID > 0 ? userID : 0;
   if (next === activeUserID) return;
   activeUserID = next;
-  records = next > 0 ? load(next) : new Map();
+  records = next > 0 ? prune(readStored(next)) : new Map();
+  if (next > 0) watchStorage();
   notify();
 }
 
-/** clearFiledMessages forgets one user's filings, on logout or a user switch. */
+/** clearFiledMessages forgets one user's filings, on sign-out. */
 export function clearFiledMessages(userID: number) {
+  if (!Number.isInteger(userID) || userID <= 0) return;
   try {
     localStorage.removeItem(storageKey(userID));
   } catch {
@@ -131,8 +177,15 @@ export function clearFiledMessages(userID: number) {
   }
 }
 
-/** clearOtherFiledMessages drops every user's filings but the signed-in one's. */
+/**
+ * clearOtherFiledMessages drops every user's filings but the signed-in one's.
+ * A bootstrap that answers with no user at all - the login page, a session that
+ * expired - names nobody to keep, and must not be read as "keep nobody": that
+ * deleted the filings of every real account on this browser, so mail deleted
+ * before the session lapsed came back after signing in again.
+ */
 export function clearOtherFiledMessages(keepUserID: number) {
+  if (!Number.isInteger(keepUserID) || keepUserID <= 0) return;
   try {
     const keep = storageKey(keepUserID);
     for (let index = localStorage.length - 1; index >= 0; index -= 1) {
@@ -146,32 +199,37 @@ export function clearOtherFiledMessages(keepUserID: number) {
 
 /**
  * recordFiledMessages files messages away and returns the ids it took. A
- * destination of 0 records a message the server no longer has.
+ * destination of 0 with no source folder records a message the server no longer
+ * has. Filing a message again replaces its record, so mail moved back out of
+ * Trash and then filed somewhere else is judged by the newer decision.
  */
 export function recordFiledMessages(entries: FiledMessage[]): number[] {
   const at = Date.now();
-  const taken: number[] = [];
+  const taken = new Set<number>();
   entries.forEach((entry) => {
     if (!Number.isInteger(entry.id) || entry.id <= 0) return;
-    const to = Number.isInteger(entry.toMailboxID) && entry.toMailboxID > 0 ? entry.toMailboxID : 0;
-    records.set(entry.id, { id: entry.id, to, at });
-    taken.push(entry.id);
+    const to = positiveMailboxID(entry.toMailboxID);
+    const from = positiveMailboxID(entry.fromMailboxID);
+    // A move to the folder the message is already in files nothing: the record
+    // would be released by the first list that drew the row anyway.
+    if (from > 0 && from === to) return;
+    records.set(entry.id, { id: entry.id, from, to, at });
+    taken.add(entry.id);
   });
-  if (taken.length === 0) return taken;
-  records = prune(records);
-  persist();
+  if (taken.size === 0) return [];
+  commit(taken, new Set());
   notify();
-  return taken;
+  return Array.from(taken);
 }
 
-/** releaseFiledMessages puts messages back on screen: an undo, or a move that was never attempted. */
+/** releaseFiledMessages puts messages back on screen: an undo, or the reader asking. */
 export function releaseFiledMessages(ids: number[]) {
-  let changed = false;
+  const released = new Set<number>();
   ids.forEach((id) => {
-    if (records.delete(id)) changed = true;
+    if (records.delete(id)) released.add(id);
   });
-  if (!changed) return;
-  persist();
+  if (released.size === 0) return;
+  commit(new Set(), released);
   notify();
 }
 
@@ -182,22 +240,49 @@ export function filedMessageIDs(): number[] {
 }
 
 /**
- * messageIsFiled reports whether a row should stay off screen: it was filed, and
- * it still claims a folder other than the one it was filed into.
+ * messageIsFiled reports whether a row should stay off screen. A record with no
+ * destination is a message the server no longer has, and hides it everywhere;
+ * otherwise the row is hidden only while it still claims the folder it was
+ * filed out of, and a row seen anywhere else has answered the question the
+ * record was asking.
  */
 export function messageIsFiled(messageID: number, mailboxID: number): boolean {
   const record = records.get(messageID);
   if (!record) return false;
   if (record.at <= Date.now() - filedMessageTTLMS) return false;
-  return record.to !== mailboxID;
+  if (record.to === 0 && record.from === 0) return true;
+  if (record.from > 0) return mailboxID === record.from;
+  return mailboxID !== record.to;
 }
 
 /**
- * filterFiledConversations drops the rows a filing is still hiding. A row stands
- * for its own seed message, which is the message the filing named, so that is
- * what decides it - the same message the list's own dismissal keys on.
+ * filterFiledConversations drops the rows a filing is still hiding, and lets go
+ * of the records the rows themselves have answered. A row stands for its own
+ * seed message, which is the message the filing named, so that is what decides
+ * it - the same message the list's own dismissal keys on.
+ *
+ * Releasing here rather than in a mutation is what makes a record self-clearing:
+ * the row arriving in Trash, or being put back by anything at all, is the proof,
+ * and it reaches every list. Nothing re-renders on it - a released record only
+ * ever unhides, and the caller is computing the unhidden list as it asks - so
+ * this stays safe to call while rendering.
  */
 export function filterFiledConversations<T extends Conversation>(conversations: T[]): T[] {
   if (records.size === 0) return conversations;
-  return conversations.filter((conversation) => !messageIsFiled(conversation.message.id, conversation.message.mailbox_id));
+  const answered = new Set<number>();
+  const kept = conversations.filter((conversation) => {
+    const { id, mailbox_id: mailboxID } = conversation.message;
+    if (messageIsFiled(id, mailboxID)) return false;
+    if (records.has(id)) answered.add(id);
+    return true;
+  });
+  if (answered.size > 0) {
+    answered.forEach((id) => records.delete(id));
+    commit(new Set(), answered);
+  }
+  return kept;
+}
+
+function positiveMailboxID(value: number | undefined): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0;
 }
