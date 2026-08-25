@@ -28,6 +28,18 @@ through the user's configured SMTP identity; forwarded mail receives an opaque
 `X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message
 that already carries the same marker.
 
+A forward may be limited to the mail the rule saw arrive (`forward_new_only`,
+which the editor turns on for a new rule). The mailbox behind a rule written
+today holds years of mail, and forwarding is the one action a rule takes that
+leaves the account -- every copy is also filed by the sending provider, which
+mirrors it back into the reader's own lists. So the option exists, and it is not
+"do not backfill this rule": Backfill still walks the mail already in the
+mailbox, still matches it, still moves it and still records what it decided. Only
+the forward is skipped, and the audit row says so instead of showing a match that
+sent nothing. Mail that arrived while the rule was running and then waited on
+`older_than:` is still forwarded when its wait is released -- the waiting row
+carries the pass it was written in for exactly that reason.
+
 A move names its destination in one of two ways, and never both:
 
 - **Delete** (`move_role: "trash"`) and **Archive** (`move_role: "archive"`) are
@@ -48,6 +60,14 @@ an action failure; it does not quietly count as a match that moved nothing. A
 failure is terminal for that message until the rule is saved again -- saving is
 what puts already-decided mail back in front of the rule -- and Backfill is what
 walks it; the scheduled worker only picks up rows still waiting on age.
+
+The copies the provider keeps of what a rule forwarded are out of the reader's
+lists, and out of the filters' own reach: every send records its Message-ID for
+the account it left from, and the mirror recognises that copy as the reader's own
+outgoing mail (`messages.own_outgoing_copy`). Without it a forwarding rule fed
+itself -- the copy of a forward matches the same sender or subject the original
+did -- and a Gmail account mirroring All Mail showed every forward back in Inbox
+and in the categories.
 
 Filters read the mail the whole-account lists show -- folders that opt into All
 Mail, never Junk, never a hidden cross-account duplicate -- so Sent, Drafts and
@@ -79,6 +99,12 @@ npm run build:plugins
 - Frontend settings route: `/settings/account/plugins/filters`
 
 ## Notes
+
+Only one scheduled row may wait for a given rule and message, and that row keeps
+the phase it was written in when that phase was the arrival: saving an edited
+rule puts waiting mail back in front of the rule through the backfill, and mail
+this rule watched arrive must not become mail it merely found -- a rule that
+forwards new mail only would stop forwarding it.
 
 `older_than:` is the one term that is not a search. It names when the rule may
 act rather than something to find in the message, so it is taken out of the

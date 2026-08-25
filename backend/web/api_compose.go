@@ -516,6 +516,13 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 		return store.MessageRecord{}, fmt.Errorf("message was not sent because delivery could not be scheduled safely: %w", err)
 	}
 	defer finishForeground()
+	// Before the send, not after: the provider files its own copy the moment it
+	// accepts the message, and a sync that reaches that copy first would mirror
+	// it as ordinary incoming mail. An id recorded for a send that then fails
+	// costs nothing, because no message will ever carry it.
+	if err := s.store.RecordOutgoingMessageID(ctx, cu.User.ID, imapAccount.ID, msg.MessageID); err != nil {
+		return store.MessageRecord{}, err
+	}
 	raw, err := s.sender.Send(ctx, smtpEnvelopeForIdentity(identity, smtpAccount), msg)
 	if err != nil {
 		return store.MessageRecord{}, err

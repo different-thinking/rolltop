@@ -56,8 +56,21 @@ func duplicateHideableRole(role string) bool {
 // user's to set: the whole-account lists drop Junk whatever it says, so a Junk
 // row switched back into All Mail would pass this check and still be invisible
 // everywhere it was meant to stand in.
+//
+// The provider's copy of mail this Rolltop sent is named for the same reason.
+// One account forwarding to another the reader also mirrors puts two rows with
+// one Message-ID in front of detection: the sender's own copy, which the lists
+// do not show, and the delivery, which they do. Letting the sent copy stand in
+// as the original would point the real delivery at a row nothing displays and
+// take the message out of every list it belongs in -- the "hid the only copy"
+// outcome the rest of this file exists to refuse. The Inbox exemption the lists
+// make is not repeated: a delivery into the Inbox is a copy in its own right,
+// and it is judged here on where it sits like any other.
 func duplicateCopyShowsInLists(item DuplicateCopy) bool {
 	if normalizeMailboxRole(item.MailboxRole) == "junk" {
+		return false
+	}
+	if item.OwnOutgoingCopy && normalizeMailboxRole(item.MailboxRole) != "inbox" {
 		return false
 	}
 	return item.ShowInAllMail && duplicateHideableRole(item.MailboxRole)
@@ -70,10 +83,14 @@ type DuplicateCopy struct {
 	MailboxID     int64
 	MailboxRole   string
 	ShowInAllMail bool
-	MessageID     string
-	ToAddr        string
-	CCAddr        string
-	DuplicateOf   int64
+	// OwnOutgoingCopy marks the provider's copy of mail this Rolltop sent from
+	// that account. The lists do not show it, so detection may neither hide
+	// another copy behind it nor hide it behind another.
+	OwnOutgoingCopy bool
+	MessageID       string
+	ToAddr          string
+	CCAddr          string
+	DuplicateOf     int64
 }
 
 // DuplicateGroupOutcome names what detection decided about one group of copies.
@@ -221,10 +238,15 @@ func (s *Store) CountWithinAccountDuplicatedMessagesForUser(ctx context.Context,
 	// of two accounts file twice is one message the reader sees more than once,
 	// and reporting it as two would describe their mailbox wrongly in exactly
 	// the way this number exists to avoid.
+	// The provider's copy of mail this Rolltop sent is left out: the lists
+	// already keep it out of sight, so it is not mail the reader sees twice,
+	// and counting it would answer a question nobody asked with a number that
+	// only grows as they use the app.
 	var messages int
 	err = db.QueryRowContext(ctx, `SELECT count(DISTINCT message_id_header) FROM (
 			SELECT message_id_header FROM messages
 			WHERE user_id = ? AND message_id_header <> '' AND duplicate_of_message_id = 0
+				AND own_outgoing_copy = 0
 			GROUP BY message_id_header, account_id
 			HAVING count(*) > 1
 		) AS repeated`, userID).Scan(&messages)
@@ -283,7 +305,7 @@ func (s *Store) duplicateCopiesForHeaders(ctx context.Context, db *sql.DB, userI
 // duplicateCopyColumns is the envelope projection every detection query reads.
 // Detection never loads bodies: it decides from recipients and folder placement.
 const duplicateCopyColumns = `SELECT m.id, m.account_id, m.mailbox_id, mb.role, mb.show_in_all_mail,
-		m.message_id_header, m.to_addr, m.cc_addr, m.duplicate_of_message_id
+		m.own_outgoing_copy, m.message_id_header, m.to_addr, m.cc_addr, m.duplicate_of_message_id
 	FROM messages m
 	JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id`
 
@@ -839,7 +861,7 @@ func scanDuplicateCopies(rows *sql.Rows) ([]DuplicateCopy, error) {
 	for rows.Next() {
 		var item DuplicateCopy
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.MailboxID, &item.MailboxRole,
-			&item.ShowInAllMail, &item.MessageID, &item.ToAddr, &item.CCAddr, &item.DuplicateOf); err != nil {
+			&item.ShowInAllMail, &item.OwnOutgoingCopy, &item.MessageID, &item.ToAddr, &item.CCAddr, &item.DuplicateOf); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
