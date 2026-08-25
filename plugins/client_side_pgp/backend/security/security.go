@@ -52,9 +52,16 @@ func Transform(raw []byte, state plugins.MessageSecurityState, body plugins.Mess
 	return plugins.MessageBodyTransform{}
 }
 
-// maxPGPScanDepth bounds MIME recursion so a deeply nested message cannot turn
-// detection into a stack or time bomb. Real PGP structures are shallow.
-const maxPGPScanDepth = 20
+const (
+	// maxPGPScanDepth bounds MIME recursion so a deeply nested message cannot turn
+	// detection into a stack or time bomb. Real PGP structures are shallow.
+	maxPGPScanDepth = 20
+	// maxPGPScanBytes bounds the structural parse. Detection only needs the MIME
+	// headers and the first armor markers, both near the top of a message, so a
+	// multi-megabyte body (a large ciphertext part) does not make per-message
+	// detection on the sync/index hot path parse the whole message.
+	maxPGPScanBytes = 1 << 20
+)
 
 // detectPGP decides whether a message is PGP-encrypted or PGP-signed from its
 // actual MIME structure rather than from substrings anywhere in the raw bytes.
@@ -66,7 +73,8 @@ const maxPGPScanDepth = 20
 // headers and the inline PGP-armor checks to real text parts, not attachment
 // bytes or quoted content.
 func detectPGP(raw []byte, fallback string) (encrypted bool, signed bool) {
-	if msg, err := mail.ReadMessage(bytes.NewReader(raw)); err == nil {
+	scanRaw := limitSecurityBytes(raw, maxPGPScanBytes)
+	if msg, err := mail.ReadMessage(bytes.NewReader(scanRaw)); err == nil {
 		encrypted, signed = scanPGPStructure(textproto.MIMEHeader(msg.Header), msg.Body, 0)
 	} else {
 		// A message that will not parse as MIME is exactly where structure is not
@@ -135,7 +143,7 @@ func scanPGPStructure(header textproto.MIMEHeader, body io.Reader, depth int) (e
 		}
 		return encrypted, signed
 	}
-	if strings.HasPrefix(mediaType, "text/") {
+	if strings.HasPrefix(mediaType, "text/") && !partIsAttachment(header, params) {
 		decoded, _ := io.ReadAll(io.LimitReader(body, 256*1024))
 		if inlinePGPMessageRE.Match(decoded) {
 			encrypted = true
@@ -145,6 +153,24 @@ func scanPGPStructure(header textproto.MIMEHeader, body io.Reader, depth int) (e
 		}
 	}
 	return encrypted, signed
+}
+
+// partIsAttachment reports whether a MIME part is carried as a file rather than
+// shown as the message body. A text attachment that merely contains a PGP block
+// -- a forwarded .txt or .asc, a quoted transcript -- is not an encrypted
+// message, so its armor must not trigger detection; only inline body text may.
+func partIsAttachment(header textproto.MIMEHeader, contentTypeParams map[string]string) bool {
+	disposition, dispParams, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if strings.EqualFold(strings.TrimSpace(disposition), "attachment") {
+		return true
+	}
+	if dispParams != nil && strings.TrimSpace(dispParams["filename"]) != "" {
+		return true
+	}
+	if contentTypeParams != nil && strings.TrimSpace(contentTypeParams["name"]) != "" {
+		return true
+	}
+	return false
 }
 
 func encryptedDisplayBody(raw []byte) string {

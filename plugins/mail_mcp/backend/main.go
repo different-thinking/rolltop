@@ -916,8 +916,16 @@ func listMessages(ctx context.Context, st *store.Store, userID int64, args listA
 	matches := make([]store.MessageRecord, 0, limit+1)
 	dbOffset := offset
 	scanned := 0
+	// Start with just enough rows for a full page and widen only when the filter is
+	// sparse enough that a small fetch did not fill it. A dense query then pulls
+	// roughly a page, not a fixed 200-row batch it would use a handful of and
+	// re-read the rest of on the next page.
+	batchSize := limit + 1
 	for scanned < listMessageScanBudget {
-		batch, err := fetch(dbOffset, listMessageScanBatch)
+		if batchSize > listMessageScanBatch {
+			batchSize = listMessageScanBatch
+		}
+		batch, err := fetch(dbOffset, batchSize)
 		if err != nil {
 			return nil, "", err
 		}
@@ -935,11 +943,13 @@ func listMessages(ctx context.Context, st *store.Store, userID int64, args listA
 			}
 			matches = append(matches, msg)
 		}
+		exhausted := len(batch) < batchSize
 		scanned += len(batch)
 		dbOffset += len(batch)
-		if len(batch) < listMessageScanBatch {
+		if exhausted {
 			return matches, "", nil // list exhausted, no more pages
 		}
+		batchSize *= 2
 	}
 	// Budget spent without exhausting the list: hand back what matched and a
 	// cursor to continue scanning from where this page stopped.

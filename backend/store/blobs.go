@@ -335,17 +335,19 @@ func matchAttachmentRows(files, existing []Attachment) []int {
 }
 
 func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messageID int64, files []Attachment) ([]Attachment, error) {
-	// Most mail carries no attachments at all, and every stored and reindexed
-	// message now comes through here, so a cheap unlocked probe answers the case
-	// with nothing on either side without opening a transaction. It is only a
-	// short-circuit: when there is work to do, the authoritative view is re-read
-	// inside the transaction under FOR UPDATE below.
-	existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
-	if err != nil {
-		return nil, err
-	}
-	if len(existing) == 0 && len(files) == 0 {
-		return nil, nil
+	// Fast path for the overwhelmingly common attachment-free message: with no new
+	// files, a cheap unlocked probe short-circuits without a transaction when the
+	// message has no existing rows either. When there ARE files to write there is
+	// work regardless, so skip the probe and go straight to the locked read below
+	// rather than reading the set twice.
+	if len(files) == 0 {
+		existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
+		if err != nil {
+			return nil, err
+		}
+		if len(existing) == 0 {
+			return nil, nil
+		}
 	}
 	ts := nowUnix()
 	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
@@ -353,10 +355,10 @@ func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messag
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Re-read the rows under the transaction and lock them, so the match, update,
-	// and delete below act on a consistent set rather than the snapshot the
-	// unlocked probe saw -- which a concurrent writer could have changed.
-	existing, err = listAttachmentsForMessageForUpdate(ctx, tx, userID, messageID)
+	// Authoritative, locked view for the match/update/delete below: reading inside
+	// the transaction under FOR UPDATE keeps a concurrent writer from changing the
+	// set between the read and the writes.
+	existing, err := listAttachmentsForMessageForUpdate(ctx, tx, userID, messageID)
 	if err != nil {
 		return nil, err
 	}
