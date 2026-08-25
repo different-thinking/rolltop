@@ -26,12 +26,8 @@ import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
 import { displayInitial } from "../../lib/senderIdentity";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
-import type {
-  RuntimeMessageDetailsPlugin,
-  RuntimeMessageQuickActionContext,
-  RuntimeMessageQuickActionPlugin,
-  RuntimePlugin
-} from "../../plugins/runtime";
+import { messageQuickActionNodes } from "../../plugins/runtime";
+import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
 import { SnoozeControl } from "./SnoozeControl";
 
@@ -180,15 +176,6 @@ function messageMenuActionNodes(plugins: readonly RuntimePlugin[], context: Mess
     .map((plugin, index) => {
       const node = plugin.renderMessageMenuActions?.(context);
       return node ? <Fragment key={`message-menu-plugin-${index}`}>{node}</Fragment> : null;
-    })
-    .filter(Boolean);
-}
-
-function messageQuickActionNodes(plugins: readonly RuntimePlugin[], context: RuntimeMessageQuickActionContext) {
-  return (plugins as readonly RuntimeMessageQuickActionPlugin[])
-    .map((plugin, index) => {
-      const node = plugin.renderMessageQuickActions?.(context);
-      return node ? <Fragment key={`message-quick-action-${index}`}>{node}</Fragment> : null;
     })
     .filter(Boolean);
 }

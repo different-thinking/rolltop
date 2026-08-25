@@ -64,12 +64,14 @@ export class ApiError extends Error {
 }
 
 /**
- * nonAPIErrorMessage names a failure whose body is not the JSON every Rolltop
- * route answers with. That body comes from something in front of the app -- a
- * proxy, the hosting platform, a gateway that timed out -- and is a whole HTML
- * document, which a toast used to print verbatim: a screenful of markup instead
- * of a reason. Its title is the one sentence in it worth reading, so that is
- * what is kept beside the status the response really carried.
+ * nonAPIErrorMessage names a failure whose body did not parse as the JSON every
+ * Rolltop route answers with. Something in front of the app answered instead --
+ * a proxy, the hosting platform, a gateway that timed out -- or the answer was
+ * cut off on the way. The body is then a whole HTML document or a fragment of a
+ * payload, which a toast used to print verbatim: a screenful of markup instead
+ * of a reason. The status the response really carried is the one thing every
+ * such failure has, so it is always said; what is added to it is whatever
+ * sentence the body actually holds, and nothing when it holds none.
  */
 function nonAPIErrorMessage(res: Response, body: string): string {
   const status = res.statusText ? `${res.status} ${res.statusText}` : String(res.status);
@@ -77,10 +79,20 @@ function nonAPIErrorMessage(res: Response, body: string): string {
   if (!trimmed) return status;
   if (trimmed.startsWith("<")) {
     const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(trimmed)?.[1]?.trim();
-    return title ? `${status}: ${title}` : `${status}: the server did not answer with a Rolltop response.`;
+    return `${status}: ${title || "the server did not answer with a Rolltop response."}`;
+  }
+  // A body that begins as JSON and does not parse is a payload the connection
+  // cut short, so there is no sentence in it to quote -- only the fragment that
+  // got through, which is what the raw dump used to be.
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return `${status}: the server's answer was cut short.`;
   }
   const firstLine = trimmed.split("\n", 1)[0].trim();
-  return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+  // A plain-text body that only repeats the status ("Bad Gateway") would
+  // otherwise be said twice in one sentence.
+  if (firstLine.toLowerCase() === res.statusText.trim().toLowerCase()) return status;
+  const excerpt = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+  return `${status}: ${excerpt}`;
 }
 
 // All API helpers flow through parse so callers see typed payloads on success

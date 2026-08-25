@@ -24,7 +24,8 @@ import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
-import type { RuntimeMessageQuickActionContext, RuntimeMessageQuickActionPlugin, RuntimePlugin } from "../../plugins/runtime";
+import { messageQuickActionNodes } from "../../plugins/runtime";
+import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { SnoozeControl } from "./SnoozeControl";
 import { ArchiveBeforeControl, EmptyTrashControl } from "./MailListActions";
@@ -100,15 +101,6 @@ function dateSectionHeadings(conversations: Conversation[], snoozedView: boolean
     openSection = label;
     return label;
   });
-}
-
-function messageQuickActionNodes(plugins: RuntimePlugin[], context: RuntimeMessageQuickActionContext) {
-  return (plugins as RuntimeMessageQuickActionPlugin[])
-    .map((plugin, index) => {
-      const node = plugin.renderMessageQuickActions?.(context);
-      return node ? <Fragment key={`message-quick-action-${index}`}>{node}</Fragment> : null;
-    })
-    .filter(Boolean);
 }
 
 function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation["message"]) {

@@ -1,3 +1,4 @@
+import { Fragment, createElement } from "react";
 import type { ReactNode } from "react";
 import type { AddToast, DatePrefs, LocationState, Navigate } from "../appTypes";
 import type { SettingsSectionID } from "../features/settings/SettingsUI";
@@ -68,6 +69,25 @@ export type RuntimeMessageQuickActionContext = {
 export type RuntimeMessageQuickActionPlugin = RuntimePlugin & {
   renderMessageQuickActions?: (context: RuntimeMessageQuickActionContext) => ReactNode;
 };
+
+/**
+ * messageQuickActionNodes renders the hook for every plugin that answers it.
+ * Both toolbars carrying these buttons -- a list row and an open conversation
+ * -- call it, so it lives beside the hook it reads rather than as a copy in
+ * each view: the keys, the plugin order and the empty-node filter are one
+ * decision about this hook, not two that can drift apart.
+ */
+export function messageQuickActionNodes(
+  plugins: readonly RuntimePlugin[],
+  context: RuntimeMessageQuickActionContext
+): ReactNode[] {
+  return (plugins as readonly RuntimeMessageQuickActionPlugin[])
+    .map((plugin, index) => {
+      const node = plugin.renderMessageQuickActions?.(context);
+      return node ? createElement(Fragment, { key: `message-quick-action-${index}` }, node) : null;
+    })
+    .filter((node) => node !== null);
+}
 
 export type RuntimePlugins = {
   all: RuntimePlugin[];
