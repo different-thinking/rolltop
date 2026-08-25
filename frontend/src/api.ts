@@ -74,7 +74,11 @@ export class ApiError extends Error {
  * sentence the body actually holds, and nothing when it holds none.
  */
 function nonAPIErrorMessage(res: Response, body: string): string {
-  const status = res.statusText ? `${res.status} ${res.statusText}` : String(res.status);
+  // The reason phrase is read once and defended once. It is a string per the
+  // Fetch specification, but not in every stand-in for a Response, and a helper
+  // that only runs when something has already failed must not be what throws.
+  const statusText = (res.statusText || "").trim();
+  const status = statusText ? `${res.status} ${statusText}` : String(res.status);
   const trimmed = body.trim();
   if (!trimmed) return status;
   if (trimmed.startsWith("<")) {
@@ -90,7 +94,7 @@ function nonAPIErrorMessage(res: Response, body: string): string {
   const firstLine = trimmed.split("\n", 1)[0].trim();
   // A plain-text body that only repeats the status ("Bad Gateway") would
   // otherwise be said twice in one sentence.
-  if (firstLine.toLowerCase() === res.statusText.trim().toLowerCase()) return status;
+  if (statusText && firstLine.toLowerCase() === statusText.toLowerCase()) return status;
   const excerpt = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
   return `${status}: ${excerpt}`;
 }
