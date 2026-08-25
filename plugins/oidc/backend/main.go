@@ -176,15 +176,43 @@ func (p *oidcPlugin) callback(host plugins.APIHost, _ string, w http.ResponseWri
 		host.WriteAPIError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if claims.Email == "" && discovery.UserinfoEndpoint != "" && token.AccessToken != "" {
-		claims.Email, claims.Name, _ = fetchUserinfo(r.Context(), discovery.UserinfoEndpoint, token.AccessToken)
+	// emailVerified tracks the verification flag from whichever source supplied
+	// the email. Consult userinfo when the ID token lacks the email, or lacks the
+	// verification status we are about to require — some providers put email in
+	// the ID token but email_verified only in userinfo, and without this a valid,
+	// verified user would be wrongly rejected.
+	emailVerified := claims.EmailVerified
+	needEmail := claims.Email == ""
+	needVerification := emailVerified == nil && !cfg.AllowUnverifiedEmail
+	if (needEmail || needVerification) && discovery.UserinfoEndpoint != "" && token.AccessToken != "" {
+		uiEmail, uiName, uiVerified, uiErr := fetchUserinfo(r.Context(), discovery.UserinfoEndpoint, token.AccessToken)
+		if uiErr != nil {
+			// A userinfo failure is not the same as an unverified or missing
+			// address; report the real (often transient, retriable) cause rather
+			// than a misleading rejection.
+			host.WriteAPIError(w, http.StatusBadGateway, "OIDC userinfo lookup failed: "+uiErr.Error())
+			return
+		}
+		if claims.Email == "" {
+			claims.Email = uiEmail
+		}
+		if claims.Name == "" {
+			claims.Name = uiName
+		}
+		if emailVerified == nil {
+			emailVerified = uiVerified
+		}
 	}
 	email, err := normalizeEmail(claims.Email)
 	if err != nil {
 		host.WriteAPIError(w, http.StatusUnauthorized, "OIDC account has no usable email address.")
 		return
 	}
-	if claims.EmailVerified != nil && !*claims.EmailVerified {
+	// Require a positive email_verified unless the operator opted out for a
+	// provider that never sends it. An absent claim is treated as unverified, so
+	// a provider that lets users set arbitrary emails cannot be used to sign in
+	// as an existing Rolltop user.
+	if !cfg.AllowUnverifiedEmail && (emailVerified == nil || !*emailVerified) {
 		host.WriteAPIError(w, http.StatusUnauthorized, "OIDC email address is not verified.")
 		return
 	}
@@ -226,6 +254,12 @@ type oidcConfig struct {
 	AllowedEmails  map[string]bool
 	AllowedDomains map[string]bool
 	AutoCreate     bool
+	// AllowUnverifiedEmail opts out of requiring a true email_verified claim.
+	// It exists for identity providers that never send the claim; leaving it off
+	// (the default) means an unverified — or absent — verification status is
+	// rejected, so a provider that lets a user set an arbitrary email cannot be
+	// used to sign in as another Rolltop user.
+	AllowUnverifiedEmail bool
 }
 
 func oidcConfigFromEnv() oidcConfig {
@@ -239,6 +273,8 @@ func oidcConfigFromEnv() oidcConfig {
 		AllowedEmails:  csvSet(os.Getenv("ROLLTOP_OIDC_ALLOWED_EMAILS")),
 		AllowedDomains: csvSet(os.Getenv("ROLLTOP_OIDC_ALLOWED_DOMAINS")),
 		AutoCreate:     boolEnv(os.Getenv("ROLLTOP_OIDC_AUTO_CREATE")),
+
+		AllowUnverifiedEmail: boolEnv(os.Getenv("ROLLTOP_OIDC_ALLOW_UNVERIFIED_EMAIL")),
 	}
 }
 
@@ -451,28 +487,29 @@ func fetchRS256Key(ctx context.Context, jwksURI, kid string) (*rsa.PublicKey, er
 	return nil, errors.New("OIDC signing key was not found")
 }
 
-func fetchUserinfo(ctx context.Context, endpoint, accessToken string) (string, string, error) {
+func fetchUserinfo(ctx context.Context, endpoint, accessToken string) (string, string, *bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode/100 != 2 {
-		return "", "", fmt.Errorf("OIDC userinfo failed with status %d", res.StatusCode)
+		return "", "", nil, fmt.Errorf("OIDC userinfo failed with status %d", res.StatusCode)
 	}
 	var out struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
+		Email         string `json:"email"`
+		Name          string `json:"name"`
+		EmailVerified *bool  `json:"email_verified"`
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return out.Email, out.Name, nil
+	return out.Email, out.Name, out.EmailVerified, nil
 }
 
 func createOIDCUser(ctx context.Context, st *store.Store, email, name string) (store.User, error) {

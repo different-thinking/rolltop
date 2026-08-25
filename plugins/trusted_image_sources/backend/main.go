@@ -15,6 +15,10 @@ func RolltopPlugin() plugins.BackendPlugin {
 
 type trustedImageSourcesHook struct{}
 
+// Compile-time proof the hook satisfies the host interface, so a missing method
+// is a build error rather than a silent fail-open at the runtime type assertion.
+var _ plugins.TrustedImageSourcesHook = trustedImageSourcesHook{}
+
 func (trustedImageSourcesHook) TrustImageSender(ctx context.Context, db *sql.DB, userID int64, sender string) error {
 	return sources.TrustSender(ctx, db, userID, sender)
 }

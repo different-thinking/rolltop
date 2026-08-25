@@ -49,6 +49,13 @@ type Config struct {
 
 	MasterKey []byte
 
+	// PublicURL is the external base URL the app is reached at (scheme + host,
+	// e.g. https://mail.example.com), used to build links in outgoing mail such
+	// as the password-reset link. When empty, those links fall back to the
+	// request's Host header, which a client controls; setting this closes that
+	// (an attacker-supplied Host in a reset request otherwise points the emailed
+	// link at their own domain). Trailing path is ignored.
+	PublicURL         string
 	SessionTTL        time.Duration
 	CookieSecure      bool
 	SyncInterval      time.Duration
@@ -211,6 +218,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("ROLLTOP_MEMORY_LIMIT: %w", err)
 	}
+	publicURL, err := parsePublicURL(os.Getenv("ROLLTOP_PUBLIC_URL"))
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Addr:                   env("ROLLTOP_ADDR", ":8080"),
 		DataDir:                dataDir,
@@ -227,6 +238,7 @@ func Load() (Config, error) {
 		InboxPollInterval:      inboxPollInterval,
 		BlobRetention:          blobRetention,
 		WebhookToken:           os.Getenv("ROLLTOP_WEBHOOK_TOKEN"),
+		PublicURL:              publicURL,
 		LogLevel:               logLevel,
 		Google:                 google,
 		MemoryLimit:            memoryLimit,
@@ -368,6 +380,28 @@ func parseBool(key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s: %w", key, err)
 	}
 	return b, nil
+}
+
+// parsePublicURL validates ROLLTOP_PUBLIC_URL and returns its scheme+host origin
+// (any path, query, or fragment is dropped). An empty value is allowed and means
+// "fall back to the request Host header". A set-but-malformed value is a startup
+// error rather than a link that silently points nowhere.
+func parsePublicURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("ROLLTOP_PUBLIC_URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("ROLLTOP_PUBLIC_URL must be an absolute http(s) URL, got %q", raw)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("ROLLTOP_PUBLIC_URL must include a host, got %q", raw)
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(), nil
 }
 
 // SearchRoot is the directory holding the per-user Bleve indexes, one

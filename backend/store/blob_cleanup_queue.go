@@ -130,10 +130,25 @@ func scanBlobCleanupQueueEntry(row blobCleanupScanDest) (BlobCleanupQueueEntry, 
 	return entry, err
 }
 
-// CompleteBlobCleanup holds SQLite's writer lock while it rechecks references
-// and path ownership, deletes the file, and removes metadata plus the journal.
-// deletePath must not access this Store. Callback or commit failure leaves the
-// SQLite metadata and queue entry available for an idempotent retry.
+// CompleteBlobCleanup rechecks references and path ownership under a row lock,
+// deletes the file, and removes the blob metadata plus the journal entry.
+// deletePath must not access this Store.
+//
+// The row lock is load-bearing on PostgreSQL, which (unlike the SQLite this code
+// was written for) has no global writer lock. The blob row is taken FOR UPDATE
+// before the reference recheck: a concurrent message/attachment/contact_icon
+// insert takes a FOR KEY SHARE lock on that row through its foreign key, which
+// conflicts with FOR UPDATE, so those re-references are blocked until this
+// transaction ends and the recheck cannot miss one about to commit.
+// (remote_image_cache has no such foreign key; UpsertRemoteImageCache takes an
+// explicit FOR SHARE on the blob row to join the same discipline.)
+//
+// deletePath runs inside the transaction, before the commit, on purpose: if it
+// fails the whole transaction rolls back and the blob metadata and queue entry
+// survive for an idempotent retry (TestBlobCleanupQueue...RetainsState). The
+// only window it cannot close is a process crash between the file delete and the
+// commit, which rolls the metadata back over an already-deleted file — rare,
+// pre-existing, and not fixable without two-phase commit across the filesystem.
 func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64, deletePath func(string) error) error {
 	if userID <= 0 || cleanupID <= 0 {
 		return errors.New("invalid blob cleanup entry")
@@ -168,7 +183,7 @@ func (s *Store) CompleteBlobCleanup(ctx context.Context, userID, cleanupID int64
 	var currentPath, currentSHA string
 	var currentSize, currentCreatedAt int64
 	err = tx.QueryRowContext(ctx, `SELECT path, sha256, size, created_at FROM blobs
-		WHERE user_id = ? AND id = ?`, userID, entry.BlobID).
+		WHERE user_id = ? AND id = ? FOR UPDATE`, userID, entry.BlobID).
 		Scan(&currentPath, &currentSHA, &currentSize, &currentCreatedAt)
 	switch {
 	case err == nil:

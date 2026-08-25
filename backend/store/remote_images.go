@@ -4,8 +4,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 )
+
+// ErrRemoteImageBlobGone reports that the blob a cache row would reference was
+// removed before the row could be written, so recording it would dangle.
+var ErrRemoteImageBlobGone = errors.New("remote image blob was removed before caching")
 
 const (
 	RemoteImageStatusOK      = "ok"
@@ -36,7 +42,30 @@ func (s *Store) UpsertRemoteImageCache(ctx context.Context, item RemoteImageCach
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = unixTime(ts)
 	}
-	_, err := s.mustDataDB(ctx, item.UserID).ExecContext(ctx, `INSERT INTO remote_image_cache
+	db := s.mustDataDB(ctx, item.UserID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return RemoteImageCache{}, err
+	}
+	defer tx.Rollback()
+	// remote_image_cache has no foreign key to blobs, so — unlike messages and
+	// attachments — a concurrent blob cleanup is not blocked from deleting the
+	// blob this row is about to reference. Take FOR SHARE on the blob row (what
+	// a foreign key's key-share lock would do) so the cleanup's FOR UPDATE waits
+	// for us, and if the blob was already removed, refuse to record a dangling
+	// reference rather than point the cache at a deleted file.
+	if item.BlobID != 0 {
+		var exists int
+		lockErr := tx.QueryRowContext(ctx, `SELECT 1 FROM blobs WHERE user_id = ? AND id = ? FOR SHARE`,
+			item.UserID, item.BlobID).Scan(&exists)
+		if errors.Is(lockErr, sql.ErrNoRows) {
+			return RemoteImageCache{}, ErrRemoteImageBlobGone
+		}
+		if lockErr != nil {
+			return RemoteImageCache{}, lockErr
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO remote_image_cache
 			(user_id, url_hash, url, blob_id, blob_path, content_type, size, status, error, fetched_at, expires_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, url_hash) DO UPDATE SET
@@ -53,6 +82,9 @@ func (s *Store) UpsertRemoteImageCache(ctx context.Context, item RemoteImageCach
 		item.UserID, item.URLHash, item.URL, item.BlobID, item.BlobPath, item.ContentType, item.Size, item.Status, item.Error,
 		timeUnix(item.FetchedAt), timeUnix(item.ExpiresAt), timeUnix(item.CreatedAt), ts)
 	if err != nil {
+		return RemoteImageCache{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return RemoteImageCache{}, err
 	}
 	return s.GetRemoteImageCacheByHash(ctx, item.UserID, item.URLHash)

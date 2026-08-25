@@ -110,7 +110,11 @@ jobs:
           # both belong to the frontend and Docker areas even though they are
           # neither .ts nor Dockerfile.
           emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^plugins/[^/]+/(frontend|themes)/'
-          emit plugin_frontend '^plugins/[^/]+/(frontend|themes)/|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^package\.json$|^package-lock\.json$'
+          # ^frontend/ is included because every plugin frontend imports from
+          # frontend/src (the host's types, registry, Icon, api, SettingsUI):
+          # a host change that breaks those imports must rebuild the plugin
+          # bundles here, or the break surfaces only at release time.
+          emit plugin_frontend '^frontend/|^plugins/[^/]+/(frontend|themes)/|^tsconfig\.json$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^package\.json$|^package-lock\.json$'
           emit android '^android/'
           emit docker '^Dockerfile$|^\.dockerignore$|^scripts/(build-plugins|assemble-plugin-dist)\.mjs$|^scripts/build-go\.sh$'
 

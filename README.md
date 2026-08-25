@@ -60,6 +60,7 @@ export ROLLTOP_SYNC_INTERVAL="15m"
 export ROLLTOP_INBOX_POLL_INTERVAL="1m"
 export ROLLTOP_BLOB_RETENTION="336h"
 export ROLLTOP_COOKIE_SECURE="false"
+export ROLLTOP_PUBLIC_URL=""
 export ROLLTOP_WEBHOOK_TOKEN=""
 export ROLLTOP_LOG_LEVEL="info"
 export ROLLTOP_MEMORY_LIMIT="80%"
@@ -70,6 +71,14 @@ export ROLLTOP_SQLITE_ACCESS="auto"
 ```
 
 Set `ROLLTOP_COOKIE_SECURE=true` when serving over HTTPS.
+
+Set `ROLLTOP_PUBLIC_URL` to the external origin the app is reached at (scheme and
+host, e.g. `https://mail.example.com`). It is the trusted base for links in
+outgoing mail — currently the password-reset link. When it is unset, that link is
+built from the request `Host` header, which a client can set: an attacker who
+triggers a reset for a victim can then have the emailed link point at their own
+domain and capture the token. Setting this closes that, so configure it in any
+deployment that sends password-reset mail. A trailing path is ignored.
 
 `ROLLTOP_MEMORY_LIMIT` is the soft ceiling the Go runtime is given for its heap.
 Without one the collector aims at roughly twice the live heap, so the first sync
