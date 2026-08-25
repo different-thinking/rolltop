@@ -82,10 +82,10 @@ func detectPGP(raw []byte, fallback string) (encrypted bool, signed bool) {
 		// missing genuinely encrypted mail; an unparseable message is rare and is
 		// not the false-positive case the structural path targets.
 		lower := strings.ToLower(string(limitSecurityBytes(raw, 256*1024)))
-		if strings.Contains(lower, "multipart/encrypted") || strings.Contains(lower, "application/pgp-encrypted") || inlinePGPMessageRE.Match(raw) {
+		if strings.Contains(lower, "multipart/encrypted") || strings.Contains(lower, "application/pgp-encrypted") || inlinePGPMessageRE.Match(scanRaw) {
 			encrypted = true
 		}
-		if strings.Contains(lower, "application/pgp-signature") || inlinePGPSignedRE.Match(raw) {
+		if strings.Contains(lower, "application/pgp-signature") || inlinePGPSignedRE.Match(scanRaw) {
 			signed = true
 		}
 	}
