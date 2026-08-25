@@ -195,22 +195,31 @@ func TestMCPAuthenticateHeaderIncludesResourceMetadata(t *testing.T) {
 func TestConsentTokenValidation(t *testing.T) {
 	rawURL := "/api/plugins/mail_mcp/oauth/authorize?response_type=code&client_id=mail-mcp-3_j23z1tMQTM_ixPjDSDJh6yje33nej-l-dTrD45s04&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fr1-r3wGxJrBd&scope=mail.readonly&code_challenge=kb8ZNqBN70AFtilmuQTRg1XsBaqiybACBqNTRn-Y5uM&code_challenge_method=S256&resource=https%3A%2F%2Fmail.theparkerstewarts.com%2Fapi%2Fplugins%2Fmail_mcp%2Fmcp&state=oauth_s_6a31d2a5e2888191a48771d5522ead45&ui_locales=en-US"
 	host := testAPIHost{}
+	const userID = int64(7)
 	getReq := httptest.NewRequest("GET", rawURL, nil)
-	token, err := newConsentToken(host, getReq)
+	token, err := newConsentToken(host, getReq, userID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	postReq := httptest.NewRequest("POST", rawURL, nil)
 	postReq.Form = map[string][]string{"consent_token": {token}}
-	if !validConsentToken(host, postReq) {
+	if !validConsentToken(host, postReq, userID) {
 		t.Fatal("matching consent token was rejected")
 	}
 
 	tamperedReq := httptest.NewRequest("POST", rawURL+"&scope=other", nil)
 	tamperedReq.Form = map[string][]string{"consent_token": {token}}
-	if validConsentToken(host, tamperedReq) {
+	if validConsentToken(host, tamperedReq, userID) {
 		t.Fatal("consent token was accepted for a different OAuth query")
+	}
+
+	// A token minted while one user was signed in must not validate for another:
+	// otherwise an attacker's token could be replayed in a victim's session.
+	otherReq := httptest.NewRequest("POST", rawURL, nil)
+	otherReq.Form = map[string][]string{"consent_token": {token}}
+	if validConsentToken(host, otherReq, userID+1) {
+		t.Fatal("consent token was accepted for a different user")
 	}
 }
 
@@ -218,7 +227,7 @@ func TestConsentPageAllowsOAuthRedirectOrigin(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/plugins/mail_mcp/oauth/authorize?response_type=code", nil)
 	rec := httptest.NewRecorder()
 
-	writeConsentPage(testAPIHost{}, rec, req, "ChatGPT", "https://chatgpt.com/connector/oauth/callback", "mail.readonly")
+	writeConsentPage(testAPIHost{}, rec, req, 1, "ChatGPT", "https://chatgpt.com/connector/oauth/callback", "mail.readonly")
 
 	policy := rec.Header().Get("Content-Security-Policy")
 	if !strings.Contains(policy, "form-action 'self' https://chatgpt.com;") {

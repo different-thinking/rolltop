@@ -279,12 +279,57 @@ func safeDialContext(ctx context.Context, network, address string) (net.Conn, er
 	return nil, errors.New("remote image host resolves only to private addresses")
 }
 
+// blockedIPNets are the IANA special-purpose ranges the net.IP helpers below do
+// not recognise but that must still never be dialed: reaching one turns the
+// remote-image proxy into an SSRF gateway to shared, reserved, or documentation
+// space. Loopback, RFC1918/ULA private, link-local, multicast, and unspecified
+// addresses are handled by the method checks in privateIP.
+var blockedIPNets = parseCIDRs(
+	// IPv4 -- IANA IPv4 Special-Purpose Address Registry
+	"0.0.0.0/8",       // "this host on this network"
+	"100.64.0.0/10",   // shared address space (carrier-grade NAT)
+	"192.0.0.0/24",    // IETF protocol assignments
+	"192.0.2.0/24",    // TEST-NET-1 (documentation)
+	"192.88.99.0/24",  // 6to4 relay anycast (deprecated)
+	"198.18.0.0/15",   // benchmarking
+	"198.51.100.0/24", // TEST-NET-2 (documentation)
+	"203.0.113.0/24",  // TEST-NET-3 (documentation)
+	"240.0.0.0/4",     // reserved / future use (includes 255.255.255.255)
+	// IPv6 -- IANA IPv6 Special-Purpose Address Registry
+	"2002::/16",     // 6to4 (embeds an IPv4 target that could be internal)
+	"64:ff9b::/96",  // NAT64 (embeds an IPv4 target that could be internal)
+	"100::/64",      // discard-only
+	"2001:db8::/32", // documentation
+	"fec0::/10",     // deprecated site-local
+)
+
+func parseCIDRs(cidrs ...string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("remoteimages: invalid blocked CIDR " + c + ": " + err.Error())
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}
+
+// privateIP reports whether an address must not be fetched. An IPv4-mapped IPv6
+// address is matched against the IPv4 ranges too (net.IPNet.Contains folds it to
+// its v4 form), so encoding a private v4 as ::ffff:a.b.c.d does not slip past.
 func privateIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+	if ip == nil {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4[0] == 169 && v4[1] == 254
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, n := range blockedIPNets {
+		if n.Contains(ip) {
+			return true
+		}
 	}
 	return false
 }

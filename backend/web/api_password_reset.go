@@ -32,6 +32,17 @@ func (s *Server) apiPasswordResetRequest(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	// Throttle by client IP and target address. A reset request sends mail and
+	// always answers "ok" regardless of whether the account exists, so there is
+	// no failure signal to key on -- every accepted request advances the backoff,
+	// which bounds both brute-force probing and mail-bombing one victim.
+	gateKey := clientIP(r) + "\x00" + strings.ToLower(strings.TrimSpace(in.Email))
+	now := time.Now()
+	if allowed, retryAfter := s.passwordResetGate.allow(gateKey, now); !allowed {
+		writeRetryAfter(w, retryAfter, "Too many password reset requests. Try again later.")
+		return
+	}
+	s.passwordResetGate.recordFailure(gateKey, now)
 	user, err := s.store.GetUserByEmail(r.Context(), in.Email)
 	if err == nil && strings.TrimSpace(user.BackupEmail) != "" {
 		if token, tokenErr := auth.NewOpaqueToken(); tokenErr == nil {
@@ -39,7 +50,16 @@ func (s *Server) apiPasswordResetRequest(w http.ResponseWriter, r *http.Request)
 			expires := time.Now().Add(45 * time.Minute)
 			if createErr := s.store.CreatePasswordResetToken(r.Context(), user.ID, tokenHash, expires); createErr == nil {
 				link := s.passwordResetLink(r, token)
-				_ = s.sendPasswordResetEmail(r.Context(), user, link, expires)
+				// Send on a detached context so the response returns without
+				// waiting on the SMTP round-trip. Blocking here would make a
+				// request for a real account (which sends mail) measurably slower
+				// than one for an unknown address (which does not), enumerating
+				// registered addresses despite the constant "ok" body.
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+				go func() {
+					defer cancel()
+					_ = s.sendPasswordResetEmail(ctx, user, link, expires)
+				}()
 			}
 		}
 	}

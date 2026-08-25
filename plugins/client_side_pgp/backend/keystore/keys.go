@@ -143,6 +143,43 @@ func SaveDiscoveredContactKey(ctx context.Context, db *store.Store, userID int64
 	})
 }
 
+// SaveAutocryptContactKey stores a public key discovered in an incoming
+// message's Autocrypt header. It comes from an unauthenticated header (Rolltop
+// verifies no DKIM signature), so unlike a key the user imports by hand it must
+// never override the user's own choice: if a manually managed key already exists
+// for the address, the Autocrypt key is dropped rather than enthroned, which is
+// what a spoofed From with an attacker key would otherwise do to make outgoing
+// mail readable by the attacker. With no manual key present, the discovered key
+// becomes preferred -- ordinary Autocrypt auto-discovery among keys the account
+// learned for itself.
+func SaveAutocryptContactKey(ctx context.Context, db *store.Store, userID int64, in ContactPublicKeyInput) error {
+	email := strings.TrimSpace(in.Email)
+	if store.NormalizeContactEmail(email) == "" || strings.TrimSpace(in.PublicKeyArmored) == "" {
+		return nil
+	}
+	existing, err := ListAllPublicKeysForEmails(ctx, db, userID, []string{email})
+	if err != nil {
+		return err
+	}
+	for _, key := range existing {
+		if isManualKey(key.SourceKind) {
+			return nil
+		}
+	}
+	in.IsPreferred = true
+	_, err = SaveDiscoveredContactKey(ctx, db, userID, in)
+	return err
+}
+
+// isManualKey reports whether a stored key was set by the user rather than
+// discovered from a header. Stored rows never carry an empty SourceKind
+// (normalizeContactPublicKey defaults it to "manual"), but the empty case is
+// treated as manual too so an unlabeled key is protected, not overridden.
+func isManualKey(sourceKind string) bool {
+	kind := strings.ToLower(strings.TrimSpace(sourceKind))
+	return kind == "" || kind == "manual"
+}
+
 func ensureContactForDiscoveredKey(ctx context.Context, db *store.Store, userID int64, email string) (store.Contact, error) {
 	if contact, err := db.GetContactByEmailForUser(ctx, userID, email); err == nil {
 		return contact, nil

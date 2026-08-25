@@ -42,6 +42,7 @@ func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteIm
 	}
 	bodyHTML = strings.ReplaceAll(bodyHTML, "\x00", "")
 	bodyHTML = removeScriptElements(bodyHTML)
+	bodyHTML = removeMetaElements(bodyHTML)
 	bodyHTML = removeInlineScripting(bodyHTML)
 	bodyHTML = replaceInlineCIDRefs(bodyHTML, attachments)
 	bodyHTML = resolveRefsAgainstDeclaredBase(bodyHTML)
@@ -81,6 +82,33 @@ var (
 	scriptOpenRE  = regexp.MustCompile(`(?is)<script\b[^>]*>`)
 	scriptCloseRE = regexp.MustCompile(`(?is)</script\s*>`)
 )
+
+// metaTagRE matches any <meta> tag. An email body has no legitimate use for one
+// -- meta belongs in <head>, which this renderer builds itself -- and a
+// <meta http-equiv="refresh"> in the body still fires inside the sandboxed
+// iframe (it is navigation, not script), which would fetch an attacker URL and
+// defeat the remote-content block that neutralizeRemoteRefs just applied.
+// Stripping every meta tag closes that and any related meta trick (referrer,
+// CSP override) in one rule.
+var (
+	metaTagRE  = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+	metaOpenRE = regexp.MustCompile(`(?i)<meta\b`)
+)
+
+func removeMetaElements(bodyHTML string) string {
+	if !strings.Contains(strings.ToLower(bodyHTML), "<meta") {
+		return bodyHTML
+	}
+	bodyHTML = metaTagRE.ReplaceAllString(bodyHTML, "")
+	// A body truncated at an unclosed <meta ... (no '>') would slip past the
+	// regex above, and a browser auto-closes the tag at end of input and still
+	// fires a refresh in its content attribute. Drop from that opening tag to the
+	// end, mirroring how removeScriptElements handles an unclosed <script>.
+	if opening := metaOpenRE.FindStringIndex(bodyHTML); opening != nil {
+		return bodyHTML[:opening[0]]
+	}
+	return bodyHTML
+}
 
 func removeScriptElements(bodyHTML string) string {
 	if !strings.Contains(strings.ToLower(bodyHTML), "<script") {

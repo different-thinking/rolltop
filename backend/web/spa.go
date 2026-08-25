@@ -239,7 +239,7 @@ func (s *Server) handleAndroidLatest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid android update metadata", http.StatusInternalServerError)
 		return
 	}
-	metadata.APKURL = publicRequestBaseURL(r) + "/android/rolltop.apk"
+	metadata.APKURL = s.publicRequestBaseURL(r) + "/android/rolltop.apk"
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, metadata)
 }
@@ -261,16 +261,21 @@ func (s *Server) handleAndroidAPK(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, full)
 }
 
-func publicRequestBaseURL(r *http.Request) string {
-	scheme := r.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
+// publicRequestBaseURL returns the external origin for a link the app hands back
+// to a client (currently the APK download URL). A configured ROLLTOP_PUBLIC_URL
+// is authoritative and header-independent, so a spoofed X-Forwarded-Host cannot
+// steer the download at an attacker in a deployment that set it; only when it is
+// unset does this fall back to the request's forwarded scheme and host. Mirrors
+// passwordResetLink and the shared plugins.RequestBaseURL.
+func (s *Server) publicRequestBaseURL(r *http.Request) string {
+	if s.publicURL != "" {
+		return s.publicURL
 	}
-	if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+	scheme := "http"
+	if requestIsHTTPS(r) {
+		scheme = "https"
+	}
+	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
 		return scheme + "://" + forwardedHost
 	}
 	return scheme + "://" + r.Host

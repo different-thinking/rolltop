@@ -11,7 +11,15 @@ import (
 	"rolltop/backend/store"
 )
 
-func (s *Service) importIncomingMessageHooks(ctx context.Context, userID int64, raw []byte, parsedFrom string) error {
+func (s *Service) importIncomingMessageHooks(ctx context.Context, userID int64, raw []byte, parsedFrom string, junk bool) error {
+	// Incoming-message hooks discover peer metadata -- today, Autocrypt public
+	// keys -- from the message itself. A spam folder is exactly where a spoofed
+	// From with an attacker key lands, so nothing filed as Junk is allowed to
+	// teach the account a key. Skipping dispatch entirely keeps that trust
+	// decision in one place rather than in each hook.
+	if junk {
+		return nil
+	}
 	backendPlugins, err := s.enabledBackendPlugins(ctx)
 	if err != nil {
 		return err

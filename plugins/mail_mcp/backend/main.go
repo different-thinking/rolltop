@@ -188,10 +188,10 @@ func (p *mailMCPPlugin) authorize(host plugins.APIHost, _ string, w http.Respons
 		return
 	}
 	if r.Method != http.MethodPost || strings.TrimSpace(r.FormValue("approve")) != "1" {
-		writeConsentPage(host, w, r, clientID, redirectURI, scope)
+		writeConsentPage(host, w, r, cu.UserID, clientID, redirectURI, scope)
 		return
 	}
-	if !validConsentToken(host, r) {
+	if !validConsentToken(host, r, cu.UserID) {
 		host.WriteAPIError(w, http.StatusBadRequest, "Mail MCP consent token is invalid.")
 		return
 	}
@@ -387,7 +387,8 @@ func (p *mailMCPPlugin) exchangeRefresh(host plugins.APIHost, w http.ResponseWri
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pruneLocked(time.Now())
-	stored, ok := p.refresh[codeHash(refresh)]
+	refreshKey := codeHash(refresh)
+	stored, ok := p.refresh[refreshKey]
 	if !ok || stored.ClientID != clientID {
 		host.WriteAPIError(w, http.StatusUnauthorized, "invalid_grant")
 		return
@@ -404,6 +405,13 @@ func (p *mailMCPPlugin) exchangeRefresh(host plugins.APIHost, w http.ResponseWri
 		host.WriteAPIError(w, http.StatusUnauthorized, "invalid_grant")
 		return
 	}
+	// Rotate only once the request is committed to succeeding: a refresh token is
+	// single-use, so deleting it before the grant check would let a transient
+	// store error consume a legitimate client's only token and force it back
+	// through the full authorization flow. Deleting here still makes a replayed
+	// (already-used) token fail as invalid_grant -- the classic sign of theft --
+	// and stops a stolen token the moment the real client next refreshes.
+	delete(p.refresh, refreshKey)
 	p.writeTokenResponseLocked(host, w, stored.UserID, stored.GrantID, stored.ClientID, stored.Scope)
 }
 
@@ -977,8 +985,8 @@ func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func writeConsentPage(host plugins.APIHost, w http.ResponseWriter, r *http.Request, clientID, redirectURI, scope string) {
-	token, err := newConsentToken(host, r)
+func writeConsentPage(host plugins.APIHost, w http.ResponseWriter, r *http.Request, userID int64, clientID, redirectURI, scope string) {
+	token, err := newConsentToken(host, r, userID)
 	if err != nil {
 		http.Error(w, "could not create consent token", http.StatusInternalServerError)
 		return
@@ -1058,7 +1066,7 @@ func validCSPHost(host string) bool {
 	return true
 }
 
-func newConsentToken(host plugins.APIHost, r *http.Request) (string, error) {
+func newConsentToken(host plugins.APIHost, r *http.Request, userID int64) (string, error) {
 	nonce, err := auth.NewOpaqueToken()
 	if err != nil {
 		return "", err
@@ -1066,11 +1074,11 @@ func newConsentToken(host plugins.APIHost, r *http.Request) (string, error) {
 	expires := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
 	nonce = strings.TrimSpace(nonce)
 	payload := expires + "." + nonce
-	signature := signConsentPayload(host, r, payload)
+	signature := signConsentPayload(host, r, userID, payload)
 	return payload + "." + signature, nil
 }
 
-func validConsentToken(host plugins.APIHost, r *http.Request) bool {
+func validConsentToken(host plugins.APIHost, r *http.Request, userID int64) bool {
 	formToken := strings.TrimSpace(r.FormValue("consent_token"))
 	if formToken == "" {
 		return false
@@ -1087,13 +1095,21 @@ func validConsentToken(host plugins.APIHost, r *http.Request) bool {
 		return false
 	}
 	payload := parts[0] + "." + parts[1]
-	expected := signConsentPayload(host, r, payload)
+	expected := signConsentPayload(host, r, userID, payload)
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) == 1
 }
 
-func signConsentPayload(host plugins.APIHost, r *http.Request, payload string) string {
+// signConsentPayload binds the token to the signed-in user as well as the
+// request's query. Without the user in the MAC, an attacker could fetch a valid
+// consent token for their own client and have a logged-in victim's browser
+// submit it, silently granting the attacker's MCP client read access to the
+// victim's mail. Mixing UserID in means a token only validates for the same
+// account it was minted under.
+func signConsentPayload(host plugins.APIHost, r *http.Request, userID int64, payload string) string {
 	mac := hmac.New(sha256.New, consentSigningKey(host))
 	mac.Write([]byte(payload))
+	mac.Write([]byte{'\n'})
+	mac.Write([]byte(strconv.FormatInt(userID, 10)))
 	mac.Write([]byte{'\n'})
 	mac.Write([]byte(r.URL.RawQuery))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
@@ -1302,19 +1318,15 @@ func oauthClientID(r *http.Request) string {
 	return strings.TrimSpace(id)
 }
 
+// requestBaseURL and requestIsHTTPS delegate to the shared host-side helper so
+// this plugin and oidc derive their public origin the same way, with a
+// configured ROLLTOP_PUBLIC_URL overriding spoofable request headers.
 func requestBaseURL(r *http.Request) string {
-	scheme := "http"
-	if requestIsHTTPS(r) {
-		scheme = "https"
-	}
-	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
-		return scheme + "://" + forwardedHost
-	}
-	return scheme + "://" + r.Host
+	return plugins.RequestBaseURL(r)
 }
 
 func requestIsHTTPS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return plugins.RequestIsHTTPS(r)
 }
 
 func codeHash(value string) string {
