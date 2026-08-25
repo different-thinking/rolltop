@@ -770,8 +770,11 @@ function statusLabel(status: string) {
 function forwardWasSkipped(ev: Evaluation) {
   if (!ev.actions_json) return false;
   try {
-    const actions = JSON.parse(ev.actions_json) as Record<string, string>;
-    return actions.forward === "skipped_existing_mail";
+    // A row that recorded no actions holds "{}", and one written before this
+    // column meant anything can hold "null" -- neither is a failure to parse,
+    // so neither should be answered by throwing.
+    const actions = JSON.parse(ev.actions_json) as Record<string, string> | null;
+    return actions?.forward === "skipped_existing_mail";
   } catch {
     return false;
   }
