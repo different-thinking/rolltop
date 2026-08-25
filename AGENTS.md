@@ -594,17 +594,31 @@ site and in review.
   must always be a prefix of that list, so editing a shipped entry, renumbering
   one, or leaving a gap is refused at startup rather than guessed at. Add a
   migration; never edit the baseline for a database that already exists.
-- Plugins carry their own migrations, recorded the same way in
-  `plugin_migrations` (`backend/store/plugins.go`). A shipped migration's SQL is
-  immutable for the same reason: the recorded checksum is how a start tells
-  "already applied" from "someone edited what ran". Reformatting one is safe —
-  the checksum hashes each statement's whitespace-separated words, so
-  indentation is not part of a migration's identity — but any change to what it
-  says needs a new migration id. A row written before that normalisation existed
-  is recognised and rewritten in place rather than refused; the one migration
-  whose text was reformatted while the checksum was still byte-exact is
-  grandfathered by hash in `supersededPluginMigrationChecksums`, and that list
-  only ever grows for a formatting-only change to an already-released migration.
+- Every schema checksum — the baseline, `postgresMigrations`, and the plugin
+  migrations in `plugin_migrations` (`backend/store/plugins.go`) — hashes its
+  statements through `normalizeSQL` (`backend/store/sqlnorm.go`) rather than
+  hashing the source text. Layout is not part of what a statement does, so
+  reformatting a shipped migration does not change its checksum; string
+  literals, quoted identifiers and dollar-quoted bodies are still byte-exact,
+  and comments are dropped. This is not cosmetic: byte-exact hashing meant one
+  gofmt re-wrap read back as "edited after it ran" and refused startup on every
+  install that had applied the migration. Changing what a statement *says* still
+  needs a new migration id.
+- A checksum recorded by an older build is recognised, never rewritten
+  (`checksumRecognised`). Rewriting rows to the current algorithm would close
+  the door behind an upgrade: the recorded checksum is what an older binary
+  reads to decide whether it may run, so a rollback or a not-yet-restarted
+  replica would meet the refusal the recognition exists to prevent. The cost is
+  two hashes per start.
+- Because those rows keep their byte-exact checksum, an install that predates
+  `normalizeSQL` stays tied to the exact text it applied — normalisation frees
+  the databases written since, not the ones written before. So reformatting an
+  already-released migration still needs its previous checksum grandfathered,
+  computed from the text as it shipped. For a plugin migration that is a line in
+  `supersededPluginMigrationChecksums`, whose one entry is
+  `remote_image_blocklist/001_create_rules` (re-indented before this existed);
+  the core `postgresMigrations` and the baseline have no such list because
+  neither has ever been reformatted, and both are already immutable by rule.
 - SQL is written with `?` placeholders and translated to `$1..$n` in the driver
   (`backend/pgbind`). That is deliberate: many statements are assembled at run
   time from fragments, and numbering them in the source would mean every

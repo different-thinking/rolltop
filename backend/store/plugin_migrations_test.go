@@ -227,16 +227,17 @@ func TestPluginMigrationChecksumIgnoresFormatting(t *testing.T) {
 	if pluginMigrationChecksum(shallow) == pluginMigrationChecksum(changed) {
 		t.Fatal("changing a migration's SQL did not change its checksum")
 	}
-	if state := pluginMigrationChecksumState(pluginMigrationChecksum(changed), shallow); state != pluginChecksumConflict {
-		t.Fatalf("an edited migration classified as %v, want a conflict", state)
+	if pluginMigrationRecognised(pluginMigrationChecksum(changed), shallow) {
+		t.Fatal("an edited migration's checksum was recognised as the one that ran")
 	}
 }
 
-// TestSupersededPluginChecksumsAreRepairedNotRefused covers the upgrade path for
-// a database whose rows were written by a build that hashed migration text
-// byte-exactly. The row describes this same migration, so it is rewritten in
-// place rather than reported as a mismatch.
-func TestSupersededPluginChecksumsAreRepairedNotRefused(t *testing.T) {
+// TestSupersededPluginChecksumsAreAcceptedAndLeftAlone covers the upgrade path
+// for a database whose rows were written by a build that hashed migration text
+// byte-exactly: the row is recognised, the start does no work, and — the part
+// that matters for a rollback — the recorded checksum is left exactly as the
+// older build wrote it, so that build can still read it.
+func TestSupersededPluginChecksumsAreAcceptedAndLeftAlone(t *testing.T) {
 	ctx := context.Background()
 	db := mustOpenTestStore(t)
 
@@ -244,20 +245,21 @@ func TestSupersededPluginChecksumsAreRepairedNotRefused(t *testing.T) {
 	if !ok {
 		t.Skip("no compiled migration distinguishes the two checksum algorithms")
 	}
+	legacy := pluginMigrationChecksumLegacy(migration)
 	if _, err := db.db.ExecContext(ctx, `UPDATE plugin_migrations SET checksum = ? WHERE plugin_id = ? AND migration_id = ?`,
-		pluginMigrationChecksumLegacy(migration), migration.PluginID, migration.ID); err != nil {
+		legacy, migration.PluginID, migration.ID); err != nil {
 		t.Fatal(err)
 	}
 
-	// The unlocked check reports work, not a refusal: the rewrite is a write.
+	// The unlocked check answers "nothing to do": recognising a checksum is not
+	// work, so an upgraded server neither takes the schema lock nor writes.
 	upToDate, err := db.pluginMigrationsUpToDate(ctx)
 	if err != nil {
 		t.Fatalf("a recognisable older checksum was reported as a mismatch: %v", err)
 	}
-	if upToDate {
-		t.Fatal("a row that still needs rewriting was reported as up to date")
+	if !upToDate {
+		t.Fatal("a database an older build had migrated was reported as outstanding")
 	}
-
 	if err := db.applyPluginMigration(ctx, migration); err != nil {
 		t.Fatal(err)
 	}
@@ -266,15 +268,8 @@ func TestSupersededPluginChecksumsAreRepairedNotRefused(t *testing.T) {
 		migration.PluginID, migration.ID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored != pluginMigrationChecksum(migration) {
-		t.Fatalf("checksum after repair = %s, want %s", stored, pluginMigrationChecksum(migration))
-	}
-	upToDate, err = db.pluginMigrationsUpToDate(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !upToDate {
-		t.Fatal("the repaired database still reports plugin migrations outstanding")
+	if stored != legacy {
+		t.Fatalf("the recorded checksum was rewritten to %s; the previous release can no longer read this database", stored)
 	}
 }
 
@@ -294,8 +289,8 @@ func TestRemoteImageBlocklistSupersededChecksum(t *testing.T) {
 	if migration.ID == "" {
 		t.Fatal("the remote image blocklist no longer declares 001_create_rules")
 	}
-	if state := pluginMigrationChecksumState(shipped, migration); state != pluginChecksumSuperseded {
-		t.Fatalf("the shipped checksum classified as %v, want it recognised and repaired", state)
+	if !pluginMigrationRecognised(shipped, migration) {
+		t.Fatal("the checksum shipped builds recorded for 001_create_rules is no longer recognised, so those installs refuse to start")
 	}
 	// The SQL itself is unchanged since that build, which is the whole reason
 	// the row may be rewritten rather than refused.
@@ -305,12 +300,13 @@ func TestRemoteImageBlocklistSupersededChecksum(t *testing.T) {
 	}
 }
 
-// TestStartupRepairsChecksumsWrittenByAnOlderBuild is the end-to-end form of the
+// TestStartupAcceptsChecksumsWrittenByAnOlderBuild is the end-to-end form of the
 // reported failure: a server that had applied its plugin migrations refused to
 // start after an upgrade with "check plugin migrations: plugin migration
 // checksum mismatch". Nothing about the database was wrong, so opening it has to
-// succeed.
-func TestStartupRepairsChecksumsWrittenByAnOlderBuild(t *testing.T) {
+// succeed — and has to leave the database openable by the release being
+// upgraded from.
+func TestStartupAcceptsChecksumsWrittenByAnOlderBuild(t *testing.T) {
 	ctx := context.Background()
 	db := mustOpenTestStore(t)
 
@@ -319,8 +315,9 @@ func TestStartupRepairsChecksumsWrittenByAnOlderBuild(t *testing.T) {
 		t.Skip("no compiled migration distinguishes the two checksum algorithms")
 	}
 	// Put the database in the state an older build left it in.
+	legacy := pluginMigrationChecksumLegacy(migration)
 	if _, err := db.db.ExecContext(ctx, `UPDATE plugin_migrations SET checksum = ? WHERE plugin_id = ? AND migration_id = ?`,
-		pluginMigrationChecksumLegacy(migration), migration.PluginID, migration.ID); err != nil {
+		legacy, migration.PluginID, migration.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -336,8 +333,8 @@ func TestStartupRepairsChecksumsWrittenByAnOlderBuild(t *testing.T) {
 		migration.PluginID, migration.ID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored != pluginMigrationChecksum(migration) {
-		t.Fatalf("startup left the old checksum in place (%s), so every later start repeats the work", stored)
+	if stored != legacy {
+		t.Fatalf("startup rewrote the checksum to %s, closing the door on a rollback to the previous release", stored)
 	}
 }
 
