@@ -243,22 +243,58 @@ site and in review.
   section headings group on exactly that date. Thread-wide answers (message
   count, participants, read state, starred, attachments) still come from the
   whole thread.
-- Filing mail is decoupled from the IMAP work behind it. A row a list mutation
-  dismissed - delete, Report spam, archive, snooze - is gone from that list the
-  moment it is clicked and stays gone while the list still returns it; only an
-  undo, a proven failure, or a queued move the view stopped watching puts it
-  back. Never release a dismissal because the request finished or a run
-  completed: a queued move ends minutes later, and the rows return to the screen
-  for the gap until the reload answers, which is the flash the dismissal exists
-  to prevent. Whatever proves a move also takes the rows out of the list's own
-  data (`onMessagesMoved`) rather than leaving that to the reload - and only
-  what proves it may: a queued move has been accepted, not performed, so
-  reporting its rows moved takes them out of the list the dismissal is measured
-  against, and the next reload hands them back with nothing hiding them. Read
-  outcomes per message and per run, never per batch: a move that relocated part
-  of a thread restores exactly what stayed, and a set of runs that did not all
-  end the same way settles each run's own messages, or a dismissal that outlives
-  its mutation hides mail that never went anywhere.
+- **Pressing Delete is the whole decision.** Filing mail is decoupled from the
+  IMAP work behind it, and the row is gone from the reader's lists whatever that
+  work does. Two things hold it off screen and they answer different questions.
+  A list's own dismissal (`MessageList`'s `dismissedIDs`) covers the rows that
+  list is holding, for as long as it holds them. The **filing**
+  (`lib/filedMessages.ts`) is the durable half, and it exists because everything
+  else that draws a row went straight past the dismissal: a page cached in
+  memory or in `localStorage`, a prefetched neighbour, a remount after a route
+  change, a reload finishing after the move. Deleted mail came back onto the
+  screen seconds later, and pressing Delete on such a row asked the server to
+  move a message it no longer had - the "could not be deleted" that followed.
+  Every path that files mail records one (`fileMessages` in the list,
+  `fileThreadMove` in the message view), and `api.forgetMessages` takes the rows
+  out of the cached pages at the same time so the stale copy cannot outlive the
+  record. Three properties keep a filing from hiding real mail, and all three
+  must stay: it names the folder the message is going **to** and hides the row
+  only while the row still claims some other folder, so deleted mail is visible
+  in Trash and shows again by itself the moment any list reports it has arrived,
+  with nothing to clear; filings **expire** (`filedMessageTTLMS`), so a move
+  that never happened is a row the reader gets back eventually whatever went
+  wrong; and the set is **bounded**. A message the server answers for with "no
+  such message" is filed with no destination at all, which hides it everywhere -
+  that is the stale row that could be neither opened nor deleted.
+- **Only three things put a filed row back, and a failure is not one of them.**
+  An undo, a move that was never dispatched, and the reader asking for it. A
+  move the server *refused* leaves the row filed and says so
+  (`reportFilingFailure`), with "Show again" on the toast: the reader pressed
+  Delete, and a row that reappears on its own is the thing they reported as mail
+  coming back from the dead. What is handed back without asking is the mail
+  nobody was asked about - the chunks a background commit's keepalive budget
+  never sent (`executeMailboxMove`'s `skippedIDs`), which never left the
+  browser. Never release a dismissal or a filing because the request finished or
+  a run completed: a queued move ends minutes later, and the rows return to the
+  screen for the gap until the reload answers, which is the flash this whole
+  path exists to prevent.
+- **A move of a message the server no longer has is done, not failed.**
+  `apiBulkMoveMessages` has answered ids that resolve to nothing with
+  `ok, moved: 0` for a while, and `apiMoveMessage` - the path a single delete
+  takes - now agrees with it. A 404 there became "Delete failed: Not Found",
+  which put the row back and left the reader with a row no further attempt could
+  ever remove, because every attempt asked the same question about the same
+  missing message. The client treats a 404 from that route the same way for the
+  same reason, so an older server cannot reintroduce it.
+- Whatever proves a move also takes the rows out of the list's own data
+  (`onMessagesMoved`) rather than leaving that to the reload - and only what
+  proves it may: a queued move has been accepted, not performed, so reporting
+  its rows moved takes them out of the list the dismissal is measured against,
+  and the next reload hands them back with nothing hiding them. Read outcomes
+  per message and per run, never per batch: a move that relocated part of a
+  thread settles exactly the messages it took, and a set of runs that did not
+  all end the same way settles each run's own messages, or one refusal decides
+  the fate of mail it never touched.
 - A conversation row can span accounts, and filing it means filing all of it. A
   thread carries copies of the same mail whenever several of the accounts were
   addressed, or none of them was - Bcc, a mailing list - which is exactly when

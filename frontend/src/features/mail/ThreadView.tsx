@@ -4,12 +4,13 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import { Star } from "@phosphor-icons/react";
-import { api } from "../../api";
+import { ApiError, api } from "../../api";
 import type { AddToast, DatePrefs, LocationState, SecurityUnlockState, Toast } from "../../appTypes";
 import type { AccountMailboxChoice, Attachment, AuthenticationResult, Bootstrap, ComposeForm, ComposeIdentity, ContactPGPKey, HeaderDetail, MailCategorySummary, Mailbox, MessageOriginalSource, MessageSecurityIndicators, SearchExplanation, ThreadMessage } from "../../types";
 import { Icon } from "../../components/Icon";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
+import { recordFiledMessages, releaseFiledMessages } from "../../lib/filedMessages";
 import { applyEmailDocumentTheme, themedEmailDocument } from "../../lib/emailDocumentTheme";
 import { displayDateTime, displaySnoozeUntil, displayTime, formatBytes, messageCountLabel } from "../../lib/format";
 import { archiveMailboxForAccount, junkMailboxForAccount, trashMailboxesByAccount } from "../../lib/folders";
@@ -998,6 +999,20 @@ export function ThreadView({
         void refreshChrome();
       } catch (err) {
         if (loadRequest !== loadRequestRef.current) return;
+        // The server has no such message, so the row that opened it is a row no
+        // list should still be drawing: a page this browser cached before the
+        // message left, or one another tab has already filed. Left alone it sat
+        // in the Inbox as mail that could not be opened and could not be deleted
+        // - deleting it asked the same server for the same missing message. It
+        // is filed as gone instead, which takes it out of every list and out of
+        // the stored pages, and the reader is put back where they came from.
+        if (err instanceof ApiError && err.status === 404 && currentMessageID > 0) {
+          recordFiledMessages([{ id: currentMessageID, toMailboxID: 0 }]);
+          api.forgetMessages([currentMessageID]);
+          addToast("This message is no longer on the server. It has been removed from your lists.");
+          navigate(backURL);
+          return;
+        }
         setError(messageFromError(err));
       } finally {
         settled = true;
@@ -1008,7 +1023,7 @@ export function ThreadView({
         }
       }
     },
-    [highlightQuery, id, refreshChrome]
+    [addToast, backURL, currentMessageID, highlightQuery, id, navigate, refreshChrome]
   );
 
   useEffect(() => {
@@ -1767,11 +1782,25 @@ export function ThreadView({
     const snoozed = Boolean(snoozedUntil) && Date.parse(snoozedUntil) > Date.now();
     const snoozedMessageID = action !== "archive" && snoozed && ids.includes(currentMessageID) ? currentMessageID : 0;
     setMessagesHidden(ids, true);
+    // The app-wide hidden set covers this session's open lists and nothing more:
+    // a reload, or a list painting from a cached page, drew the row again. The
+    // filing is what makes the decision outlast them, and it names the folder
+    // the mail is going to, so the row shows again by itself once any list
+    // reports it has arrived there.
+    fileThreadMove(ids, target.id);
     addToast(`Moved ${messageCountLabel(ids.length)} to ${target.name}.`, "success", {
-      onUndo: () => setMessagesHidden(ids, false),
+      onUndo: () => {
+        releaseFiledMessages(ids);
+        setMessagesHidden(ids, false);
+      },
       onCommit: (reason) => void commitThreadMove(action, target, ids, snoozedMessageID, reason === "background")
     });
     navigate(backURL);
+  }
+
+  function fileThreadMove(ids: number[], toMailboxID: number) {
+    recordFiledMessages(ids.map((id) => ({ id, toMailboxID })));
+    api.forgetMessages(ids);
   }
 
   async function commitThreadMove(action: HeaderMoveAction, target: Mailbox, ids: number[], snoozedMessageID: number, keepalive: boolean) {
@@ -1785,12 +1814,20 @@ export function ThreadView({
     } catch (err) {
       // A failed move may still have relocated part of the conversation: the
       // small-move path moves message by message and reports only the first
-      // error. Restoring the rows is the honest default — the conversation does
-      // still have messages in this folder — but the cached list can no longer
-      // be trusted about which, so it is dropped and reloaded from the server.
-      setMessagesHidden(ids, false);
+      // error, so the cached list can no longer be trusted about which, and it
+      // is dropped and reloaded from the server. The rows stay filed rather than
+      // being put back: the reader pressed Delete and a row that reappears on
+      // its own is what they reported as mail coming back. The toast carries the
+      // way back onto the screen, and the filing ages out on its own.
       api.clearMailCache(userID);
-      addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}`, "error");
+      addToast(`${headerMoveFailureLabel(action)} failed: ${messageFromError(err)}. It stays hidden until you show it again.`, "error", {
+        label: "Show again",
+        onUndo: () => {
+          releaseFiledMessages(ids);
+          setMessagesHidden(ids, false);
+        },
+        onCommit: () => undefined
+      });
       if (!keepalive) void refreshChrome().catch(() => undefined);
       return;
     }

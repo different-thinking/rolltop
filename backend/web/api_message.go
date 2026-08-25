@@ -769,7 +769,24 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 		s.serverError(w, r, err)
 		return
 	}
-	refreshMailboxes, err := s.moveRefreshMailboxNames(r.Context(), cu.User.ID, []int64{id}, dest)
+	messages, err := s.store.ListMessagesByIDsForUser(r.Context(), cu.User.ID, []int64{id})
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if len(messages) == 0 {
+		// The id does not resolve to a message this user owns, which bulk-move
+		// has answered as success for a while and this path has to answer the
+		// same way: a lone move is the drag, swipe or Delete of one message, and
+		// the reader asking for it to leave a folder it is not in has got the
+		// outcome they asked for. A 404 made that a "Delete failed" toast that
+		// also put the row back on the screen - and the row it put back was one
+		// no later attempt could ever remove, because every attempt asked the
+		// same question about the same missing message.
+		writeJSON(w, map[string]any{"ok": true, "moved": 0, "mailbox": dest.Name})
+		return
+	}
+	refreshMailboxes, err := s.moveRefreshMailboxNamesForMessages(r.Context(), cu.User.ID, messages, dest)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -782,7 +799,9 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 	defer finishForeground()
 	if err := s.syncer.MoveMessage(r.Context(), cu.User.ID, id, in.MailboxID); err != nil {
 		if store.IsNotFound(err) {
-			http.NotFound(w, r)
+			// The row went between the lookup above and the move - another tab,
+			// or reconciliation reaching the folder. Same answer, same reason.
+			writeJSON(w, map[string]any{"ok": true, "moved": 0, "mailbox": dest.Name})
 			return
 		}
 		s.apiError(w, r, http.StatusBadGateway, "could not move message", err)
@@ -790,7 +809,7 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 	}
 	s.startMoveRefresh(cu.User.ID, dest.AccountID, refreshMailboxes)
 	finishForeground()
-	writeJSON(w, map[string]any{"ok": true, "mailbox": dest.Name})
+	writeJSON(w, map[string]any{"ok": true, "moved": 1, "mailbox": dest.Name})
 }
 
 func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, messageIDs []int64, dest store.Mailbox) ([]string, error) {

@@ -832,7 +832,7 @@ export default function App() {
     await Promise.allSettled(cleanup);
     await api.logout(csrf);
     bootstrapGenerationRef.current += 1;
-    if (bootstrap.user) api.clearMailCache(bootstrap.user.id);
+    if (bootstrap.user) api.forgetUserMail(bootstrap.user.id);
     applySecurityUnlock(emptySecurityUnlockState, true);
     setSecurityUnlockOpen(false);
     setSecurityUnlockIdentityID(null);
