@@ -862,11 +862,25 @@ Android (unit tests and lint), and a Docker build when the image definition
 changes. Keep the path filters in that workflow's `changes` job in sync when
 adding a new top-level area.
 
-`.github/workflows/ci.yml` has two jobs. `verify` runs on every push to `main`
-and answers the one question a pull request cannot: two changes that are each
-green alone may still be broken together. It builds the themes, runs the Go
-suite, links every plugin backend with `-buildmode=plugin`, and verifies the
-checked-in spam model. Keep it lean.
+`.github/workflows/ci.yml` has two jobs. `verify` runs on every push to `main`,
+and its `Classify Push` step decides whether the Go suite has to run at all. A
+push straight to `main` (a one-parent commit), a change to a path the `pr.yml`
+`go` filter misses, or a push it cannot diff runs the full suite: it builds the
+themes, runs the Go suite, links every plugin backend with `-buildmode=plugin`,
+and verifies the checked-in spam model. A normal reviewed merge — a two-parent
+commit touching only covered paths — skips all of that and trusts the run the
+pull request already did.
+
+That trust is sound only when the pull request ran against the current tip of
+`main`. **Enable branch protection's "Require branches to be up to date before
+merging" (or a merge queue) so a pull request that went green against a stale
+`main` cannot merge and break it in the gap between the suite it passed and the
+tip it lands on.** That is a repository-admin setting; the workflow cannot
+enforce it, and without it `verify`'s skip is a stale-green hole rather than an
+optimization. It does not re-run the suite for the reviewed-merge case, so it is
+not a second chance to catch two changes that are broken together — the
+up-to-date requirement is what makes each pull request's own run cover that.
+Keep the job lean.
 
 Do not add `-coverprofile` to that step. Tests in `backend/web` and
 `backend/syncer` build a real backend plugin and load it with `plugin.Open`,
