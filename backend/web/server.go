@@ -530,7 +530,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// frame-ancestors 'none' (with the legacy X-Frame-Options below for old
 		// browsers) forbids embedding the app in any frame, which is what stops a
 		// clickjacking page from overlaying it.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		// script-src is 'self' plus 'wasm-unsafe-eval' (openpgp/pdfium compile
+		// WebAssembly) and no 'unsafe-inline': the shell loads one external module
+		// bundle, and the only inline <script> the server emits is the startup
+		// bootstrap, which is type="application/json" and never executes. Dropping
+		// the module-preload polyfill (vite.config.ts) removed the last executable
+		// inline script, so an injected inline <script> can no longer run.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Frame-Options", "DENY")
 		// HSTS only over a secure connection: sending it over plain HTTP is
 		// ignored by browsers, and a local http:// deployment must not pin itself
