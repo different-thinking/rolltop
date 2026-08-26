@@ -202,9 +202,9 @@ site and in review.
   handshake and refused every Google account with "refusing to send an OAuth
   access token over an unencrypted connection". The gate itself is right and
   stays: a bearer token is as good as the password it replaced. Only its input
-  was wrong, and the socket is the one thing that cannot drift from what was
-  negotiated -- `UseTLS` says what was intended. Anything wrapping the socket
-  must stay unwrappable here, or the gate silently starts refusing again.
+  was wrong. The socket is what was negotiated; `UseTLS` is only what was
+  intended. Anything wrapping the socket must stay unwrappable here, or the
+  gate silently starts refusing again.
 - Gmail's label views (All Mail, Important, Starred) must stay excluded from
   sync by default. The data model stores one folder per message, so mirroring
   them duplicates most of the mailbox.
