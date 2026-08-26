@@ -814,6 +814,36 @@ site and in review.
   forwards it twice. The backfill walk skips what the rule already decided on
   since the rule's own `updated_at`, which also keeps one audit row per message
   rather than one per run, and still reconsiders everything after an edit.
+- **A filter marks read before it forwards or moves, and a read it could not
+  push stops nothing.** Marking read is the one filter action that adds to the
+  others instead of choosing between them - mail a rule forwarded, filed or
+  deleted is mail with no unread badge left to answer for - and the order is what
+  makes it work: `\Seen` is pushed against the UID the message still has, and the
+  move is what takes that UID away, so a mark-read that ran after the move would
+  be flagging the message where it no longer is. The flag travels the same
+  generation-proved path the star does (`StoredMessageHost.MarkMessageRead` ->
+  `Service.SetReadForMessage` + `PushReadStateForMessage`); the removed `star`
+  action was a product decision, not a limit on what sync writes back.
+  Three outcomes are three different words in the audit, because they are three
+  different states of the message. `already_read` is mail that needed nothing -
+  asking anyway is an IMAP round trip per matched message to set the flag it has.
+  `queued` is local read state whose push is waiting on a mailbox generation the
+  mirror cannot prove; it is not "ok", because the server does not have the flag
+  yet, and it is safe because **the move refuses on exactly the same evidence**
+  (`prepareMessageMove`'s generation check is `SyncReadStateForMessage`'s) - so a
+  queued flag is never deleted along with the row a completed move removes.
+  `failed` is a push that errored, and it deliberately does **not** return before
+  the forward and the move: an evaluation row is terminal for its message, since
+  the backfill skips what the rule already decided on, so aborting there would
+  leave a "forward it, then delete it" rule with the mail neither forwarded nor
+  deleted and nothing that ever comes back to it. The row still ends as
+  `action_failed`, which is what says the rule did not do all it says.
+- **Every rule in one arrival is handed the same message, so an action that
+  changes it has to change the copy they share.** `ImportStoredMessage` walks the
+  rules over one `StoredMessageContext`, which is why `evaluateRule` takes it by
+  pointer: the first rule to mark mail read leaves the rules behind it looking at
+  mail that is read, and a stale copy spends a second push on the flag the first
+  one already set.
 - **Forwarding is the one filter action that leaves the account, so a rule may
   limit it to the mail it saw arrive** (`Actions.ForwardNewOnly`, the default
   for a rule written in the editor). The mailbox behind a new rule holds years

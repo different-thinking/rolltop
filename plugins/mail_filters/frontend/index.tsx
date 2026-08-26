@@ -18,6 +18,10 @@ import "./styles.css";
 type Actions = {
   move_mailbox_id: number;
   move_role: string;
+  // mark_read marks the mail read the way opening it would. It is the one
+  // action that adds to the others rather than replacing them: mail a rule
+  // forwarded, filed or deleted is mail with no unread badge left to answer.
+  mark_read: boolean;
   forward_to: string;
   // forward_new_only limits the forward to mail that reaches the rule as it
   // arrives. Everything else about the rule is unchanged: Backfill still walks
@@ -223,6 +227,7 @@ function actionSummary(actions: Actions, mailboxes: Mailbox[]) {
     const folder = mailboxes.find((mailbox) => mailbox.id === actions.move_mailbox_id);
     parts.push(folder ? `Move to ${folder.account_label || folder.account_email} / ${folder.name}` : "Move to a folder that is gone");
   }
+  if (actions.mark_read) parts.push("Mark as read");
   return parts.length > 0 ? parts.join(" \u00b7 ") : "Record matches only";
 }
 
@@ -251,7 +256,7 @@ const blankRule: Rule = {
   // forward is the one action that leaves the account, so the first Backfill of
   // a rule written without thinking about it must not send hundreds of copies of
   // mail the reader dealt with long ago. Turning it off is one click.
-  actions: { move_mailbox_id: 0, move_role: "", forward_to: "", forward_new_only: true },
+  actions: { move_mailbox_id: 0, move_role: "", mark_read: false, forward_to: "", forward_new_only: true },
   position: 0
 };
 
@@ -557,6 +562,15 @@ export function MailFilterSettings({ csrf, user, mailboxes, location, navigate, 
               <input type="email" value={draft.actions.forward_to} onChange={(event) => setAction({ forward_to: event.target.value })} placeholder="name@example.com" />
             </label>
           </div>
+          <label className="mail-filter-mark-read">
+            <input type="checkbox" checked={draft.actions.mark_read} onChange={(event) => setAction({ mark_read: event.target.checked })} />
+            <span>Mark it as read</span>
+          </label>
+          {draft.actions.mark_read ? (
+            <p className="muted">
+              Marking read happens before the forward and the move, so mail this filter files or deletes leaves nothing unread behind. Backfill marks the mail already in the mailbox read as well &mdash; on a filter that matches years of mail, that is one pass over all of it.
+            </p>
+          ) : null}
           {draft.actions.forward_to.trim() ? (
             <label className="mail-filter-forward-scope">
               <input type="checkbox" checked={draft.actions.forward_new_only} onChange={(event) => setAction({ forward_new_only: event.target.checked })} />
@@ -764,19 +778,20 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
-// forwardWasSkipped reads the one action outcome that is neither a success nor
-// a failure: a rule that forwards new mail only, reached by mail that was
-// already in the mailbox when the rule got to it.
-function forwardWasSkipped(ev: Evaluation) {
-  if (!ev.actions_json) return false;
+// actionOutcome reads what one action recorded on an evaluation row. The two
+// outcomes the detail line spells out are the ones that are neither a success
+// nor a failure, and a row that shows "matched" over either of them says the
+// opposite of what happened.
+function actionOutcome(ev: Evaluation, action: string) {
+  if (!ev.actions_json) return "";
   try {
     // A row that recorded no actions holds "{}", and one written before this
     // column meant anything can hold "null" -- neither is a failure to parse,
     // so neither should be answered by throwing.
     const actions = JSON.parse(ev.actions_json) as Record<string, string> | null;
-    return actions?.forward === "skipped_existing_mail";
+    return actions?.[action] || "";
   } catch {
-    return false;
+    return "";
   }
 }
 
@@ -793,7 +808,10 @@ function evaluationDetail(ev: Evaluation, datePrefs: DatePrefs) {
     outcome,
     // A row that matched and forwarded nothing has to say why, or the audit
     // reads as a forward that quietly failed.
-    forwardWasSkipped(ev) ? "forward skipped \u2014 this mail was already in the mailbox" : ""
+    actionOutcome(ev, "forward") === "skipped_existing_mail" ? "forward skipped \u2014 this mail was already in the mailbox" : "",
+    // Read locally, with the flag still to reach the server. Saying "marked as
+    // read" here would claim the mail is read on every other client too.
+    actionOutcome(ev, "read") === "queued" ? "marked read here \u2014 the flag reaches the server on the next sync" : ""
   ].filter(Boolean);
   return parts.join(" · ");
 }

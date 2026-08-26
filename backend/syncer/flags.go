@@ -97,44 +97,73 @@ func (s *Service) PushPendingReadState(ctx context.Context, userID int64, limit 
 
 // SyncReadStateForMessage pushes the read state for one message UID to IMAP.
 func (s *Service) SyncReadStateForMessage(ctx context.Context, userID, messageID int64) error {
+	_, err := s.PushReadStateForMessage(ctx, userID, messageID)
+	return err
+}
+
+// PushReadStateForMessage is SyncReadStateForMessage with the one answer its
+// callers used to throw away: whether the change actually reached the server.
+// A mailbox generation that cannot be proved leaves the change queued for
+// PushPendingReadState rather than issuing STORE against a reused UID, which is
+// the correct outcome and not an error -- but it is not the same as done, and a
+// caller that records what it did to a message must be able to tell them apart.
+func (s *Service) PushReadStateForMessage(ctx context.Context, userID, messageID int64) (bool, error) {
 	msg, err := s.Store.GetMessageForUser(ctx, userID, messageID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	account, err := s.Store.GetMailAccountForUser(ctx, userID, msg.AccountID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	mailbox, err := s.Store.GetMailboxForUser(ctx, userID, msg.MailboxID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	expectedUIDValidity, err := s.Store.GetMessageUIDValidityForUser(ctx, userID, msg.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if expectedUIDValidity <= 0 || mailbox.UIDValidity <= 0 || expectedUIDValidity != mailbox.UIDValidity {
 		// Leave the mutation pending. The next mailbox sync will reset or refresh
 		// the stale generation without issuing STORE against a reused UID.
-		return nil
+		return false, nil
 	}
 	flagFetcher, ok := s.Fetcher.(UIDValidityFlagFetcher)
 	if !ok {
-		return errors.New("IMAP fetcher cannot prove mailbox generation for read-state sync")
+		return false, errors.New("IMAP fetcher cannot prove mailbox generation for read-state sync")
 	}
 	applied, err := flagFetcher.SetSeenWithUIDValidity(ctx, account, mailbox.Name, msg.UID,
 		msg.IsRead, uint32(expectedUIDValidity))
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !applied {
-		return nil
+		return false, nil
 	}
 	if err := s.Store.ClearReadSyncPending(ctx, userID, msg.ID); err != nil {
-		return err
+		return false, err
 	}
 	msg.ReadSyncPending = false
-	return s.IndexAttachmentsForMessage(ctx, msg)
+	return true, s.IndexAttachmentsForMessage(ctx, msg)
+}
+
+// SetReadForMessage updates local read state and queues the matching IMAP flag
+// change, the way SetStarredForMessage does for the star. The push itself is
+// SyncReadStateForMessage: leaving the change queued is the correct outcome for
+// a mailbox generation that cannot be proved, not a failure.
+func (s *Service) SetReadForMessage(ctx context.Context, userID, messageID int64, read bool) (store.MessageRecord, error) {
+	if err := s.Store.MarkMessageReadForUser(ctx, userID, messageID, read, true); err != nil {
+		return store.MessageRecord{}, err
+	}
+	msg, err := s.Store.GetMessageForUser(ctx, userID, messageID)
+	if err != nil {
+		return store.MessageRecord{}, err
+	}
+	if err := s.IndexAttachmentsForMessage(ctx, msg); err != nil {
+		return store.MessageRecord{}, err
+	}
+	return msg, nil
 }
 
 // PushPendingStarState sends locally queued star-state changes to IMAP in bounded batches.
