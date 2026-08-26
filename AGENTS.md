@@ -208,6 +208,39 @@ site and in review.
 - Gmail's label views (All Mail, Important, Starred) must stay excluded from
   sync by default. The data model stores one folder per message, so mirroring
   them duplicates most of the mailbox.
+- **A category is defined in exactly one place** (`mailparse.categoryDefinitions`)
+  and nowhere else: the name is the stored value, the view name, and the URL
+  segment at once, so the sidebar, the router, validation, and the API payload
+  all derive from that list. Do not add a second list of categories anywhere,
+  and do not rename a name without a migration -- it is in the database and in
+  people's links.
+- **Only `Invoices & Contracts` reads message content, and only out of machine
+  mail.** Every other category is a header claim the reader could check
+  themselves; that one cannot be, because an invoice and a delivery notice are
+  the same robot as far as headers go. So it is decided in a second step
+  (`applyInvoiceEvidence`), it may take mail out of `Notifications` and
+  `Newsletters` only, and it must never take mail the headers called a person
+  writing: wrongly filing somebody's mail into a paperwork list costs more than
+  leaving one invoice among the notifications. The two evidence grades exist for
+  the same reason -- broadcast mail will put "Rechnung" in a subject line, so it
+  needs a document, not a word.
+- **Changing what a category means is a `store.CategoryVersion` bump, not a
+  column reset.** The backfill re-reads mail an older generation filed, a batch
+  at a time, while the rows keep the category they already have; emptying
+  `messages.category` to force the same pass would blank every category list for
+  as long as it runs.
+- **A re-pass may only improve an answer, never guess at one that exists.** Every
+  fallback in classification -- the sender address, a scan that stopped at
+  `maxCategoryScanBytes` -- knows less than the headers and the whole-message
+  parse that filed the row in the first place, so it may fill an empty category
+  and must never replace a filled one (`CategoryCandidate.Category`,
+  `CategorizeReaderScan`). This is not a nicety: blob retention prunes raw
+  messages after `ROLLTOP_BLOB_RETENTION` (14 days by default) and clears
+  `blob_path` with them, so a pass that re-decided unreadable rows from their
+  address would drain most of a mailbox into the default list. Those rows are
+  not selected at all. A message that has *never* been classified is the
+  opposite case and must always leave a pass with something, or it is selected
+  forever.
 - The whole-account lists - All Mail, Inbox, and every category view - read one
   flag, `mailboxes.show_in_all_mail`, through `Store.inPlayMailScope`. Sent,
   Drafts, Trash and Junk default it off (`defaultMailboxShowInAllMail`), and that

@@ -259,6 +259,33 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE messages ADD COLUMN has_autocrypt_header bigint NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// Which classifier generation decided a message's category
+		// (store.CategoryVersion). Categories used to be a one-way door: the
+		// backfill only ever looked at rows with no category at all, so mail
+		// filed before a rule changed stayed where the old rule put it forever
+		// — and a category added later started out empty except for mail that
+		// happened to arrive after it. The column turns that into ordinary
+		// background work: rows an older generation filed are re-read a batch
+		// at a time, while keeping the answer they already have until the new
+		// one lands, so no list goes blank while the pass runs.
+		//
+		// Existing rows default to 0, which is below every shipped generation:
+		// the first run of a build carrying this column re-classifies the
+		// mailbox once. Adding the column is metadata-only in PostgreSQL — the
+		// default is not volatile — so the migration itself does not rewrite
+		// the table.
+		//
+		// The index is not partial. A predicate naming one generation would
+		// have to be replaced by a new migration on every bump, and the
+		// selection reads `category_version < $1` with a bound parameter, which
+		// a partial index could not be matched against anyway.
+		Version: "0009-message-category-version",
+		Statements: []string{
+			`ALTER TABLE messages ADD COLUMN category_version bigint NOT NULL DEFAULT 0`,
+			`CREATE INDEX idx_messages_category_version ON messages (user_id, category_version, id)`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

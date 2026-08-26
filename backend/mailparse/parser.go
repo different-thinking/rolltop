@@ -123,9 +123,10 @@ type ParsedMessage struct {
 	// Autocrypt header. The thread view gates its per-message key-import probe on
 	// this so it no longer downloads every message's full source just to look.
 	HasAutocryptHeader bool
-	// Category is decided from the list and automation headers while they are
-	// still in hand. Reading it back later means re-opening the raw message,
-	// which is what the backfill has to do for mail stored before categories.
+	// Category is decided while the message is open: the headers name what kind
+	// of traffic it is, and the body and attachment names decide whether it is
+	// paperwork. Reading it back later means re-opening the raw message, which
+	// is what the backfill has to do for mail stored before categories.
 	Category string
 }
 
@@ -148,6 +149,9 @@ func Parse(raw []byte) (ParsedMessage, error) {
 		To:         addressHeader(msg.Header.Get("To")),
 		CC:         addressHeader(msg.Header.Get("Cc")),
 	}
+	// The header decision is made before the body walk so that every exit below
+	// -- including the truncated-message one -- leaves a categorized message.
+	// What the walk collects can only refine it, in categorize below.
 	parsed.Category = Categorize(msg.Header, parsed.From)
 	parsed.HasAutocryptHeader = strings.TrimSpace(msg.Header.Get("Autocrypt")) != ""
 	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
@@ -157,13 +161,23 @@ func Parse(raw []byte) (ParsedMessage, error) {
 		if isTolerableEOF(err) {
 			parsed.Text = cleanIndexedText(parsed.Text)
 			parsed.Sanitize()
+			parsed.categorize()
 			return parsed, nil
 		}
 		return ParsedMessage{}, err
 	}
 	parsed.Text = cleanIndexedText(parsed.Text)
 	parsed.Sanitize()
+	parsed.categorize()
 	return parsed, nil
+}
+
+// categorize settles the category once the body and the attachment names are
+// known. It runs after Sanitize so the text it reads is the text the rest of
+// the app stores, and it is the same decision the backfill makes from a stored
+// message -- only from a whole message rather than a bounded scan of one.
+func (p *ParsedMessage) categorize() {
+	p.Category = applyInvoiceEvidence(p.Category, p.CategoryContent())
 }
 
 // ParseDisplayBody is the lighter display path used when a raw message is loaded
