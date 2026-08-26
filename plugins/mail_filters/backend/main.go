@@ -50,6 +50,13 @@ const (
 	// message is read -- and saying so is what keeps the row from claiming a
 	// flag change that never left this process.
 	readAlready = "already_read"
+	// readQueued is the same distinction for a push the host could not make:
+	// the message is read here, and `\Seen` is waiting on a mailbox generation
+	// the mirror cannot prove. It is not a failure, and it is not "ok" either --
+	// the flag is not on the server yet, and only the pending-read push will put
+	// it there. The move that may follow refuses on the same evidence, which is
+	// what keeps a queued flag from being dropped with the row a move removes.
+	readQueued = "queued"
 	// moveRoleTrash and moveRoleArchive are destinations named relative to the
 	// message's own account, so one rule can say "Trash" and mean each
 	// account's own Trash. Deleting mail is exactly this move: Rolltop never
@@ -185,7 +192,7 @@ func (p *mailFiltersBackend) ImportStoredMessage(ctx context.Context, host plugi
 		return err
 	}
 	for _, rule := range rules {
-		moved, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0)
+		moved, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0)
 		if err != nil {
 			return err
 		}
@@ -641,10 +648,14 @@ func deleteRule(ctx context.Context, db *sql.DB, userID, id int64) error {
 // prevent. And a rule whose only term is the age matches every message its
 // scope reaches, because the age was the entire condition; asking the search
 // index for the empty string that remains would answer no to all of them.
-func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, p pass, evalID int64) (bool, error) {
+// evaluateRule takes the message by pointer because one action changes it: a
+// rule that marks mail read leaves the next rule in the same arrival looking at
+// a message that is now read, and a stale copy would spend a second push on the
+// flag the first rule already set.
+func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg *plugins.StoredMessageContext, p pass, evalID int64) (bool, error) {
 	phase := p.Phase
 	if rule.ScopeMode == "selected_accounts" && !containsID(rule.AccountIDs, msg.AccountID) {
-		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusSkipped, false, time.Time{}, nil, nil, "{}", "")
+		return false, recordEvaluation(ctx, db, evalID, rule, *msg, phase, statusSkipped, false, time.Time{}, nil, nil, "{}", "")
 	}
 	query := rule.Query
 	aged := false
@@ -654,22 +665,22 @@ func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		query = strings.TrimSpace(age.QueryWithoutClause)
 		aged = true
 		if dueAt := msg.Date.Add(age.Duration); time.Now().UTC().Before(dueAt) {
-			result, err := matchMessage(ctx, host, msg, query, aged)
+			result, err := matchMessage(ctx, host, *msg, query, aged)
 			if err != nil {
-				return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
+				return false, recordEvaluation(ctx, db, evalID, rule, *msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
 			}
 			if !result.Matched {
-				return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
+				return false, recordEvaluation(ctx, db, evalID, rule, *msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
 			}
-			return false, scheduleEvaluation(ctx, db, evalID, rule, msg, phase, dueAt, result)
+			return false, scheduleEvaluation(ctx, db, evalID, rule, *msg, phase, dueAt, result)
 		}
 	}
-	result, err := matchMessage(ctx, host, msg, query, aged)
+	result, err := matchMessage(ctx, host, *msg, query, aged)
 	if err != nil {
-		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
+		return false, recordEvaluation(ctx, db, evalID, rule, *msg, phase, statusFailed, false, time.Time{}, nil, nil, "{}", err.Error())
 	}
 	if !result.Matched {
-		return false, recordEvaluation(ctx, db, evalID, rule, msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
+		return false, recordEvaluation(ctx, db, evalID, rule, *msg, phase, statusNotMatched, false, time.Time{}, result.Terms, result.Fields, "{}", "")
 	}
 	actionJSON, moved, status, errText := applyActions(ctx, host, db, rule, msg, p)
 	if errText != "" {
@@ -678,7 +689,7 @@ func evaluateRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	if status == "" {
 		status = statusMatched
 	}
-	if err := recordEvaluation(ctx, db, evalID, rule, msg, phase, status, true, time.Time{}, result.Terms, result.Fields, actionJSON, errText); err != nil {
+	if err := recordEvaluation(ctx, db, evalID, rule, *msg, phase, status, true, time.Time{}, result.Terms, result.Fields, actionJSON, errText); err != nil {
 		return moved, err
 	}
 	return moved, nil
@@ -780,7 +791,7 @@ func moveDestination(ctx context.Context, host plugins.StoredMessageHost, db *sq
 	return 0, fmt.Errorf("unknown move destination %q", actions.MoveRole)
 }
 
-func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, p pass) (string, bool, string, string) {
+func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg *plugins.StoredMessageContext, p pass) (string, bool, string, string) {
 	results := map[string]string{}
 	// Marking read comes first because the move is what ends this message's
 	// life in the folder it is in: `\Seen` is pushed against the UID the
@@ -788,15 +799,20 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	// with it. A message that is read already is left alone -- the flag would
 	// be the one it has, and the push behind it is an IMAP round trip per
 	// matched message that changes nothing.
+	//
+	// A read that could not be pushed does not stop the rest of the rule.
+	// An evaluation row is terminal for its message -- the backfill skips what
+	// this rule has already decided on -- so returning here would leave a
+	// "forward it, then delete it" rule with the mail neither forwarded nor
+	// deleted, and nothing that ever comes back to it, over a flag it could not
+	// set. The row still ends as a failure, and readErr says what went wrong.
+	readErr := ""
 	if rule.Actions.MarkRead {
-		if msg.IsRead {
-			results["read"] = readAlready
-		} else if err := host.MarkMessageRead(ctx, msg.UserID, msg.MessageID, true); err != nil {
-			results["read"] = "failed"
-			return mustJSON(results), false, statusFailed, err.Error()
-		} else {
-			results["read"] = "ok"
+		outcome, err := markRead(ctx, host, msg)
+		if err != nil {
+			outcome, readErr = "failed", err.Error()
 		}
+		results["read"] = outcome
 	}
 	switch {
 	case rule.Actions.forwards(p):
@@ -820,7 +836,7 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		// match that forwarded nothing and says nothing about why.
 		results["forward"] = forwardSkippedNew
 	}
-	destID, err := moveDestination(ctx, host, db, rule.Actions, msg)
+	destID, err := moveDestination(ctx, host, db, rule.Actions, *msg)
 	if err != nil {
 		results["move"] = "failed"
 		return mustJSON(results), false, statusFailed, err.Error()
@@ -831,9 +847,42 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 			return mustJSON(results), false, statusFailed, err.Error()
 		}
 		results["move"] = "ok"
-		return mustJSON(results), true, statusMatched, ""
+		return mustJSON(results), true, matchedUnless(readErr), readErr
 	}
-	return mustJSON(results), false, statusMatched, ""
+	return mustJSON(results), false, matchedUnless(readErr), readErr
+}
+
+// markRead applies the rule's read action to one message and answers with what
+// the audit should record. It keeps the caller's copy of the message in step
+// with what it did, because the next rule over this same arrival reads it.
+// Mail that is read already is answered without a host call at all: the flag
+// would be the one it has, and asking anyway is an IMAP round trip per matched
+// message on a backfill.
+func markRead(ctx context.Context, host plugins.StoredMessageHost, msg *plugins.StoredMessageContext) (string, error) {
+	if msg.IsRead {
+		return readAlready, nil
+	}
+	pushed, err := host.MarkMessageRead(ctx, msg.UserID, msg.MessageID, true)
+	if err != nil {
+		return "failed", err
+	}
+	// Local read state is set whether or not the push landed, so the message is
+	// read from here on either way.
+	msg.IsRead = true
+	if !pushed {
+		return readQueued, nil
+	}
+	return "ok", nil
+}
+
+// matchedUnless keeps a read that could not be pushed visible in the row's
+// status. The rule matched and its move ran, but it did not do everything it
+// says, and an audit that shows a plain match for that says the opposite.
+func matchedUnless(errText string) string {
+	if errText != "" {
+		return statusFailed
+	}
+	return statusMatched
 }
 
 func recordEvaluation(ctx context.Context, db *sql.DB, evalID int64, rule Rule, msg plugins.StoredMessageContext, phase, status string, matched bool, dueAt time.Time, terms, fields []string, actionJSON, errText string) error {
@@ -943,7 +992,7 @@ func backfillRule(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 	processed := 0
 	next := from
 	for _, msg := range messages {
-		if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 			return processed, next, false, err
 		}
 		processed++
@@ -1047,7 +1096,7 @@ func runScheduled(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		if err != nil {
 			return processed, err
 		}
-		if _, err := evaluateRule(ctx, host, db, rule, item.msg, scheduledPass(item.origin), item.evalID); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, &item.msg, scheduledPass(item.origin), item.evalID); err != nil {
 			return processed, err
 		}
 		processed++

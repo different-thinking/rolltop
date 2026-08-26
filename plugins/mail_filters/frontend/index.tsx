@@ -778,19 +778,20 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
-// forwardWasSkipped reads the one action outcome that is neither a success nor
-// a failure: a rule that forwards new mail only, reached by mail that was
-// already in the mailbox when the rule got to it.
-function forwardWasSkipped(ev: Evaluation) {
-  if (!ev.actions_json) return false;
+// actionOutcome reads what one action recorded on an evaluation row. The two
+// outcomes the detail line spells out are the ones that are neither a success
+// nor a failure, and a row that shows "matched" over either of them says the
+// opposite of what happened.
+function actionOutcome(ev: Evaluation, action: string) {
+  if (!ev.actions_json) return "";
   try {
     // A row that recorded no actions holds "{}", and one written before this
     // column meant anything can hold "null" -- neither is a failure to parse,
     // so neither should be answered by throwing.
     const actions = JSON.parse(ev.actions_json) as Record<string, string> | null;
-    return actions?.forward === "skipped_existing_mail";
+    return actions?.[action] || "";
   } catch {
-    return false;
+    return "";
   }
 }
 
@@ -807,7 +808,10 @@ function evaluationDetail(ev: Evaluation, datePrefs: DatePrefs) {
     outcome,
     // A row that matched and forwarded nothing has to say why, or the audit
     // reads as a forward that quietly failed.
-    forwardWasSkipped(ev) ? "forward skipped \u2014 this mail was already in the mailbox" : ""
+    actionOutcome(ev, "forward") === "skipped_existing_mail" ? "forward skipped \u2014 this mail was already in the mailbox" : "",
+    // Read locally, with the flag still to reach the server. Saying "marked as
+    // read" here would claim the mail is read on every other client too.
+    actionOutcome(ev, "read") === "queued" ? "marked read here \u2014 the flag reaches the server on the next sync" : ""
   ].filter(Boolean);
   return parts.join(" · ");
 }

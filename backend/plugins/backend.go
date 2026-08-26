@@ -239,9 +239,12 @@ type StoredMessageHost interface {
 	MatchMessageSearch(context.Context, int64, int64, string) (SearchMatchResult, error)
 	StarMessage(context.Context, int64, int64, bool) error
 	// MarkMessageRead sets local read state for one message and pushes the
-	// matching `\Seen` change to IMAP, which is the whole of what read-state
-	// sync is allowed to touch.
-	MarkMessageRead(context.Context, int64, int64, bool) error
+	// matching `\Seen` change to IMAP. It answers whether that push reached the
+	// server: a mailbox generation that cannot be proved leaves the change
+	// queued for the next read-state push rather than flagging a reused UID,
+	// which is a correct outcome and not an error -- but a caller recording what
+	// it did to a message must not report it as done.
+	MarkMessageRead(context.Context, int64, int64, bool) (bool, error)
 	MoveMessage(context.Context, int64, int64, int64) error
 	ForwardMessage(context.Context, int64, int64, string, []MailHeader) error
 	// ArchiveMailboxID answers where one account files archived mail, for the

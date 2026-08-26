@@ -34,11 +34,28 @@ handles it, filed in a folder, or deleted is mail with no unread badge left to
 answer for. It runs **before** the forward and the move, because the move is what
 ends the message's life in the folder it is in -- `\Seen` is pushed against the
 UID the message still has, and the copy the move leaves behind carries the flag
-with it. A message that is read already is left alone and the audit says so
-(`read: already_read`) rather than claiming a flag change: the alternative is one
-IMAP round trip per matched message to set the flag it has. Read state is the
-one flag Rolltop's sync writes back, so this is nothing a rule could not do by
-opening the mail.
+with it. The push is the same generation-proved one the star uses
+(`StoredMessageHost.MarkMessageRead`); the `star` action was removed as a product
+decision (`migrations/user/003`), not because sync could not write it back.
+
+The audit keeps three outcomes apart, because they are three different states of
+the message:
+
+- `already_read` -- the message needed nothing, and no host call was made. The
+  alternative is one IMAP round trip per matched message to set the flag it has.
+- `queued` -- read locally, with `\Seen` waiting on a mailbox generation the
+  mirror cannot prove. Not `ok`: the server does not have the flag yet, and the
+  pending-read push is what will put it there. The move refuses on exactly that
+  same evidence, so a queued flag is never dropped along with the local row a
+  completed move deletes.
+- `failed` -- the push errored, and the rest of the rule **still runs**. An
+  evaluation row is terminal for its message, so returning here would leave a
+  "forward it, then delete it" rule with the mail neither forwarded nor deleted
+  and nothing that ever comes back to it. The row ends as `action_failed`.
+
+Every rule in one arrival is handed the same message, so the first rule to mark
+it read leaves the rules behind it looking at mail that is read -- otherwise the
+second rule spends another push on the flag the first one set.
 
 A forward may be limited to the mail the rule saw arrive (`forward_new_only`,
 which the editor turns on for a new rule). The mailbox behind a rule written

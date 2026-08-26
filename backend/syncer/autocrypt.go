@@ -179,16 +179,17 @@ func (h syncPluginHost) StarMessage(ctx context.Context, userID, messageID int64
 }
 
 // MarkMessageRead sets read state locally and pushes `\Seen`, so a filter that
-// marks mail read leaves it in the same state opening it would have.
-func (h syncPluginHost) MarkMessageRead(ctx context.Context, userID, messageID int64, read bool) error {
+// marks mail read leaves it in the same state opening it would have. The bool
+// is whether the push reached the server; false means it is queued.
+func (h syncPluginHost) MarkMessageRead(ctx context.Context, userID, messageID int64, read bool) (bool, error) {
 	if h.s == nil {
-		return errors.New("sync service is not configured")
+		return false, errors.New("sync service is not configured")
 	}
 	msg, err := h.s.SetReadForMessage(ctx, userID, messageID, read)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return h.s.SyncReadStateForMessage(ctx, userID, msg.ID)
+	return h.s.PushReadStateForMessage(ctx, userID, msg.ID)
 }
 
 func (h syncPluginHost) MoveMessage(ctx context.Context, userID, messageID, destMailboxID int64) error {

@@ -170,6 +170,11 @@ type fakeFilterHost struct {
 	// message is still in the folder a move would take it out of.
 	readMarked []int64
 	ops        []string
+	// readQueuedOnly stands for a host that set read state locally but could
+	// not prove the mailbox generation, so `\Seen` is waiting rather than sent.
+	// readErr stands for the push failing outright.
+	readQueuedOnly bool
+	readErr        error
 	// archiveMailboxID is the account's chosen Archive folder, and zero stands
 	// for an account whose reader never named one.
 	archiveMailboxID int64
@@ -188,13 +193,16 @@ func (h *fakeFilterHost) MatchMessageSearch(_ context.Context, _, _ int64, query
 
 func (h *fakeFilterHost) StarMessage(context.Context, int64, int64, bool) error { return nil }
 
-func (h *fakeFilterHost) MarkMessageRead(_ context.Context, _, messageID int64, read bool) error {
+func (h *fakeFilterHost) MarkMessageRead(_ context.Context, _, messageID int64, read bool) (bool, error) {
 	if !read {
-		return errors.New("filters only mark mail read")
+		return false, errors.New("filters only mark mail read")
 	}
 	h.readMarked = append(h.readMarked, messageID)
 	h.ops = append(h.ops, "read")
-	return nil
+	if h.readErr != nil {
+		return false, h.readErr
+	}
+	return !h.readQueuedOnly, nil
 }
 
 func (h *fakeFilterHost) MoveMessage(_ context.Context, _, messageID, destID int64) error {
@@ -227,7 +235,7 @@ func TestBackfillSchedulesMailThatIsNotOldEnoughYet(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 100, time.Now().UTC().Add(-2*24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +263,7 @@ func TestAgeOnlyRuleSchedulesWithoutSearching(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "older_than:30d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 101, time.Now().UTC().Add(-24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +288,7 @@ func TestRepeatedSchedulingKeepsOneWaitingRow(t *testing.T) {
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 102, time.Now().UTC().Add(-24*time.Hour))
 
 	for range 3 {
-		if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+		if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -306,7 +314,7 @@ func TestDueMessageMatchesOnTheRemainingQueryAndActs(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{ForwardTo: "archive@example.test"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 103, time.Now().UTC().Add(-30*24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, scheduledPass(phaseInbound), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, scheduledPass(phaseInbound), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -333,7 +341,7 @@ func TestMessageWithoutADateLeavesTheAgeToTheIndex(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 104, time.Time{})
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -454,7 +462,7 @@ func TestQueryWithNoConditionMatchesNothing(t *testing.T) {
 	}
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 105, time.Now().UTC().Add(-24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -613,7 +621,7 @@ func TestPurgeClearsWaitsWhoseMessageIsGone(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test older_than:7d", Actions{MoveRole: "trash"})
 	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 340, time.Now().UTC().Add(-24*time.Hour))
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 340, time.Now().UTC().Add(-24*time.Hour))
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, user.ID, 340); err != nil {
@@ -644,7 +652,7 @@ func TestRecentActionsShowFailures(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{})
 	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 350, time.Now().UTC().Add(-24*time.Hour))
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 350, time.Now().UTC().Add(-24*time.Hour))
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -725,7 +733,7 @@ func TestDeleteMovesMailIntoTheAccountsOwnTrash(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 300, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -749,7 +757,7 @@ func TestArchiveMovesMailIntoTheFolderTheAccountChose(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 301, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -771,7 +779,7 @@ func TestArchiveWithoutAChosenFolderIsRecordedAsAFailure(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleArchive})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 302, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -797,7 +805,7 @@ func TestDeleteWithoutATrashFolderIsRecordedAsAFailure(t *testing.T) {
 	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MoveRole: moveRoleTrash})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 303, time.Now().UTC().Add(-time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -871,7 +879,7 @@ func TestForwardNewOnlyLeavesTheBackfillsMailUnforwarded(t *testing.T) {
 	})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 400, time.Now().UTC().Add(-400*24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -902,7 +910,7 @@ func TestForwardNewOnlyStillForwardsMailAsItArrives(t *testing.T) {
 	})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 401, time.Now().UTC())
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1009,10 +1017,10 @@ func TestAWaitThatBeganOnArrivalKeepsItsOriginThroughABackfill(t *testing.T) {
 	})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 410, time.Now().UTC().Add(-24*time.Hour))
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1046,7 +1054,7 @@ func TestMarkReadRunsBeforeTheMoveItComesWith(t *testing.T) {
 	})
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 700, time.Now().UTC())
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1078,7 +1086,7 @@ func TestMarkReadLeavesMailThatIsAlreadyReadAlone(t *testing.T) {
 	msg := storedMessage(user.ID, account.ID, mailbox.ID, 701, time.Now().UTC().Add(-30*24*time.Hour))
 	msg.IsRead = true
 
-	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, backfillPass(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1090,5 +1098,101 @@ func TestMarkReadLeavesMailThatIsAlreadyReadAlone(t *testing.T) {
 	}
 	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, readAlready) {
 		t.Fatalf("actions = %q, want the row to say the mail was read already", actions)
+	}
+}
+
+// A flag the host could not push is the least of what a rule does, and it must
+// not cost the mail the rest of it. An evaluation row is terminal for its
+// message -- the backfill skips what this rule already decided on -- so a read
+// that aborted the rule would leave a "forward it, then delete it" rule with the
+// mail neither forwarded nor deleted, and nothing that ever comes back to it.
+func TestMarkReadFailureStillLetsTheRuleFileTheMail(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "mark-read-failed@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, user.ID, account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeFilterHost{
+		store:   st,
+		matches: map[string]bool{"from:studio@example.test": true},
+		readErr: errors.New("imap refused the flag"),
+	}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MarkRead: true, MoveRole: moveRoleTrash})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 702, time.Now().UTC())
+
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.movedTo) != 1 || host.movedTo[0] != trash.ID {
+		t.Fatalf("moved to %v, want the rule's move to run despite the failed flag", host.movedTo)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusFailed {
+		t.Fatalf("status = %q, want %q so the audit shows the rule did not do all it says", status, statusFailed)
+	}
+	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, `"read":"failed"`) ||
+		!strings.Contains(actions, `"move":"ok"`) {
+		t.Fatalf("actions = %q, want the failed read and the move that still ran", actions)
+	}
+}
+
+// A push the host could only queue is not a push. The message is read here and
+// `\Seen` is waiting on a mailbox generation the mirror cannot prove, so the row
+// says so rather than claiming the server has the flag.
+func TestMarkReadRecordsAQueuedPushAsQueued(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "mark-read-queued@example.test")
+	host := &fakeFilterHost{
+		store:          st,
+		matches:        map[string]bool{"from:studio@example.test": true},
+		readQueuedOnly: true,
+	}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MarkRead: true})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 703, time.Now().UTC())
+
+	if _, err := evaluateRule(ctx, host, db, rule, &msg, inboundPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusMatched {
+		t.Fatalf("status = %q, want %q -- a queued push is not a failure", status, statusMatched)
+	}
+	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, readQueued) {
+		t.Fatalf("actions = %q, want the queued push recorded as queued", actions)
+	}
+}
+
+// Every rule in one arrival is handed the same message, so the first rule to
+// mark it read has to leave the ones behind it looking at mail that is read.
+// Otherwise the second rule spends a whole push on the flag the first one set.
+func TestASecondRuleOverOneArrivalDoesNotMarkTheSameMailReadTwice(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "mark-read-two-rules@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	first := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MarkRead: true})
+	second := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MarkRead: true})
+	insertMessage(t, st, db, user.ID, account.ID, mailbox.ID, 704, time.Now().UTC())
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 704, time.Now().UTC())
+
+	backend := &mailFiltersBackend{}
+	if err := backend.ImportStoredMessage(ctx, host, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.readMarked) != 1 {
+		t.Fatalf("marked read %v, want one push for one message", host.readMarked)
+	}
+	if actions := evaluationActions(t, db, user.ID, first.ID, msg.MessageID); !strings.Contains(actions, `"read":"ok"`) {
+		t.Fatalf("first rule actions = %q, want the push it made", actions)
+	}
+	if actions := evaluationActions(t, db, user.ID, second.ID, msg.MessageID); !strings.Contains(actions, readAlready) {
+		t.Fatalf("second rule actions = %q, want it to see mail the first rule already read", actions)
 	}
 }
