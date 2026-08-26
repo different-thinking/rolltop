@@ -344,6 +344,18 @@ func (s *Service) pgResolveFuzzy(ctx context.Context, spec store.MessageSearchQu
 	return spec, nil
 }
 
+// pgSearchOrder maps the package's result order onto the store's spelling of it.
+func pgSearchOrder(order SearchOrder) store.MessageSearchOrder {
+	switch order {
+	case SearchOrderNewest:
+		return store.MessageSearchOrderNewest
+	case SearchOrderOldest:
+		return store.MessageSearchOrderOldest
+	default:
+		return store.MessageSearchOrderRelevance
+	}
+}
+
 func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText string, limit, offset int, opts SearchOptions) ([]Hit, error) {
 	if limit <= 0 || limit > maxHitsPerRequest {
 		limit = 50
@@ -351,6 +363,10 @@ func (s *Service) pgSearchHits(ctx context.Context, userID int64, queryText stri
 	offset = max(offset, 0)
 	parsed := parseQuery(queryText)
 	spec := pgSearchSpec(userID, parsed, opts, limit, offset, s.pg.TrigramSearchEnabled())
+	// Only the results list orders by date. The spec builder is shared with
+	// match and explain, which ask the ranking question, so the order is set
+	// here rather than in there.
+	spec.Order = pgSearchOrder(opts.Order)
 	spec, err := s.pgResolveFuzzy(ctx, spec)
 	if err != nil {
 		return nil, err

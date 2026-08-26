@@ -65,6 +65,18 @@ type MessageSearchTextTerm struct {
 	FuzzyTerm string
 }
 
+// MessageSearchOrder chooses how a ranked page leaves the query. The zero value
+// keeps the relevance ordering every caller had; the two date orders replace it
+// so a reader can walk the matches by when the mail arrived instead of by how
+// well it matched.
+type MessageSearchOrder string
+
+const (
+	MessageSearchOrderRelevance MessageSearchOrder = ""
+	MessageSearchOrderNewest    MessageSearchOrder = "newest"
+	MessageSearchOrderOldest    MessageSearchOrder = "oldest"
+)
+
 // MessageSearchQuery is the neutral spec the search package compiles a parsed
 // query into. Zero values mean "no constraint" throughout.
 type MessageSearchQuery struct {
@@ -111,6 +123,9 @@ type MessageSearchQuery struct {
 
 	// MessageIDs restricts the search to the given messages (match/explain).
 	MessageIDs []int64
+
+	// Order picks the ordering of the returned page. Empty ranks by relevance.
+	Order MessageSearchOrder
 
 	Limit  int
 	Offset int
@@ -429,11 +444,33 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 	exactOrder := ""
 	outerExactOrder := ""
 	var exactArgs []any
-	if fuzzy {
+	if fuzzy && q.Order == MessageSearchOrderRelevance {
 		exactColumn = `, (ms.tsv @@ to_tsquery('simple', ?)) AS exact_match`
 		exactOrder = `exact_match DESC, `
 		outerExactOrder = `r.exact_match DESC, `
 		exactArgs = append(exactArgs, q.TSQuery)
+	}
+
+	// A date order replaces the ranking instead of tie-breaking it: the reader
+	// asked for the matches by date, so neither the score nor the exact-match
+	// column may decide which of them the page holds. That is also why the
+	// column above is not computed at all under a date order - it exists only to
+	// order by, and it costs one more tsquery evaluation per candidate row.
+	//
+	// The message id follows the date in both directions. Mail arriving in the
+	// same second is ordinary - a mailing list fan-out, one sync writing a
+	// batch - and without a total order the rows carrying that second would land
+	// differently on each request, so paging past them would repeat some and
+	// skip others.
+	innerOrder := exactOrder + `score DESC, m.date_unix DESC, ms.message_id DESC`
+	outerOrder := outerExactOrder + `r.score DESC, r.ranked_date DESC, r.message_id DESC`
+	switch q.Order {
+	case MessageSearchOrderNewest:
+		innerOrder = `m.date_unix DESC, ms.message_id DESC`
+		outerOrder = `r.ranked_date DESC, r.message_id DESC`
+	case MessageSearchOrderOldest:
+		innerOrder = `m.date_unix ASC, ms.message_id ASC`
+		outerOrder = `r.ranked_date ASC, r.message_id ASC`
 	}
 
 	limit := q.Limit
@@ -446,7 +483,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		FROM message_search ms
 		JOIN messages m ON m.id = ms.message_id
 		WHERE ` + strings.Join(conditions, " AND ") + `
-		ORDER BY ` + exactOrder + `score DESC, m.date_unix DESC, ms.message_id DESC
+		ORDER BY ` + innerOrder + `
 		LIMIT ? OFFSET ?`
 
 	var query string
@@ -466,7 +503,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 			ts_filter(ms.tsv, '{d}'::"char"[]) @@ to_tsquery('simple', ?)
 			FROM (` + ranked + `) r
 			JOIN message_search ms ON ms.message_id = r.message_id AND ms.user_id = ?
-			ORDER BY ` + outerExactOrder + `r.score DESC, r.ranked_date DESC, r.message_id DESC`
+			ORDER BY ` + outerOrder
 	} else {
 		args = append(args, scoreArgs...)
 		args = append(args, exactArgs...)
@@ -474,7 +511,7 @@ func (s *Store) SearchMessageIDs(ctx context.Context, q MessageSearchQuery) ([]M
 		args = append(args, limit, offset)
 		query = `SELECT r.message_id, r.score, false, false, false, false
 			FROM (` + ranked + `) r
-			ORDER BY ` + outerExactOrder + `r.score DESC, r.ranked_date DESC, r.message_id DESC`
+			ORDER BY ` + outerOrder
 	}
 
 	var rows *sql.Rows

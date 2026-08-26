@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1817,5 +1818,79 @@ func TestSearchSenderNameBeatsOlderBodyMentions(t *testing.T) {
 	}
 	if boostedScore <= baselineScore {
 		t.Fatalf("expected recency nudge to raise score: boosted=%v baseline=%v", boostedScore, baselineScore)
+	}
+}
+
+func TestSearchWithDateOrderReplacesTheRanking(t *testing.T) {
+	ctx := context.Background()
+	svc, err := Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	// The oldest match is the strongest one by relevance: it carries the term in
+	// the subject while the newer ones only mention it in the body. A date order
+	// that still leaned on the score would keep it in front.
+	msgs := []store.MessageRecord{
+		{ID: 1, UserID: 1, Subject: "needle needle needle", BodyText: "needle", Date: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: 2, UserID: 1, Subject: "second", BodyText: "needle", Date: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{ID: 3, UserID: 1, Subject: "third", BodyText: "needle", Date: time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)},
+		{ID: 4, UserID: 2, Subject: "other tenant", BodyText: "needle", Date: time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, msg := range msgs {
+		if err := svc.IndexMessage(ctx, msg, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newest, err := svc.SearchWithOptions(ctx, 1, "needle", 10, 0, SearchOptions{Order: SearchOrderNewest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{3, 2, 1}; !slices.Equal(newest, want) {
+		t.Fatalf("newest = %v, want %v", newest, want)
+	}
+
+	oldest, err := svc.SearchWithOptions(ctx, 1, "needle", 10, 0, SearchOptions{Order: SearchOrderOldest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{1, 2, 3}; !slices.Equal(oldest, want) {
+		t.Fatalf("oldest = %v, want %v", oldest, want)
+	}
+
+	// Paging has to walk the same order it started in, or a reader turning the
+	// page would see rows the previous page already showed.
+	second, err := svc.SearchWithOptions(ctx, 1, "needle", 1, 1, SearchOptions{Order: SearchOrderNewest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{2}; !slices.Equal(second, want) {
+		t.Fatalf("second page = %v, want %v", second, want)
+	}
+}
+
+func TestSearchOrderNormalizationKeepsBestMatchAsTheDefault(t *testing.T) {
+	for _, value := range []string{"", "best", "relevance", "nonsense", "  "} {
+		if got := NormalizeSearchOrder(value); got != SearchOrderBest {
+			t.Fatalf("NormalizeSearchOrder(%q) = %q", value, got)
+		}
+	}
+	for _, value := range []string{"newest", "NEWEST", " desc ", "date_desc"} {
+		if got := NormalizeSearchOrder(value); got != SearchOrderNewest {
+			t.Fatalf("NormalizeSearchOrder(%q) = %q", value, got)
+		}
+	}
+	for _, value := range []string{"oldest", "asc", "date_asc"} {
+		if got := NormalizeSearchOrder(value); got != SearchOrderOldest {
+			t.Fatalf("NormalizeSearchOrder(%q) = %q", value, got)
+		}
+	}
+	if got := SearchOrderBest.String(); got != "best" {
+		t.Fatalf("SearchOrderBest.String() = %q", got)
+	}
+	if got := SearchOrderNewest.String(); got != "newest" {
+		t.Fatalf("SearchOrderNewest.String() = %q", got)
 	}
 }

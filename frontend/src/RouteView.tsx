@@ -76,7 +76,7 @@ export function RouteView({
     return <SnoozedView csrf={csrf} datePrefs={user} location={location} navigate={navigate} hiddenMessageIDs={hiddenMessageIDs} mailboxes={mailboxes} swipePreferences={swipePreferences} archiveMailboxes={archiveMailboxes} mailGeneration={mailGeneration} messageSecurityPlugins={runtimePlugins.all} addToast={addToast} />;
   }
   if (location.path === "/search" || location.path.startsWith("/search/")) {
-    return <SearchView csrf={csrf} location={location} navigate={navigate} replaceRoute={replaceRoute} hiddenMessageIDs={hiddenMessageIDs} datePrefs={user} mailboxes={mailboxes} swipePreferences={swipePreferences} archiveMailboxes={archiveMailboxes} activeSyncRuns={activeSyncRuns} mailGeneration={mailGeneration} messageSecurityPlugins={runtimePlugins.all} searchActionPlugins={runtimePlugins.all} addToast={addToast} />;
+    return <SearchView csrf={csrf} userID={user.id} location={location} navigate={navigate} replaceRoute={replaceRoute} hiddenMessageIDs={hiddenMessageIDs} datePrefs={user} mailboxes={mailboxes} swipePreferences={swipePreferences} archiveMailboxes={archiveMailboxes} activeSyncRuns={activeSyncRuns} mailGeneration={mailGeneration} messageSecurityPlugins={runtimePlugins.all} searchActionPlugins={runtimePlugins.all} addToast={addToast} />;
   }
   if (location.path.startsWith("/messages/")) {
     return (

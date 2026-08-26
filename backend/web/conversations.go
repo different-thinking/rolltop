@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,20 @@ type conversationSeed struct {
 	MatchTerms      []string
 	MatchFields     []string
 	MatchQueryTerms []string
+	// SnoozeReturn is the reminder time a message came back on, and only mail
+	// returning from a snooze carries one. The row prints the later of that and
+	// the message date, so a date-ordered list has to sort by the same value or
+	// it would print a date the row is not in the order of.
+	SnoozeReturn time.Time
+}
+
+// sortDate is what a date-ordered list places the row by, and it is the value
+// the row prints.
+func (c conversationSeed) sortDate() time.Time {
+	if c.SnoozeReturn.After(c.Message.Date) {
+		return c.SnoozeReturn
+	}
+	return c.Message.Date
 }
 
 func (s *Server) conversationViews(ctx context.Context, userID int64, seeds []store.MessageRecord, own map[string]bool) ([]conversationView, error) {
@@ -232,12 +247,26 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		unique = append(unique, seed)
 	}
 	rawOffset := 0
+	fromHits := 0
+	// What counts towards the page being assembled. Under best match that is
+	// every seed collected, due snoozes included, which is what puts them at the
+	// front of the results. A date order sorts them into place instead, and then
+	// only the hits may count: the window has to hold the whole top of the date
+	// order to slice a page out of it, and a due snooze counted here would cut
+	// the hits short by one - crowding a row off this page that the next page,
+	// collecting the same way, would show again.
+	collected := func() int {
+		if opts.Order == search.SearchOrderBest {
+			return len(unique)
+		}
+		return fromHits
+	}
 	// One hit can only ever become one conversation, so a batch smaller than the
 	// page being assembled cannot fill it - asking for a hundred hits to collect
 	// the hundred-and-first conversation is a round that is wasted before it is
 	// made.
 	batchSize := min(max(searchSeedBatchStart, targetEnd), searchSeedBatchMax)
-	for len(unique) < targetEnd {
+	for collected() < targetEnd {
 		bleveStart := time.Now()
 		hits, err := s.search.SearchHitsWithOptions(ctx, userID, searchQuery, batchSize, rawOffset, opts)
 		if timing != nil {
@@ -282,7 +311,8 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 			}
 			seen[key] = true
 			unique = append(unique, conversationSeed{Message: msg, MatchTerms: termsByID[msg.ID], MatchFields: fieldsByID[msg.ID], MatchQueryTerms: queryTermsByID[msg.ID]})
-			if len(unique) >= targetEnd {
+			fromHits++
+			if collected() >= targetEnd {
 				break
 			}
 		}
@@ -295,6 +325,7 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		}
 		batchSize = min(batchSize*2, searchSeedBatchMax)
 	}
+	sortSearchSeedsByDate(unique, opts.Order)
 	if targetStart >= len(unique) {
 		return nil, nil
 	}
@@ -302,6 +333,38 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		targetEnd = len(unique)
 	}
 	return unique[targetStart:targetEnd], nil
+}
+
+// sortSearchSeedsByDate puts the collected window in date order. The hits
+// already arrive in it, so this is not what orders the search - two things the
+// loop above does are what it is for. Mail returning from a snooze is collected
+// before the first hit is read, and a thread is represented by whichever of its
+// matching messages was reached first; both belong where their date puts them
+// rather than at the front.
+//
+// Sorting the window is sound because the window is every page up to the one
+// asked for: the loop rebuilds it from hit zero on every request, so page four
+// sorts the same rows in the same order that page one did.
+func sortSearchSeedsByDate(seeds []conversationSeed, order search.SearchOrder) {
+	newestFirst := order == search.SearchOrderNewest
+	if !newestFirst && order != search.SearchOrderOldest {
+		return
+	}
+	sort.SliceStable(seeds, func(i, j int) bool {
+		left, right := seeds[i].sortDate(), seeds[j].sortDate()
+		if left.Equal(right) {
+			// Same-second mail is ordinary - a list fan-out, one sync writing a
+			// batch - and the id keeps those rows in one order across pages.
+			if newestFirst {
+				return seeds[i].Message.ID > seeds[j].Message.ID
+			}
+			return seeds[i].Message.ID < seeds[j].Message.ID
+		}
+		if newestFirst {
+			return left.After(right)
+		}
+		return left.Before(right)
+	})
 }
 
 func (s *Server) dueSearchConversationSeeds(ctx context.Context, userID int64, query string, opts search.SearchOptions, own map[string]bool, mailboxFilter searchMailboxFilter, starFilter *bool) ([]conversationSeed, error) {
@@ -330,7 +393,7 @@ func (s *Server) dueSearchConversationSeeds(ctx context.Context, userID int64, q
 			continue
 		}
 		if strings.TrimSpace(query) == "" {
-			out = append(out, conversationSeed{Message: candidates[len(candidates)-1]})
+			out = append(out, conversationSeed{Message: candidates[len(candidates)-1], SnoozeReturn: item.Snooze.SnoozedUntil})
 			continue
 		}
 		result, matched, err := s.search.ExplainMessagesWithOptions(ctx, userID, ids, query, opts)
@@ -346,6 +409,7 @@ func (s *Server) dueSearchConversationSeeds(ctx context.Context, userID int64, q
 		}
 		out = append(out, conversationSeed{
 			Message: msg, MatchTerms: result.Terms, MatchFields: result.Fields, MatchQueryTerms: result.QueryTerms,
+			SnoozeReturn: item.Snooze.SnoozedUntil,
 		})
 	}
 	return out, nil

@@ -237,11 +237,49 @@ type MessageIndexDocument struct {
 const maxCompoundFieldBytes = 128 * 1024
 const minSplitFragmentLength = 4
 
+// SearchOrder chooses the order hits leave a search in. The zero value is the
+// best-match ranking every caller has always got, so SearchOptions{} keeps
+// behaving as it did; the two date orders replace that ranking outright for the
+// results list, which offers them beside it.
+type SearchOrder string
+
+const (
+	SearchOrderBest   SearchOrder = ""
+	SearchOrderNewest SearchOrder = "newest"
+	SearchOrderOldest SearchOrder = "oldest"
+)
+
+// NormalizeSearchOrder narrows any client-supplied value to a known order, so an
+// unknown one reads as the default rather than as an error.
+func NormalizeSearchOrder(value string) SearchOrder {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "newest", "date_desc", "desc":
+		return SearchOrderNewest
+	case "oldest", "date_asc", "asc":
+		return SearchOrderOldest
+	default:
+		return SearchOrderBest
+	}
+}
+
+// String spells the default out. The empty value keeps it off URLs and cache
+// keys, but a response echoing the applied order has to name it.
+func (o SearchOrder) String() string {
+	if o == SearchOrderBest {
+		return "best"
+	}
+	return string(o)
+}
+
 // SearchOptions carries ranking hints supplied by callers outside the raw query text.
 type SearchOptions struct {
 	SenderBoosts  []SenderBoost
 	ContactBoosts []SenderBoost
 	Behavior      SearchBehavior
+	// Order replaces the ranking with a date order for the results list. Match
+	// and explain ignore it: they ask which single message the query hit best,
+	// which is a ranking question whatever order the list is drawn in.
+	Order SearchOrder
 }
 
 // SearchBehavior holds query-time ranking controls from the authenticated user's
@@ -1785,6 +1823,17 @@ func (s *Service) search(ctx context.Context, userID int64, queryText string, li
 	}
 	query := buildQuery(userID, queryText, opts)
 	req := bleve.NewSearchRequestOptions(query, limit, offset, false)
+	// The date sort replaces the score sort rather than following it, and the
+	// document id follows the date in both directions. Mail arriving in the same
+	// second is ordinary, and callers page through these hits by offset: without
+	// a total order the rows sharing a second would land differently on each
+	// request, repeating some and skipping others across page boundaries.
+	switch opts.Order {
+	case SearchOrderNewest:
+		req.SortBy([]string{"-date", "_id"})
+	case SearchOrderOldest:
+		req.SortBy([]string{"date", "_id"})
+	}
 	req.IncludeLocations = includeLocations
 	index, err := s.indexForUser(userID)
 	if err != nil {

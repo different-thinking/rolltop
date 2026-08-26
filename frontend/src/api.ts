@@ -11,6 +11,7 @@ import type {
   CalendarSummary,
   Contact,
   ContactAutocomplete,
+  ConversationListPage,
   DatabaseOverview,
   DuplicateCopyReport,
   DuplicateScanResult,
@@ -31,6 +32,7 @@ import type {
   ScopeMoveResponse,
   SearchExplanation,
   SearchIndexReport,
+  SearchListResponse,
   SearchRebuildBlock,
   ServerLogLine,
   StorageStats,
@@ -43,8 +45,8 @@ import type {
 } from "./types";
 import { clearMailSnapshots, clearOtherMailSnapshots, forgetMessagesInSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
 import { clearFiledMessages, clearOtherFiledMessages, filedMessageIDs, filterFiledConversations, releaseAnsweredFilings, setFiledMessagesUser } from "./lib/filedMessages";
-import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
-import type { MailSortOrder } from "./lib/mailSort";
+import { clearOtherMailSortOrders, defaultMailSortOrder, defaultSearchSortOrder } from "./lib/mailSort";
+import type { MailSortOrder, SearchSortOrder } from "./lib/mailSort";
 import type { MailView } from "./lib/routes";
 import { clearOtherSidebarState } from "./lib/sidebarLocal";
 
@@ -345,8 +347,11 @@ function mailListCacheKey(userID: number, mailboxID: string | null, page: number
   return `user:${userID}:mail-epoch:${epoch}:${mailListURL(mailboxID, page, order, view)}`;
 }
 
-function searchListURL(query: string, page: number) {
+// Best match is the default and stays off the URL with it, so a client that
+// never touches the order keeps asking for the address it always has.
+function searchListURL(query: string, page: number, order: SearchSortOrder = defaultSearchSortOrder) {
   const q = new URLSearchParams({ q: query, page: String(page) });
+  if (order !== defaultSearchSortOrder) q.set("sort", order);
   return `/api/search?${q}`;
 }
 
@@ -381,7 +386,7 @@ function cachedMail(userID: number, mailboxID: string | null, page: number, orde
 // back, from the network or from either cache. A page the reader filed mail out
 // of is stale in exactly one way, and it is the way that puts deleted mail back
 // on screen; the filing itself decides when the row is due again.
-function withoutFiledConversations<T extends MailListResponse>(page: T): T {
+function withoutFiledConversations<T extends ConversationListPage>(page: T): T {
   const conversations = filterFiledConversations(page.conversations);
   return conversations.length === page.conversations.length ? page : { ...page, conversations };
 }
@@ -390,7 +395,7 @@ function withoutFiledConversations<T extends MailListResponse>(page: T): T {
 // have answered - a message drawn where it was filed to, or anywhere other than
 // the folder it left. Only the network paths do it: `cachedMail` is read while
 // a view renders, and releasing a record writes to `localStorage`.
-function answeredFiledConversations<T extends MailListResponse>(page: T): T {
+function answeredFiledConversations<T extends ConversationListPage>(page: T): T {
   releaseAnsweredFilings(page.conversations);
   return withoutFiledConversations(page);
 }
@@ -536,11 +541,11 @@ export const api = {
     putJSON<{ ok: boolean; snoozed: boolean; snooze: MessageSnooze }>(`/api/messages/${id}/snooze`, csrf, { until: until.toISOString() }, options),
   unsnoozeMessage: (csrf: string, id: number, options?: MutationRequestOptions) =>
     deleteJSON<{ ok: boolean; snoozed: boolean }>(`/api/messages/${id}/snooze`, csrf, options),
-  search: (query: string, page: number) =>
-    getJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page))
+  search: (query: string, page: number, order: SearchSortOrder = defaultSearchSortOrder) =>
+    getJSON<SearchListResponse>(searchListURL(query, page, order))
       .then(answeredFiledConversations),
-  prefetchSearch: (query: string, page: number) =>
-    prefetchJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page)),
+  prefetchSearch: (query: string, page: number, order: SearchSortOrder = defaultSearchSortOrder) =>
+    prefetchJSON<SearchListResponse>(searchListURL(query, page, order)),
   brandIcons: (domains: string[]) => {
     const q = new URLSearchParams();
     domains.slice(0, 40).forEach((domain) => q.append("domain", domain));

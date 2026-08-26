@@ -616,6 +616,31 @@ site and in review.
   similarity, because a weight is allowed to be zero and the arithmetic would
   have to be re-argued after every change to one. Never add a ranking term to
   that score without deciding, in the same change, what bounds it.
+- **The results list's date orders replace the ranking; they never tie-break
+  it.** `search.SearchOrder` reaches both backends and both drop the score from
+  the ordering outright - Bleve sorts by the `date` field, PostgreSQL by
+  `date_unix` - because a reader who asked for their matches by date is asking a
+  different question, and a ranking left in front of the date would answer the
+  old one with a new label. The exact-match column that orders the fuzzy path is
+  not even computed under a date order, since it exists only to sort by and
+  costs a tsquery per candidate row. Both directions end in the message id, and
+  that is not decoration: same-second mail is ordinary, callers page these hits
+  by offset, and without a total order the rows sharing a second would land
+  differently on each request and be repeated or skipped across page boundaries.
+  Only the list orders by date - match and explain ask which single message the
+  query hit best, which stays a ranking question whatever order the list is
+  drawn in, so `SearchOptions.Order` is applied in `pgSearchHits` rather than in
+  the spec builder the three of them share.
+- **Under a date order only hits count towards the search page being
+  assembled.** `searchConversationSeedHits` collects mail returning from a
+  snooze before it reads the first hit, and those seeds sort by the reminder
+  they came back on rather than by when they were written - which is what the
+  row prints, so `conversationSeed.sortDate` is what the window is sorted by.
+  Counting them towards the target takes a hit's place in the collected window,
+  and since every page rebuilds that window from hit zero, the row a due snooze
+  crowded off page one comes back on page two: the pages stop partitioning the
+  matches. Best match keeps counting every seed, which is what puts returned
+  mail at the front of a ranked result list.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the

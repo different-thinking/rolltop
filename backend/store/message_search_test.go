@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -352,5 +353,77 @@ func TestCountMessageSearchMatchesRespectsItsCeilingAndFilters(t *testing.T) {
 	theirs, err := db.CountMessageSearchMatches(ctx, MessageSearchQuery{UserID: other.ID, TSQuery: "'rechnung'"}, 100)
 	if err != nil || theirs != 10 {
 		t.Fatalf("neighbour count = %d, err = %v, want 10", theirs, err)
+	}
+}
+
+// A date order has to replace the ranking outright: the strongest match by
+// relevance is the oldest row here, so a query that still leaned on the score
+// would keep it in front of newer mail.
+func TestSearchMessageIDsOrdersByDateInBothDirections(t *testing.T) {
+	ctx := context.Background()
+	db := mustOpenTestStore(t)
+	user, account, mailbox := searchTestFixtures(t, ctx, db)
+
+	dates := []time.Time{
+		time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 1, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
+	}
+	ids := make([]int64, 0, len(dates))
+	var docs []MessageSearchDoc
+	for i, date := range dates {
+		uid := uint32(1 + i)
+		path := fmt.Sprintf("users/%d/search-order/uid-%d.eml", user.ID, uid)
+		blob, err := db.CreateBlob(ctx, BlobRecord{UserID: user.ID, Kind: "message", Path: path, SHA256: fmt.Sprintf("%064d", uid), Size: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := db.CreateMessage(ctx, CreateMessage{
+			UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blob.ID,
+			MessageIDHeader: fmt.Sprintf("<search-order-%d@example.test>", uid),
+			CanonicalSHA256: fmt.Sprintf("%064d", uid), MessageIDHash: fmt.Sprintf("order-hash-%d", uid),
+			ThreadKey: fmt.Sprintf("order-thread-%d", uid), Subject: "Rechnung",
+			FromAddr: "sender@example.test", Date: date, InternalDate: date,
+			UID: uid, UIDValidity: mailbox.UIDValidity, Size: 1, BlobPath: path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc := MessageSearchDoc{MessageID: msg.ID, UserID: user.ID, TextC: "anbei die rechnung"}
+		// Only the oldest row carries the term in the subject weight class.
+		if i == 0 {
+			doc.TextA = "Rechnung rechnung rechnung"
+		}
+		docs = append(docs, doc)
+		ids = append(ids, msg.ID)
+	}
+	if err := db.UpsertMessageSearch(ctx, user.ID, docs); err != nil {
+		t.Fatal(err)
+	}
+
+	hitIDs := func(order MessageSearchOrder) []int64 {
+		t.Helper()
+		hits, err := db.SearchMessageIDs(ctx, MessageSearchQuery{
+			UserID: user.ID, TSQuery: "'rechnung'", Weights: [4]float64{0.1, 0.2, 0.4, 1.0}, Order: order,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int64, 0, len(hits))
+		for _, hit := range hits {
+			out = append(out, hit.MessageID)
+		}
+		return out
+	}
+
+	if got, want := hitIDs(MessageSearchOrderNewest), []int64{ids[2], ids[1], ids[0]}; !slices.Equal(got, want) {
+		t.Fatalf("newest = %v, want %v", got, want)
+	}
+	if got, want := hitIDs(MessageSearchOrderOldest), []int64{ids[0], ids[1], ids[2]}; !slices.Equal(got, want) {
+		t.Fatalf("oldest = %v, want %v", got, want)
+	}
+	// The relevance ordering is unchanged: the subject match still leads.
+	if got := hitIDs(MessageSearchOrderRelevance); len(got) != 3 || got[0] != ids[0] {
+		t.Fatalf("relevance = %v, want the subject match first", got)
 	}
 }
