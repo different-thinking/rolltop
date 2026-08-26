@@ -5,45 +5,51 @@ import (
 	"database/sql"
 	"log"
 	"regexp"
+	"strings"
 	"sync"
 
 	"rolltop/backend/plugins"
 	"rolltop/plugins/remote_image_blocklist/rules"
 )
 
-// compiledPatternCache memoizes regexp.Compile across image fetches. The
-// blocklist changes only on an admin edit, but AllowRemoteImageFetch runs on
-// every remote image, so recompiling every stored pattern on each fetch was
-// pure repeated work. Entries are keyed by the pattern text; a nil value marks
-// a pattern that failed to compile so a broken row is logged and skipped once
-// rather than on every fetch. ReplaceRules now rejects uncompilable patterns at
-// write time, so a nil entry should only ever come from a row predating that
-// check. The set is bounded by the admin-maintained rule count, so it does not
-// grow without bound.
+// compiledBlocklist memoizes the compiled form of the whole blocklist across
+// image fetches. The blocklist changes only on an admin edit, but
+// AllowRemoteImageFetch runs on every remote image, so recompiling every stored
+// pattern on each fetch was pure repeated work. It caches exactly one snapshot —
+// the currently-stored set, keyed by the joined pattern text — and recompiles
+// only when that set actually changes, so a rule edited or deleted replaces the
+// snapshot rather than leaving a dead entry behind (the reason a per-pattern map
+// was the wrong shape: it grew by every distinct pattern ever seen). Patterns
+// that fail to compile are logged and dropped when the snapshot is built, not on
+// every fetch; ReplaceRules rejects uncompilable patterns at write time, so that
+// only happens for a row predating that check.
 var (
-	compiledPatternMu    sync.RWMutex
-	compiledPatternCache = map[string]*regexp.Regexp{}
+	compiledBlocklistMu  sync.Mutex
+	compiledBlocklistKey string
+	compiledBlocklistSet []*regexp.Regexp
+	compiledBlocklistOK  bool
 )
 
-func compiledPattern(pattern string) *regexp.Regexp {
-	compiledPatternMu.RLock()
-	re, ok := compiledPatternCache[pattern]
-	compiledPatternMu.RUnlock()
-	if ok {
-		return re
+func compiledBlockers(patterns []string) []*regexp.Regexp {
+	key := strings.Join(patterns, "\n")
+	compiledBlocklistMu.Lock()
+	defer compiledBlocklistMu.Unlock()
+	if compiledBlocklistOK && key == compiledBlocklistKey {
+		return compiledBlocklistSet
 	}
-	compiledPatternMu.Lock()
-	defer compiledPatternMu.Unlock()
-	if re, ok := compiledPatternCache[pattern]; ok {
-		return re
+	set := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			log.Printf("remote_image_blocklist: skipping invalid pattern %q: %v", pattern, err)
+			continue
+		}
+		set = append(set, re)
 	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		log.Printf("remote_image_blocklist: skipping invalid pattern %q: %v", pattern, err)
-		re = nil
-	}
-	compiledPatternCache[pattern] = re
-	return re
+	compiledBlocklistKey = key
+	compiledBlocklistSet = set
+	compiledBlocklistOK = true
+	return set
 }
 
 // RolltopPlugin is the symbol loaded by plugin.Open.
@@ -88,11 +94,7 @@ func (remoteImageBlocklistHook) AllowRemoteImageFetch(ctx context.Context, db *s
 	if err != nil {
 		return plugins.RemoteImageFetchDecision{}, err
 	}
-	for _, pattern := range patterns {
-		re := compiledPattern(pattern)
-		if re == nil {
-			continue
-		}
+	for _, re := range compiledBlockers(patterns) {
 		if re.MatchString(req.URL) {
 			return plugins.RemoteImageFetchDecision{Allow: false, Reason: "remote image blocklist"}, nil
 		}

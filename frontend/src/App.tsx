@@ -247,6 +247,7 @@ export default function App() {
   const runtimePluginLoadGenerationRef = useRef(0);
   const bootstrappedFromHTMLRef = useRef(bootstrap !== null);
   const bootstrapGenerationRef = useRef(0);
+  const unauthorizedRefreshRef = useRef(false);
   const loadedBuildIdentityRef = useRef("");
   const shellCheckRunningRef = useRef(false);
   const shellReloadingRef = useRef(false);
@@ -306,7 +307,15 @@ export default function App() {
   useEffect(() => {
     api.setUnauthorizedHandler(() => {
       if (!bootstrap?.user) return;
-      void refreshBootstrap();
+      // Several requests can 401 at once when the session expires; coalesce them
+      // into a single bootstrap refresh instead of firing one per response. The
+      // guard clears when the refresh settles, by which point bootstrap.user is
+      // gone and the check above absorbs any stragglers.
+      if (unauthorizedRefreshRef.current) return;
+      unauthorizedRefreshRef.current = true;
+      void refreshBootstrap().finally(() => {
+        unauthorizedRefreshRef.current = false;
+      });
     });
     return () => api.setUnauthorizedHandler(null);
   }, [bootstrap?.user, refreshBootstrap]);
