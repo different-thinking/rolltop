@@ -485,31 +485,37 @@ func (f *fakeCapabilitySupporter) Support(capability string) (bool, error) {
 
 func TestOrderFetchedUIDBatchSortsServerResponses(t *testing.T) {
 	fetched := []syncer.FetchedMessage{{UID: 9}, {UID: 3}, {UID: 7}}
-	got, err := orderFetchedUIDBatch([]uint32{3, 7, 9}, fetched)
+	got, missing, err := orderFetchedUIDBatch([]uint32{3, 7, 9}, fetched)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing = %#v, want none", missing)
 	}
 	if gotUIDs := []uint32{got[0].UID, got[1].UID, got[2].UID}; !reflect.DeepEqual(gotUIDs, []uint32{3, 7, 9}) {
 		t.Fatalf("ordered UIDs = %#v", gotUIDs)
 	}
 }
 
-func TestOrderFetchedUIDBatchRejectsMissingUIDBeforeDelivery(t *testing.T) {
-	got, err := orderFetchedUIDBatch([]uint32{3, 7, 9}, []syncer.FetchedMessage{{UID: 9}, {UID: 3}})
-	if err == nil || !strings.Contains(err.Error(), "UID batch 7") {
-		t.Fatalf("missing UID error = %v", err)
+func TestOrderFetchedUIDBatchReportsMissingUIDsAsVanished(t *testing.T) {
+	got, missing, err := orderFetchedUIDBatch([]uint32{3, 7, 9}, []syncer.FetchedMessage{{UID: 9}, {UID: 3}})
+	if err != nil {
+		t.Fatalf("missing UID reported as error: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("partial ordered batch = %#v, want nil", got)
+	if !reflect.DeepEqual(missing, []uint32{7}) {
+		t.Fatalf("missing = %#v, want [7]", missing)
+	}
+	if gotUIDs := []uint32{got[0].UID, got[1].UID}; !reflect.DeepEqual(gotUIDs, []uint32{3, 9}) {
+		t.Fatalf("delivered UIDs = %#v, want the surviving [3 9]", gotUIDs)
 	}
 }
 
 func TestOrderFetchedUIDBatchIgnoresUnsolicitedUIDAndRejectsDuplicates(t *testing.T) {
-	got, err := orderFetchedUIDBatch([]uint32{3}, []syncer.FetchedMessage{{UID: 99}, {UID: 3}})
-	if err != nil || len(got) != 1 || got[0].UID != 3 {
-		t.Fatalf("unsolicited UID result = %#v, %v", got, err)
+	got, missing, err := orderFetchedUIDBatch([]uint32{3}, []syncer.FetchedMessage{{UID: 99}, {UID: 3}})
+	if err != nil || len(got) != 1 || got[0].UID != 3 || len(missing) != 0 {
+		t.Fatalf("unsolicited UID result = %#v, missing=%#v, %v", got, missing, err)
 	}
-	if _, err := orderFetchedUIDBatch([]uint32{3}, []syncer.FetchedMessage{{UID: 3}, {UID: 3}}); err == nil {
+	if _, _, err := orderFetchedUIDBatch([]uint32{3}, []syncer.FetchedMessage{{UID: 3}, {UID: 3}}); err == nil {
 		t.Fatal("duplicate requested UID was accepted")
 	}
 }

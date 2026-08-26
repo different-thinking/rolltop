@@ -199,6 +199,66 @@ var postgresMigrations = []postgresMigration{
 				ON mailboxes (user_id, account_id, role) WHERE role <> ''`,
 		},
 	},
+	{
+		// Partial indexes for the three global retention/maintenance queries in
+		// store/message_body.go. Those run across every tenant at once (s.db, no
+		// user_id filter), and every existing messages index leads with user_id,
+		// so each maintenance pass fell back to a sequential scan of the whole
+		// messages table — the cost growing with the whole installation regardless
+		// of how little was actually due. Each index is partial and ordered by the
+		// (date_unix|created_at, id) the matching query filters and orders on, so a
+		// pass range-scans only the rows still eligible and stops at its LIMIT:
+		//
+		//   * idx_messages_prunable_blob_path -> ListMessagesWithPrunableBlobs
+		//     (WHERE blob_path <> '' AND date_unix < ?). blob_path is non-empty
+		//     only while a message still owns a local raw file, a small and
+		//     shrinking set as retention prunes them.
+		//   * idx_messages_compactable_html + idx_messages_compactable_text ->
+		//     CompactMessageBodiesBefore, whose two disjoint eligibility arms
+		//     (an HTML body to drop, or a long plaintext body to shorten) each get
+		//     an index the rewritten UNION ALL query can range-scan and merge.
+		//     The text arm's length threshold is the literal DefaultMessageBodyPreviewBytes
+		//     (4096); the query selects against that same literal so the predicate
+		//     matches. Migrations are immutable, so were that default ever changed
+		//     a new migration would carry the new value — until then the query
+		//     still returns correct rows, only without this index.
+		//   * idx_blobs_message_cache -> ListMessagesWithExpiredCachedBlobs, which
+		//     drives off blobs (WHERE kind = 'message-cache' AND created_at < ?)
+		//     and joins back to messages by the FK index added in 0005.
+		//
+		// CREATE INDEX (not CONCURRENTLY) for the same reason as 0005-fk-indexes:
+		// migrations run under the exclusive instance lock, so there is no
+		// concurrent writer for the build to block. IF NOT EXISTS so an operator
+		// who added an equivalent index by hand is not an error.
+		Version: "0007-maintenance-partial-indexes",
+		Statements: []string{
+			`CREATE INDEX IF NOT EXISTS idx_messages_prunable_blob_path
+				ON messages (date_unix, id) WHERE blob_path <> ''`,
+			`CREATE INDEX IF NOT EXISTS idx_messages_compactable_html
+				ON messages (date_unix, id) WHERE body_html <> ''`,
+			`CREATE INDEX IF NOT EXISTS idx_messages_compactable_text
+				ON messages (date_unix, id) WHERE body_html = '' AND length(body_text) > 4096`,
+			`CREATE INDEX IF NOT EXISTS idx_blobs_message_cache
+				ON blobs (created_at, id) WHERE kind = 'message-cache'`,
+		},
+	},
+	{
+		// Record whether a mirrored message carried an Autocrypt header, decided
+		// once at parse time. The thread view used to fetch every message's full
+		// RFC822 source (base64 attachments and all) on every open just to look for
+		// this header and offer to import the sender's key; the flag lets the client
+		// skip that fetch for the messages that do not have one — the large majority.
+		//
+		// Existing rows default to 0 (no header known). They were parsed before this
+		// column existed, so the client will not offer an Autocrypt import prompt for
+		// mail synced earlier — but the server-side ImportIncomingMessage hook
+		// already imported those keys at the time they arrived, so the peer key is
+		// in the keystore regardless. New mail sets the flag from the parse.
+		Version: "0008-message-autocrypt-header",
+		Statements: []string{
+			`ALTER TABLE messages ADD COLUMN has_autocrypt_header bigint NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

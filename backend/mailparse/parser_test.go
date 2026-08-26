@@ -71,6 +71,41 @@ func TestParsePreservesPlainTextLineBreaks(t *testing.T) {
 	}
 }
 
+func TestParseDetectsAutocryptHeader(t *testing.T) {
+	withHeader := strings.Join([]string{
+		"From: sender@example.test",
+		"To: me@example.test",
+		"Subject: keyed",
+		"Autocrypt: addr=sender@example.test; keydata=AAAA",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"body",
+	}, "\r\n")
+	parsed, err := Parse([]byte(withHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.HasAutocryptHeader {
+		t.Fatal("HasAutocryptHeader = false, want true for a message carrying an Autocrypt header")
+	}
+
+	withoutHeader := strings.Join([]string{
+		"From: sender@example.test",
+		"To: me@example.test",
+		"Subject: plain",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"body",
+	}, "\r\n")
+	plain, err := Parse([]byte(withoutHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.HasAutocryptHeader {
+		t.Fatal("HasAutocryptHeader = true, want false for a message with no Autocrypt header")
+	}
+}
+
 func TestParseDisplayBodyStopsAfterMixedBody(t *testing.T) {
 	raw := strings.Join([]string{
 		"From: sender@example.test",

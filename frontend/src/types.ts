@@ -247,6 +247,12 @@ export type ThreadMessage = {
   reply_subject: string;
   can_reply_all: boolean;
   /**
+   * has_autocrypt_header is true when this message was parsed with an Autocrypt
+   * header. The thread view only fetches the full source to probe for a peer
+   * key when it is set, rather than doing so for every message on every open.
+   */
+  has_autocrypt_header: boolean;
+  /**
    * copy_ids names every physical message row this drawn message stands for,
    * itself included. It is absent unless a mirrored label view (Gmail's All
    * Mail) held a second copy that the thread hid behind this one, and read-state

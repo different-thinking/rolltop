@@ -1323,7 +1323,7 @@ func TestMoveRefreshMailboxNamesIncludesSourceAndDestination(t *testing.T) {
 // while every other account's messages failed one by one deep inside the run,
 // so the check has to happen before anything starts.
 func TestMessagesAccountScopeRejectsASelectionCrossingAccounts(t *testing.T) {
-	messages := []store.MessageRecord{
+	messages := []store.ScopeMessage{
 		{ID: 1, AccountID: 10},
 		{ID: 2, AccountID: 10},
 		{ID: 3, AccountID: 11},
@@ -1338,7 +1338,7 @@ func TestMessagesAccountScopeRejectsASelectionCrossingAccounts(t *testing.T) {
 // accounts describes work the reader has already done and hides the destination
 // they actually have to change.
 func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsSound(t *testing.T) {
-	messages := []store.MessageRecord{
+	messages := []store.ScopeMessage{
 		{ID: 1, AccountID: 10},
 		{ID: 2, AccountID: 10},
 	}
@@ -1348,7 +1348,7 @@ func TestMessagesAccountScopeNamesTheDestinationWhenTheSelectionIsSound(t *testi
 }
 
 func TestMessagesAccountScopeAcceptsASingleAccountSelection(t *testing.T) {
-	messages := []store.MessageRecord{
+	messages := []store.ScopeMessage{
 		{ID: 1, AccountID: 10},
 		{ID: 2, AccountID: 10},
 	}

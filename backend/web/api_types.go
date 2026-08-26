@@ -321,6 +321,10 @@ type apiThreadMessage struct {
 	Expanded           bool                          `json:"expanded"`
 	ReplySubject       string                        `json:"reply_subject"`
 	CanReplyAll        bool                          `json:"can_reply_all"`
+	// HasAutocryptHeader is true when this message was parsed with an Autocrypt
+	// header. The client only fetches the full source to probe for a peer key
+	// when it is set, instead of doing so for every message on every open.
+	HasAutocryptHeader bool `json:"has_autocrypt_header"`
 	// CopyIDs names every physical row this drawn message stands for, itself
 	// included. It is absent unless a mirrored label view's copy was hidden
 	// behind it, and marking the message unread has to reach all of them.

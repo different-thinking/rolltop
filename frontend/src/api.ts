@@ -134,9 +134,44 @@ export type ComposeSendResult = {
   archived_mailbox?: string;
 };
 
+// getCacheMaxEntries bounds the ETag revalidation cache. It used to grow with
+// every distinct URL a session ever fetched and was never trimmed, so a long
+// session (or one that paged through a large mailbox) accumulated entries for
+// the whole run. A cap with least-recently-used eviction keeps the working set
+// — the pages and messages in play — while dropping the long tail; an evicted
+// entry simply revalidates from the server on its next fetch.
+const getCacheMaxEntries = 200;
+// getCache is an insertion-ordered LRU: cacheGet moves a hit to the most-recent
+// end, and cacheSet evicts from the least-recent front once the cap is passed.
+// Reach for cacheGet/cacheSet rather than the raw map so that ordering holds;
+// direct delete/keys stay fine, they do not disturb it.
 const getCache = new Map<string, { etag: string; data: unknown }>();
 const getInflight = new Map<string, Promise<unknown>>();
 const mailCacheEpochs = new Map<number, number>();
+// lastRetainedUserID is the signed-in user the get-cache was last reconciled
+// for, so retainMailCacheForUser can tell an actual user switch (drop the
+// URL-scoped entries that may hold the previous user's data) from the frequent
+// same-user bootstrap refresh (keep the cache).
+let lastRetainedUserID: number | null = null;
+
+function cacheGet(key: string): { etag: string; data: unknown } | undefined {
+  const entry = getCache.get(key);
+  if (entry) {
+    getCache.delete(key);
+    getCache.set(key, entry);
+  }
+  return entry;
+}
+
+function cacheSet(key: string, value: { etag: string; data: unknown }): void {
+  getCache.delete(key);
+  getCache.set(key, value);
+  while (getCache.size > getCacheMaxEntries) {
+    const oldest = getCache.keys().next().value;
+    if (oldest === undefined) break;
+    getCache.delete(oldest);
+  }
+}
 type MutationRequestOptions = { keepalive?: boolean };
 
 async function fetchGET(url: string, init: RequestInit): Promise<Response> {
@@ -162,13 +197,13 @@ export async function getJSON<T>(url: string, cacheKey = url): Promise<T> {
 
   const request = (async () => {
     const headers: Record<string, string> = { Accept: "application/json" };
-    const cached = getCache.get(cacheKey);
+    const cached = cacheGet(cacheKey);
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
     const res = await fetchGET(url, { headers });
     if (res.status === 304 && cached) return cached.data as T;
     const data = await parse<T>(res);
     const etag = res.headers.get("ETag") || "";
-    if (etag) getCache.set(cacheKey, { etag, data });
+    if (etag) cacheSet(cacheKey, { etag, data });
     else getCache.delete(cacheKey);
     return data;
   })();
@@ -315,7 +350,7 @@ function prefetchJSON<T>(url: string, cacheKey = url) {
 }
 
 function cachedJSON<T>(cacheKey: string): T | null {
-  const cached = getCache.get(cacheKey);
+  const cached = cacheGet(cacheKey);
   return cached ? cached.data as T : null;
 }
 
@@ -362,6 +397,21 @@ function retainMailCacheForUser(userID: number) {
     const match = key.match(/^user:(\d+):mail-epoch:/);
     if (match && Number(match[1]) !== userID) getCache.delete(key);
   }
+  // On an actual change of signed-in user — a switch, or a logout where userID
+  // arrives as 0 — drop every entry not scoped to a user. Those are keyed by URL
+  // alone (bootstrap, contacts, a message body) and can still hold the previous
+  // user's data, so carrying them across a switch is both a cross-user leak risk
+  // and the other half of this cache's unbounded growth. The common case, a
+  // same-user bootstrap refresh, leaves them in place.
+  if (lastRetainedUserID !== null && lastRetainedUserID !== userID) {
+    for (const key of getCache.keys()) {
+      if (!key.startsWith("user:")) {
+        getCache.delete(key);
+        getInflight.delete(key);
+      }
+    }
+  }
+  lastRetainedUserID = userID;
   clearOtherMailSnapshots(userID);
   clearOtherMailSortOrders(userID);
   clearOtherSidebarState(userID);

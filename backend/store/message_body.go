@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,6 +73,20 @@ func (s *Store) BlobPathInUseForUser(ctx context.Context, userID int64, blobPath
 }
 
 // CompactMessageBodiesBefore replaces old full bodies with previews after raw blobs age out.
+//
+// A message is eligible on either of two disjoint conditions: it still carries a
+// full HTML body to drop (body_html <> ”), or it is plaintext-only with a body
+// longer than a preview (body_html = ” AND length(body_text) > threshold). The
+// query is a UNION ALL of exactly those two arms so each is served by its own
+// partial index (idx_messages_compactable_html / idx_messages_compactable_text
+// from migration 0007) and the two merge in (date_unix, id) order, letting the
+// pass stop at LIMIT instead of scanning the whole messages table.
+//
+// The plaintext arm's threshold is the literal DefaultMessageBodyPreviewBytes so
+// it matches that index's predicate; previewLimit still sizes the preview text
+// actually written. The two coincide for every real caller (retention passes the
+// default); a different previewLimit only makes that arm select against the
+// default instead, which stays correct and merely skips this index.
 func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time, previewLimit, limit int) (int, error) {
 	if previewLimit <= 0 {
 		previewLimit = DefaultMessageBodyPreviewBytes
@@ -79,9 +94,15 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, body_text FROM messages
-		WHERE date_unix < ? AND (body_html != '' OR length(body_text) > ?)
-		ORDER BY date_unix, id LIMIT ?`, cutoff.UTC().Unix(), previewLimit, limit)
+	cutoffUnix := cutoff.UTC().Unix()
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT id, body_text FROM (
+			SELECT id, body_text, date_unix FROM messages
+				WHERE date_unix < ? AND body_html <> ''
+			UNION ALL
+			SELECT id, body_text, date_unix FROM messages
+				WHERE date_unix < ? AND body_html = '' AND length(body_text) > %d
+		) compactable
+		ORDER BY date_unix, id LIMIT ?`, DefaultMessageBodyPreviewBytes), cutoffUnix, cutoffUnix, limit)
 	if err != nil {
 		return 0, err
 	}
