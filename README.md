@@ -827,6 +827,27 @@ account. All Mail sits below it and shows the rest. Both are whole-account
 lists rather than the `INBOX` folder of one account, which keeps its own entry
 under Folders. The older `/mail/unarchived` address still resolves to `Inbox`.
 
+Below them sit the categories, one list each and one category per message:
+`Relevant`, `Newsletters`, `Forums`, `Notifications`, and `Invoices &
+Contracts`. The first four are decided from the list and automation headers the
+sender set, which is why the answer is the same one a reader can check for
+themselves. `Invoices & Contracts` is the exception, because no header
+distinguishes an invoice from a delivery notice: it is decided from the
+message's own subject, body, and attachment names - a structured e-invoice
+(ZUGFeRD, Factur-X, XRechnung), a file named after what it is, a document
+number beside an amount, or, for mail that is only a robot talking, the word in
+the subject. It is only ever taken out of `Notifications` and `Newsletters`.
+Mail from a person, and a discussion list a person can answer, stay where they
+are however much they read like paperwork - misfiling somebody's mail into a
+paperwork list costs more than leaving one invoice among the notifications.
+
+Dropping mail on a category, or the thread view's `File sender under ...`,
+files that sender there for good, which is the correction for anything the
+rules read wrongly. When those rules change, mail that is already filed is
+re-read a batch at a time in the background (`store.CategoryVersion`); it keeps
+the category it has until the new answer replaces it, so no list goes blank
+while the pass runs.
+
 Sent, Drafts, Trash and Junk are out of those lists by default, because they
 answer "what is on my plate" and the user's own writing is not on it - a Sent
 folder inside them puts every reply back in front of its author in All Mail, in

@@ -426,3 +426,82 @@ func candidateIDsOf(candidates []CategoryCandidate) []int64 {
 	}
 	return out
 }
+
+// ageCategoryGeneration puts a message back into the state a build shipped
+// before the current classifier rules left it in: filed, and stamped by an
+// older generation.
+func (f categoryFixture) ageCategoryGeneration(t *testing.T, messageID int64) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := f.db.dataDB(ctx, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET category_version = ? WHERE user_id = ? AND id = ?`,
+		CategoryVersion-1, f.user.ID, messageID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestARuleChangeReachesMailThatIsAlreadyFiled(t *testing.T) {
+	ctx := context.Background()
+	f := newCategoryFixture(t)
+	current := f.create(t, f.inbox, 1, "news@example.test", mailparse.CategoryNewsletters)
+	stale := f.create(t, f.inbox, 2, "billing@shop.test", mailparse.CategoryNotifications)
+	pending := f.create(t, f.inbox, 3, "later@example.test", "")
+	f.ageCategoryGeneration(t, stale.ID)
+
+	// Unclassified mail is taken first: it is the only kind that is missing
+	// from every list while it waits.
+	first, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].ID != pending.ID {
+		t.Fatalf("first batch = %+v, want only %d", first, pending.ID)
+	}
+	candidates, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 || candidates[0].ID != pending.ID || candidates[1].ID != stale.ID {
+		t.Fatalf("candidates = %+v, want %d then %d (%d was filed by this generation)",
+			candidates, pending.ID, stale.ID, current.ID)
+	}
+	// A re-pass is not a mailbox that came undone: the rows it will re-read are
+	// in a list and readable, so they are not reported as waiting.
+	if count, err := f.db.CountMessagesNeedingCategory(ctx, f.user.ID); err != nil || count != 1 {
+		t.Fatalf("pending count = %d err=%v, want 1", count, err)
+	}
+	// The message keeps the category it has until the new answer replaces it,
+	// so no list is empty while the pass runs.
+	filed, err := f.db.GetMessageForUser(ctx, f.user.ID, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filed.Category != mailparse.CategoryNotifications {
+		t.Fatalf("category while the re-pass is queued = %q, want %q", filed.Category, mailparse.CategoryNotifications)
+	}
+
+	if err := f.db.SetMessageCategories(ctx, f.user.ID, []MessageCategoryUpdate{
+		{MessageID: pending.ID, FromAddr: "later@example.test", Category: mailparse.CategoryRelevant},
+		{MessageID: stale.ID, FromAddr: "billing@shop.test", Category: mailparse.CategoryInvoices},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refiled, err := f.db.GetMessageForUser(ctx, f.user.ID, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refiled.Category != mailparse.CategoryInvoices {
+		t.Fatalf("re-classified category = %q, want %q", refiled.Category, mailparse.CategoryInvoices)
+	}
+	// And the row is stamped, so the same pass cannot pick it up forever.
+	remaining, err := f.db.ListMessagesNeedingCategory(ctx, f.user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("candidates after the pass = %+v, want none", remaining)
+	}
+}

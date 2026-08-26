@@ -1,6 +1,12 @@
-// File overview: Header-driven message categories. One message belongs to
-// exactly one category, decided from the list and automation headers the sender
-// set rather than from body text, so the answer is stable and explainable.
+// File overview: Message categories. One message belongs to exactly one
+// category, decided from the list and automation headers the sender set rather
+// than from body text, so the answer is stable and explainable.
+//
+// Invoices & Contracts is the one category headers cannot decide, because an
+// invoice and a delivery notice are the same robot as far as a header is
+// concerned. It is therefore reached in a second step, from the content, and
+// only out of the categories that already named the message machine mail --
+// see category_invoices.go for what that step may and may not take.
 //
 // The category set is defined once, in categoryDefinitions below. Adding a
 // category there gives it a name, a sidebar label, an icon, validation, and a
@@ -29,6 +35,11 @@ const (
 	// CategoryNotifications is transactional automation: receipts, alerts, and
 	// no-reply robots that are neither a list nor a person writing.
 	CategoryNotifications = "notifications"
+	// CategoryInvoices is the paperwork inside that automation: invoices,
+	// receipts, contracts, and the notices that change one. It is decided from
+	// what the message carries rather than from its headers, and only ever out
+	// of machine mail.
+	CategoryInvoices = "invoices"
 )
 
 // Category is one entry of the category registry: the stored name plus the
@@ -47,13 +58,10 @@ var categoryDefinitions = []Category{
 	{Name: CategoryNewsletters, Label: "Newsletters", Icon: "newspaper"},
 	{Name: CategoryForums, Label: "Forums", Icon: "forum"},
 	{Name: CategoryNotifications, Label: "Notifications", Icon: "notifications"},
+	// Last in the sidebar because it is carved out of the list above it: what
+	// is left in Notifications is everything this one did not claim.
+	{Name: CategoryInvoices, Label: "Invoices & Contracts", Icon: "receipt"},
 }
-
-// maxCategoryHeaderBytes bounds how much of a stored message the backfill reads
-// looking for the header block. A message whose headers do not end inside this
-// window is malformed for classification purposes and falls back to the address
-// rules rather than pulling an entire large body into memory.
-const maxCategoryHeaderBytes = 256 * 1024
 
 // CategoryRegistry lists every category with its display text, in sidebar order.
 func CategoryRegistry() []Category {
@@ -83,10 +91,14 @@ func ValidCategory(name string) bool {
 	return false
 }
 
-// Categorize decides one message's category from its headers, falling back to
-// the sender address when the headers say nothing. The order matters: a
+// Categorize decides one message's category from its headers alone, falling
+// back to the sender address when the headers say nothing. The order matters: a
 // discussion list also carries unsubscribe headers, and a newsletter also looks
 // automated, so the more specific claim is tested first.
+//
+// This is the whole answer for every category but Invoices & Contracts, which
+// needs the message itself; callers holding the content use
+// CategorizeWithContent instead.
 func Categorize(header mail.Header, from string) string {
 	if hasListPost(header) {
 		return CategoryForums
@@ -100,19 +112,28 @@ func Categorize(header mail.Header, from string) string {
 	return CategorizeAddress(from)
 }
 
+// CategorizeWithContent decides a category with the message in hand rather than
+// only its headers. The header decision is made first and unchanged: content
+// can move machine mail into Invoices & Contracts, and can do nothing else.
+func CategorizeWithContent(header mail.Header, from string, content CategoryContent) string {
+	return applyInvoiceEvidence(Categorize(header, from), content)
+}
+
 // CategorizeReader classifies a stored message that is being re-read from the
-// blob store. Only the header block is consumed. A message whose headers cannot
-// be parsed still gets a category from its address so the backfill always makes
-// progress instead of revisiting the same row forever.
+// blob store. It consumes the header block and a bounded part of the body, the
+// same evidence the parser hands CategorizeWithContent for newly fetched mail
+// (see maxCategoryScanBytes for what "bounded" costs and buys). A message whose
+// headers cannot be parsed still gets a category from its address so the
+// backfill always makes progress instead of revisiting the same row forever.
 func CategorizeReader(r io.Reader, from string) string {
 	if r == nil {
 		return CategorizeAddress(from)
 	}
-	msg, err := mail.ReadMessage(io.LimitReader(r, maxCategoryHeaderBytes))
+	header, content, err := scanCategoryContent(r)
 	if err != nil {
 		return CategorizeAddress(from)
 	}
-	return Categorize(msg.Header, from)
+	return CategorizeWithContent(header, from, content)
 }
 
 // CategorizeAddress is the header-less fallback. It recognizes only the robot

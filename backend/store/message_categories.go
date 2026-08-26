@@ -24,6 +24,21 @@ type CategoryCandidate struct {
 	BlobPath string
 }
 
+// CategoryVersion is the classifier generation a message's category was decided
+// by, stored beside the category itself. The backfill re-reads mail an older
+// generation filed, which is what lets a new category take mail that is already
+// sitting in another one.
+//
+// The alternative -- emptying the column so the existing pass picks it up --
+// was rejected: an empty category is not in any category list, so every list
+// would go blank for as long as the re-pass takes. Rows keep the answer they
+// have until the new one replaces it.
+//
+// Bump this whenever a change to mailparse's rules should reach mail that is
+// already stored. It costs one blob read per message, spread over the
+// background worker's turns.
+const CategoryVersion = 1
+
 // CategoryBackfillLimit bounds one backfill pass, and is the batch size the
 // worker uses. The pass opens a stored message per row, so the ceiling is about
 // how long the worker holds its turn, not about how much SQLite can return.
@@ -46,9 +61,15 @@ func validCategoryOrError(category string) (string, error) {
 	return normalized, nil
 }
 
-// ListMessagesNeedingCategory returns the next batch of unclassified messages.
-// Rows are taken oldest-id first so a pass that is interrupted resumes where it
-// stopped rather than revisiting the newest mail every time.
+// ListMessagesNeedingCategory returns the next batch of messages the classifier
+// still owes an answer: the ones that have no category at all, and then the
+// ones an older classifier generation filed. Rows are taken oldest-id first so
+// a pass that is interrupted resumes where it stopped rather than revisiting
+// the newest mail every time.
+//
+// Unclassified mail is always taken first and in full. It is the only kind that
+// is missing from every list while it waits, so a re-pass over a large mailbox
+// must never push it behind an hour of work.
 func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, limit int) ([]CategoryCandidate, error) {
 	if limit <= 0 || limit > CategoryBackfillLimit {
 		limit = CategoryBackfillLimit
@@ -94,6 +115,51 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 		}
 		out = append(out, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) >= limit {
+		return out, nil
+	}
+	stale, err := s.listMessagesWithStaleCategory(ctx, userID, limit-len(out))
+	if err != nil {
+		return nil, err
+	}
+	return append(out, stale...), nil
+}
+
+// listMessagesWithStaleCategory returns messages an older classifier generation
+// filed, oldest-id first.
+//
+// The in-play priority the pending query applies is deliberately absent here.
+// These rows are already in a category and already visible; ordering them by
+// what a list can show would mean sorting the tenant's entire mailbox on every
+// pass to reorder work nobody is waiting on.
+func (s *Store) listMessagesWithStaleCategory(ctx context.Context, userID int64, limit int) ([]CategoryCandidate, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path
+		FROM messages m
+		WHERE m.user_id = ? AND m.category <> '' AND m.category_version < ?
+		ORDER BY m.id
+		LIMIT ?`, userID, CategoryVersion, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]CategoryCandidate, 0, limit)
+	for rows.Next() {
+		var item CategoryCandidate
+		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
 	return out, rows.Err()
 }
 
@@ -102,6 +168,11 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 // worker classifies every message it finds, including Trash and Junk, but
 // counting those here would leave the browser reporting tens of thousands of
 // messages still to sort long after every list it can render is complete.
+//
+// Only mail that has no category at all is counted. A message an older
+// generation filed is in a list and readable while it waits to be re-read, and
+// reporting a re-pass as mail "waiting to be sorted" would tell the reader
+// their whole mailbox had come undone.
 //
 // Snoozed threads are counted: they are hidden for now, not out of scope, and
 // they will want a category when they come back.
@@ -134,11 +205,13 @@ type MessageCategoryUpdate struct {
 	Category  string
 }
 
-// SetMessageCategories records classified categories for one batch. The stored
-// correction for each sender is read inside the same transaction that does the
-// write, and wins: reading it beforehand would let a correction made while the
-// batch was in flight be overwritten by the classifier and then never revisited,
-// because the row is no longer pending once it has a category.
+// SetMessageCategories records classified categories for one batch, stamping
+// each row with the generation that decided it so the same pass cannot select
+// it again. The stored correction for each sender is read inside the same
+// transaction that does the write, and wins: reading it beforehand would let a
+// correction made while the batch was in flight be overwritten by the
+// classifier and then never revisited, because the row is no longer pending
+// once it has a category.
 //
 // Rows are grouped by the answer they get rather than updated one by one. A
 // backfill batch is dominated by repeat senders, so a batch of 200 messages is
@@ -184,8 +257,8 @@ func (s *Store) SetMessageCategories(ctx context.Context, userID int64, updates 
 	ts := nowUnix()
 	for _, key := range keys {
 		ids := groups[key]
-		args := make([]any, 0, len(ids)+6)
-		args = append(args, userID, key.sender, key.category, key.sender, ts, userID)
+		args := make([]any, 0, len(ids)+7)
+		args = append(args, userID, key.sender, key.category, key.sender, CategoryVersion, ts, userID)
 		for _, id := range ids {
 			args = append(args, id)
 		}
@@ -193,6 +266,7 @@ func (s *Store) SetMessageCategories(ctx context.Context, userID int64, updates 
 			category = COALESCE((SELECT o.category FROM category_sender_overrides o
 				WHERE o.user_id = ? AND o.sender = ?), ?),
 			sender_address = ?,
+			category_version = ?,
 			updated_at = ?
 			WHERE user_id = ? AND id IN (`+sqlPlaceholders(len(ids))+`)`, args...); err != nil {
 			return err

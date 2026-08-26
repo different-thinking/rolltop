@@ -1005,7 +1005,7 @@ function Sidebar({
       icon: category.icon || "label",
       active: listRoute.view === category.name,
       unread: category.unread,
-      title: `${category.label}: ${messageCountLabel(category.total)}, decided from each message's own headers and excluding archived mail. Drop mail here to file its sender under ${category.label}.`,
+      title: `${category.label}: ${messageCountLabel(category.total)}, decided from each message itself and excluding archived mail. Drop mail here to file its sender under ${category.label}.`,
       section: index === 0 ? "Categories" : undefined,
       category: { name: category.name, label: category.label }
     }))
