@@ -1082,13 +1082,17 @@ export function ThreadView({
 
   useEffect(() => {
     if (!securityEnabled || loading) return;
+    // Cached restores are collected and applied in one state update so a thread
+    // whose messages were all probed earlier does not trigger a re-render per
+    // message.
+    const restored: Record<number, AttachmentPGPImportState> = {};
     for (const item of thread) {
       if (autocryptImports[item.message.id]) continue;
       // A result from an earlier open in this session stands in without another
       // round trip; load() clears the state map but not this cache.
       const cached = autocryptResultsRef.current[item.message.id];
       if (cached) {
-        setAutocryptImports((current) => ({ ...current, [item.message.id]: cached }));
+        restored[item.message.id] = cached;
         continue;
       }
       // No Autocrypt header means there is no peer key to import, so there is no
@@ -1096,6 +1100,9 @@ export function ThreadView({
       // large majority of messages skip the probe entirely.
       if (!item.has_autocrypt_header) continue;
       void checkAutocryptPublicKey(item);
+    }
+    if (Object.keys(restored).length > 0) {
+      setAutocryptImports((current) => ({ ...current, ...restored }));
     }
   }, [autocryptImports, loading, securityEnabled, thread]);
 
