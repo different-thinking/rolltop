@@ -194,6 +194,17 @@ site and in review.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`
   account stores no password at all; do not add a fallback that reads one.
+- **Whether an IMAP connection is encrypted is asked of the socket, never of
+  the go-imap client** (`imapclient.transportEncrypted`). `client.New` leaves
+  its own `IsTLS` false for every connection the caller dialed, and this package
+  dials its own so it can wrap the socket for the fetch watchdog -- so the
+  cleartext gate that guards an XOAUTH2 token read `false` on a finished TLS
+  handshake and refused every Google account with "refusing to send an OAuth
+  access token over an unencrypted connection". The gate itself is right and
+  stays: a bearer token is as good as the password it replaced. Only its input
+  was wrong. The socket is what was negotiated; `UseTLS` is only what was
+  intended. Anything wrapping the socket must stay unwrappable here, or the
+  gate silently starts refusing again.
 - Gmail's label views (All Mail, Important, Starred) must stay excluded from
   sync by default. The data model stores one folder per message, so mirroring
   them duplicates most of the mailbox.
@@ -243,22 +254,85 @@ site and in review.
   section headings group on exactly that date. Thread-wide answers (message
   count, participants, read state, starred, attachments) still come from the
   whole thread.
-- Filing mail is decoupled from the IMAP work behind it. A row a list mutation
-  dismissed - delete, Report spam, archive, snooze - is gone from that list the
-  moment it is clicked and stays gone while the list still returns it; only an
-  undo, a proven failure, or a queued move the view stopped watching puts it
-  back. Never release a dismissal because the request finished or a run
+- **Pressing Delete is the whole decision.** Filing mail is decoupled from the
+  IMAP work behind it, and the row is gone from the reader's lists whatever that
+  work does. Two things hold it off screen and they answer different questions.
+  A list's own dismissal (`MessageList`'s `dismissedIDs`) covers the rows that
+  list is holding, for as long as it holds them. The **filing**
+  (`lib/filedMessages.ts`) is the durable half, and it exists because everything
+  else that draws a row went straight past the dismissal: a page cached in
+  memory or in `localStorage`, a prefetched neighbour, a remount after a route
+  change, a reload finishing after the move. Deleted mail came back onto the
+  screen seconds later, and pressing Delete on such a row asked the server to
+  move a message it no longer had - the "could not be deleted" that followed.
+  Every path that files mail records one - the list's `fileMessages`, the
+  message view's, the drag/drop `moveMessages` in `App` - and
+  `api.forgetMessages` takes the rows out of the cached pages at the same time
+  so the stale copy cannot outlive the record. Four properties keep a filing
+  from hiding real mail, and all four must stay.
+  - A record is **self-releasing**. It names the folder the message left and the
+    folder it is going to, and hides the row only while the row still claims the
+    folder it left; any list that draws the row anywhere else drops the record on
+    sight (`filterFiledConversations`), which is why nothing has to be cleared
+    when a move lands. A rule of "hidden until it reaches Trash" alone went on
+    hiding a message that had since come back: filed out of the Inbox, arrived in
+    Trash, dragged back, and the record re-armed. A caller that cannot name a
+    source folder - a drag holds the folder it dropped on, a header move covers a
+    whole conversation - files on the destination alone and gets the weaker rule.
+  - Records **expire** (`filedMessageTTLMS`) and the set is **bounded**, so a
+    filing whose move never happened is a row the reader gets back eventually,
+    whatever went wrong in the background.
+  - Writes **merge with what is stored**. Two tabs are two copies of the map, and
+    a plain overwrite meant the second tab to file anything dropped the first
+    tab's filings - mail one tab deleted was drawn again after a reload. Tabs
+    also follow each other through the `storage` event.
+  - A filing is filed **per account**, against that account's own destination.
+    Every path that can span accounts splits by `conversationAccountMessageIDs`
+    first: a record naming another account's Trash never stops hiding the row,
+    because the copy arrives in its own. The queued-move watch may keep the
+    coarser grouping - it only ever gives rows back - but filing may not.
+
+  A message Rolltop itself answers for with "no such message" is filed with no
+  destination at all, which hides it everywhere - that is the stale row that
+  could be neither opened nor deleted. Only Rolltop may say that: the answer
+  carries `code: "message_gone"` (`writeMessageGone`), because Go's own
+  `http.NotFound` and every proxy in front of the app answer 404 in plain text,
+  and a client acting on the status alone would hide a message that is still
+  there because a gateway answered for it.
+- **Only three things put a filed row back, and a failure is not one of them.**
+  An undo, a move that was never dispatched, and the reader asking for it. A
+  move the server *refused* leaves the row filed and says so
+  (`reportFilingFailure`), with "Show again" on the toast: the reader pressed
+  Delete, and a row that reappears on its own is the thing they reported as mail
+  coming back from the dead. What is handed back without asking is the mail
+  nobody was asked about - the chunks a background commit's keepalive budget
+  never sent (`executeMailboxMove`'s `skippedIDs`), which never left the
+  browser, and a drag/drop the server refused - nobody asked for those rows to
+  be out of the way, they were asked to be somewhere else and are not there.
+  Never release a dismissal or a filing because the request finished or a run
   completed: a queued move ends minutes later, and the rows return to the screen
-  for the gap until the reload answers, which is the flash the dismissal exists
-  to prevent. Whatever proves a move also takes the rows out of the list's own
-  data (`onMessagesMoved`) rather than leaving that to the reload - and only
-  what proves it may: a queued move has been accepted, not performed, so
-  reporting its rows moved takes them out of the list the dismissal is measured
-  against, and the next reload hands them back with nothing hiding them. Read
-  outcomes per message and per run, never per batch: a move that relocated part
-  of a thread restores exactly what stayed, and a set of runs that did not all
-  end the same way settles each run's own messages, or a dismissal that outlives
-  its mutation hides mail that never went anywhere.
+  for the gap until the reload answers, which is the flash this whole path
+  exists to prevent.
+- **A move of a message the server no longer has is done, not failed.**
+  `apiBulkMoveMessages` has answered ids that resolve to nothing with
+  `ok, moved: 0` for a while, and `apiMoveMessage` - the path a single delete
+  takes - now agrees with it. A 404 there became "Delete failed: Not Found",
+  which put the row back and left the reader with a row no further attempt could
+  ever remove, because every attempt asked the same question about the same
+  missing message. The client must **not** read the status for this: the same
+  route answers 404 for a destination folder it cannot resolve, and so does
+  anything in front of the app, and treating those as moved files mail away on a
+  request that never touched it. The route says what happened; the status does
+  not.
+- Whatever proves a move also takes the rows out of the list's own data
+  (`onMessagesMoved`) rather than leaving that to the reload - and only what
+  proves it may: a queued move has been accepted, not performed, so reporting
+  its rows moved takes them out of the list the dismissal is measured against,
+  and the next reload hands them back with nothing hiding them. Read outcomes
+  per message and per run, never per batch: a move that relocated part of a
+  thread settles exactly the messages it took, and a set of runs that did not
+  all end the same way settles each run's own messages, or one refusal decides
+  the fate of mail it never touched.
 - A conversation row can span accounts, and filing it means filing all of it. A
   thread carries copies of the same mail whenever several of the accounts were
   addressed, or none of them was - Bcc, a mailing list - which is exactly when

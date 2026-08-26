@@ -41,7 +41,8 @@ import type {
   ThreadMessage,
   User
 } from "./types";
-import { clearMailSnapshots, clearOtherMailSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
+import { clearMailSnapshots, clearOtherMailSnapshots, forgetMessagesInSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
+import { clearFiledMessages, clearOtherFiledMessages, filedMessageIDs, filterFiledConversations, releaseAnsweredFilings, setFiledMessagesUser } from "./lib/filedMessages";
 import { clearOtherMailSortOrders, defaultMailSortOrder } from "./lib/mailSort";
 import type { MailSortOrder } from "./lib/mailSort";
 import type { MailView } from "./lib/routes";
@@ -148,16 +149,16 @@ const getCacheMaxEntries = 200;
 const getCache = new Map<string, { etag: string; data: unknown }>();
 const getInflight = new Map<string, Promise<unknown>>();
 const mailCacheEpochs = new Map<number, number>();
-// lastRetainedUserID is the signed-in user the get-cache was last reconciled
-// for, so retainMailCacheForUser can tell an actual user switch (drop the
-// URL-scoped entries that may hold the previous user's data) from the frequent
-// same-user bootstrap refresh (keep the cache).
-let lastRetainedUserID: number | null = null;
 // getCacheGeneration is bumped on every actual user switch. A GET that was
 // already in flight when the switch happened captures the generation at its
 // start and refuses to write its result into the cache once the generation has
 // moved on, so a previous user's response cannot repopulate a purged key.
 let getCacheGeneration = 0;
+// The signed-in user, so callers that only hold message ids - a list row, an
+// open message - can still reach this user's cached pages and filings. It also
+// tells retainMailCacheForUser an actual user switch from the frequent same-user
+// bootstrap refresh.
+let activeMailUserID = 0;
 
 function cacheGet(key: string): { etag: string; data: unknown } | undefined {
   const entry = getCache.get(key);
@@ -372,14 +373,36 @@ function cachedMail(userID: number, mailboxID: string | null, page: number, orde
   // Named views keep no localStorage snapshot: snapshot keys only name
   // mailbox/all pages, and an All Mail page painting into one of them would
   // show exactly the rows that view exists to leave out.
-  return cached || (view ? null : loadMailSnapshot(userID, mailboxID, page, order));
+  const stored = cached || (view ? null : loadMailSnapshot(userID, mailboxID, page, order));
+  return stored && withoutFiledConversations(stored);
+}
+
+// withoutFiledConversations is applied to every list page this module hands
+// back, from the network or from either cache. A page the reader filed mail out
+// of is stale in exactly one way, and it is the way that puts deleted mail back
+// on screen; the filing itself decides when the row is due again.
+function withoutFiledConversations<T extends MailListResponse>(page: T): T {
+  const conversations = filterFiledConversations(page.conversations);
+  return conversations.length === page.conversations.length ? page : { ...page, conversations };
+}
+
+// answeredFiledConversations is that plus letting go of the records these rows
+// have answered - a message drawn where it was filed to, or anywhere other than
+// the folder it left. Only the network paths do it: `cachedMail` is read while
+// a view renders, and releasing a record writes to `localStorage`.
+function answeredFiledConversations<T extends MailListResponse>(page: T): T {
+  releaseAnsweredFilings(page.conversations);
+  return withoutFiledConversations(page);
 }
 
 async function loadMail(userID: number, mailboxID: string | null, page: number, order: MailSortOrder = defaultMailSortOrder, view: MailView = ""): Promise<MailListResponse> {
   const url = mailListURL(mailboxID, page, order, view);
   const epoch = mailCacheEpoch(userID);
   const key = mailListCacheKey(userID, mailboxID, page, order, view, epoch);
-  const data = await getJSON<MailListResponse>(url, key);
+  // Filed rows come off the page before it is stored, not only before it is
+  // handed back: a snapshot written with them outlives the filing that hides
+  // them, and would paint deleted mail again once the filing expired.
+  const data = answeredFiledConversations(await getJSON<MailListResponse>(url, key));
   if (mailCacheEpoch(userID) !== epoch) {
     getCache.delete(key);
     return data;
@@ -401,7 +424,31 @@ function clearMailCache(userID: number) {
   clearMailSnapshots(userID);
 }
 
+/**
+ * forgetUserMail drops everything this browser holds about one user's mail, for
+ * a sign-out. Filings go with it - they are the reader's own pending decisions
+ * and belong to their session - which is why `clearMailCache` leaves them
+ * alone: a dropped cache is a page this browser can no longer trust, and mail
+ * the reader deleted a moment ago is not made undeleted by that.
+ */
+function forgetUserMail(userID: number) {
+  clearMailCache(userID);
+  clearFiledMessages(userID);
+}
+
 function retainMailCacheForUser(userID: number) {
+  const switchedUser = activeMailUserID !== userID;
+  activeMailUserID = userID;
+  setFiledMessagesUser(userID);
+  clearOtherFiledMessages(userID);
+  // Only when the signed-in user changes, which for a browser session means
+  // once. This walks every stored page and re-encodes the ones it rewrites, and
+  // it is reached from `refreshBootstrap` - the chrome refresh that also runs
+  // on every message open - so doing it per call spent that on the main thread
+  // over and over for an answer that cannot have changed. The rewrite exists so
+  // that mail filed away in an earlier session is out of the stored pages before
+  // its record expires; the read path filters the rest.
+  if (switchedUser) forgetFiledMessages();
   for (const cachedUserID of mailCacheEpochs.keys()) {
     if (cachedUserID !== userID) clearMailCache(cachedUserID);
   }
@@ -414,8 +461,9 @@ function retainMailCacheForUser(userID: number) {
   // alone (bootstrap, contacts, a message body) and can still hold the previous
   // user's data, so carrying them across a switch is both a cross-user leak risk
   // and the other half of this cache's unbounded growth. The common case, a
-  // same-user bootstrap refresh, leaves them in place.
-  if (lastRetainedUserID !== null && lastRetainedUserID !== userID) {
+  // same-user bootstrap refresh, leaves them in place. (On the first call the
+  // cache is empty, so the purge is a harmless no-op.)
+  if (switchedUser) {
     // Bump first so any GET already in flight for the previous user refuses to
     // write its result back after this purge.
     getCacheGeneration++;
@@ -426,12 +474,40 @@ function retainMailCacheForUser(userID: number) {
       }
     }
   }
-  lastRetainedUserID = userID;
   clearOtherMailSnapshots(userID);
   clearOtherMailSortOrders(userID);
   clearOtherSidebarState(userID);
 }
 
+/**
+ * forgetMessages takes messages out of every list page this browser is holding -
+ * the in-memory pages, the prefetched neighbours, the localStorage snapshots -
+ * for mail the reader filed away or that the server says it no longer has.
+ * Filtering the pages on the way out (`withoutFiledConversations`) is what keeps
+ * a filed row off screen; this is what stops the stale copy outliving the
+ * filing, so a page whose ETag never changes again cannot bring it back.
+ *
+ * The rewritten page keeps its data and loses its ETag: a revalidation that
+ * answered 304 would otherwise be answered from the copy edited here, which is
+ * an answer about mail rather than about the page the server holds.
+ */
+function forgetMessages(messageIDs: number[]) {
+  const gone = new Set(messageIDs.filter((id) => Number.isInteger(id) && id > 0));
+  if (gone.size === 0) return;
+  for (const [key, entry] of getCache) {
+    const data = entry.data as { conversations?: unknown } | null;
+    if (!data || !Array.isArray(data.conversations)) continue;
+    const conversations = (data.conversations as Conversation[]).filter((conversation) => !gone.has(conversation.message.id));
+    if (conversations.length === data.conversations.length) continue;
+    getCache.set(key, { etag: "", data: { ...data, conversations } });
+  }
+  if (activeMailUserID > 0) forgetMessagesInSnapshots(activeMailUserID, Array.from(gone));
+}
+
+/** forgetFiledMessages drops what is currently filed from the cached pages too. */
+function forgetFiledMessages() {
+  forgetMessages(filedMessageIDs());
+}
 
 // The api object is deliberately explicit rather than generated: it documents
 // the route surface used by the current frontend and keeps response shapes close
@@ -451,14 +527,18 @@ export const api = {
   cachedMail,
   prefetchMail,
   clearMailCache,
+  forgetUserMail,
   retainMailCacheForUser,
-  snoozes: (page: number) => getJSON<SnoozeListResponse>(`/api/snoozes?${new URLSearchParams({ page: String(page) })}`),
+  forgetMessages,
+  snoozes: (page: number) => getJSON<SnoozeListResponse>(`/api/snoozes?${new URLSearchParams({ page: String(page) })}`)
+    .then(answeredFiledConversations),
   snoozeMessage: (csrf: string, id: number, until: Date, options?: MutationRequestOptions) =>
     putJSON<{ ok: boolean; snoozed: boolean; snooze: MessageSnooze }>(`/api/messages/${id}/snooze`, csrf, { until: until.toISOString() }, options),
   unsnoozeMessage: (csrf: string, id: number, options?: MutationRequestOptions) =>
     deleteJSON<{ ok: boolean; snoozed: boolean }>(`/api/messages/${id}/snooze`, csrf, options),
   search: (query: string, page: number) =>
-    getJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page)),
+    getJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page))
+      .then(answeredFiledConversations),
   prefetchSearch: (query: string, page: number) =>
     prefetchJSON<{ conversations: Conversation[]; page: number; has_prev: boolean; has_next: boolean }>(searchListURL(query, page)),
   brandIcons: (domains: string[]) => {
