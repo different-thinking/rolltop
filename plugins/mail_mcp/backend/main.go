@@ -854,57 +854,106 @@ func mailThreadGet(ctx context.Context, st *store.Store, userID int64, id string
 	return map[string]any{"id": threadID(msg), "messages": out, "historyId": strconv.FormatInt(msg.UpdatedAt.Unix(), 10)}, nil
 }
 
+// listMessageScanBatch is how many rows a query pulls from the store per round,
+// and listMessageScanBudget bounds how many it will scan for one page before
+// handing back a cursor. Together they let a query walk the whole mailbox across
+// pages without loading it all at once.
+const (
+	listMessageScanBatch  = 200
+	listMessageScanBudget = 1000
+)
+
 func listMessages(ctx context.Context, st *store.Store, userID int64, args listArgs, threads bool) ([]store.MessageRecord, string, error) {
 	limit := args.MaxResults
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	offset := pageOffset(args.PageToken)
-	fetchLimit := limit + 1
-	if strings.TrimSpace(args.Q) != "" {
-		fetchLimit = 200
-		offset = 0
-	}
-	var messages []store.MessageRecord
-	var err error
-	if mailboxID := firstMailboxLabel(args.LabelIDs); mailboxID > 0 {
+
+	var mailboxID int64
+	if mailboxID = firstMailboxLabel(args.LabelIDs); mailboxID > 0 {
 		if _, err := st.GetMailboxForUser(ctx, userID, mailboxID); err != nil {
 			return nil, "", err
 		}
-		if threads {
-			messages, err = st.ListLatestThreadMessagesForMailbox(ctx, userID, mailboxID, fetchLimit, offset, store.ThreadListNewestFirst)
-		} else {
-			messages, err = st.ListMessagesForMailbox(ctx, userID, mailboxID, fetchLimit, offset)
-		}
-	} else {
-		if threads {
-			messages, err = st.ListLatestThreadMessagesForUser(ctx, userID, fetchLimit, offset, store.ThreadListNewestFirst)
-		} else {
-			messages, err = st.ListMessagesForUser(ctx, userID, fetchLimit, offset)
-		}
 	}
-	if err != nil {
-		return nil, "", err
+	fetch := func(off, lim int) ([]store.MessageRecord, error) {
+		if mailboxID > 0 {
+			if threads {
+				return st.ListLatestThreadMessagesForMailbox(ctx, userID, mailboxID, lim, off, store.ThreadListNewestFirst)
+			}
+			return st.ListMessagesForMailbox(ctx, userID, mailboxID, lim, off)
+		}
+		if threads {
+			return st.ListLatestThreadMessagesForUser(ctx, userID, lim, off, store.ThreadListNewestFirst)
+		}
+		return st.ListMessagesForUser(ctx, userID, lim, off)
 	}
+
 	query, err := parseMailQuery(args.Q)
 	if err != nil {
 		return nil, "", err
 	}
-	if query.active() {
-		filtered := messages[:0]
-		for _, msg := range messages {
-			if query.matches(msg) {
-				filtered = append(filtered, msg)
-			}
+
+	if !query.active() {
+		messages, err := fetch(offset, limit+1)
+		if err != nil {
+			return nil, "", err
 		}
-		messages = filtered
+		next := ""
+		if len(messages) > limit {
+			messages = messages[:limit]
+			next = strconv.Itoa(offset + limit)
+		}
+		return messages, next, nil
 	}
-	next := ""
-	if len(messages) > limit {
-		messages = messages[:limit]
-		next = strconv.Itoa(offset + limit)
+
+	// Query path: page through the list by store offset, applying the in-memory
+	// filter, until there are limit+1 matches, the list runs out, or the scan
+	// budget for this page is spent. The cursor is a store offset, so a query
+	// pages through every message. The previous code forced the offset to zero and
+	// refiltered only the newest 200 rows on every call -- so a query never saw
+	// past those 200 and its "next" cursor produced the same page forever.
+	matches := make([]store.MessageRecord, 0, limit+1)
+	dbOffset := offset
+	scanned := 0
+	// Start with just enough rows for a full page and widen only when the filter is
+	// sparse enough that a small fetch did not fill it. A dense query then pulls
+	// roughly a page, not a fixed 200-row batch it would use a handful of and
+	// re-read the rest of on the next page.
+	batchSize := limit + 1
+	for scanned < listMessageScanBudget {
+		if batchSize > listMessageScanBatch {
+			batchSize = listMessageScanBatch
+		}
+		batch, err := fetch(dbOffset, batchSize)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(batch) == 0 {
+			return matches, "", nil // list exhausted, no more pages
+		}
+		for i, msg := range batch {
+			if !query.matches(msg) {
+				continue
+			}
+			if len(matches) == limit {
+				// The (limit+1)th match: stop before including it and point the
+				// cursor at its store offset so the next page resumes exactly there.
+				return matches, strconv.Itoa(dbOffset + i), nil
+			}
+			matches = append(matches, msg)
+		}
+		exhausted := len(batch) < batchSize
+		scanned += len(batch)
+		dbOffset += len(batch)
+		if exhausted {
+			return matches, "", nil // list exhausted, no more pages
+		}
+		batchSize *= 2
 	}
-	return messages, next, nil
+	// Budget spent without exhausting the list: hand back what matched and a
+	// cursor to continue scanning from where this page stopped.
+	return matches, strconv.Itoa(dbOffset), nil
 }
 
 func mailMessage(msg store.MessageRecord, format string) map[string]any {

@@ -370,3 +370,60 @@ func (testAPIHost) WriteJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
 }
+
+func TestListMessagesPaginatesQueryResultsWithoutLooping(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	user, account, mailbox, blob := createTestMailbox(t, ctx, db, "page@example.test")
+	// Interleave matching and non-matching messages so the in-memory filter is
+	// active and the matches are spread across store offsets rather than sitting
+	// in one contiguous window.
+	want := map[int64]bool{}
+	uid := uint32(1)
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		keep := createMailboxMessage(t, ctx, db, user.ID, account.ID, mailbox.ID, blob.ID, "keepme subject", uid, base.Add(time.Duration(uid)*time.Minute))
+		want[keep.ID] = true
+		uid++
+		createMailboxMessage(t, ctx, db, user.ID, account.ID, mailbox.ID, blob.ID, "unrelated", uid, base.Add(time.Duration(uid)*time.Minute))
+		uid++
+	}
+
+	got := map[int64]bool{}
+	token := ""
+	for pages := 0; ; pages++ {
+		if pages > 20 {
+			t.Fatal("pagination did not terminate: the cursor is looping")
+		}
+		msgs, next, err := listMessages(ctx, db, user.ID, listArgs{Q: "keepme", MaxResults: 2, PageToken: token}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) > 2 {
+			t.Fatalf("page returned %d messages, want at most MaxResults=2", len(msgs))
+		}
+		for _, m := range msgs {
+			if got[m.ID] {
+				t.Fatalf("message %d was returned on more than one page", m.ID)
+			}
+			got[m.ID] = true
+		}
+		if next == "" {
+			break
+		}
+		token = next
+	}
+	if len(got) != len(want) {
+		t.Fatalf("paged matches = %d, want %d", len(got), len(want))
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("match %d was never returned across pages", id)
+		}
+	}
+}

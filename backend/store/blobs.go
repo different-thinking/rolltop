@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 )
 
@@ -153,11 +154,29 @@ func (s *Store) GetAttachmentForUser(ctx context.Context, userID, id int64) (Att
 
 // ListAttachmentsForMessage returns attachment metadata for a user-owned message.
 func (s *Store) ListAttachmentsForMessage(ctx context.Context, userID, messageID int64) ([]Attachment, error) {
-	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT id, user_id, message_id, blob_id, filename, content_type, content_id, is_inline, size, blob_path, created_at
-		FROM attachments WHERE user_id = ? AND message_id = ? ORDER BY id`, userID, messageID)
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, attachmentsForMessageSelectSQL, userID, messageID)
 	if err != nil {
 		return nil, err
 	}
+	return scanAttachmentRows(rows)
+}
+
+const attachmentsForMessageSelectSQL = `SELECT id, user_id, message_id, blob_id, filename, content_type, content_id, is_inline, size, blob_path, created_at
+	FROM attachments WHERE user_id = ? AND message_id = ? ORDER BY id`
+
+// listAttachmentsForMessageForUpdate reads a message's attachment rows inside a
+// transaction and locks them with FOR UPDATE, so a reparse can match, update,
+// and delete against a consistent set instead of a snapshot a concurrent writer
+// may have changed between the read and the writes.
+func listAttachmentsForMessageForUpdate(ctx context.Context, tx *sql.Tx, userID, messageID int64) ([]Attachment, error) {
+	rows, err := tx.QueryContext(ctx, attachmentsForMessageSelectSQL+` FOR UPDATE`, userID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return scanAttachmentRows(rows)
+}
+
+func scanAttachmentRows(rows *sql.Rows) ([]Attachment, error) {
 	defer rows.Close()
 	var out []Attachment
 	for rows.Next() {
@@ -249,9 +268,9 @@ func (s *Store) ListAttachmentsForMessages(ctx context.Context, userID int64, me
 // matchAttachmentRows pairs each parsed part with the index of the existing
 // row that already holds it, or -1 for a part no row holds yet. A part is
 // recognised by its Content-ID first - the one identifier a message body refers
-// to a part by - then by filename and size, and whatever is still unpaired is
-// matched in order, so a reparse that only corrected metadata keeps every row
-// where it was.
+// to a part by - then by filename with size and content-type, and whatever is
+// still unpaired is matched in order, so a reparse that only corrected metadata
+// keeps every row where it was.
 func matchAttachmentRows(files, existing []Attachment) []int {
 	rowForFile := make([]int, len(files))
 	for i := range rowForFile {
@@ -277,13 +296,22 @@ func matchAttachmentRows(files, existing []Attachment) []int {
 		id := strings.TrimSpace(strings.Trim(file.ContentID, "<>"))
 		return id != "" && strings.EqualFold(strings.TrimSpace(strings.Trim(row.ContentID, "<>")), id)
 	})
+	// Filename plus size plus content-type is an exact metadata match; then
+	// filename plus size, which still pins the bytes because size is the strong
+	// content discriminator. A filename-only pass used to follow, but matching by
+	// name alone reaches across positions and could pair two same-named parts of
+	// different sizes -- handing one part's stable id the other's blob, so a later
+	// download returned the wrong file. Whatever these exact passes leave unpaired
+	// falls to the positional pass below, which keeps a part in its place instead
+	// of guessing by name.
 	match(func(file, row Attachment) bool {
 		name := strings.TrimSpace(file.Filename)
-		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name) && row.Size == file.Size
+		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name) && row.Size == file.Size &&
+			strings.EqualFold(strings.TrimSpace(row.ContentType), strings.TrimSpace(file.ContentType))
 	})
 	match(func(file, row Attachment) bool {
 		name := strings.TrimSpace(file.Filename)
-		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name)
+		return name != "" && strings.EqualFold(strings.TrimSpace(row.Filename), name) && row.Size == file.Size
 	})
 	// Whatever is left is paired in order. A part the parse describes
 	// differently than the row does - a filename a better parse decoded, a size
@@ -307,15 +335,19 @@ func matchAttachmentRows(files, existing []Attachment) []int {
 }
 
 func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messageID int64, files []Attachment) ([]Attachment, error) {
-	existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
-	if err != nil {
-		return nil, err
-	}
-	// Most mail carries no attachments at all, and every stored and reindexed
-	// message now comes through here, so the case with nothing on either side
-	// answers without opening a transaction.
-	if len(existing) == 0 && len(files) == 0 {
-		return nil, nil
+	// Fast path for the overwhelmingly common attachment-free message: with no new
+	// files, a cheap unlocked probe short-circuits without a transaction when the
+	// message has no existing rows either. When there ARE files to write there is
+	// work regardless, so skip the probe and go straight to the locked read below
+	// rather than reading the set twice.
+	if len(files) == 0 {
+		existing, err := s.ListAttachmentsForMessage(ctx, userID, messageID)
+		if err != nil {
+			return nil, err
+		}
+		if len(existing) == 0 {
+			return nil, nil
+		}
 	}
 	ts := nowUnix()
 	tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
@@ -323,6 +355,16 @@ func (s *Store) ReplaceAttachmentsForMessage(ctx context.Context, userID, messag
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Authoritative, locked view for the match/update/delete below: reading inside
+	// the transaction under FOR UPDATE keeps a concurrent writer from changing the
+	// set between the read and the writes.
+	existing, err := listAttachmentsForMessageForUpdate(ctx, tx, userID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 && len(files) == 0 {
+		return nil, nil
+	}
 	rowForFile := matchAttachmentRows(files, existing)
 	taken := make(map[int]bool, len(existing))
 	for i, file := range files {

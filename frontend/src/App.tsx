@@ -657,6 +657,14 @@ export default function App() {
     else if (bootstrap?.user) api.prefetchMail(bootstrap.user.id, null, 1, loadMailSortOrder(bootstrap.user.id));
   }, [bootstrap?.user, navigate, notificationsEnabled]);
 
+  // The event-stream effect reads notifyNewMail through a ref so a new callback
+  // identity (it changes whenever notification settings or the bootstrap object
+  // change) does not re-run that effect and tear down the EventSource.
+  const notifyNewMailRef = useRef(notifyNewMail);
+  useEffect(() => {
+    notifyNewMailRef.current = notifyNewMail;
+  }, [notifyNewMail]);
+
   // When someone returns to an idle tab, warm All Mail before they click it.
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -706,9 +714,9 @@ export default function App() {
           const previous = lastNotify.current;
           const newMessages = chrome.latest_sync_run.new_messages || 0;
           if (previous && previous.id === chrome.latest_sync_run.id && newMessages > previous.stored) {
-            notifyNewMail(newMessages - previous.stored, chrome.latest_sync_run);
+            notifyNewMailRef.current(newMessages - previous.stored, chrome.latest_sync_run);
           } else if (previous && previous.id !== chrome.latest_sync_run.id && newMessages > 0) {
-            notifyNewMail(newMessages, chrome.latest_sync_run);
+            notifyNewMailRef.current(newMessages, chrome.latest_sync_run);
           }
           lastNotify.current = { id: chrome.latest_sync_run.id, stored: newMessages };
         }
@@ -725,7 +733,10 @@ export default function App() {
     return () => {
       events.close();
     };
-  }, [bootstrap?.user, notifyNewMail]);
+    // Keyed on the stable user id, not the bootstrap.user object or notifyNewMail:
+    // a bootstrap refresh that leaves the same user signed in must not reconnect
+    // the stream. notifyNewMail is reached through notifyNewMailRef instead.
+  }, [bootstrap?.user?.id]);
 
   // Rows a mutation is about to remove are hidden from every mail list at once,
   // so the drag/drop path and the thread header's own moves dismiss identically.

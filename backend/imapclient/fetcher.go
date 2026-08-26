@@ -63,8 +63,10 @@ var errIdleStopTimeout = errors.New("IDLE session did not stop cleanly")
 // errFetchStalled reports a fetch whose connection stopped delivering bytes
 // for a whole idle window. It is a transport verdict about this attempt, not
 // about the batch: data was not flowing, so waiting longer had nothing to wait
-// for.
-var errFetchStalled = errors.New("IMAP fetch stalled")
+// for. The sentinel lives in syncer so ClassifyRemoteError can treat a stall as
+// transient (imapclient already imports syncer; the reverse would be a cycle);
+// this alias keeps the local name for call sites and tests.
+var errFetchStalled = syncer.ErrFetchStalled
 
 // connActivity timestamps the last byte a connection delivered. The fetch
 // watchdog reads it to tell a slow link that is still making progress from a
@@ -178,7 +180,12 @@ func (f *Fetcher) ListMailboxes(ctx context.Context, account store.MailAccount) 
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	releaseOwned := true
+	defer func() {
+		if releaseOwned {
+			release()
+		}
+	}()
 
 	mailboxes := make(chan *imap.MailboxInfo, 50)
 	done := make(chan error, 1)
@@ -188,10 +195,14 @@ func (f *Fetcher) ListMailboxes(ctx context.Context, account store.MailAccount) 
 
 	var out []syncer.MailboxInfo
 	for mb := range mailboxes {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
+			// A server with more folders than the channel buffer holds would
+			// otherwise leave c.List blocked on the next send forever. Hand off
+			// draining and the client release to the background so the reader
+			// goroutine can finish and the connection is only pooled once idle.
+			releaseOwned = false
+			drainAndRelease(mailboxes, done, release)
 			return nil, ctx.Err()
-		default:
 		}
 		info, ok := mailboxDiscoveryInfo(mb)
 		if !ok {
@@ -210,6 +221,24 @@ func mailboxDiscoveryInfo(mailbox *imap.MailboxInfo) (syncer.MailboxInfo, bool) 
 		return syncer.MailboxInfo{}, false
 	}
 	return syncer.MailboxInfo{Name: mailbox.Name, Attributes: append([]string(nil), mailbox.Attributes...)}, true
+}
+
+// drainAndRelease finishes a fetch its caller is abandoning early. go-imap
+// streams results into a buffered channel and only returns — reporting on
+// done — once it has written them all, so a caller that stops reading on a
+// cancelled context or a read error would leave that reader goroutine blocked
+// forever on a full channel. Releasing the session client while the reader
+// still holds the connection is just as wrong: it hands a connection that is
+// mid-command back to the session pool for the next operation to reuse. This
+// drains the channel in the background so the reader can finish, waits for it
+// via done, and only then releases the client.
+func drainAndRelease[T any](messages <-chan T, done <-chan error, release func()) {
+	go func() {
+		for range messages {
+		}
+		<-done
+		release()
+	}()
 }
 
 type trainingCandidateClient interface {
@@ -1043,7 +1072,12 @@ func (f *Fetcher) FetchMessage(ctx context.Context, account store.MailAccount, m
 	if err != nil {
 		return syncer.FetchedMessage{}, err
 	}
-	defer release()
+	releaseOwned := true
+	defer func() {
+		if releaseOwned {
+			release()
+		}
+	}()
 	selected, err := c.Select(mailbox, true)
 	if err != nil {
 		return syncer.FetchedMessage{}, fmt.Errorf("select mailbox %q read-only: %w", mailbox, err)
@@ -1066,10 +1100,13 @@ func (f *Fetcher) FetchMessage(ctx context.Context, account store.MailAccount, m
 	var out syncer.FetchedMessage
 	found := false
 	for msg := range messages {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
+			// Abandon the read but keep the fetch goroutine unblocked: drain the
+			// channel and release the client in the background so the connection
+			// is only returned to the pool once the command has finished.
+			releaseOwned = false
+			drainAndRelease(messages, done, release)
 			return syncer.FetchedMessage{}, ctx.Err()
-		default:
 		}
 		if msg == nil || msg.Uid != uid {
 			continue
@@ -1080,6 +1117,8 @@ func (f *Fetcher) FetchMessage(ctx context.Context, account store.MailAccount, m
 		}
 		raw, err := io.ReadAll(body)
 		if err != nil {
+			releaseOwned = false
+			drainAndRelease(messages, done, release)
 			return syncer.FetchedMessage{}, fmt.Errorf("read message body mailbox %q UID %d: %w", mailbox, uid, err)
 		}
 		out = syncer.FetchedMessage{

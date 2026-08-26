@@ -131,7 +131,11 @@ func (s *Service) classifyMessageInput(ctx context.Context, hooks []plugins.Mess
 	host := syncPluginHost{s: s}
 	for _, hook := range hooks {
 		generationRecoveryPhase(ctx, "plugin-classification", hook.ID())
-		if err := hook.ClassifyMessage(ctx, host, input); err != nil {
+		// guardPluginHook contains a panicking classifier so it cannot crash the
+		// sync process; a returned error is logged here with message context.
+		if err := guardPluginHook(hook.ID(), "classification", func() error {
+			return hook.ClassifyMessage(ctx, host, input)
+		}); err != nil {
 			// Do not include the error string: plugin errors can contain derived
 			// message evidence, which must not be written to application logs.
 			log.Printf("message classifier failed plugin_id=%s user_id=%d message_id=%d error_type=%T", hook.ID(), input.UserID, input.MessageID, err)

@@ -198,6 +198,13 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 	var endSessions func()
 	ctx, endSessions = WithAccountSessionScope(ctx)
 	defer endSessions()
+	// Settling a transfer -- marking it succeeded, finishing a claim, bringing the
+	// local mirror in line -- must outlive the request it was dispatched under, the
+	// same way the move path does (see applyMoveOutcome). Remote calls below stay on
+	// ctx so a cancelled request stops hitting the server; only the store/local
+	// settlement runs on settleCtx so a closed tab cannot leave a claim held or the
+	// mirror out of step with a message the server already has.
+	settleCtx := context.WithoutCancel(ctx)
 	msg, err := s.Store.GetMessageForUser(ctx, userID, messageID)
 	if err != nil {
 		return err
@@ -238,7 +245,7 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 		if resolveErr != nil {
 			return resolveErr
 		}
-		return s.fetchAndCompleteSucceededCopy(ctx, userID, msg, destAccount, dest, raw, date,
+		return s.fetchAndCompleteSucceededCopy(settleCtx, userID, msg, destAccount, dest, raw, date,
 			transfer.ID, destinationUID, destinationUIDValidity)
 	}
 	boundaryFetcher, hasBoundaryFetcher := s.Fetcher.(MailboxAppendBoundaryFetcher)
@@ -288,10 +295,12 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 			return errors.New("message copy remains pending because exact destination matches are ambiguous")
 		}
 		if len(after) == 1 {
-			if err := s.Store.MarkMessageTransferSucceeded(ctx, userID, transfer.ID, after[0], int64(matches.UIDValidity)); err != nil {
+			// The remote proof above ran on ctx; the message is already on the
+			// server, so settle it detached from the request like the append path.
+			if err := s.Store.MarkMessageTransferSucceeded(settleCtx, userID, transfer.ID, after[0], int64(matches.UIDValidity)); err != nil {
 				return err
 			}
-			return s.fetchAndCompleteSucceededCopy(ctx, userID, msg, destAccount, dest, raw, date,
+			return s.fetchAndCompleteSucceededCopy(settleCtx, userID, msg, destAccount, dest, raw, date,
 				transfer.ID, after[0], matches.UIDValidity)
 		}
 		for _, uid := range matches.CandidateUIDs {
@@ -315,15 +324,18 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 	if !claimed {
 		return errors.New("message copy is already awaiting remote reconciliation")
 	}
+	// The APPEND runs on ctx (a cancelled request should stop uploading), but the
+	// transfer was claimed before it, so every settlement call below uses settleCtx
+	// -- a closed tab must not leave the claim held until the stale-claim cutoff.
 	fetched, err := s.Fetcher.AppendMessage(ctx, destAccount, dest.Name, raw, msg.MessageIDHeader, date)
 	if err != nil {
 		var markErr error
 		if IsAppendApplied(err) {
-			markErr = s.Store.MarkMessageTransferSucceeded(ctx, userID, transfer.ID, 0, 0)
+			markErr = s.Store.MarkMessageTransferSucceeded(settleCtx, userID, transfer.ID, 0, 0)
 		} else if IsAppendOutcomeUnknown(err) {
-			markErr = s.Store.FinishMessageTransferDispatch(ctx, userID, transfer.ID, claim)
+			markErr = s.Store.FinishMessageTransferDispatch(settleCtx, userID, transfer.ID, claim)
 		} else {
-			markErr = s.Store.MarkMessageTransferFailed(ctx, userID, transfer.ID)
+			markErr = s.Store.MarkMessageTransferFailed(settleCtx, userID, transfer.ID)
 		}
 		if markErr != nil {
 			return errors.Join(err, markErr)
@@ -336,14 +348,14 @@ func (s *Service) CopyMessage(ctx context.Context, userID, messageID, destMailbo
 		destinationUID = fetched.UID
 		destinationUIDValidity = int64(fetched.UIDValidity)
 	}
-	if err := s.Store.MarkMessageTransferSucceeded(ctx, userID, transfer.ID, destinationUID, destinationUIDValidity); err != nil {
-		finishErr := s.Store.FinishMessageTransferDispatch(context.WithoutCancel(ctx), userID, transfer.ID, claim)
+	if err := s.Store.MarkMessageTransferSucceeded(settleCtx, userID, transfer.ID, destinationUID, destinationUIDValidity); err != nil {
+		finishErr := s.Store.FinishMessageTransferDispatch(settleCtx, userID, transfer.ID, claim)
 		if errors.Is(finishErr, store.ErrNotFound) {
 			finishErr = nil
 		}
 		return errors.Join(err, finishErr)
 	}
-	return s.completeCopiedMessageLocally(ctx, userID, msg, destAccount, dest, fetched, raw, date, transfer.ID)
+	return s.completeCopiedMessageLocally(settleCtx, userID, msg, destAccount, dest, fetched, raw, date, transfer.ID)
 }
 
 func (s *Service) fetchAndCompleteSucceededCopy(ctx context.Context, userID int64, source store.MessageRecord, account store.MailAccount, destination store.Mailbox, raw []byte, date time.Time, transferID int64, destinationUID, destinationUIDValidity uint32) error {

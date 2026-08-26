@@ -228,62 +228,73 @@ func (s *Store) GetOrCreateMailboxFromDiscovery(ctx context.Context, userID, acc
 	if name == "" {
 		name = "INBOX"
 	}
-	ts := nowUnix()
 	role := normalizeMailboxRole(discoveredRole)
 	if role == "" {
 		role = defaultMailboxRole(name)
 	}
 	syncMode := defaultMailboxSyncMode(name, role, attributes)
-	db := s.mustDataDB(ctx, userID)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return Mailbox{}, err
-	}
-	insertRole := role
-	if role != "" {
-		var roleAlreadyAssigned bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-			SELECT 1 FROM mailboxes WHERE user_id = ? AND account_id = ? AND role = ? AND name <> ?
-		)`, userID, accountID, role, name).Scan(&roleAlreadyAssigned); err != nil {
-			_ = tx.Rollback()
-			return Mailbox{}, err
-		}
-		if roleAlreadyAssigned {
-			insertRole = ""
-		}
-	}
-	icon := defaultMailboxIcon(name, insertRole)
-	showInAllMail := defaultMailboxShowInAllMail(insertRole)
-	_, err = tx.ExecContext(ctx, `INSERT INTO mailboxes (user_id, account_id, name, sync_mode, role, icon, show_in_sidebar, show_in_all_mail, include_in_search, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
-		ON CONFLICT(user_id, account_id, name) DO NOTHING`, userID, accountID, name, syncMode, insertRole, icon, boolInt(showInAllMail), ts, ts)
-	if err != nil {
-		_ = tx.Rollback()
-		return Mailbox{}, err
-	}
-	if role != "" {
-		roleIcon := defaultMailboxIcon(name, role)
-		// The All Mail default is resolved in Go rather than repeated as a role
-		// list in SQL: a second list here would decide the same question for
-		// folders that gain their role after discovery, and drift from the first.
-		roleShowInAllMail := boolInt(defaultMailboxShowInAllMail(role))
-		_, err = tx.ExecContext(ctx, `UPDATE mailboxes
-			SET role = ?,
-				icon = CASE WHEN icon = 'folder' THEN ? ELSE icon END,
-				show_in_all_mail = CASE WHEN ? = 0 THEN 0 ELSE show_in_all_mail END,
-				updated_at = ?
-			WHERE user_id = ? AND account_id = ? AND name = ? AND role = ''
-			AND NOT EXISTS (
-				SELECT 1 FROM mailboxes assigned
-				WHERE assigned.user_id = ? AND assigned.account_id = ? AND assigned.role = ? AND assigned.name <> ?
-			)`, role, roleIcon, roleShowInAllMail, ts, userID, accountID, name, userID, accountID, role, name)
+	// attempt creates the folder and, when assignRole is set, claims `role` for it.
+	// A concurrent discovery can win the role between the read check and the write;
+	// the partial unique index (0006-mailbox-role-unique) then rejects the second
+	// assignment. Rather than surface that raw violation to the sync caller, the
+	// caller retries once with assignRole=false -- the same unroled outcome the
+	// read check produces when it already sees the role taken.
+	attempt := func(assignRole bool) error {
+		ts := nowUnix()
+		tx, err := s.mustDataDB(ctx, userID).BeginTx(ctx, nil)
 		if err != nil {
-			_ = tx.Rollback()
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		insertRole := ""
+		if assignRole && role != "" {
+			var roleAlreadyAssigned bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM mailboxes WHERE user_id = ? AND account_id = ? AND role = ? AND name <> ?
+			)`, userID, accountID, role, name).Scan(&roleAlreadyAssigned); err != nil {
+				return err
+			}
+			if !roleAlreadyAssigned {
+				insertRole = role
+			}
+		}
+		icon := defaultMailboxIcon(name, insertRole)
+		showInAllMail := defaultMailboxShowInAllMail(insertRole)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mailboxes (user_id, account_id, name, sync_mode, role, icon, show_in_sidebar, show_in_all_mail, include_in_search, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
+			ON CONFLICT(user_id, account_id, name) DO NOTHING`, userID, accountID, name, syncMode, insertRole, icon, boolInt(showInAllMail), ts, ts); err != nil {
+			return err
+		}
+		if assignRole && role != "" {
+			roleIcon := defaultMailboxIcon(name, role)
+			// The All Mail default is resolved in Go rather than repeated as a role
+			// list in SQL: a second list here would decide the same question for
+			// folders that gain their role after discovery, and drift from the first.
+			roleShowInAllMail := boolInt(defaultMailboxShowInAllMail(role))
+			if _, err := tx.ExecContext(ctx, `UPDATE mailboxes
+				SET role = ?,
+					icon = CASE WHEN icon = 'folder' THEN ? ELSE icon END,
+					show_in_all_mail = CASE WHEN ? = 0 THEN 0 ELSE show_in_all_mail END,
+					updated_at = ?
+				WHERE user_id = ? AND account_id = ? AND name = ? AND role = ''
+				AND NOT EXISTS (
+					SELECT 1 FROM mailboxes assigned
+					WHERE assigned.user_id = ? AND assigned.account_id = ? AND assigned.role = ? AND assigned.name <> ?
+				)`, role, roleIcon, roleShowInAllMail, ts, userID, accountID, name, userID, accountID, role, name); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	if err := attempt(true); err != nil {
+		if !IsUniqueConstraint(err) {
 			return Mailbox{}, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return Mailbox{}, err
+		// Another discovery won the role between our check and our write; keep the
+		// folder but leave it unroled.
+		if err := attempt(false); err != nil {
+			return Mailbox{}, err
+		}
 	}
 	return s.GetMailbox(ctx, userID, accountID, name)
 }
@@ -607,6 +618,13 @@ func (s *Store) UpdateMailboxSettings(ctx context.Context, userID, mailboxID int
 		settings.SyncMode, settings.Role, settings.Icon, boolInt(settings.ShowInSidebar), boolInt(settings.ShowInAllMail), boolInt(settings.IncludeInSearch), nowUnix(), userID, mailboxID)
 	if err != nil {
 		_ = tx.Rollback()
+		// The read-then-write check above lost a race with a concurrent role
+		// assignment: the partial unique index (0006-mailbox-role-unique) is the
+		// backstop that turned it into a violation. Report the same domain error
+		// the check would have, not a raw driver error.
+		if IsUniqueConstraint(err) {
+			return fmt.Errorf("%w: %s is already assigned in this account", ErrDuplicateMailboxRole, settings.Role)
+		}
 		return err
 	}
 	n, err := res.RowsAffected()
