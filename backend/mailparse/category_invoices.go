@@ -69,10 +69,12 @@ func invoiceEvidenceOf(content CategoryContent) invoiceEvidence {
 		}
 	}
 	subject := foldCategoryText(content.Subject)
-	body := foldCategoryText(content.Text)
+	// The subject and the body are read as one string because a document
+	// names its number in one and its total in the other as often as not.
+	written := subject + " " + foldCategoryText(content.Text)
 	// A number and an amount together are a document being sent, not a word
 	// being used: either alone is ordinary in mail that is not paperwork.
-	if invoiceNumberRE.MatchString(subject+" "+body) && invoiceAmountRE.MatchString(subject+" "+body) {
+	if invoiceNumberRE.MatchString(written) && invoiceAmountRE.MatchString(written) {
 		return invoiceEvidenceDocument
 	}
 	// Only the subject is read for the weaker grade. A body footer carries
@@ -164,13 +166,22 @@ var invoiceDocumentExtensions = []string{".pdf", ".xml", ".doc", ".docx", ".odt"
 // invoiceNumberRE matches a document naming its own number: the word, whatever
 // compound it sits in, then the number itself. A digit is required, because
 // "Rechnung: bitte beachten" is a sentence and not a document reference.
-var invoiceNumberRE = regexp.MustCompile(`(?:rechnung|invoice|beleg|quittung|receipt|faktura|vertrag|contract)[a-z]*\s*(?:nr\.?|nummer|no\.?|number|#|:)\s*[a-z0-9._/-]*\d[a-z0-9._/-]*`)
+//
+// Both separators are loose because a document writes the same reference every
+// way there is: "Rechnung-Nr. 4711", "Vertrags-Nr: 12/2024", "Invoice no 7".
+// The colon is allowed after the word for the number as well as instead of it,
+// which is the shape a hyphenated German reference takes.
+var invoiceNumberRE = regexp.MustCompile(`(?:rechnung|invoice|beleg|quittung|receipt|faktura|vertrag|contract)[a-z]*[\s-]*(?:nr\.?|nummer|no\.?|number|#|:)[\s:]*[a-z0-9._/-]*\d[a-z0-9._/-]*`)
 
 // invoiceAmountRE matches an amount of money on either side of its currency.
 // Cents are required where the currency trails, because a bare number in front
 // of "EUR" is common in prose ("save 20 EUR"); a leading currency symbol is
 // already specific enough without them.
-var invoiceAmountRE = regexp.MustCompile(`(?:€|eur|chf|usd|\$)\s?\d+(?:[.,\s]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,\s]\d{3})*[.,]\d{2}\s?(?:€|eur|chf|usd|\$)`)
+//
+// A currency costs nothing to add here and only ever helps a reader billed in
+// it: an amount grades a message only when a document number stands beside it,
+// so a wider list cannot on its own file anything.
+var invoiceAmountRE = regexp.MustCompile(`(?:€|eur|chf|usd|gbp|jpy|\$|£|¥)\s?\d+(?:[.,\s]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,\s]\d{3})*[.,]\d{2}\s?(?:€|eur|chf|usd|gbp|jpy|\$|£|¥)`)
 
 // categoryTextFolder normalizes the spellings the same word arrives in. A
 // German umlaut is written three ways in mail -- "Kündigung", "Kuendigung",

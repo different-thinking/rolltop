@@ -140,6 +140,12 @@ func TestInvoiceNumberAndAmountAreBothRequired(t *testing.T) {
 		want string
 	}{
 		{name: "number and amount", text: "Rechnungsnummer 2024-7, Betrag 12,00 EUR", want: CategoryInvoices},
+		// German documents hyphenate the reference as often as they space it.
+		{name: "hyphenated reference", text: "Rechnung-Nr. 4711 über 12,00 EUR", want: CategoryInvoices},
+		{name: "hyphenated contract reference", text: "Vertrags-Nr: 12/2024, Beitrag 49,90 EUR", want: CategoryInvoices},
+		// An amount is an amount in the currency the reader is billed in.
+		{name: "pounds", text: "Invoice no. 2024-7 for £12.00", want: CategoryInvoices},
+		{name: "yen", text: "Invoice no. 2024-7 for ¥1,200", want: CategoryInvoices},
 		{name: "amount alone", text: "Nur heute: 12,00 EUR sparen", want: CategoryNewsletters},
 		{name: "number alone", text: "Rechnungsnummer 2024-7 wurde storniert", want: CategoryNewsletters},
 		{name: "a sentence that only looks like a reference", text: "Rechnung: bitte beachten Sie unsere Hinweise", want: CategoryNewsletters},
