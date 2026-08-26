@@ -35,6 +35,20 @@ func ReadLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
+// SupportedImageType reports whether a Content-Type names an image format the
+// avatar cache will store and serve. Kept here, alongside ReadLimited, so a
+// deployment without the attachment-preview plugin still validates the type
+// itself rather than rejecting every avatar. MIME parameters are ignored.
+func SupportedImageType(contentType string) bool {
+	clean := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch clean {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
 // Image is the cached Gravatar result for one user/email hash pair.
 type Image struct {
 	ID          int64

@@ -327,13 +327,16 @@ func (s *Server) ensureGravatarImage(ctx context.Context, userID int64, hash str
 		return image, fmt.Errorf("gravatar returned %d", resp.StatusCode)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
-	previewHook, previewOK := attachmentPreviewHook()
-	if !previewOK || !previewHook.SupportedPreviewImageType(contentType) {
+	// The gravatar hook validates the type and reads the body itself, so avatar
+	// fetching keeps working on a deployment that does not compile in the
+	// attachment-preview plugin (it used to borrow both from there and fail
+	// every fetch when that plugin was absent).
+	if !hook.SupportedImageType(contentType) {
 		image.Error = "unsupported image type"
 		_ = hook.UpsertImage(ctx, userDB, image)
 		return image, fmt.Errorf("unsupported gravatar content type")
 	}
-	data, err := previewHook.ReadPreviewLimited(resp.Body, hook.MaxImageBytes())
+	data, err := hook.ReadLimited(resp.Body, hook.MaxImageBytes())
 	if err != nil {
 		image.Error = "image too large"
 		_ = hook.UpsertImage(ctx, userDB, image)

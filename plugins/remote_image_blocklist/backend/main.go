@@ -3,11 +3,48 @@ package main
 import (
 	"context"
 	"database/sql"
+	"log"
 	"regexp"
+	"sync"
 
 	"rolltop/backend/plugins"
 	"rolltop/plugins/remote_image_blocklist/rules"
 )
+
+// compiledPatternCache memoizes regexp.Compile across image fetches. The
+// blocklist changes only on an admin edit, but AllowRemoteImageFetch runs on
+// every remote image, so recompiling every stored pattern on each fetch was
+// pure repeated work. Entries are keyed by the pattern text; a nil value marks
+// a pattern that failed to compile so a broken row is logged and skipped once
+// rather than on every fetch. ReplaceRules now rejects uncompilable patterns at
+// write time, so a nil entry should only ever come from a row predating that
+// check. The set is bounded by the admin-maintained rule count, so it does not
+// grow without bound.
+var (
+	compiledPatternMu    sync.RWMutex
+	compiledPatternCache = map[string]*regexp.Regexp{}
+)
+
+func compiledPattern(pattern string) *regexp.Regexp {
+	compiledPatternMu.RLock()
+	re, ok := compiledPatternCache[pattern]
+	compiledPatternMu.RUnlock()
+	if ok {
+		return re
+	}
+	compiledPatternMu.Lock()
+	defer compiledPatternMu.Unlock()
+	if re, ok := compiledPatternCache[pattern]; ok {
+		return re
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		log.Printf("remote_image_blocklist: skipping invalid pattern %q: %v", pattern, err)
+		re = nil
+	}
+	compiledPatternCache[pattern] = re
+	return re
+}
 
 // RolltopPlugin is the symbol loaded by plugin.Open.
 func RolltopPlugin() plugins.BackendPlugin {
@@ -52,8 +89,8 @@ func (remoteImageBlocklistHook) AllowRemoteImageFetch(ctx context.Context, db *s
 		return plugins.RemoteImageFetchDecision{}, err
 	}
 	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
+		re := compiledPattern(pattern)
+		if re == nil {
 			continue
 		}
 		if re.MatchString(req.URL) {

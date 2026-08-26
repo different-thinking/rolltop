@@ -131,6 +131,7 @@ type GravatarHook interface {
 	MissingTTL(time.Time) time.Time
 	PositiveTTL(time.Time) time.Time
 	MaxImageBytes() int64
+	SupportedImageType(string) bool
 	ReadLimited(io.Reader, int64) ([]byte, error)
 }
 

@@ -43,7 +43,7 @@ func (s *Service) ForwardMessage(ctx context.Context, userID, messageID int64, t
 	}
 	for _, header := range headers {
 		if strings.EqualFold(strings.TrimSpace(header.Name), "X-Rolltop-Forwarded-By") && messageHasHeaderValue(raw, header.Name, header.Value) {
-			return fmt.Errorf("message was already forwarded by this Rolltop account")
+			return plugins.ErrAlreadyForwarded
 		}
 	}
 	identity, smtpAccount, err := s.forwardIdentity(ctx, userID, msg.AccountID)

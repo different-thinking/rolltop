@@ -329,6 +329,12 @@ func (p NoopBackendPlugin) Stop(BackendStartHost) error { return nil }
 // host treat that plugin as broken.
 var ErrUnsupported = errors.New("plugin hook unsupported")
 
+// ErrAlreadyForwarded is returned by a host ForwardMessage implementation when
+// the message already carries this Rolltop's forwarding header, i.e. a forward
+// would loop. A plugin distinguishes this expected outcome from a real failure
+// with errors.Is rather than by matching the error text.
+var ErrAlreadyForwarded = errors.New("message was already forwarded by this Rolltop account")
+
 // MailIdentityContext is the host-provided subset of an outgoing identity that
 // compose/security plugins may inspect.
 type MailIdentityContext struct {

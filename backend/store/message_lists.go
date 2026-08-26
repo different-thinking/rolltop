@@ -307,6 +307,16 @@ const allMailSource = "\n\t\t\tJOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.
 const snoozeJoin = `LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)`
 
+// InPlayMailScopeSQL is the core predicate of inPlayMailScope, exported so the
+// mail_filters plugin acts on exactly the mail the whole-account lists show
+// without restating the rule and drifting from it. It assumes the messages
+// table aliased m with its mailbox joined as mb, and carries no leading space
+// dependency of its own beyond the " AND " it opens with. inPlayMailScope wraps
+// it with the optional archived-folder exclusion; a caller that wants filters
+// to reach archived mail uses this fragment on its own.
+const InPlayMailScopeSQL = " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" +
+	" AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))"
+
 // inPlayMailScope renders the predicate for mail a whole-account list shows:
 // folders that opt into All Mail, minus the hidden cross-account duplicates,
 // optionally minus each account's Archive folder, plus whatever narrows the
@@ -339,8 +349,7 @@ func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchiv
 	args := make([]any, 0, len(extraArgs)+len(exclusionArgs))
 	args = append(args, extraArgs...)
 	args = append(args, exclusionArgs...)
-	return extra + " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" +
-		" AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))" + exclusion, args, nil
+	return extra + InPlayMailScopeSQL + exclusion, args, nil
 }
 
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
