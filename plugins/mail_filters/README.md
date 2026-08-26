@@ -23,10 +23,22 @@ already written.
 from:studio@example.com subject:Reservation older_than:7d
 ```
 
-A rule then does two things at most: it forwards, and it moves. Forwarding goes
-through the user's configured SMTP identity; forwarded mail receives an opaque
-`X-Rolltop-Forwarded-By` header, and the plugin refuses to forward a message
-that already carries the same marker.
+A rule then does three things at most: it marks mail read, it forwards, and it
+moves. Forwarding goes through the user's configured SMTP identity; forwarded
+mail receives an opaque `X-Rolltop-Forwarded-By` header, and the plugin refuses
+to forward a message that already carries the same marker.
+
+Marking read (`mark_read`) is the one action that composes with the others
+rather than choosing between them: mail a rule forwarded to the person who
+handles it, filed in a folder, or deleted is mail with no unread badge left to
+answer for. It runs **before** the forward and the move, because the move is what
+ends the message's life in the folder it is in -- `\Seen` is pushed against the
+UID the message still has, and the copy the move leaves behind carries the flag
+with it. A message that is read already is left alone and the audit says so
+(`read: already_read`) rather than claiming a flag change: the alternative is one
+IMAP round trip per matched message to set the flag it has. Read state is the
+one flag Rolltop's sync writes back, so this is nothing a rule could not do by
+opening the mail.
 
 A forward may be limited to the mail the rule saw arrive (`forward_new_only`,
 which the editor turns on for a new rule). The mailbox behind a rule written

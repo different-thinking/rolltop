@@ -137,6 +137,24 @@ func (s *Service) SyncReadStateForMessage(ctx context.Context, userID, messageID
 	return s.IndexAttachmentsForMessage(ctx, msg)
 }
 
+// SetReadForMessage updates local read state and queues the matching IMAP flag
+// change, the way SetStarredForMessage does for the star. The push itself is
+// SyncReadStateForMessage: leaving the change queued is the correct outcome for
+// a mailbox generation that cannot be proved, not a failure.
+func (s *Service) SetReadForMessage(ctx context.Context, userID, messageID int64, read bool) (store.MessageRecord, error) {
+	if err := s.Store.MarkMessageReadForUser(ctx, userID, messageID, read, true); err != nil {
+		return store.MessageRecord{}, err
+	}
+	msg, err := s.Store.GetMessageForUser(ctx, userID, messageID)
+	if err != nil {
+		return store.MessageRecord{}, err
+	}
+	if err := s.IndexAttachmentsForMessage(ctx, msg); err != nil {
+		return store.MessageRecord{}, err
+	}
+	return msg, nil
+}
+
 // PushPendingStarState sends locally queued star-state changes to IMAP in bounded batches.
 func (s *Service) PushPendingStarState(ctx context.Context, userID int64, limit int) error {
 	messages, err := s.Store.ListMessagesWithStarSyncPending(ctx, userID, limit)

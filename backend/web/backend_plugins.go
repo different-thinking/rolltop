@@ -210,6 +210,25 @@ func (s *Server) StarMessage(ctx context.Context, userID, messageID int64, starr
 	return nil
 }
 
+// MarkMessageRead sets read state locally and pushes `\Seen` for one message.
+// The push is synchronous, unlike the reader-facing bulk route's: a filter that
+// marks mail read and then moves it must have the flag on the server while the
+// message is still in the folder the move leaves.
+func (s *Server) MarkMessageRead(ctx context.Context, userID, messageID int64, read bool) error {
+	if s == nil || s.syncer == nil {
+		return errors.New("sync service is not configured")
+	}
+	msg, err := s.syncer.SetReadForMessage(ctx, userID, messageID, read)
+	if err != nil {
+		return err
+	}
+	if err := s.syncer.SyncReadStateForMessage(ctx, userID, msg.ID); err != nil {
+		return err
+	}
+	s.notifyUserChanged(userID)
+	return nil
+}
+
 func (s *Server) MoveMessage(ctx context.Context, userID, messageID, destMailboxID int64) error {
 	if s == nil || s.syncer == nil {
 		return errors.New("sync service is not configured")

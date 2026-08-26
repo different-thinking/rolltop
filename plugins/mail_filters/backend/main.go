@@ -45,6 +45,11 @@ const (
 	// forwards new mail only and the message was already in the mailbox. It is
 	// not a failure: the rule matched, and its move -- if it has one -- ran.
 	forwardSkippedNew = "skipped_existing_mail"
+	// readAlready is what the audit records for a rule that marks mail read
+	// when the message was read already. The rule did what it says -- the
+	// message is read -- and saying so is what keeps the row from claiming a
+	// flag change that never left this process.
+	readAlready = "already_read"
 	// moveRoleTrash and moveRoleArchive are destinations named relative to the
 	// message's own account, so one rule can say "Trash" and mean each
 	// account's own Trash. Deleting mail is exactly this move: Rolltop never
@@ -361,7 +366,12 @@ func (p *mailFiltersBackend) apiMessageAction(host plugins.APIHost, db *sql.DB, 
 type Actions struct {
 	MoveMailboxID int64  `json:"move_mailbox_id"`
 	MoveRole      string `json:"move_role"`
-	ForwardTo     string `json:"forward_to"`
+	// MarkRead marks matching mail read, exactly as opening it would. It is the
+	// one action that composes with every other one rather than replacing it:
+	// mail that was forwarded, filed or deleted by a rule is mail the reader
+	// has no unread badge to answer for.
+	MarkRead  bool   `json:"mark_read"`
+	ForwardTo string `json:"forward_to"`
 	// ForwardNewOnly limits forwarding to mail that reached the rule as it
 	// arrived. The rest of the rule is unaffected: Backfill still walks the mail
 	// already in the mailbox, still matches it, still moves it and still records
@@ -772,6 +782,22 @@ func moveDestination(ctx context.Context, host plugins.StoredMessageHost, db *sq
 
 func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.DB, rule Rule, msg plugins.StoredMessageContext, p pass) (string, bool, string, string) {
 	results := map[string]string{}
+	// Marking read comes first because the move is what ends this message's
+	// life in the folder it is in: `\Seen` is pushed against the UID the
+	// message still has, and the copy the move leaves behind carries the flag
+	// with it. A message that is read already is left alone -- the flag would
+	// be the one it has, and the push behind it is an IMAP round trip per
+	// matched message that changes nothing.
+	if rule.Actions.MarkRead {
+		if msg.IsRead {
+			results["read"] = readAlready
+		} else if err := host.MarkMessageRead(ctx, msg.UserID, msg.MessageID, true); err != nil {
+			results["read"] = "failed"
+			return mustJSON(results), false, statusFailed, err.Error()
+		} else {
+			results["read"] = "ok"
+		}
+	}
 	switch {
 	case rule.Actions.forwards(p):
 		forwarderID, err := ensureForwarderID(ctx, db, msg.UserID, msg.AccountID)

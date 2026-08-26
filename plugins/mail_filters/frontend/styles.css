@@ -156,6 +156,18 @@
   }
 }
 
+/* Marking read is not a destination, so it sits under the row rather than in
+   it: it adds to whatever the rule already does with the mail. */
+.mail-filter-mark-read {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mail-filter-mark-read input[type="checkbox"] {
+  width: auto;
+}
+
 /* The forward's own scope sits under the address it qualifies rather than in
    the row of destinations: it answers "which mail", not "where to". */
 .mail-filter-forward-scope {

@@ -238,6 +238,10 @@ type StoredMessageHost interface {
 	BackendHost
 	MatchMessageSearch(context.Context, int64, int64, string) (SearchMatchResult, error)
 	StarMessage(context.Context, int64, int64, bool) error
+	// MarkMessageRead sets local read state for one message and pushes the
+	// matching `\Seen` change to IMAP, which is the whole of what read-state
+	// sync is allowed to touch.
+	MarkMessageRead(context.Context, int64, int64, bool) error
 	MoveMessage(context.Context, int64, int64, int64) error
 	ForwardMessage(context.Context, int64, int64, string, []MailHeader) error
 	// ArchiveMailboxID answers where one account files archived mail, for the

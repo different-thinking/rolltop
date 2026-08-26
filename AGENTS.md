@@ -814,6 +814,17 @@ site and in review.
   forwards it twice. The backfill walk skips what the rule already decided on
   since the rule's own `updated_at`, which also keeps one audit row per message
   rather than one per run, and still reconsiders everything after an edit.
+- **A filter marks read before it forwards or moves.** Marking read is the one
+  filter action that adds to the others instead of choosing between them - mail
+  a rule forwarded, filed or deleted is mail with no unread badge left to answer
+  for - and the order is what makes it work: `\Seen` is pushed against the UID
+  the message still has, and the move is what takes that UID away, so a mark-read
+  that ran after the move would be flagging the message where it no longer is.
+  Mail that is read already is left alone and the audit says so
+  (`read: already_read`); asking anyway would be an IMAP round trip per matched
+  message to set the flag it has. Read state is the one flag Rolltop's sync
+  writes back (`StoredMessageHost.MarkMessageRead`), which is why this action
+  exists where the removed `star` one does not.
 - **Forwarding is the one filter action that leaves the account, so a rule may
   limit it to the mail it saw arrive** (`Actions.ForwardNewOnly`, the default
   for a rule written in the editor). The mailbox behind a new rule holds years

@@ -165,6 +165,11 @@ type fakeFilterHost struct {
 	moved    []int64
 	movedTo  []int64
 	forwards []string
+	// readMarked and ops record the read action and the order the actions ran
+	// in. The order is the point: `\Seen` has to reach the server while the
+	// message is still in the folder a move would take it out of.
+	readMarked []int64
+	ops        []string
 	// archiveMailboxID is the account's chosen Archive folder, and zero stands
 	// for an account whose reader never named one.
 	archiveMailboxID int64
@@ -183,9 +188,19 @@ func (h *fakeFilterHost) MatchMessageSearch(_ context.Context, _, _ int64, query
 
 func (h *fakeFilterHost) StarMessage(context.Context, int64, int64, bool) error { return nil }
 
+func (h *fakeFilterHost) MarkMessageRead(_ context.Context, _, messageID int64, read bool) error {
+	if !read {
+		return errors.New("filters only mark mail read")
+	}
+	h.readMarked = append(h.readMarked, messageID)
+	h.ops = append(h.ops, "read")
+	return nil
+}
+
 func (h *fakeFilterHost) MoveMessage(_ context.Context, _, messageID, destID int64) error {
 	h.moved = append(h.moved, messageID)
 	h.movedTo = append(h.movedTo, destID)
+	h.ops = append(h.ops, "move")
 	return nil
 }
 
@@ -195,6 +210,7 @@ func (h *fakeFilterHost) ArchiveMailboxID(context.Context, int64, int64) (int64,
 
 func (h *fakeFilterHost) ForwardMessage(_ context.Context, _, _ int64, to string, _ []plugins.MailHeader) error {
 	h.forwards = append(h.forwards, to)
+	h.ops = append(h.ops, "forward")
 	return nil
 }
 
@@ -1008,5 +1024,71 @@ func TestAWaitThatBeganOnArrivalKeepsItsOriginThroughABackfill(t *testing.T) {
 	}
 	if phase != phaseInbound {
 		t.Fatalf("wait phase = %q, want the arrival it began as", phase)
+	}
+}
+
+// Marking read is the one action that adds to the others rather than replacing
+// them, so a rule that forwards and files also gets to leave nothing unread
+// behind. The order it runs in is load-bearing: `\Seen` is pushed against the
+// UID the message still has, and the move is what takes that UID away.
+func TestMarkReadRunsBeforeTheMoveItComesWith(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "mark-read@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, user.ID, account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{
+		MarkRead: true, MoveRole: moveRoleTrash, ForwardTo: "bookkeeping@example.test",
+	})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 700, time.Now().UTC())
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, inboundPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.readMarked) != 1 || host.readMarked[0] != msg.MessageID {
+		t.Fatalf("marked read %v, want the matched message", host.readMarked)
+	}
+	if len(host.movedTo) != 1 || host.movedTo[0] != trash.ID {
+		t.Fatalf("moved to %v, want the rule's own destination", host.movedTo)
+	}
+	want := []string{"read", "forward", "move"}
+	if strings.Join(host.ops, ",") != strings.Join(want, ",") {
+		t.Fatalf("actions ran %v, want %v", host.ops, want)
+	}
+	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, `"read":"ok"`) {
+		t.Fatalf("actions = %q, want the read recorded", actions)
+	}
+}
+
+// Mail the reader has already read needs no flag change, and a backfill that
+// asked for one anyway would spend an IMAP round trip per matched message to
+// set the flag it already has.
+func TestMarkReadLeavesMailThatIsAlreadyReadAlone(t *testing.T) {
+	st := openFilterStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, account, mailbox := mailFilterFixture(t, st, "mark-read-already@example.test")
+	host := &fakeFilterHost{store: st, matches: map[string]bool{"from:studio@example.test": true}}
+	rule := insertRule(t, db, user.ID, "from:studio@example.test", Actions{MarkRead: true})
+	msg := storedMessage(user.ID, account.ID, mailbox.ID, 701, time.Now().UTC().Add(-30*24*time.Hour))
+	msg.IsRead = true
+
+	if _, err := evaluateRule(ctx, host, db, rule, msg, backfillPass(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(host.readMarked) != 0 {
+		t.Fatalf("marked read %v, want mail that is read already left alone", host.readMarked)
+	}
+	if status, _ := evaluationState(t, db, user.ID, rule.ID, msg.MessageID); status != statusMatched {
+		t.Fatalf("status = %q, want %q", status, statusMatched)
+	}
+	if actions := evaluationActions(t, db, user.ID, rule.ID, msg.MessageID); !strings.Contains(actions, readAlready) {
+		t.Fatalf("actions = %q, want the row to say the mail was read already", actions)
 	}
 }
