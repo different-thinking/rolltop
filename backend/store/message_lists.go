@@ -591,8 +591,13 @@ func latestThreadMessagesQuery(source, predicate, direction string) string {
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
 				-- A sortable composite of (effective date, id): both halves are
 				-- zero-padded to a fixed width so ordering the text orders the
-				-- numbers, and the id is read back out by offset below.
-				MAX(lpad((CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END)::text, 20, '0')
+				-- numbers, and the id is read back out by offset below. The date
+				-- is clamped to >= 0 first: a negative date_unix (a pre-1970 or
+				-- corrupt header date) renders as "-5", whose sign left-pads into
+				-- the middle of the field and makes lexical order stop tracking
+				-- numeric order. Real mail dates are positive; a bogus negative
+				-- one sorts as epoch 0 (oldest) instead of scrambling the page.
+				MAX(lpad(GREATEST(CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END, 0)::text, 20, '0')
 					|| ':' || lpad(m.id::text, 20, '0')) AS latest_key
 			FROM messages m%[1]s
 			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id

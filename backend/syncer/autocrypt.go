@@ -198,16 +198,7 @@ func (h syncPluginHost) ArchiveMailboxID(ctx context.Context, userID, accountID 
 	if h.s == nil || h.s.Store == nil {
 		return 0, errors.New("message store is not configured")
 	}
-	targets, err := h.s.Store.ArchiveMailboxesForUser(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
-	for _, target := range targets {
-		if target.AccountID == accountID {
-			return target.MailboxID, nil
-		}
-	}
-	return 0, nil
+	return h.s.Store.ArchiveMailboxIDForAccount(ctx, userID, accountID)
 }
 
 var _ plugins.BackendHost = syncPluginHost{}

@@ -18,6 +18,8 @@ import { availableParallelism, totalmem } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { declaredManifestFiles } from "./plugin-manifest.mjs";
+
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const pluginsRoot = path.join(repoRoot, "plugins");
 
@@ -173,12 +175,7 @@ async function runPool(items, limit, worker) {
 function missingDeclaredFiles(plugins) {
   const missing = [];
   for (const { id, manifest } of plugins) {
-    const declared = [
-      manifest.frontend?.module,
-      manifest.frontend?.css,
-      ...(manifest.themes ?? []).map((theme) => theme.css)
-    ].filter(Boolean);
-    for (const relative of declared) {
+    for (const relative of declaredManifestFiles(manifest)) {
       const absolute = path.join(pluginsRoot, id, relative);
       if (!existsSync(absolute)) {
         missing.push(`${id}: ${relative}`);

@@ -145,6 +145,24 @@ func (s *Store) ArchiveMailboxIDsForUser(ctx context.Context, userID int64) ([]i
 	return ids, nil
 }
 
+// ArchiveMailboxIDForAccount resolves the Archive folder one account files mail
+// into, or zero when the reader has not named one (archiving has no role to
+// fall back on). It is the single lookup both the web plugin host and the sync
+// plugin host archive through, so a plugin that archives lands where the
+// header's Archive button and the Android swipe always land.
+func (s *Store) ArchiveMailboxIDForAccount(ctx context.Context, userID, accountID int64) (int64, error) {
+	targets, err := s.ArchiveMailboxesForUser(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	for _, target := range targets {
+		if target.AccountID == accountID {
+			return target.MailboxID, nil
+		}
+	}
+	return 0, nil
+}
+
 // GetSwipePreferences loads one user's swipe settings, returning stable defaults
 // before that user has saved an explicit preference row.
 func (s *Store) GetSwipePreferences(ctx context.Context, userID int64) (SwipePreferences, error) {

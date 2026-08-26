@@ -26,6 +26,8 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:f
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { declaredManifestFiles } from "./plugin-manifest.mjs";
+
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const pluginsRoot = path.join(repoRoot, "plugins");
 
@@ -33,16 +35,6 @@ const outRoot = process.argv[2];
 if (!outRoot) {
   console.error("usage: node scripts/assemble-plugin-dist.mjs <output-dir>");
   process.exit(1);
-}
-
-function declaredFiles(manifest) {
-  return [
-    manifest.frontend?.module,
-    manifest.frontend?.css,
-    ...(manifest.themes ?? []).map((theme) => theme.css)
-  ]
-    .filter(Boolean)
-    .map((relative) => path.posix.normalize(relative.replace(/^\/+/, "")));
 }
 
 // A manifest path is served as "everything under the declared file's own
@@ -83,7 +75,7 @@ for (const entry of readdirSync(pluginsRoot, { withFileTypes: true })) {
   // `LoadManifests` at startup, which stats the theme CSS itself and refuses
   // to boot without it — so the file is what has to be proven present.
   const wanted = new Set();
-  for (const relative of declaredFiles(manifest)) {
+  for (const relative of declaredManifestFiles(manifest)) {
     if (existsSync(path.join(pluginsRoot, entry.name, relative))) {
       wanted.add(parentDirectory(relative));
     } else {
