@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,12 @@ type conversationSeed struct {
 	MatchTerms      []string
 	MatchFields     []string
 	MatchQueryTerms []string
+	// ListDate is the instant the list actually ordered this row by, and only a
+	// list that ordered by something other than the row's own reckoning sets it.
+	// The row then prints it verbatim, which is what keeps the date it shows and
+	// the date it sorted by the same one - a row cannot be placed by its message
+	// date and headed by a snooze return.
+	ListDate time.Time
 }
 
 func (s *Server) conversationViews(ctx context.Context, userID int64, seeds []store.MessageRecord, own map[string]bool) ([]conversationView, error) {
@@ -81,6 +88,9 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		queryTerms   []string
 		snoozedUntil time.Time
 		snoozeReturn time.Time
+		// listDate is the date the list placed the row by, when the list decided
+		// it rather than the row. Zero leaves the row to work it out itself.
+		listDate time.Time
 	}
 	threadKeys := make([]string, 0, len(seeds))
 	snoozeKeys := make([]string, 0, len(seeds))
@@ -121,6 +131,7 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 		if !g.hasSeed {
 			g.seed = seed.Message
 			g.hasSeed = true
+			g.listDate = seed.ListDate
 		}
 		if snooze, ok := activeSnoozes[store.SnoozeThreadKey(seed.Message)]; ok {
 			g.snoozedUntil = snooze.SnoozedUntil
@@ -160,9 +171,17 @@ func (s *Server) conversationViewsFromSeeds(ctx context.Context, userID int64, s
 			}
 		}
 		view.SnoozedUntil = group.snoozedUntil
-		view.ListDate = view.Message.Date
-		if group.snoozeReturn.After(view.ListDate) {
-			view.ListDate = group.snoozeReturn
+		// A list that ordered by something of its own says so, and then the row
+		// prints that. Only a row left to its own reckoning is headed by a
+		// snooze return, which is what puts mail coming back from a reminder at
+		// the top of a list ordered by when it last became current.
+		if !group.listDate.IsZero() {
+			view.ListDate = group.listDate
+		} else {
+			view.ListDate = view.Message.Date
+			if group.snoozeReturn.After(view.ListDate) {
+				view.ListDate = group.snoozeReturn
+			}
 		}
 		if view.HasAttachments {
 			view.AttachmentNames = s.conversationAttachmentNames(ctx, userID, group.messages, 3)
@@ -232,12 +251,26 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		unique = append(unique, seed)
 	}
 	rawOffset := 0
+	fromHits := 0
+	// What counts towards the page being assembled. Under best match that is
+	// every seed collected, due snoozes included, which is what puts them at the
+	// front of the results. A date order sorts them into place instead, and then
+	// only the hits may count: the window has to hold the whole top of the date
+	// order to slice a page out of it, and a due snooze counted here would cut
+	// the hits short by one - crowding a row off this page that the next page,
+	// collecting the same way, would show again.
+	collected := func() int {
+		if opts.Order == search.SearchOrderBest {
+			return len(unique)
+		}
+		return fromHits
+	}
 	// One hit can only ever become one conversation, so a batch smaller than the
 	// page being assembled cannot fill it - asking for a hundred hits to collect
 	// the hundred-and-first conversation is a round that is wasted before it is
 	// made.
 	batchSize := min(max(searchSeedBatchStart, targetEnd), searchSeedBatchMax)
-	for len(unique) < targetEnd {
+	for collected() < targetEnd {
 		bleveStart := time.Now()
 		hits, err := s.search.SearchHitsWithOptions(ctx, userID, searchQuery, batchSize, rawOffset, opts)
 		if timing != nil {
@@ -282,7 +315,8 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 			}
 			seen[key] = true
 			unique = append(unique, conversationSeed{Message: msg, MatchTerms: termsByID[msg.ID], MatchFields: fieldsByID[msg.ID], MatchQueryTerms: queryTermsByID[msg.ID]})
-			if len(unique) >= targetEnd {
+			fromHits++
+			if collected() >= targetEnd {
 				break
 			}
 		}
@@ -295,6 +329,7 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		}
 		batchSize = min(batchSize*2, searchSeedBatchMax)
 	}
+	orderSearchSeedsByDate(unique, opts.Order)
 	if targetStart >= len(unique) {
 		return nil, nil
 	}
@@ -302,6 +337,44 @@ func (s *Server) searchConversationSeedHits(ctx context.Context, userID int64, q
 		targetEnd = len(unique)
 	}
 	return unique[targetStart:targetEnd], nil
+}
+
+// orderSearchSeedsByDate merges the collected window into date order, and it is
+// a merge rather than a sort on purpose. The hits already arrive in the order
+// the reader asked for; what does not is the mail returning from a snooze, which
+// is collected before the first hit is read. So this compares message dates and
+// nothing else, and leans on the sort being stable: seeds that share a date keep
+// the order they were collected in, which for the hits is the order the search
+// backend put them in.
+//
+// That is what keeps the pages a partition of the matches. Two rows written in
+// the same second are ordinary, and the backends break that tie their own way -
+// Bleve by the decimal spelling of the document id, PostgreSQL by its value, so
+// the two disagree as soon as a reader holds more than nine matching messages.
+// Either is a total order, and pages carved out of one fit together; a second
+// tie-break here, disagreeing with whichever of them selected the window, is
+// what would make a row show up on two pages while another was never reached.
+//
+// Sorting the window at all is sound because the window is every page up to the
+// one asked for: the loop rebuilds it from hit zero on every request, so page
+// four merges the same rows the same way page one did.
+//
+// Every seed is then stamped with the date it was placed by, so the row prints
+// that instead of promoting a snooze return the list did not order by.
+func orderSearchSeedsByDate(seeds []conversationSeed, order search.SearchOrder) {
+	newestFirst := order == search.SearchOrderNewest
+	if !newestFirst && order != search.SearchOrderOldest {
+		return
+	}
+	sort.SliceStable(seeds, func(i, j int) bool {
+		if newestFirst {
+			return seeds[i].Message.Date.After(seeds[j].Message.Date)
+		}
+		return seeds[i].Message.Date.Before(seeds[j].Message.Date)
+	})
+	for i := range seeds {
+		seeds[i].ListDate = seeds[i].Message.Date
+	}
 }
 
 func (s *Server) dueSearchConversationSeeds(ctx context.Context, userID int64, query string, opts search.SearchOptions, own map[string]bool, mailboxFilter searchMailboxFilter, starFilter *bool) ([]conversationSeed, error) {

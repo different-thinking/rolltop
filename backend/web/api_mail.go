@@ -10,6 +10,7 @@ import (
 
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
+	"rolltop/backend/search"
 	"rolltop/backend/store"
 )
 
@@ -209,6 +210,24 @@ func (s *Server) mailPageResponse(ctx context.Context, user store.User, mailboxI
 	}, nil
 }
 
+// searchSortFromRequest reads the result order from the URL. Best match stays the
+// default and stays off the URL with it, so warmed pages, service caches, and
+// clients that never touch sorting all keep asking for the same address.
+func searchSortFromRequest(r *http.Request) search.SearchOrder {
+	return search.NormalizeSearchOrder(r.URL.Query().Get("sort"))
+}
+
+// threadListOrderForSearch maps the search order onto the plain list order used
+// when a search carries no query and no folder filter at all - an empty search
+// box, which is the whole-account list. Best match has nothing to rank there, so
+// it keeps the list's own newest-first default.
+func threadListOrderForSearch(order search.SearchOrder) store.ThreadListOrder {
+	if order == search.SearchOrderOldest {
+		return store.ThreadListOldestFirst
+	}
+	return store.ThreadListNewestFirst
+}
+
 // apiSearch combines URL query parsing, optional mailbox filtering, sender-history
 // boosts, Bleve search hits, and SQLite conversation hydration into the search
 // result payload consumed by SearchView.
@@ -224,6 +243,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 	const pageSize = 50
 	timing := newSearchTiming()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	order := searchSortFromRequest(r)
 	filterDone := timing.measure(&timing.filter)
 	searchQuery, mailboxFilter, err := s.searchMailboxFilter(r.Context(), cu.User.ID, q)
 	filterDone()
@@ -245,7 +265,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	page := pageFromRequest(r)
-	cacheKey := mailListCacheKey{UserID: cu.User.ID, Page: page, Search: true, Query: q}
+	cacheKey := mailListCacheKey{UserID: cu.User.ID, Page: page, Search: true, Query: q, Sort: string(order)}
 	if s.writeSearchNotModifiedIfFresh(w, r, cacheKey) {
 		return
 	}
@@ -256,12 +276,13 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 	if searchQuery == "" && !mailboxFilter.enabled {
 		var messages []store.MessageRecord
 		hydrateDone := timing.measure(&timing.hydrate)
-		messages, err = s.store.ListLatestThreadMessagesForUser(r.Context(), cu.User.ID, pageSize*3+1, offset, store.ThreadListNewestFirst)
+		messages, err = s.store.ListLatestThreadMessagesForUser(r.Context(), cu.User.ID, pageSize*3+1, offset, threadListOrderForSearch(order))
 		hydrateDone()
 		seeds = conversationSeedsFromMessages(messages)
 	} else {
 		boostDone := timing.measure(&timing.sender)
 		opts := s.searchOptionsWithRankingBoosts(r.Context(), cu.User)
+		opts.Order = order
 		boostDone()
 		seeds, err = s.searchConversationSeedHits(r.Context(), cu.User.ID, searchQuery, page, pageSize, opts, own, mailboxFilter, timing)
 	}
@@ -288,6 +309,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		"has_prev":      page > 1,
 		"has_next":      hasNext,
 		"query":         q,
+		"sort":          order.String(),
 	})
 	if ok {
 		s.rememberMailListETag(cacheKey, etag, generation)

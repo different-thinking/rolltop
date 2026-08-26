@@ -127,14 +127,33 @@ export type Conversation = {
   list_date?: string;
 };
 
-/** MailListResponse is one paged conversation list returned by /api/mail. */
-export type MailListResponse = {
+/**
+ * ConversationListPage is what every paged conversation list has in common.
+ * Only the orders they can be drawn in differ, so the helpers that filter a page
+ * take this and each list names its own sort.
+ */
+export type ConversationListPage = {
   conversations: Conversation[];
   page: number;
   has_prev: boolean;
   has_next: boolean;
+};
+
+/** MailListResponse is one paged conversation list returned by /api/mail. */
+export type MailListResponse = ConversationListPage & {
   /** sort echoes the date direction the server applied; older servers omit it. */
   sort?: "newest" | "oldest";
+};
+
+/**
+ * SearchListResponse is one paged result list returned by /api/search. Its sort
+ * carries the best-match ranking as well as the two date orders, because that
+ * ranking is an order the results list offers and the mail list has no
+ * equivalent of.
+ */
+export type SearchListResponse = ConversationListPage & {
+  /** sort echoes the order the server applied; older servers omit it. */
+  sort?: "best" | "newest" | "oldest";
 };
 
 /**

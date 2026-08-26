@@ -800,6 +800,8 @@ In account settings, `Folder scope` can be:
 - `INBOX,Sent` for a comma-separated subset.
 - `*` for all selectable IMAP folders.
 
+Search results are drawn best match first and can be re-ordered by date in either direction from the results header. The choice is stored per user in the browser, separately from the mail list's own direction, and changing it returns to the first page because the result window is rebuilt from a different end. A date order replaces the ranking rather than tie-breaking it: relevance, the sender-history and contact boosts, and the recency nudge all stop deciding which results the page holds, so the mail is walked strictly by when it was written. That also applies to mail returning from a snooze, which a best-match list heads with the reminder it came back on and a date-ordered one places - and dates - by when it was written, like everything else in the list.
+
 Search supports Gmail-style operators:
 
 - `has:attachment`

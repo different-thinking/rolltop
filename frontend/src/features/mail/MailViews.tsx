@@ -20,8 +20,8 @@ import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { effectiveMailboxSyncMode, mailboxActiveRun, mailboxNeedsSync, mailboxRefreshKey } from "../../lib/sync";
 import { HighlightedText } from "../../lib/searchHighlight";
 import { mailPageSize } from "../../lib/constants";
-import { loadMailSortOrder, saveMailSortOrder } from "../../lib/mailSort";
-import type { MailSortOrder } from "../../lib/mailSort";
+import { loadMailSortOrder, loadSearchSortOrder, saveMailSortOrder, saveSearchSortOrder } from "../../lib/mailSort";
+import type { MailSortOrder, SearchSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
@@ -580,24 +580,24 @@ export function MailView({
 }
 
 /**
- * MailSortToggle switches All Mail and folder lists between newest and oldest
- * first. Both directions stay visible so the current one is readable at a
- * glance instead of hidden behind a single toggle's next state, and both stay
- * clickable while a page loads because the pending request is dropped anyway.
+ * SortToggle shows every order a list offers side by side. They all stay visible
+ * so the current one is readable at a glance instead of hidden behind a single
+ * toggle's next state, and they all stay clickable while a page loads because
+ * the pending request is dropped anyway.
  */
-function MailSortToggle({
+function SortToggle<Order extends string>({
+  label,
   order,
+  choices,
   onChange
 }: {
-  order: MailSortOrder;
-  onChange: (order: MailSortOrder) => void;
+  label: string;
+  order: Order;
+  choices: Array<{ value: Order; label: string; icon: string; title: string }>;
+  onChange: (order: Order) => void;
 }) {
-  const choices: Array<{ value: MailSortOrder; label: string; icon: string; title: string }> = [
-    { value: "newest", label: "Newest", icon: "sort_descending", title: "Sort by date, newest first" },
-    { value: "oldest", label: "Oldest", icon: "sort_ascending", title: "Sort by date, oldest first" }
-  ];
   return (
-    <div className="mail-sort-toggle" role="group" aria-label="Sort by date">
+    <div className="mail-sort-toggle" role="group" aria-label={label}>
       {choices.map((choice) => (
         <button
           className={choice.value === order ? "active" : ""}
@@ -614,6 +614,42 @@ function MailSortToggle({
       ))}
     </div>
   );
+}
+
+const mailSortChoices: Array<{ value: MailSortOrder; label: string; icon: string; title: string }> = [
+  { value: "newest", label: "Newest", icon: "sort_descending", title: "Sort by date, newest first" },
+  { value: "oldest", label: "Oldest", icon: "sort_ascending", title: "Sort by date, oldest first" }
+];
+
+/** MailSortToggle switches All Mail and folder lists between newest and oldest first. */
+function MailSortToggle({
+  order,
+  onChange
+}: {
+  order: MailSortOrder;
+  onChange: (order: MailSortOrder) => void;
+}) {
+  return <SortToggle label="Sort by date" order={order} choices={mailSortChoices} onChange={onChange} />;
+}
+
+// Best match leads because it is the default and the order the query itself
+// answers in; the two date orders sit beside it as the alternative to it rather
+// than as a direction applied to it.
+const searchSortChoices: Array<{ value: SearchSortOrder; label: string; icon: string; title: string }> = [
+  { value: "best", label: "Best", icon: "ranking", title: "Sort by best match" },
+  { value: "newest", label: "Newest", icon: "sort_descending", title: "Sort by date, newest first" },
+  { value: "oldest", label: "Oldest", icon: "sort_ascending", title: "Sort by date, oldest first" }
+];
+
+/** SearchSortToggle switches the results list between best match and either date direction. */
+function SearchSortToggle({
+  order,
+  onChange
+}: {
+  order: SearchSortOrder;
+  onChange: (order: SearchSortOrder) => void;
+}) {
+  return <SortToggle label="Sort search results" order={order} choices={searchSortChoices} onChange={onChange} />;
 }
 
 /** SnoozedView reuses the normal conversation list for active local reminders. */
@@ -882,11 +918,15 @@ function SearchMaintenanceNotice({ run }: { run: SyncRun }) {
 }
 
 /**
- * SearchView is always best-match search. The URL carries the query and page so
- * opening a result can preserve a precise back target to the same result page.
+ * SearchView draws one page of search results. The URL carries the query and
+ * page so opening a result can preserve a precise back target to the same result
+ * page; the order stays off it and beside the reader instead, stored per user
+ * the way the mail list's direction is, because it is how they read results
+ * rather than which results they are looking at.
  */
 export function SearchView({
   csrf,
+  userID,
   location,
   navigate,
   replaceRoute,
@@ -902,6 +942,7 @@ export function SearchView({
   addToast
 }: {
   csrf: string;
+  userID: number;
   location: LocationState;
   navigate: (url: string) => void;
   /** Used for the empty-page bounce, which must not add a history entry. */
@@ -924,12 +965,21 @@ export function SearchView({
   const [hasNext, setHasNext] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [staleResults, setStaleResults] = useState("");
+  const [sortOrder, setSortOrder] = useState<SearchSortOrder>(() => loadSearchSortOrder(userID));
+  const [sortOrderUserID, setSortOrderUserID] = useState(userID);
   const loadedKey = useRef("");
   const route = searchRoute(location.path);
   const query = route.query;
   const page = route.page;
-  const searchKey = query + ":best:" + page;
-  const slideDirection = useListSlideDirection("search:" + query, page);
+  // A different signed-in user brings their own stored order along. Adjusted
+  // during render rather than in an effect so the fetch below already closes
+  // over the new user's order instead of requesting the old one first.
+  if (sortOrderUserID !== userID) {
+    setSortOrderUserID(userID);
+    setSortOrder(loadSearchSortOrder(userID));
+  }
+  const searchKey = query + ":" + sortOrder + ":" + page;
+  const slideDirection = useListSlideDirection("search:" + query + ":" + sortOrder, page);
   const listPending = loading || loadedKey.current !== searchKey;
   // A search is far more expensive than a mailbox page, and a bulk move emits a
   // mail-list change per moved message. Coalescing those bursts keeps one delete
@@ -950,7 +1000,7 @@ export function SearchView({
     setError("");
     setStaleResults("");
     api
-      .search(query, page)
+      .search(query, page, sortOrder)
       .then((data) => {
         if (cancelled) return;
         loadedKey.current = searchKey;
@@ -958,7 +1008,7 @@ export function SearchView({
         setHasPrev(data.has_prev);
         setHasNext(data.has_next);
         if (data.conversations.length === 0 && page > 1) replaceRoute(searchURL(query, page - 1));
-        if (data.has_next) api.prefetchSearch(query, page + 1);
+        if (data.has_next) api.prefetchSearch(query, page + 1, sortOrder);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -981,12 +1031,21 @@ export function SearchView({
     return () => {
       cancelled = true;
     };
-  }, [query, page, searchKey, settledGeneration, refreshGeneration]);
+  }, [query, page, sortOrder, searchKey, settledGeneration, refreshGeneration]);
 
   const pageURL = (nextPage: number) => searchURL(query, nextPage);
   const returnURL = routeWithSearch(location.path, location.search);
   const maintenanceRun = activeSearchMaintenanceRun(activeSyncRuns);
   const pluginSearchActions = searchActionNodes(searchActionPlugins, query, navigate);
+
+  // Reordering rebuilds the result window from a different end, so a reader who
+  // was on page 4 of best match is sent back to the new first page.
+  function changeSortOrder(next: SearchSortOrder) {
+    if (next === sortOrder) return;
+    saveSearchSortOrder(userID, next);
+    setSortOrder(next);
+    if (page !== 1) navigate(searchURL(query, 1));
+  }
 
   function updateReadStates(states: ConversationReadState[]) {
     const readByID = new Map(states.map((state) => [state.id, state.read]));
@@ -1008,6 +1067,7 @@ export function SearchView({
     <>
       <ListHeader
         title="Search"
+        actions={<SearchSortToggle order={sortOrder} onChange={changeSortOrder} />}
         pager={{
           page,
           pageSize: mailPageSize,
