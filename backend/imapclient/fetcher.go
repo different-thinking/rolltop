@@ -1711,11 +1711,13 @@ func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate
 	if err := authenticate(c, transportEncrypted(conn)); err != nil {
 		terminateClient(c)
 		wrapped := fmt.Errorf("login to IMAP server %s: %w", addr, err)
-		// A server that does not offer XOAUTH2 has not rejected the credential,
-		// so this must not look like a stale token: the retry would spend a real
-		// refresh at Google and open a second connection that fails identically,
-		// once per mailbox.
-		if errors.Is(err, xoauth2.ErrUnsupported) {
+		// Neither a server that does not offer XOAUTH2 nor a transport this
+		// side refuses to put a token on has rejected the credential, so
+		// neither must look like a stale token: the retry would spend a real
+		// refresh at Google and open a second connection that fails
+		// identically, once per mailbox. Both answers are the same on every
+		// attempt, so there is nothing a fresh token could change.
+		if errors.Is(err, xoauth2.ErrUnsupported) || errors.Is(err, xoauth2.ErrCleartext) {
 			return nil, wrapped
 		}
 		return nil, googletoken.AuthError{Err: wrapped}

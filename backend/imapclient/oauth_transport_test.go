@@ -7,11 +7,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
 	"time"
 
+	"rolltop/backend/googletoken"
 	"rolltop/backend/xoauth2"
 
 	"github.com/emersion/go-imap/client"
@@ -53,6 +55,25 @@ func TestXOAUTH2AuthenticationRefusesAnUnencryptedTransport(t *testing.T) {
 	}
 	if attempts := len(server.payloads()); attempts != 0 {
 		t.Fatalf("authentication attempts = %d, want none", attempts)
+	}
+}
+
+// A transport this side refuses is this side's answer, not the server's. Sent
+// back as a credential rejection it would spend a real token refresh at Google
+// and open a second connection that fails identically, once per mailbox
+// operation, for an answer no token can change.
+func TestConnectAndAuthenticateDoesNotTreatACleartextRefusalAsAStaleToken(t *testing.T) {
+	server := startFakeIMAPServer(t, "good-token")
+	refusal := fmt.Errorf("%w: %s", xoauth2.ErrCleartext, "imap.example.test")
+	_, err := (&Fetcher{}).connectAndAuthenticate(server.account(t), func(*client.Client, bool) error {
+		return refusal
+	})
+	if !errors.Is(err, xoauth2.ErrCleartext) {
+		t.Fatalf("error = %v, want it to carry ErrCleartext", err)
+	}
+	var rejected googletoken.AuthError
+	if errors.As(err, &rejected) {
+		t.Fatalf("cleartext refusal reported as a rejected credential: %v", err)
 	}
 }
 
