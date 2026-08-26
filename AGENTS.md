@@ -623,24 +623,41 @@ site and in review.
   different question, and a ranking left in front of the date would answer the
   old one with a new label. The exact-match column that orders the fuzzy path is
   not even computed under a date order, since it exists only to sort by and
-  costs a tsquery per candidate row. Both directions end in the message id, and
-  that is not decoration: same-second mail is ordinary, callers page these hits
-  by offset, and without a total order the rows sharing a second would land
-  differently on each request and be repeated or skipped across page boundaries.
-  Only the list orders by date - match and explain ask which single message the
-  query hit best, which stays a ranking question whatever order the list is
-  drawn in, so `SearchOptions.Order` is applied in `pgSearchHits` rather than in
-  the spec builder the three of them share.
+  costs a tsquery per candidate row. Only the list orders by date - match and
+  explain ask which single message the query hit best, which stays a ranking
+  question whatever order the list is drawn in, so `SearchOptions.Order` is
+  applied in `pgSearchHits` rather than in the spec builder the three of them
+  share.
+- **The message id behind the date is a determinism device, and the two backends
+  do not spell it the same way.** Same-second mail is ordinary and callers page
+  these hits by offset, so the sequence has to be total or the rows sharing a
+  second land differently on each request and are repeated or skipped across page
+  boundaries. Bleve compares `_id` as the string it is, ordering "10" ahead of
+  "9"; PostgreSQL orders by the numeric `ms.message_id` in the direction of the
+  page. Both are total orders and that is all either is for - nothing above
+  these backends may assume the two agree, and in particular nothing may
+  re-order a collected window by a tie-break of its own. `searchConversationSeedHits`
+  therefore merges rather than sorts: `orderSearchSeedsByDate` compares message
+  dates and nothing else and leans on the sort being stable, so hits keep the
+  order the backend gave them and only the snooze seeds move.
 - **Under a date order only hits count towards the search page being
-  assembled.** `searchConversationSeedHits` collects mail returning from a
-  snooze before it reads the first hit, and those seeds sort by the reminder
-  they came back on rather than by when they were written - which is what the
-  row prints, so `conversationSeed.sortDate` is what the window is sorted by.
-  Counting them towards the target takes a hit's place in the collected window,
-  and since every page rebuilds that window from hit zero, the row a due snooze
-  crowded off page one comes back on page two: the pages stop partitioning the
-  matches. Best match keeps counting every seed, which is what puts returned
-  mail at the front of a ranked result list.
+  assembled.** `searchConversationSeedHits` collects mail returning from a snooze
+  before it reads the first hit. Counting those seeds towards the target takes a
+  hit's place in the collected window, and since every page rebuilds that window
+  from hit zero, the row a due snooze crowded off page one comes back on page
+  two: the pages stop partitioning the matches. Best match keeps counting every
+  seed, which is what puts returned mail at the front of a ranked result list.
+- **A row prints the date the list placed it by.** `conversationSeed.ListDate`
+  carries that date whenever the list decided it rather than the row, and
+  `conversationViewsFromSeeds` then prints it verbatim; a zero value leaves the
+  row to its own reckoning, which is the message date promoted to the snooze
+  return so mail coming back from a reminder heads a list ordered by when things
+  last became current. A date-ordered search sets it to the message date on every
+  seed in the window, which is the only way the two stay one date: the due
+  reminders are read through a capped page (200) while the reminder the row
+  prints is looked up uncapped, so a rule that read the snooze return here would
+  place a row by one date and head it with another as soon as a reader held more
+  due snoozes than that page.
 - The search index is derived state and must never hold the mail hostage. A
   Bleve write that fails drops its batch and marks the folders it touched as
   coverage nothing has verified (`search_index_state_known = 0`), which the

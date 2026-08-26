@@ -1562,9 +1562,8 @@ func TestSearchConversationSeedHitsPagesADateOrderWithoutRepeats(t *testing.T) {
 		}
 		ids = append(ids, msg.ID)
 	}
-	// Two of the matches carry a reminder, set to one shared second so their
-	// order among themselves is decided rather than raced. A snooze can only be
-	// set into the future, so this waits for the two it sets to come due.
+	// Two of the matches carry a reminder that has come back. A snooze can only
+	// be set into the future, so this waits for the two it sets to come due.
 	returnAt := time.Now().UTC().Add(2 * time.Second)
 	for _, index := range []int{3, 5} {
 		if _, err := db.SnoozeMessage(ctx, user.ID, ids[index], returnAt); err != nil {
@@ -1588,19 +1587,16 @@ func TestSearchConversationSeedHitsPagesADateOrderWithoutRepeats(t *testing.T) {
 
 	server := &Server{store: db, search: searchSvc, mailListCache: newMailListCache()}
 	own := map[string]bool{strings.ToLower(user.Email): true}
-	// Both reminders landed on the same second, so among themselves the message
-	// id decides, in the direction the page runs.
-	oldestFirst := []int64{ids[0], ids[1], ids[2], ids[4], ids[6], ids[7]}
-	newestFirst := slices.Clone(oldestFirst)
+	// A date-ordered list places returned mail by when it was written, like
+	// everything else in it, so the walk is simply the corpus in date order.
+	newestFirst := slices.Clone(ids)
 	slices.Reverse(newestFirst)
 	cases := []struct {
 		order search.SearchOrder
 		want  []int64
 	}{
-		// Mail that just came back from a reminder is the newest thing in the
-		// list, so it heads the newest-first walk and ends the oldest-first one.
-		{search.SearchOrderNewest, append([]int64{ids[5], ids[3]}, newestFirst...)},
-		{search.SearchOrderOldest, append(slices.Clone(oldestFirst), ids[3], ids[5])},
+		{search.SearchOrderNewest, newestFirst},
+		{search.SearchOrderOldest, slices.Clone(ids)},
 	}
 	for _, tc := range cases {
 		var walked []int64
@@ -1620,5 +1616,206 @@ func TestSearchConversationSeedHitsPagesADateOrderWithoutRepeats(t *testing.T) {
 		if !slices.Equal(walked, tc.want) {
 			t.Fatalf("%s walked = %v, want %v", tc.order, walked, tc.want)
 		}
+	}
+}
+
+// Mail written in the same second is what a date order has no answer for on its
+// own, and each search backend breaks that tie its own way - Bleve by the
+// document id as a string, PostgreSQL by the numeric id. Whichever it is, the
+// pages have to stay a partition of the matches: the seed collection may not
+// re-order the window by a rule of its own, or a row shows up on two pages while
+// another is never reached.
+func TestSearchConversationSeedHitsPagesSameSecondMatchesWithoutRepeats(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	searchSvc, err := search.Open(filepath.Join(dir, "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+
+	user, err := db.CreateUser(ctx, "same-second@example.test", "Same Second", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.UpsertMailAccount(ctx, store.MailAccount{UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993, Username: user.Email, EncryptedPassword: "encrypted", Mailbox: "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Enough rows that the decimal spelling of the ids and their values disagree,
+	// which is the difference between the two backends' tie-breaks.
+	const messageCount = 12
+	// One instant for all of them: a mailing list fan-out, or one sync writing a
+	// batch it fetched together.
+	arrived := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	ids := make([]int64, 0, messageCount)
+	for i := range messageCount {
+		blob, err := db.CreateBlob(ctx, store.BlobRecord{UserID: user.ID, Kind: "message", Path: fmt.Sprintf("messages/burst-%d.eml", i), SHA256: fmt.Sprintf("burst-sha-%d", i), Size: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := db.CreateMessage(ctx, store.CreateMessage{
+			UserID:    user.ID,
+			AccountID: account.ID,
+			MailboxID: mailbox.ID,
+			BlobID:    blob.ID,
+			Subject:   fmt.Sprintf("Burst %d", i),
+			FromAddr:  fmt.Sprintf("sender%d@example.test", i),
+			ToAddr:    user.Email,
+			Date:      arrived,
+			UID:       uint32(400 + i),
+			BodyText:  "needle in this one",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := searchSvc.IndexMessage(ctx, msg, nil); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, msg.ID)
+	}
+
+	server := &Server{store: db, search: searchSvc, mailListCache: newMailListCache()}
+	own := map[string]bool{strings.ToLower(user.Email): true}
+	for _, order := range []search.SearchOrder{search.SearchOrderNewest, search.SearchOrderOldest} {
+		var walked []int64
+		for page := 1; page <= messageCount/2; page++ {
+			seeds, err := server.searchConversationSeedHits(ctx, user.ID, "needle", page, 2, search.SearchOptions{Order: order}, own, searchMailboxFilter{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// One extra seed per page is the "is there a next page" probe.
+			if len(seeds) > 2 {
+				seeds = seeds[:2]
+			}
+			for _, seed := range seeds {
+				walked = append(walked, seed.Message.ID)
+			}
+		}
+		// Which of two same-second rows leads is the backend's to decide, so this
+		// asks only what the pages owe the reader: every match once.
+		sorted := slices.Clone(walked)
+		slices.Sort(sorted)
+		if want := slices.Sorted(slices.Values(ids)); !slices.Equal(sorted, want) {
+			t.Fatalf("%s walked %v, which is not each of %v exactly once", order, walked, want)
+		}
+	}
+}
+
+// The date a row prints is the date the list placed it by. Mail returning from a
+// snooze is where those two can come apart: its row is normally headed by the
+// reminder it came back on, which is what puts it at the top of a list ordered
+// by when things last became current. A search ordered by date placed it by when
+// it was written, so that is what it has to show - and it has to show it whether
+// or not the row came through the capped list of due reminders, because that cap
+// is a paging bound and not a rule about what a row prints.
+func TestAPISearchDateOrderPrintsTheDateItSortedBy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	searchSvc, err := search.Open(filepath.Join(dir, "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchSvc.Close()
+
+	user, err := db.CreateUser(ctx, "list-date@example.test", "List Date", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.UpsertMailAccount(ctx, store.MailAccount{UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993, Username: user.Email, EncryptedPassword: "encrypted", Mailbox: "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := time.Date(2026, 1, 9, 8, 30, 0, 0, time.UTC)
+	blob, err := db.CreateBlob(ctx, store.BlobRecord{UserID: user.ID, Kind: "message", Path: "messages/list-date.eml", SHA256: "list-date-sha", Size: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := db.CreateMessage(ctx, store.CreateMessage{
+		UserID:    user.ID,
+		AccountID: account.ID,
+		MailboxID: mailbox.ID,
+		BlobID:    blob.ID,
+		Subject:   "Reminded thread",
+		FromAddr:  "sender@example.test",
+		ToAddr:    user.Email,
+		Date:      written,
+		UID:       500,
+		BodyText:  "needle in this one",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := searchSvc.IndexMessage(ctx, msg, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SnoozeMessage(ctx, user.ID, msg.ID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		due, err := db.ListDueSnoozedMessagesForUser(ctx, user.ID, 10, 0, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(due) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the snooze never came due")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	server := &Server{store: db, search: searchSvc, mailListCache: newMailListCache()}
+	listDate := func(sort string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/search?q=needle&sort="+sort, nil)
+		req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: user}))
+		rec := httptest.NewRecorder()
+		server.apiSearch(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sort=%q status = %d body = %s", sort, rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Conversations []apiConversation `json:"conversations"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Conversations) != 1 {
+			t.Fatalf("sort=%q conversations = %#v", sort, payload.Conversations)
+		}
+		return payload.Conversations[0].ListDate
+	}
+
+	for _, order := range []string{"newest", "oldest"} {
+		if got, want := listDate(order), written.Format(time.RFC3339); got != want {
+			t.Fatalf("sort=%q list date = %q, want the date the row was placed by, %q", order, got, want)
+		}
+	}
+	// Best match still orders by when mail last became current, so there the
+	// reminder is what heads the row.
+	if got := listDate("best"); got == written.Format(time.RFC3339) {
+		t.Fatalf("best-match list date = %q, want the snooze return", got)
 	}
 }

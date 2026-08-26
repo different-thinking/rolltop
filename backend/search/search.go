@@ -1824,13 +1824,20 @@ func (s *Service) search(ctx context.Context, userID int64, queryText string, li
 	query := buildQuery(userID, queryText, opts)
 	req := bleve.NewSearchRequestOptions(query, limit, offset, false)
 	// The date sort replaces the score sort rather than following it, and the
-	// document id follows the date in both directions. Mail arriving in the same
-	// second is ordinary, and callers page through these hits by offset: without
-	// a total order the rows sharing a second would land differently on each
-	// request, repeating some and skipping others across page boundaries.
+	// document id follows the date. Mail arriving in the same second is
+	// ordinary, and callers page through these hits by offset: without a total
+	// order the rows sharing a second would land differently on each request,
+	// repeating some and skipping others across page boundaries.
+	//
+	// Bleve compares `_id` as the string it is, so this orders same-second mail
+	// by the decimal spelling of the message id rather than by its value - "10"
+	// ahead of "9". That is deliberate and it is all this tie-break is for: it
+	// makes the sequence total and repeatable, which is what paging needs, and
+	// no caller may assume it agrees with the numeric order the PostgreSQL
+	// backend breaks the same tie by.
 	switch opts.Order {
 	case SearchOrderNewest:
-		req.SortBy([]string{"-date", "_id"})
+		req.SortBy([]string{"-date", "-_id"})
 	case SearchOrderOldest:
 		req.SortBy([]string{"date", "_id"})
 	}
