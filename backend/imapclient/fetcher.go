@@ -1614,7 +1614,7 @@ func (f *Fetcher) login(account store.MailAccount) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decrypt IMAP password: %w", err)
 	}
-	return f.connectAndAuthenticate(account, func(c *client.Client) error {
+	return f.connectAndAuthenticate(account, func(c *client.Client, _ bool) error {
 		return c.Login(account.Username, password)
 	})
 }
@@ -1643,14 +1643,17 @@ func (f *Fetcher) loginWithGoogleToken(account store.MailAccount) (*client.Clien
 	return authenticated, nil
 }
 
-func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client) error {
-	return func(c *client.Client) error {
+func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.Client, bool) error {
+	return func(c *client.Client, encrypted bool) error {
 		// Mirror the SMTP side: an access token is as good as the password it
 		// replaced, so it must never go out over an unencrypted connection. The
 		// SASL Start callback the go-imap client uses carries no transport
 		// information, so the gate lives here, on the real connection state
-		// rather than the configured intent.
-		if err := xoauth2.EnsureEncrypted(account.Host, c.IsTLS()); err != nil {
+		// rather than the configured intent. The state comes from the socket
+		// this connection was dialed on: the client's own IsTLS only knows
+		// about handshakes the library performed itself, and this one dials
+		// its own socket so it can wrap it for the watchdog.
+		if err := xoauth2.EnsureEncrypted(account.Host, encrypted); err != nil {
 			return err
 		}
 		supported, err := c.SupportAuth(xoauth2.Mechanism)
@@ -1664,7 +1667,10 @@ func authenticateXOAUTH2(account store.MailAccount, token string) func(*client.C
 	}
 }
 
-func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate func(*client.Client) error) (*client.Client, error) {
+// connectAndAuthenticate dials the account's server and hands the connection to
+// authenticate, together with whether the transport is actually encrypted, so a
+// credential that must not travel in the clear can refuse before it is sent.
+func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate func(c *client.Client, encrypted bool) error) (*client.Client, error) {
 	addr := net.JoinHostPort(account.Host, fmt.Sprintf("%d", account.Port))
 	timeout := f.commandTimeout()
 
@@ -1702,19 +1708,40 @@ func (f *Fetcher) connectAndAuthenticate(account store.MailAccount, authenticate
 	}
 	connActivityRegistry.Store(c, activity)
 	c.Timeout = timeout
-	if err := authenticate(c); err != nil {
+	if err := authenticate(c, transportEncrypted(conn)); err != nil {
 		terminateClient(c)
 		wrapped := fmt.Errorf("login to IMAP server %s: %w", addr, err)
-		// A server that does not offer XOAUTH2 has not rejected the credential,
-		// so this must not look like a stale token: the retry would spend a real
-		// refresh at Google and open a second connection that fails identically,
-		// once per mailbox.
-		if errors.Is(err, xoauth2.ErrUnsupported) {
+		// Neither a server that does not offer XOAUTH2 nor a transport this
+		// side refuses to put a token on has rejected the credential, so
+		// neither must look like a stale token: the retry would spend a real
+		// refresh at Google and open a second connection that fails
+		// identically, once per mailbox. Both answers are the same on every
+		// attempt, so there is nothing a fresh token could change.
+		if errors.Is(err, xoauth2.ErrUnsupported) || errors.Is(err, xoauth2.ErrCleartext) {
 			return nil, wrapped
 		}
 		return nil, googletoken.AuthError{Err: wrapped}
 	}
 	return c, nil
+}
+
+// transportEncrypted reports whether conn carries a completed TLS handshake.
+// It has to unwrap: the socket is wrapped for the fetch watchdog before the
+// client ever sees it, and a wrapper is not a *tls.Conn to a type assertion.
+// Asking the connection beats trusting the account's UseTLS flag, which says
+// what was intended rather than what was negotiated.
+func transportEncrypted(conn net.Conn) bool {
+	for conn != nil {
+		switch typed := conn.(type) {
+		case *tls.Conn:
+			return typed.ConnectionState().HandshakeComplete
+		case *activityConn:
+			conn = typed.Conn
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // sessionClient returns an authenticated connection for one operation and the
