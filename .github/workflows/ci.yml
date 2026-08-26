@@ -344,6 +344,9 @@ jobs:
 
           exit "$status"
 
+      - name: Run Frontend Tests
+        run: npm run test
+
       - name: Build Frontend
         run: |
           mkdir -p test-results build-artifacts

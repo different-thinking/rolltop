@@ -109,7 +109,7 @@ jobs:
           # scripts/assemble-plugin-dist.mjs decides what reaches the image, so
           # both belong to the frontend and Docker areas even though they are
           # neither .ts nor Dockerfile.
-          emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^plugins/[^/]+/(frontend|themes)/'
+          emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vitest\.config\.ts$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^plugins/[^/]+/(frontend|themes)/'
           # ^frontend/ is included because every plugin frontend imports from
           # frontend/src (the host's types, registry, Icon, api, SettingsUI):
           # a host change that breaks those imports must rebuild the plugin
@@ -309,6 +309,9 @@ jobs:
           cat test-results/typescript-test-report.md >> "$GITHUB_STEP_SUMMARY"
 
           exit "$status"
+
+      - name: Run Frontend Tests
+        run: npm run test
 
       - name: Build Frontend
         run: npm run build:vite
