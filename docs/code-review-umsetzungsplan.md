@@ -212,6 +212,15 @@ Fünf Phasen, nach Risiko/Aufwand-Verhältnis geordnet. Phase 0 ist bewusst klei
 ### Phase 4 — CI, Tests, Infra, Aufräumen
 *Ziel: die Prozesslücken schließen, die Regressionen entstehen lassen. Laufend / geschätzt ~1–2 Wochen.*
 
+> **Status: umgesetzt.** Alle Punkte sind im Code umgesetzt. Zwei Restpunkte
+> sind bewusst als Nicht-Code-Aufgaben dokumentiert statt erzwungen:
+> **CI-7** — die „Require branches to be up to date"/Merge-Queue-Einstellung ist
+> eine Repo-Admin-Aktion (in AGENTS.md/README dokumentiert; der Workflow kann sie
+> nicht selbst setzen); **CI-8** — die go-imap-v2-Migration ist als Entscheidung
+> plus Plan (`docs/go-imap-v2-migration.md`) eingelagert, bewusst zurückgestellt.
+> **CI-2** startet wie geplant mit reinen Funktionen (Vitest-Runner + erste
+> Suite); der Ausbau der Frontend-Abdeckung bleibt laufende Arbeit.
+
 - **CI-2** Vitest einführen; mit den in AGENTS.md dokumentierten Invarianten (Dismissal-Lebenszyklus, `waitForChromeEvent`, Keepalive-Budgets) als reine Funktionen beginnen. — *L (Setup S)*
 - **CI-4** 14 `go vet`-Findings fixen (Pointer-Receiver, `defer cancel`), dann `go vet ./...` als Pflicht-Gate. — *S–M*
 - **CI-5** Tabellengetriebene Tests für OIDC (falsche Signatur, `aud`/`iss`/`exp`, `alg`-Verwechslung) und `googletoken`. — *M*
