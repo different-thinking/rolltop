@@ -11,6 +11,8 @@ import { Icon } from "../../components/Icon";
 import { ListHeader } from "../../components/common";
 import { androidNativeAvailable } from "../../lib/androidNative";
 import { messageFromError } from "../../lib/errors";
+import { filterFiledConversations, recordFiledMessages, releaseAnsweredFilings, releaseFiledMessages, subscribeFiledMessages } from "../../lib/filedMessages";
+import type { FiledMessage } from "../../lib/filedMessages";
 import { dateGroupLabel, displaySnoozeUntil, displayTime, localDayKey, messageCountLabel } from "../../lib/format";
 import { displayInitial, stableHash } from "../../lib/senderIdentity";
 import { archiveMailboxForAccount, junkMailboxForAccount, roleMailboxIDs, trashMailboxForAccount } from "../../lib/folders";
@@ -1397,7 +1399,11 @@ type MessageListScope = {
 type TrashMoveGroup = {
   target: Mailbox;
   messageIDs: number[];
-  items: { rowID: number; messageIDs: number[] }[];
+  // `rowMailboxID` is the folder the row's own message is leaving, which is the
+  // only source folder a conversation row can speak for: the filing that hides
+  // the row is judged on that message, and a record that knows the folder it is
+  // leaving stops hiding the row the moment anything reports it elsewhere.
+  items: { rowID: number; rowMailboxID: number; messageIDs: number[] }[];
 };
 
 // The backend queues a background run for bulk moves above 5 message IDs and
@@ -1535,6 +1541,8 @@ function MessageList({
 }) {
   const [selectedIDs, setSelectedIDs] = useState<Set<number>>(() => new Set());
   const [dismissedIDs, setDismissedIDs] = useState<Set<number>>(() => new Set());
+  // Bumped when the filed record changes; `visible` reads that record directly.
+  const [, setFiledGeneration] = useState(0);
   const [readStateBusy, setReadStateBusy] = useState(false);
   const [snoozeBusy, setSnoozeBusy] = useState(false);
   // A counter rather than a boolean: deferred delete commits can overlap when
@@ -1575,7 +1583,11 @@ function MessageList({
   // selectionBusy gates every bulk row mutation (toolbar buttons, swipes, drags)
   // so concurrent moves cannot race each other on the same rows.
   const selectionBusy = readStateBusy || snoozeBusy || swipeActionBusy || scopeDeleteBusy || trashOps > 0;
-  const visible = conversations
+  // Rows this list dismissed are hidden by `dismissedIDs`, which lives as long
+  // as this component does. Rows the reader filed away are hidden by the filed
+  // record, which outlives it: a remount, a cached page, or a reload finishing
+  // after the move used to hand deleted mail straight back to the screen.
+  const visible = filterFiledConversations(conversations)
     .filter((conversation) => !dismissedIDs.has(conversation.message.id))
     .map((conversation) => {
       const pendingRead = pendingSwipeReadStates.get(conversation.message.id);
@@ -1614,6 +1626,21 @@ function MessageList({
   const selectedDragAccountIDs = uniquePositiveIDs(selectedDragItems.flatMap(conversationTransferAccountIDs));
 
   keyboardIndexRef.current = keyboardIndex;
+
+  // Filing is recorded outside React, so the list is told when it changes -
+  // by this view's own mutations and by a message view that found its message
+  // gone from the server.
+  useEffect(() => subscribeFiledMessages(() => setFiledGeneration((current) => current + 1)), []);
+
+  // The rows on screen answer their own filings: a message drawn where it was
+  // filed to, or anywhere other than the folder it left, has settled the
+  // question the record was asking. `visible` decides that while rendering and
+  // must stay pure, so letting the records go happens here, once the rows are
+  // up - and for rows this view was handed rather than fetched, which is the
+  // set the request paths never see.
+  useEffect(() => {
+    releaseAnsweredFilings(conversations);
+  }, [conversations]);
 
   useEffect(() => {
     return () => {
@@ -1894,12 +1921,36 @@ function MessageList({
       // fails gives back exactly the mail it left where it was. A row belonging
       // to an account this pass started no run for is never cleared at all.
       const idsByAccount = new Map<number, number[]>();
+      // Filing is decided per account too, and unlike the watch it cannot be
+      // approximate: the watch only ever gives rows back, so a row named under
+      // an account it does not belong to costs nothing, while a filing that
+      // names the wrong account's Trash hides mail that has arrived in its own.
+      // So the watch keeps the row's whole id list per account and the filing
+      // takes each account's own messages (`conversationAccountMessageIDs`, the
+      // split every other delete path files by).
+      const filed: FiledMessage[] = [];
       if (wholeFilterTaken) {
         for (const conversation of visible) {
           const ids = [conversation.message.id, ...conversationTransferMessageIDs(conversation)];
           for (const accountID of conversationTransferAccountIDs(conversation)) {
             if (!runsByAccount.has(accountID)) continue;
             idsByAccount.set(accountID, [...(idsByAccount.get(accountID) || []), ...ids]);
+          }
+          for (const group of conversationAccountMessageIDs(conversation) || []) {
+            if (!runsByAccount.has(group.accountID)) continue;
+            // No Trash folder for this account means nothing to file against:
+            // a record with no destination hides the row everywhere, which is
+            // the answer for mail the server has lost and not for mail whose
+            // destination this client simply cannot name.
+            const target = trashMailboxForAccount(mailboxes, group.accountID);
+            if (!target) continue;
+            for (const id of group.messageIDs) {
+              filed.push({
+                id,
+                fromMailboxID: id === conversation.message.id ? conversation.message.mailbox_id : undefined,
+                toMailboxID: target.id
+              });
+            }
           }
         }
       }
@@ -1909,6 +1960,9 @@ function MessageList({
       }));
       const clearedIDs = uniquePositiveIDs(groups.flatMap((group) => group.ids));
       if (clearedIDs.length > 0) {
+        // Filed under each account's own Trash, so a whole-filter delete hides
+        // its rows past this component the way a row delete does.
+        fileMessages(filed);
         optimisticallyDismiss(clearedIDs);
         void watchQueuedMove(groups, "Trash");
       }
@@ -1998,7 +2052,7 @@ function MessageList({
       }
       for (const entry of rowGroups) {
         const group = groups.get(entry.target.id) || { target: entry.target, messageIDs: [], items: [] };
-        group.items.push({ rowID: conversation.message.id, messageIDs: entry.messageIDs });
+        group.items.push({ rowID: conversation.message.id, rowMailboxID: conversation.message.mailbox_id, messageIDs: entry.messageIDs });
         group.messageIDs.push(...entry.messageIDs);
         groups.set(entry.target.id, group);
       }
@@ -2020,13 +2074,20 @@ function MessageList({
     // dismissal lapses when the list stops returning the message, and the list
     // goes on returning this one.
     const dismissIDs = uniquePositiveIDs(entries.flatMap((entry) => entry.messageIDs));
+    // Each message is filed under the Trash it is going to, and the row's own
+    // message also under the folder it is leaving - the one source folder a row
+    // can speak for. A sibling elsewhere in the thread is filed on the
+    // destination alone, which is what a caller that cannot name a source gets.
+    const filed: FiledMessage[] = entries.flatMap((entry) => {
+      const rowMailboxes = new Map(entry.items.map((item) => [item.rowID, item.rowMailboxID]));
+      return entry.messageIDs.map((id) => ({ id, fromMailboxID: rowMailboxes.get(id), toMailboxID: entry.target.id }));
+    });
     const totalMessages = entries.reduce((sum, entry) => sum + entry.messageIDs.length, 0);
     const registered = deferSwipeMutation(
       rowIDs[0],
       `Moved ${messageCountLabel(totalMessages)} to ${destLabel}.`,
       () => {
-        removePendingSwipeMoveIDs(dismissIDs);
-        restoreDismissed(dismissIDs);
+        unfileMessages(dismissIDs);
         setSelectedIDs((current) => new Set([...current, ...rowIDs]));
       },
       (keepalive) => commitTrashMove(entries, dismissIDs, destLabel, keepalive)
@@ -2034,6 +2095,7 @@ function MessageList({
     if (!registered) return;
     if (alreadyInTrash > 0) addToast(`Skipped ${messageCountLabel(alreadyInTrash)} already in ${skippedLabel}.`);
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissIDs]));
+    fileMessages(filed);
     optimisticallyDismiss(dismissIDs);
     clearSelection();
   }
@@ -2054,7 +2116,12 @@ function MessageList({
     const stillQueuedIDs = new Set<number>();
     const queuedGroups: QueuedMoveGroup[] = [];
     const movedRowIDs: number[] = [];
-    const restoreIDs: number[] = [];
+    // Two different reasons a message is still here, and they end differently.
+    // `skippedIDs` were never sent - a background commit's request budget ran
+    // out - so they are handed back: the reader's decision was never carried to
+    // the server for them. `failedIDs` were refused, and stay filed.
+    const skippedIDs: number[] = [];
+    const failedIDs: number[] = [];
     const reselectRowIDs: number[] = [];
     let queuedMessages = 0;
     let firstError: unknown;
@@ -2064,25 +2131,24 @@ function MessageList({
     const chunkBudgets = keepaliveChunkBudgets(entries.length);
     try {
       await Promise.all(entries.map(async (entry, index) => {
-        const { movedIDs, queuedIDs, queuedGroups: groups, queuedCount, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudgets[index]);
+        const { movedIDs, queuedIDs, queuedGroups: groups, queuedCount, skippedIDs: notSent, error } = await executeMailboxMove(entry.target, entry.messageIDs, keepalive, chunkBudgets[index]);
         if (error !== undefined && firstError === undefined) firstError = error;
         queuedIDs.forEach((id) => stillQueuedIDs.add(id));
         queuedGroups.push(...groups);
         queuedMessages += queuedCount;
         movedMessageIDs.push(...movedIDs);
+        skippedIDs.push(...notSent);
         const movedSet = new Set(movedIDs);
+        const notSentSet = new Set(notSent);
         for (const item of entry.items) {
           // The reminder belongs to the row's own message, so it only goes when
           // that message is one of the messages this move relocated.
           if (movedSet.has(item.rowID)) movedRowIDs.push(item.rowID);
-          const stayedIDs = item.messageIDs.filter((id) => !movedSet.has(id));
-          if (stayedIDs.length === 0) continue;
-          // Whatever stayed in the folder is still this list's mail, even when a
-          // sibling in the same thread moved: a thread with messages left here is
-          // a row the list still has to show, and nothing else releases the
-          // dismissal now that it outlives the mutation.
-          restoreIDs.push(item.rowID, ...stayedIDs);
-          reselectRowIDs.push(item.rowID);
+          const refused = item.messageIDs.filter((id) => !movedSet.has(id) && !notSentSet.has(id));
+          if (refused.length > 0) failedIDs.push(...refused);
+          // The row goes back into the selection when part of what it stands for
+          // was never asked about, so the reader can send it again.
+          if (item.messageIDs.some((id) => notSentSet.has(id))) reselectRowIDs.push(item.rowID);
         }
       }));
     } finally {
@@ -2103,12 +2169,12 @@ function MessageList({
     // They stay pending so a reload of this page does not show them again on
     // their way out.
     removePendingSwipeMoveIDs(dismissIDs.filter((id) => !stillQueuedIDs.has(id)));
-    if (restoreIDs.length > 0) {
-      restoreDismissed(uniquePositiveIDs(restoreIDs));
+    if (skippedIDs.length > 0) {
+      unfileMessages(uniquePositiveIDs(skippedIDs));
       setSelectedIDs((current) => new Set([...current, ...reselectRowIDs]));
     }
     if (queuedMessages > 0) addToast(`Move to ${destLabel} started for ${messageCountLabel(queuedMessages)}.`);
-    if (firstError !== undefined) addToast(`Delete failed: ${messageFromError(firstError)}`, "error");
+    if (firstError !== undefined) reportFilingFailure(`Delete failed: ${messageFromError(firstError)}.`, failedIDs);
     // The rows are gone from this page; reload it so the following messages move
     // up instead of leaving the page short, or empty after a full-page delete.
     if (movedMessageIDs.length > 0) onListChanged?.();
@@ -2120,7 +2186,7 @@ function MessageList({
   // executeMailboxMove pushes messageIDs into the target mailbox and reports
   // which messages moved (or were queued as a background run) so callers can
   // reconcile rows without guessing. Shared by swipe moves and bulk delete.
-  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean, chunkBudget = keepaliveMoveChunkBudget): Promise<{ movedIDs: number[]; queuedIDs: number[]; queuedGroups: QueuedMoveGroup[]; queuedCount: number; error?: unknown }> {
+  async function executeMailboxMove(target: Mailbox, messageIDs: number[], keepalive: boolean, chunkBudget = keepaliveMoveChunkBudget): Promise<{ movedIDs: number[]; queuedIDs: number[]; queuedGroups: QueuedMoveGroup[]; queuedCount: number; skippedIDs: number[]; error?: unknown }> {
     if (keepalive || messageIDs.length > inlineMoveMessageLimit) {
       // Chunk here (within the backend's batch cap) so each chunk's outcome is
       // tracked independently: one failed chunk must not discard the moved IDs
@@ -2133,6 +2199,10 @@ function MessageList({
       // one action into several accounts' folders passes each of them a share
       // of the budget rather than letting every destination spend all of it.
       const dispatched = keepalive ? chunks.slice(0, chunkBudget) : chunks;
+      // What the budget left behind was never asked for, so it is neither moved
+      // nor failed: it is mail this move did not touch, and the caller has to
+      // hand it back rather than file it away on a request nobody made.
+      const skippedIDs = chunks.slice(dispatched.length).flat();
       const results = await Promise.allSettled(dispatched.map((chunk) =>
         api.bulkMoveMessages(csrf, chunk, target.id, keepalive ? { keepalive: true } : undefined)));
       const movedIDs: number[] = [];
@@ -2154,7 +2224,7 @@ function MessageList({
           error = result.reason;
         }
       });
-      return { movedIDs, queuedIDs, queuedGroups, queuedCount, error };
+      return { movedIDs, queuedIDs, queuedGroups, queuedCount, skippedIDs, error };
     }
     const movedIDs: number[] = [];
     let error: unknown;
@@ -2163,10 +2233,60 @@ function MessageList({
         await api.moveMessage(csrf, messageID, target.id);
         movedIDs.push(messageID);
       } catch (err) {
+        // A message the server no longer has is answered as success by the route
+        // itself, the way bulk-move has answered it for a while, so nothing here
+        // reads a status as "there was nothing to move". Reading 404 that way
+        // was wrong in the other direction: the same route answers 404 for a
+        // destination folder it cannot resolve, and for anything in front of the
+        // app that answers instead - reporting those as moved would file mail
+        // away on a request that never touched it.
         if (error === undefined) error = err;
       }
     }
-    return { movedIDs, queuedIDs: [], queuedGroups: [], queuedCount: 0, error };
+    return { movedIDs, queuedIDs: [], queuedGroups: [], queuedCount: 0, skippedIDs: [], error };
+  }
+
+  /**
+   * fileMessages records what the reader filed away and takes it out of every
+   * cached page this browser is holding. Pressing Delete is the whole decision:
+   * from here the row is gone from the reader's lists whatever the background
+   * does, and only an undo, a move that was never attempted, or the filing
+   * ageing out puts it back.
+   */
+  function fileMessages(entries: FiledMessage[]) {
+    const filed = recordFiledMessages(entries);
+    if (filed.length > 0) api.forgetMessages(filed);
+  }
+
+  /** unfileMessages is the way back: an undo, or the reader asking to see it again. */
+  function unfileMessages(ids: number[]) {
+    if (ids.length === 0) return;
+    releaseFiledMessages(ids);
+    removePendingSwipeMoveIDs(ids);
+    restoreDismissed(ids);
+  }
+
+  /**
+   * reportFilingFailure says what went wrong without undoing the reader's
+   * decision. The mail is still where it was, so the toast carries the way back
+   * onto the screen rather than taking it there unasked: a row that reappeared
+   * on its own was the flash this whole path exists to prevent, and the reader
+   * who wants it back is the one who knows they do.
+   */
+  function reportFilingFailure(message: string, ids: number[]) {
+    const stuck = uniquePositiveIDs(ids);
+    if (stuck.length === 0) {
+      addToast(message, "error");
+      return;
+    }
+    addToast(`${message} It stays hidden here until you show it again.`, "error", {
+      label: "Show again",
+      onUndo: () => {
+        unfileMessages(stuck);
+        onListChanged?.();
+      },
+      onCommit: () => undefined
+    });
   }
 
   function optimisticallyDismiss(ids: number[]) {
@@ -2313,19 +2433,20 @@ function MessageList({
       const provenIDs = proven.filter((id) => !returnedSet.has(id));
       if (provenIDs.length > 0) onMessagesMoved(provenIDs);
       if (returned.length > 0) {
-        restoreDismissed(uniquePositiveIDs(returned));
         const reason = failure ? failure.error || failure.status : "the run did not report a result";
-        addToast(`Move to ${destLabel} did not finish: ${reason}.`, "error");
+        reportFilingFailure(`Move to ${destLabel} did not finish: ${reason}.`, returned);
       }
       onListChanged?.();
       return;
     }
-    // Past the watch window the rows stop being hidden on trust: show whatever
-    // the folder still holds rather than keeping them invisible for the session.
-    // Nothing else releases them - a dismissal now outlives the mutation - so
-    // this is the one place that has to put an unproven move back on screen.
+    // Past the watch window nothing has been proved either way, and the run is
+    // very likely still working: a Trash purge behind it holds the tenant's turn
+    // for as long as it takes. The rows stay filed rather than being handed back
+    // on a timer - a row that reappeared on its own is what the reader reported
+    // as mail coming back from the dead - and the reader is told, with the way
+    // back on the toast. The filing ages out on its own if the move never lands.
     removePendingSwipeMoveIDs(ids);
-    restoreDismissed(ids);
+    reportFilingFailure(`Move to ${destLabel} is taking longer than expected.`, ids);
     onListChanged?.();
   }
 
@@ -2564,13 +2685,21 @@ function MessageList({
     // it would hide it past the reload, because the list keeps returning it.
     const rowMoves = messageIDs.includes(conversation.message.id);
     const dismissedIDs = messageIDs;
+    // Filed under the folder each account's copy is going to, the same way the
+    // bulk delete files its selection, with the row's own message also carrying
+    // the folder it is leaving.
+    const filed: FiledMessage[] = moving.flatMap((entry) =>
+      entry.messageIDs.map((id) => ({
+        id,
+        fromMailboxID: id === conversation.message.id ? conversation.message.mailbox_id : undefined,
+        toMailboxID: entry.target.id
+      })));
     const registered = deferSwipeMutation(
       conversation.message.id,
       `Moved ${messageCountLabel(messageIDs.length)} to ${destLabel}.`,
       () => {
         cancelSwipeDismiss(conversation.message.id);
-        removePendingSwipeMoveIDs(dismissedIDs);
-        restoreDismissed(dismissedIDs);
+        unfileMessages(dismissedIDs);
       },
       async (keepalive) => {
         // Deleting a snoozed row dismisses its reminder too. On a background
@@ -2592,6 +2721,7 @@ function MessageList({
         const movedIDs = results.flatMap((result) => result.movedIDs);
         const queuedIDs = results.flatMap((result) => result.queuedIDs);
         const queuedGroups = results.flatMap((result) => result.queuedGroups);
+        const notSentIDs = results.flatMap((result) => result.skippedIDs);
         const error = results.find((result) => result.error !== undefined)?.error;
         const queued = new Set(queuedIDs);
         removePendingSwipeMoveIDs(dismissedIDs.filter((id) => !queued.has(id)));
@@ -2605,25 +2735,27 @@ function MessageList({
         // reason as in the bulk path: they have not left the folder yet, and a
         // row taken out of the list loses the dismissal hiding it.
         const movedSet = new Set(movedIDs);
+        const notSentSet = new Set(notSentIDs);
         const settledIDs = movedIDs.filter((id) => !queued.has(id));
-        const stayedIDs = messageIDs.filter((id) => !movedSet.has(id));
+        const refusedIDs = messageIDs.filter((id) => !movedSet.has(id) && !notSentSet.has(id));
         if (settledIDs.length > 0) onMessagesMoved(settledIDs);
-        // A move that relocated part of the thread leaves the rest here, and the
-        // row goes on standing for it, so the row comes back with the messages
-        // that stayed. The reload below is what puts it on screen again:
-        // reporting the moved messages took the whole row out of the list.
-        if (stayedIDs.length > 0) {
+        // Messages a background commit's request budget never reached were not
+        // asked about, so the row comes back for them - the reader's decision
+        // never left the browser. Messages the server refused stay filed; the
+        // toast below carries the way back onto the screen.
+        if (notSentIDs.length > 0) {
           cancelSwipeDismiss(conversation.message.id);
-          restoreDismissed(uniquePositiveIDs([conversation.message.id, ...stayedIDs]));
+          unfileMessages(uniquePositiveIDs([conversation.message.id, ...notSentIDs]));
         }
         if (movedIDs.length > 0) onListChanged?.();
         if (error === undefined) return;
         const partial = movedIDs.length > 0 ? `${movedIDs.length.toLocaleString()} moved, but the remaining action failed` : `${rowMoveLabel(action)} failed`;
-        addToast(`${partial}: ${messageFromError(error)}`, "error");
+        reportFilingFailure(`${partial}: ${messageFromError(error)}.`, refusedIDs);
       }
     );
     if (!registered) return false;
     setPendingSwipeMoveIDs((current) => new Set([...current, ...dismissedIDs]));
+    fileMessages(filed);
     // The row slides out only when its own message is one of the ones going.
     // A row whose copy stays here keeps its place and reports no dismissal, so
     // a swipe springs it back rather than sliding out a row that never left.

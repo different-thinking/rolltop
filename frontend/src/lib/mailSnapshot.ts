@@ -271,3 +271,35 @@ function optionalBoolean(value: unknown): boolean {
 function optionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
 }
+
+/**
+ * forgetMessagesInSnapshots rewrites this user's stored pages without the rows
+ * the given messages seed. A snapshot paints before any request answers, so a
+ * page still carrying mail the reader deleted is the copy that puts it back on
+ * screen - and, once the message is really gone, the copy whose row opens to a
+ * message the server cannot find.
+ */
+export function forgetMessagesInSnapshots(userID: number, messageIDs: number[]) {
+  if (!positiveInteger(userID) || messageIDs.length === 0) return;
+  const gone = new Set(messageIDs);
+  try {
+    const prefix = `${snapshotPrefix}${userID}.`;
+    storageKeys().filter((key) => key.startsWith(prefix)).forEach((key) => {
+      const serialized = localStorage.getItem(key);
+      if (!serialized) return;
+      let snapshot: MailSnapshot;
+      try {
+        snapshot = JSON.parse(serialized) as MailSnapshot;
+      } catch {
+        localStorage.removeItem(key);
+        return;
+      }
+      if (!record(snapshot) || !validMailPage(snapshot.page)) return;
+      const kept = snapshot.page.conversations.filter((conversation) => !gone.has(conversation.message.id));
+      if (kept.length === snapshot.page.conversations.length) return;
+      localStorage.setItem(key, JSON.stringify({ ...snapshot, page: { ...snapshot.page, conversations: kept } }));
+    });
+  } catch {
+    // Storage may be unavailable in private or locked-down browser contexts.
+  }
+}

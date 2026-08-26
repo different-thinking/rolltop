@@ -13,6 +13,7 @@ import { AppShell } from "./features/layout/AppShell";
 import { ComposeOverlay } from "./features/compose/ComposeViews";
 import { RouteView } from "./RouteView";
 import { messageFromError } from "./lib/errors";
+import { recordFiledMessages, releaseFiledMessages } from "./lib/filedMessages";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
@@ -757,7 +758,18 @@ export default function App() {
       const ids = Array.from(new Set(messageIDs.filter((id) => Number.isFinite(id) && id > 0)));
       if (ids.length === 0) return;
       const copying = action === "copy";
-      if (!copying) setMessagesHidden(ids, true);
+      // A drop is a filing like any other, and it is recorded like one: the
+      // app-wide hidden set covers the lists open in this tab and nothing else,
+      // so a reload or a cached page drew the row again. The record names the
+      // destination and no source folder - a drag holds the folder it landed on,
+      // not the one each message came from - and it replaces whatever record the
+      // message already had, which is how mail dragged back out of Trash stops
+      // being judged by the delete that put it there.
+      if (!copying) {
+        setMessagesHidden(ids, true);
+        recordFiledMessages(ids.map((id) => ({ id, toMailboxID: mailbox.id })));
+        api.forgetMessages(ids);
+      }
       const verb = copying ? "Copying" : "Moving";
       const toastID = addToast(`${verb} ${messageCountLabel(ids.length)} to ${mailbox.name}...`, "loading");
       try {
@@ -779,7 +791,13 @@ export default function App() {
           updateToast(toastID, `Moved ${messageCountLabel(data.moved ?? ids.length)} to ${mailbox.name}.`, "success");
         }
       } catch (err) {
-        if (!copying) setMessagesHidden(ids, false);
+        // A drop that the server refused moved nothing, so the rows come back:
+        // unlike Delete, nobody asked for them to be out of the way - they were
+        // asked to be somewhere else, and they are not there.
+        if (!copying) {
+          releaseFiledMessages(ids);
+          setMessagesHidden(ids, false);
+        }
         updateToast(toastID, `${copying ? "Copy" : "Move"} failed: ${messageFromError(err)}`, "error");
       }
     },
@@ -843,7 +861,7 @@ export default function App() {
     await Promise.allSettled(cleanup);
     await api.logout(csrf);
     bootstrapGenerationRef.current += 1;
-    if (bootstrap.user) api.clearMailCache(bootstrap.user.id);
+    if (bootstrap.user) api.forgetUserMail(bootstrap.user.id);
     applySecurityUnlock(emptySecurityUnlockState, true);
     setSecurityUnlockOpen(false);
     setSecurityUnlockIdentityID(null);
