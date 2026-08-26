@@ -22,7 +22,7 @@ func RolltopPlugin() plugins.BackendPlugin {
 	return &pgpBackend{}
 }
 
-func (pgpBackend) ID() string { return plugins.ClientSidePGP }
+func (*pgpBackend) ID() string { return plugins.ClientSidePGP }
 
 func (p *pgpBackend) Start(host plugins.BackendStartHost) error {
 	p.mu.Lock()
@@ -63,6 +63,6 @@ func (p *pgpBackend) unregisterRoutesLocked() {
 	p.routes = nil
 }
 
-func (p pgpBackend) String() string {
+func (p *pgpBackend) String() string {
 	return fmt.Sprintf("rolltop backend plugin %s", p.ID())
 }

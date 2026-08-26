@@ -85,7 +85,7 @@ func RolltopPlugin() plugins.BackendPlugin {
 	return &mailFiltersBackend{}
 }
 
-func (mailFiltersBackend) ID() string { return pluginID }
+func (*mailFiltersBackend) ID() string { return pluginID }
 
 func (p *mailFiltersBackend) Start(host plugins.BackendStartHost) error {
 	p.mu.Lock()

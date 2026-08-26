@@ -50,6 +50,18 @@ services:
       - "8080:8080"
     env_file:
       - .env.rolltop
+    healthcheck:
+      # Liveness only: hits the unauthenticated /api/health route, which never
+      # touches the database. busybox wget ships in the alpine base image; it
+      # exits non-zero on a connection failure or a non-2xx status. The
+      # start_period is generous because first boot runs schema migrations under
+      # an exclusive lock before the listener comes up, and an unhealthy status
+      # during that window must not trip a restart.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
       # The keyword form rather than a postgres:// URL, because the password is
       # substituted in verbatim: in a URL it would have to be percent-encoded,

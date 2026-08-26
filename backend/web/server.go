@@ -489,6 +489,10 @@ func New(opts Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleHome)
+	// Registered as its own exact pattern so ServeMux routes it here, ahead of
+	// the "/api/" subtree that requires a session: the probe must answer
+	// without authentication.
+	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/assets/", s.handleFrontendAsset)
 	mux.HandleFunc("/manifest.webmanifest", s.handleWebManifest)
@@ -622,6 +626,25 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, defaultMailPath, http.StatusSeeOther)
+}
+
+// handleHealth is an unauthenticated liveness probe for container
+// orchestration (the compose healthcheck, load balancers, uptime monitors). It
+// reports only that the process is up and serving HTTP; it deliberately does
+// not touch the database. The app already blocks on the database at startup, so
+// a probe that failed on a transient database blip would only get the
+// orchestrator to restart a process that is otherwise working correctly.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = io.WriteString(w, "ok\n")
+	}
 }
 
 func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
