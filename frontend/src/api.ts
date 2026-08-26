@@ -153,6 +153,11 @@ const mailCacheEpochs = new Map<number, number>();
 // URL-scoped entries that may hold the previous user's data) from the frequent
 // same-user bootstrap refresh (keep the cache).
 let lastRetainedUserID: number | null = null;
+// getCacheGeneration is bumped on every actual user switch. A GET that was
+// already in flight when the switch happened captures the generation at its
+// start and refuses to write its result into the cache once the generation has
+// moved on, so a previous user's response cannot repopulate a purged key.
+let getCacheGeneration = 0;
 
 function cacheGet(key: string): { etag: string; data: unknown } | undefined {
   const entry = getCache.get(key);
@@ -196,6 +201,7 @@ export async function getJSON<T>(url: string, cacheKey = url): Promise<T> {
   if (inflight) return inflight as Promise<T>;
 
   const request = (async () => {
+    const generation = getCacheGeneration;
     const headers: Record<string, string> = { Accept: "application/json" };
     const cached = cacheGet(cacheKey);
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
@@ -203,8 +209,14 @@ export async function getJSON<T>(url: string, cacheKey = url): Promise<T> {
     if (res.status === 304 && cached) return cached.data as T;
     const data = await parse<T>(res);
     const etag = res.headers.get("ETag") || "";
-    if (etag) cacheSet(cacheKey, { etag, data });
-    else getCache.delete(cacheKey);
+    // Drop the write if the signed-in user changed while this request was in
+    // flight: its result belongs to the previous user and must not repopulate a
+    // key retainMailCacheForUser just purged. The caller still receives its own
+    // data; only the shared cache is protected.
+    if (generation === getCacheGeneration) {
+      if (etag) cacheSet(cacheKey, { etag, data });
+      else getCache.delete(cacheKey);
+    }
     return data;
   })();
 
@@ -404,6 +416,9 @@ function retainMailCacheForUser(userID: number) {
   // and the other half of this cache's unbounded growth. The common case, a
   // same-user bootstrap refresh, leaves them in place.
   if (lastRetainedUserID !== null && lastRetainedUserID !== userID) {
+    // Bump first so any GET already in flight for the previous user refuses to
+    // write its result back after this purge.
+    getCacheGeneration++;
     for (const key of getCache.keys()) {
       if (!key.startsWith("user:")) {
         getCache.delete(key);

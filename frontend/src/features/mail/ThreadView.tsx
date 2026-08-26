@@ -1262,7 +1262,12 @@ export function ThreadView({
       }
       record({ status: "ready", email: key.email || email, key });
     } catch {
-      record({ status: "ignored" });
+      // A transient failure — messageOriginal rejecting on a network blip, or the
+      // security plugin momentarily unavailable — is not a terminal "no key here"
+      // verdict, so it is only set on the live state (which load() clears) and
+      // never written to the session cache. A later open then probes again
+      // instead of the failure permanently suppressing the import prompt.
+      setAutocryptImports((current) => ({ ...current, [messageID]: { status: "ignored" } }));
     }
   }
 
@@ -2613,7 +2618,7 @@ function EmailFrame({
   full?: boolean;
 }) {
   const ref = useRef<HTMLIFrameElement | null>(null);
-  const observerRef = useRef<ResizeObserver | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(full ? 220 : 96);
   const highlightKey = `${highlightQuery}:${highlightTerms.join(",")}`;
   const themedSrcDoc = themedEmailDocument(srcDoc);
@@ -2622,21 +2627,29 @@ function EmailFrame({
     setHeight(full ? 220 : 96);
   }, [srcDoc, highlightKey, full]);
 
-  // Stop observing the previous document when this frame unmounts.
+  // Disconnect the observer and detach the load listener when this frame
+  // unmounts.
   useEffect(() => () => {
-    observerRef.current?.disconnect();
-    observerRef.current = null;
+    cleanupRef.current?.();
+    cleanupRef.current = null;
   }, []);
 
   const resize = useCallback(() => {
-    const doc = ref.current?.contentDocument;
+    const frame = ref.current;
+    const doc = frame?.contentDocument;
     const body = doc?.body;
     const html = doc?.documentElement;
-    if (!body || !html) return;
+    if (!frame || !body || !html) return;
+    // Measure with the frame briefly collapsed so content sized to the viewport
+    // (body{height:100%}, a min-height:100vh hero) reports its natural height
+    // instead of echoing back the height we last applied. Without this the
+    // ResizeObserver below would grow such an email ~12px per tick without
+    // bound. The collapse and restore are synchronous within this call, so the
+    // observer only ever samples the committed height, never the transient 0.
+    const applied = frame.style.height;
+    frame.style.height = "0px";
     const next = Math.max(body.scrollHeight, body.offsetHeight, html.scrollHeight, html.offsetHeight, full ? 180 : 84) + 12;
-    // Setting the outer iframe height does not resize the observed inner
-    // document, so this cannot feed back into the observer; the equality guard
-    // just avoids a redundant render on a no-op measurement.
+    frame.style.height = applied;
     setHeight((current) => (current === next ? current : next));
   }, [full]);
 
@@ -2655,29 +2668,40 @@ function EmailFrame({
         highlightEmailDocument(doc, highlightQuery, highlightTerms);
         resize();
         window.requestAnimationFrame(resize);
-        // Replace the old fixed 120/600/1600ms settle cascade — which froze the
-        // height at 1.6s and clipped images that finished loading later — with a
-        // ResizeObserver bound to the document for the life of this load. Late
-        // images, web fonts, and width-driven reflow all change the observed
-        // box, so the height keeps following the content instead of a stopwatch.
-        observerRef.current?.disconnect();
-        observerRef.current = null;
+        // Tear down whatever the previous srcDoc wired up before observing the
+        // new document.
+        cleanupRef.current?.();
+        cleanupRef.current = null;
+        const cleanups: Array<() => void> = [];
         const body = doc?.body;
         const html = doc?.documentElement;
+        // A ResizeObserver replaces the old fixed 120/600/1600ms cascade that
+        // froze the height at 1.6s: reflow from width changes or layout shifts
+        // keeps the height following the content for the life of this load.
         if (typeof ResizeObserver !== "undefined" && (body || html)) {
           const observer = new ResizeObserver(() => resize());
           if (html) observer.observe(html);
           if (body) observer.observe(body);
-          observerRef.current = observer;
+          cleanups.push(() => observer.disconnect());
         } else {
           // Engines without ResizeObserver keep the original settle-timer nudges.
           window.setTimeout(resize, 120);
           window.setTimeout(resize, 600);
           window.setTimeout(resize, 1600);
         }
-        // Some engines finish font layout without resizing the observed box, so
-        // nudge the measurement once when the document's fonts settle.
-        doc?.fonts?.ready?.then(() => resize()).catch(() => undefined);
+        if (doc) {
+          // A late image (or nested frame) can grow scrollHeight without
+          // enlarging the observed border-box, so the ResizeObserver alone would
+          // miss it. Remeasure whenever any subresource finishes loading; load
+          // does not bubble, so listen in the capture phase.
+          const onSubresourceLoad = () => resize();
+          doc.addEventListener("load", onSubresourceLoad, true);
+          cleanups.push(() => doc.removeEventListener("load", onSubresourceLoad, true));
+          // Fonts can change layout without resizing the observed box; nudge once
+          // when they settle.
+          doc.fonts?.ready?.then(() => resize()).catch(() => undefined);
+        }
+        cleanupRef.current = () => cleanups.forEach((fn) => fn());
       }}
     />
   );

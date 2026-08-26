@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -337,10 +338,16 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 	}
 	messageAnnotations := s.pluginMessageAnnotations(ctx, userID, messageIDs, backendPlugins)
 	// Which of these messages carried an Autocrypt header, so the client can gate
-	// its per-message key-import probe instead of fetching every full source. A
-	// failure here is not worth failing the thread over — the probe simply falls
-	// back to its prior behaviour for this render.
-	autocryptHeaders, _ := s.store.MessagesWithAutocryptHeaderForUser(ctx, userID, messageIDs)
+	// its per-message key-import probe instead of fetching every full source.
+	// This lookup must not fail the thread, but a nil map on error would set the
+	// flag false for every message and silently suppress the probe thread-wide —
+	// the opposite of falling back. So on error the flag is forced true for all
+	// messages, which restores the prior behaviour (the client probes each), at
+	// the cost of the extra fetches only for the duration of the fault.
+	autocryptHeaders, autocryptHeaderErr := s.store.MessagesWithAutocryptHeaderForUser(ctx, userID, messageIDs)
+	if autocryptHeaderErr != nil {
+		log.Printf("thread autocrypt-header lookup failed user_id=%d messages=%d: %v", userID, len(messageIDs), autocryptHeaderErr)
+	}
 	bimiEnabled := s.pluginEnabled(ctx, plugins.BIMIBrandIcons)
 	gravatarEnabled := s.pluginEnabled(ctx, plugins.GravatarSenderIcons)
 	var userDB *sql.DB
@@ -435,7 +442,7 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 			Expanded:           view.Expanded,
 			ReplySubject:       replySubject(view.Message.Subject),
 			CanReplyAll:        view.CanReplyAll,
-			HasAutocryptHeader: autocryptHeaders[view.Message.ID],
+			HasAutocryptHeader: autocryptHeaderErr != nil || autocryptHeaders[view.Message.ID],
 			CopyIDs:            view.CopyIDs,
 		})
 	}

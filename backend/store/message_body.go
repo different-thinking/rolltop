@@ -82,11 +82,14 @@ func (s *Store) BlobPathInUseForUser(ctx context.Context, userID int64, blobPath
 // from migration 0007) and the two merge in (date_unix, id) order, letting the
 // pass stop at LIMIT instead of scanning the whole messages table.
 //
-// The plaintext arm's threshold is the literal DefaultMessageBodyPreviewBytes so
-// it matches that index's predicate; previewLimit still sizes the preview text
-// actually written. The two coincide for every real caller (retention passes the
-// default); a different previewLimit only makes that arm select against the
-// default instead, which stays correct and merely skips this index.
+// The plaintext arm carries two length predicates. The literal
+// DefaultMessageBodyPreviewBytes is what matches the partial index's immutable
+// predicate (a bound parameter would not), and the previewLimit parameter is
+// what makes the selection correct: for the default and any larger preview size
+// the two combine to `length > previewLimit`, exactly what should be compacted;
+// for a smaller preview size the literal dominates, so that arm compacts only
+// bodies longer than the default — a safe under-compaction, never wrong rows.
+// Every real caller (retention) passes the default, where the two coincide.
 func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time, previewLimit, limit int) (int, error) {
 	if previewLimit <= 0 {
 		previewLimit = DefaultMessageBodyPreviewBytes
@@ -100,9 +103,9 @@ func (s *Store) CompactMessageBodiesBefore(ctx context.Context, cutoff time.Time
 				WHERE date_unix < ? AND body_html <> ''
 			UNION ALL
 			SELECT id, body_text, date_unix FROM messages
-				WHERE date_unix < ? AND body_html = '' AND length(body_text) > %d
+				WHERE date_unix < ? AND body_html = '' AND length(body_text) > %d AND length(body_text) > ?
 		) compactable
-		ORDER BY date_unix, id LIMIT ?`, DefaultMessageBodyPreviewBytes), cutoffUnix, cutoffUnix, limit)
+		ORDER BY date_unix, id LIMIT ?`, DefaultMessageBodyPreviewBytes), cutoffUnix, cutoffUnix, previewLimit, limit)
 	if err != nil {
 		return 0, err
 	}

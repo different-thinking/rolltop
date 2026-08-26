@@ -675,6 +675,15 @@ func (f *Fetcher) FetchMailbox(ctx context.Context, account store.MailAccount, m
 
 // FetchUIDs fetches a known sparse UID set. Explicit folder repair uses this to
 // fill local holes without downloading every already-mirrored message body.
+//
+// A requested UID the server returns nothing for is skipped (and logged), not
+// treated as a failure: within one selected mailbox it has been expunged since
+// the set was chosen, which is the common reason a repair hole exists and cannot
+// be filled. Failing the whole batch on it — the pre-vanished-skip behaviour —
+// would abort filling every other hole in the set the moment one message was
+// gone. A UID that is only transiently withheld (a non-conforming server, not an
+// expunge) leaves the mailbox short of its remote count, so the caller's own
+// completeness check re-runs the repair rather than the hole persisting unseen.
 func (f *Fetcher) FetchUIDs(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, handle func(syncer.FetchedMessage) error) error {
 	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
