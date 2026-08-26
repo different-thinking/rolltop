@@ -119,6 +119,10 @@ type ParsedMessage struct {
 	Files       []Attachment
 	IsEncrypted bool
 	IsSigned    bool
+	// HasAutocryptHeader records whether the top-level message carried an
+	// Autocrypt header. The thread view gates its per-message key-import probe on
+	// this so it no longer downloads every message's full source just to look.
+	HasAutocryptHeader bool
 	// Category is decided from the list and automation headers while they are
 	// still in hand. Reading it back later means re-opening the raw message,
 	// which is what the backfill has to do for mail stored before categories.
@@ -145,6 +149,7 @@ func Parse(raw []byte) (ParsedMessage, error) {
 		CC:         addressHeader(msg.Header.Get("Cc")),
 	}
 	parsed.Category = Categorize(msg.Header, parsed.From)
+	parsed.HasAutocryptHeader = strings.TrimSpace(msg.Header.Get("Autocrypt")) != ""
 	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
 		parsed.Date = d.UTC()
 	}

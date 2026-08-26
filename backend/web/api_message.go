@@ -773,7 +773,7 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 		s.serverError(w, r, err)
 		return
 	}
-	messages, err := s.store.ListMessagesByIDsForUser(r.Context(), cu.User.ID, []int64{id})
+	messages, err := s.store.ListScopeMessagesByIDsForUser(r.Context(), cu.User.ID, []int64{id})
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -817,7 +817,7 @@ func (s *Server) apiMoveMessage(w http.ResponseWriter, r *http.Request, id int64
 }
 
 func (s *Server) moveRefreshMailboxNames(ctx context.Context, userID int64, messageIDs []int64, dest store.Mailbox) ([]string, error) {
-	messages, err := s.store.ListMessagesByIDsForUser(ctx, userID, messageIDs)
+	messages, err := s.store.ListScopeMessagesByIDsForUser(ctx, userID, messageIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +842,7 @@ var errMoveDestinationOtherAccount = errors.New("choose a destination folder in 
 // accountID is the destination's, so a mismatch is either of two faults and
 // they are distinguished: the selection spans accounts, or it is a single
 // account that is not the destination's.
-func messagesAccountScope(messages []store.MessageRecord, accountID int64) error {
+func messagesAccountScope(messages []store.ScopeMessage, accountID int64) error {
 	var selected int64
 	mismatch := false
 	for _, msg := range messages {
@@ -861,7 +861,7 @@ func messagesAccountScope(messages []store.MessageRecord, accountID int64) error
 	return nil
 }
 
-func (s *Server) moveRefreshMailboxNamesForMessages(ctx context.Context, userID int64, messages []store.MessageRecord, dest store.Mailbox) ([]string, error) {
+func (s *Server) moveRefreshMailboxNamesForMessages(ctx context.Context, userID int64, messages []store.ScopeMessage, dest store.Mailbox) ([]string, error) {
 	seen := map[string]bool{}
 	names := make([]string, 0, 2)
 	add := func(name string) {
@@ -967,7 +967,7 @@ func (s *Server) apiBulkMoveMessages(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	messages, err := s.store.ListMessagesByIDsForUser(r.Context(), cu.User.ID, in.MessageIDs)
+	messages, err := s.store.ListScopeMessagesByIDsForUser(r.Context(), cu.User.ID, in.MessageIDs)
 	if err != nil {
 		s.serverError(w, r, err)
 		return

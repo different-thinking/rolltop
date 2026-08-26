@@ -135,12 +135,49 @@ export type ComposeSendResult = {
   archived_mailbox?: string;
 };
 
+// getCacheMaxEntries bounds the ETag revalidation cache. It used to grow with
+// every distinct URL a session ever fetched and was never trimmed, so a long
+// session (or one that paged through a large mailbox) accumulated entries for
+// the whole run. A cap with least-recently-used eviction keeps the working set
+// — the pages and messages in play — while dropping the long tail; an evicted
+// entry simply revalidates from the server on its next fetch.
+const getCacheMaxEntries = 200;
+// getCache is an insertion-ordered LRU: cacheGet moves a hit to the most-recent
+// end, and cacheSet evicts from the least-recent front once the cap is passed.
+// Reach for cacheGet/cacheSet rather than the raw map so that ordering holds;
+// direct delete/keys stay fine, they do not disturb it.
 const getCache = new Map<string, { etag: string; data: unknown }>();
 const getInflight = new Map<string, Promise<unknown>>();
 const mailCacheEpochs = new Map<number, number>();
+// getCacheGeneration is bumped on every actual user switch. A GET that was
+// already in flight when the switch happened captures the generation at its
+// start and refuses to write its result into the cache once the generation has
+// moved on, so a previous user's response cannot repopulate a purged key.
+let getCacheGeneration = 0;
 // The signed-in user, so callers that only hold message ids - a list row, an
-// open message - can still reach this user's cached pages and filings.
+// open message - can still reach this user's cached pages and filings. It also
+// tells retainMailCacheForUser an actual user switch from the frequent same-user
+// bootstrap refresh.
 let activeMailUserID = 0;
+
+function cacheGet(key: string): { etag: string; data: unknown } | undefined {
+  const entry = getCache.get(key);
+  if (entry) {
+    getCache.delete(key);
+    getCache.set(key, entry);
+  }
+  return entry;
+}
+
+function cacheSet(key: string, value: { etag: string; data: unknown }): void {
+  getCache.delete(key);
+  getCache.set(key, value);
+  while (getCache.size > getCacheMaxEntries) {
+    const oldest = getCache.keys().next().value;
+    if (oldest === undefined) break;
+    getCache.delete(oldest);
+  }
+}
 type MutationRequestOptions = { keepalive?: boolean };
 
 async function fetchGET(url: string, init: RequestInit): Promise<Response> {
@@ -165,15 +202,22 @@ export async function getJSON<T>(url: string, cacheKey = url): Promise<T> {
   if (inflight) return inflight as Promise<T>;
 
   const request = (async () => {
+    const generation = getCacheGeneration;
     const headers: Record<string, string> = { Accept: "application/json" };
-    const cached = getCache.get(cacheKey);
+    const cached = cacheGet(cacheKey);
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
     const res = await fetchGET(url, { headers });
     if (res.status === 304 && cached) return cached.data as T;
     const data = await parse<T>(res);
     const etag = res.headers.get("ETag") || "";
-    if (etag) getCache.set(cacheKey, { etag, data });
-    else getCache.delete(cacheKey);
+    // Drop the write if the signed-in user changed while this request was in
+    // flight: its result belongs to the previous user and must not repopulate a
+    // key retainMailCacheForUser just purged. The caller still receives its own
+    // data; only the shared cache is protected.
+    if (generation === getCacheGeneration) {
+      if (etag) cacheSet(cacheKey, { etag, data });
+      else getCache.delete(cacheKey);
+    }
     return data;
   })();
 
@@ -319,7 +363,7 @@ function prefetchJSON<T>(url: string, cacheKey = url) {
 }
 
 function cachedJSON<T>(cacheKey: string): T | null {
-  const cached = getCache.get(cacheKey);
+  const cached = cacheGet(cacheKey);
   return cached ? cached.data as T : null;
 }
 
@@ -411,6 +455,24 @@ function retainMailCacheForUser(userID: number) {
   for (const key of getCache.keys()) {
     const match = key.match(/^user:(\d+):mail-epoch:/);
     if (match && Number(match[1]) !== userID) getCache.delete(key);
+  }
+  // On an actual change of signed-in user — a switch, or a logout where userID
+  // arrives as 0 — drop every entry not scoped to a user. Those are keyed by URL
+  // alone (bootstrap, contacts, a message body) and can still hold the previous
+  // user's data, so carrying them across a switch is both a cross-user leak risk
+  // and the other half of this cache's unbounded growth. The common case, a
+  // same-user bootstrap refresh, leaves them in place. (On the first call the
+  // cache is empty, so the purge is a harmless no-op.)
+  if (switchedUser) {
+    // Bump first so any GET already in flight for the previous user refuses to
+    // write its result back after this purge.
+    getCacheGeneration++;
+    for (const key of getCache.keys()) {
+      if (!key.startsWith("user:")) {
+        getCache.delete(key);
+        getInflight.delete(key);
+      }
+    }
   }
   clearOtherMailSnapshots(userID);
   clearOtherMailSortOrders(userID);

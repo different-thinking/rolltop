@@ -5,7 +5,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -792,23 +791,146 @@ func (s *Store) CountMessagesByCategoryForUser(ctx context.Context, userID int64
 	return counts, rows.Err()
 }
 
-// ListMessagesByIDsForUser bulk-loads messages by ID while preserving user ownership checks.
+// messageIDChunkSize bounds how many ids ride in one IN (...) list. Postgres
+// caps a statement at 65535 bind parameters; a few hundred per round trip
+// collapses what used to be one query per id into a handful while keeping each
+// statement (and the row set it scans) small.
+const messageIDChunkSize = 500
+
+// ListMessagesByIDsForUser bulk-loads messages by ID while preserving user
+// ownership checks. Results follow the order of ids and skip any id this user
+// does not own, matching what the old per-id loop produced; a chunked IN query
+// replaces that loop's N+1 round trips.
 func (s *Store) ListMessagesByIDsForUser(ctx context.Context, userID int64, ids []int64) ([]MessageRecord, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	messages := make([]MessageRecord, 0, len(ids))
-	for _, id := range ids {
-		m, err := s.GetMessageForUser(ctx, userID, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]MessageRecord, len(ids))
+	for start := 0; start < len(ids); start += messageIDChunkSize {
+		end := min(start+messageIDChunkSize, len(ids))
+		chunk := ids[start:end]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, userID)
+		for _, id := range chunk {
+			args = append(args, id)
 		}
+		rows, err := db.QueryContext(ctx, `SELECT `+messageColumns+`
+			FROM messages m
+			WHERE m.user_id = ? AND m.id IN (`+sqlPlaceholders(len(chunk))+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, m)
+		batch, err := scanMessages(rows)
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range batch {
+			byID[m.ID] = m
+		}
+	}
+	messages := make([]MessageRecord, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			messages = append(messages, m)
+		}
 	}
 	return messages, nil
+}
+
+// ListScopeMessagesByIDsForUser bulk-loads only the ownership and placement
+// columns (id, account, mailbox) for a set of ids. The move path needs nothing
+// more than these to check that a selection stays inside one account and to name
+// the folders a refresh must touch, so it avoids dragging every message body
+// through memory the way ListMessagesByIDsForUser would. Results follow the
+// order of ids and skip ids this user does not own.
+func (s *Store) ListScopeMessagesByIDsForUser(ctx context.Context, userID int64, ids []int64) ([]ScopeMessage, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]ScopeMessage, len(ids))
+	for start := 0; start < len(ids); start += messageIDChunkSize {
+		end := min(start+messageIDChunkSize, len(ids))
+		chunk := ids[start:end]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, userID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id
+			FROM messages m
+			WHERE m.user_id = ? AND m.id IN (`+sqlPlaceholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := scanScopeMessages(rows)
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range batch {
+			byID[m.ID] = m
+		}
+	}
+	messages := make([]ScopeMessage, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			messages = append(messages, m)
+		}
+	}
+	return messages, nil
+}
+
+// MessagesWithAutocryptHeaderForUser reports which of the given message ids were
+// parsed with an Autocrypt header. The thread view gates its per-message
+// key-import probe on this: only a flagged message is worth fetching the full
+// RFC822 source for. Ids the user does not own, or messages stored before the
+// flag existed, are simply absent from the result.
+func (s *Store) MessagesWithAutocryptHeaderForUser(ctx context.Context, userID int64, ids []int64) (map[int64]bool, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]bool, len(ids))
+	for start := 0; start < len(ids); start += messageIDChunkSize {
+		end := min(start+messageIDChunkSize, len(ids))
+		chunk := ids[start:end]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, userID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := db.QueryContext(ctx, `SELECT id FROM messages
+			WHERE user_id = ? AND has_autocrypt_header <> 0 AND id IN (`+sqlPlaceholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // ListThreadMessagesForUser loads all messages in the selected message's conversation.

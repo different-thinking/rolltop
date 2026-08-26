@@ -675,6 +675,15 @@ func (f *Fetcher) FetchMailbox(ctx context.Context, account store.MailAccount, m
 
 // FetchUIDs fetches a known sparse UID set. Explicit folder repair uses this to
 // fill local holes without downloading every already-mirrored message body.
+//
+// A requested UID the server returns nothing for is skipped (and logged), not
+// treated as a failure: within one selected mailbox it has been expunged since
+// the set was chosen, which is the common reason a repair hole exists and cannot
+// be filled. Failing the whole batch on it — the pre-vanished-skip behaviour —
+// would abort filling every other hole in the set the moment one message was
+// gone. A UID that is only transiently withheld (a non-conforming server, not an
+// expunge) leaves the mailbox short of its remote count, so the caller's own
+// completeness check re-runs the repair rather than the hole persisting unseen.
 func (f *Fetcher) FetchUIDs(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, handle func(syncer.FetchedMessage) error) error {
 	c, release, err := f.sessionClient(ctx, account)
 	if err != nil {
@@ -895,9 +904,19 @@ func (f *Fetcher) fetchUIDBatch(ctx context.Context, c *client.Client, mailbox s
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ordered, err := orderFetchedUIDBatch(requested, fetched)
+	ordered, missing, err := orderFetchedUIDBatch(requested, fetched)
 	if err != nil {
 		return fmt.Errorf("fetch mailbox %q UID batch %s: %w", mailbox, describeBatch(requested), err)
+	}
+	if len(missing) > 0 {
+		// The server returned no data for these UIDs. A concurrent expunge (this
+		// account on another client, or a rule firing on the server) between the
+		// UID set being chosen and this FETCH is exactly what that looks like, and
+		// it is routine — a UID FETCH is defined to return nothing for a UID that
+		// no longer exists. Failing the batch here dropped the whole folder into
+		// account backoff over mail that is simply gone; skipping the vanished
+		// UIDs lets the turn finish with the messages that are still there.
+		log.Printf("fetch mailbox %q skipped %d vanished UID(s) %s", mailbox, len(missing), describeBatch(missing))
 	}
 	fetched = nil
 	for i := range ordered {
@@ -1005,7 +1024,14 @@ func guardedUIDFetch(ctx context.Context, c *client.Client, seqset *imap.SeqSet,
 	return err
 }
 
-func orderFetchedUIDBatch(requested []uint32, fetched []syncer.FetchedMessage) ([]syncer.FetchedMessage, error) {
+// orderFetchedUIDBatch reorders the server's response to match the requested
+// order and reports which requested UIDs the server returned nothing for. A
+// missing UID is not an error: within one selected mailbox UIDVALIDITY is fixed,
+// so a UID a UID FETCH omits has been expunged since the set was chosen, and the
+// batch's own comment explains why the caller skips it rather than failing the
+// turn. Only a genuinely malformed response — the same UID returned twice — is
+// an error.
+func orderFetchedUIDBatch(requested []uint32, fetched []syncer.FetchedMessage) ([]syncer.FetchedMessage, []uint32, error) {
 	wanted := make(map[uint32]bool, len(requested))
 	for _, uid := range requested {
 		if uid != 0 {
@@ -1018,12 +1044,12 @@ func orderFetchedUIDBatch(requested []uint32, fetched []syncer.FetchedMessage) (
 			continue
 		}
 		if _, exists := byUID[message.UID]; exists {
-			return nil, fmt.Errorf("IMAP server returned UID %d more than once", message.UID)
+			return nil, nil, fmt.Errorf("IMAP server returned UID %d more than once", message.UID)
 		}
 		byUID[message.UID] = message
 	}
 	ordered := make([]syncer.FetchedMessage, 0, len(requested))
-	missing := make([]uint32, 0)
+	var missing []uint32
 	for _, uid := range requested {
 		message, ok := byUID[uid]
 		if !ok {
@@ -1032,10 +1058,7 @@ func orderFetchedUIDBatch(requested []uint32, fetched []syncer.FetchedMessage) (
 		}
 		ordered = append(ordered, message)
 	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("IMAP server omitted requested UID batch %s", describeBatch(missing))
-	}
-	return ordered, nil
+	return ordered, missing, nil
 }
 
 func normalizeUIDList(uids []uint32) []uint32 {

@@ -942,6 +942,11 @@ export function ThreadView({
   const autoPGPVerificationRef = useRef<Set<string>>(new Set());
   const pgpWasUnlockedRef = useRef(false);
   const pgpBodiesRef = useRef<Record<number, PGPBodyState>>({});
+  // Resolved Autocrypt probe results, keyed by message id and kept across the
+  // reloads that reset autocryptImports. A message's full RFC822 source is
+  // fetched at most once per session to look for a peer key, instead of on every
+  // thread open. Cleared when the security plugin is turned off.
+  const autocryptResultsRef = useRef<Record<number, AttachmentPGPImportState>>({});
 
   useEffect(() => {
     pgpBodiesRef.current = pgpBodies;
@@ -954,6 +959,7 @@ export function ThreadView({
     setPGPAttachmentImports({});
     setAutocryptImports({});
     setAutocryptGossipImports({});
+    autocryptResultsRef.current = {};
     autoPGPVerificationRef.current = new Set();
   }, [securityEnabled]);
 
@@ -1076,9 +1082,27 @@ export function ThreadView({
 
   useEffect(() => {
     if (!securityEnabled || loading) return;
+    // Cached restores are collected and applied in one state update so a thread
+    // whose messages were all probed earlier does not trigger a re-render per
+    // message.
+    const restored: Record<number, AttachmentPGPImportState> = {};
     for (const item of thread) {
       if (autocryptImports[item.message.id]) continue;
+      // A result from an earlier open in this session stands in without another
+      // round trip; load() clears the state map but not this cache.
+      const cached = autocryptResultsRef.current[item.message.id];
+      if (cached) {
+        restored[item.message.id] = cached;
+        continue;
+      }
+      // No Autocrypt header means there is no peer key to import, so there is no
+      // reason to download this message's full source. The backend flag lets the
+      // large majority of messages skip the probe entirely.
+      if (!item.has_autocrypt_header) continue;
       void checkAutocryptPublicKey(item);
+    }
+    if (Object.keys(restored).length > 0) {
+      setAutocryptImports((current) => ({ ...current, ...restored }));
     }
   }, [autocryptImports, loading, securityEnabled, thread]);
 
@@ -1246,8 +1270,14 @@ export function ThreadView({
   async function checkAutocryptPublicKey(item: ThreadMessage) {
     const email = item.sender_email.trim();
     const messageID = item.message.id;
+    // record caches the resolved probe outcome so a later open reuses it without
+    // refetching the source; the transient "checking" state is never cached.
+    const record = (state: AttachmentPGPImportState) => {
+      autocryptResultsRef.current[messageID] = state;
+      setAutocryptImports((current) => ({ ...current, [messageID]: state }));
+    };
     if (!email) {
-      setAutocryptImports((current) => ({ ...current, [messageID]: { status: "ignored" } }));
+      record({ status: "ignored" });
       return;
     }
     setAutocryptImports((current) => ({ ...current, [messageID]: { status: "checking", email } }));
@@ -1256,20 +1286,25 @@ export function ThreadView({
       if (!securityPlugin) throw new Error("PGP plugin is still loading. Try again in a moment.");
       const key = await securityPlugin.autocryptKeyRecordFromMessageSource(original.source, email);
       if (!key) {
-        setAutocryptImports((current) => ({ ...current, [messageID]: { status: "ignored" } }));
+        record({ status: "ignored" });
         return;
       }
       const resolution = await savedPGPPublicKeyResolution(key.email || email, key);
       if (resolution.status === "same") {
-        setAutocryptImports((current) => ({ ...current, [messageID]: { status: "same", email: key.email || email, key, existing: resolution.existing } }));
+        record({ status: "same", email: key.email || email, key, existing: resolution.existing });
         return;
       }
       if (resolution.status === "different") {
-        setAutocryptImports((current) => ({ ...current, [messageID]: { status: "different", email: key.email || email, key, existing: resolution.existing } }));
+        record({ status: "different", email: key.email || email, key, existing: resolution.existing });
         return;
       }
-      setAutocryptImports((current) => ({ ...current, [messageID]: { status: "ready", email: key.email || email, key } }));
+      record({ status: "ready", email: key.email || email, key });
     } catch {
+      // A transient failure — messageOriginal rejecting on a network blip, or the
+      // security plugin momentarily unavailable — is not a terminal "no key here"
+      // verdict, so it is only set on the live state (which load() clears) and
+      // never written to the session cache. A later open then probes again
+      // instead of the failure permanently suppressing the import prompt.
       setAutocryptImports((current) => ({ ...current, [messageID]: { status: "ignored" } }));
     }
   }
@@ -1301,7 +1336,11 @@ export function ThreadView({
       const existing = await securityPlugin.publicKeys([email], true).catch(() => ({ keys: [] as ContactPGPKey[] }));
       const hasPreferred = (existing.keys || []).some((candidate) => candidate.email.toLowerCase() === email.toLowerCase() && candidate.is_preferred);
       await securityPlugin.savePublicKey(csrf, { ...key, email: state.email || key.email, is_preferred: !hasPreferred });
-      setAutocryptImports((current) => ({ ...current, [messageID]: { ...state, status: "imported" } }));
+      const imported: AttachmentPGPImportState = { ...state, status: "imported" };
+      // Cache the terminal state too, so reopening the thread does not surface the
+      // import prompt again for a key that is already saved.
+      autocryptResultsRef.current[messageID] = imported;
+      setAutocryptImports((current) => ({ ...current, [messageID]: imported }));
       addToast(`PGP public key imported for ${state.email || key.email}.`);
     } catch (err) {
       setAutocryptImports((current) => ({ ...current, [messageID]: { ...state, status: "error", error: messageFromError(err) } }));
@@ -2640,8 +2679,9 @@ function QuotedDetails({
 }
 
 // EmailFrame isolates message HTML in a sandboxed iframe, applies the active
-// Rolltop theme, highlights search terms inside the iframe document, and
-// repeatedly measures height because images/fonts can settle after load.
+// Rolltop theme, highlights search terms inside the iframe document, and tracks
+// its height with a ResizeObserver so images and fonts that settle after load
+// keep the frame the right size.
 function EmailFrame({
   srcDoc,
   highlightQuery = "",
@@ -2654,6 +2694,7 @@ function EmailFrame({
   full?: boolean;
 }) {
   const ref = useRef<HTMLIFrameElement | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(full ? 220 : 96);
   const highlightKey = `${highlightQuery}:${highlightTerms.join(",")}`;
   const themedSrcDoc = themedEmailDocument(srcDoc);
@@ -2662,14 +2703,31 @@ function EmailFrame({
     setHeight(full ? 220 : 96);
   }, [srcDoc, highlightKey, full]);
 
-  function resize() {
-    const doc = ref.current?.contentDocument;
+  // Disconnect the observer and detach the load listener when this frame
+  // unmounts.
+  useEffect(() => () => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+  }, []);
+
+  const resize = useCallback(() => {
+    const frame = ref.current;
+    const doc = frame?.contentDocument;
     const body = doc?.body;
     const html = doc?.documentElement;
-    if (!body || !html) return;
+    if (!frame || !body || !html) return;
+    // Measure with the frame briefly collapsed so content sized to the viewport
+    // (body{height:100%}, a min-height:100vh hero) reports its natural height
+    // instead of echoing back the height we last applied. Without this the
+    // ResizeObserver below would grow such an email ~12px per tick without
+    // bound. The collapse and restore are synchronous within this call, so the
+    // observer only ever samples the committed height, never the transient 0.
+    const applied = frame.style.height;
+    frame.style.height = "0px";
     const next = Math.max(body.scrollHeight, body.offsetHeight, html.scrollHeight, html.offsetHeight, full ? 180 : 84) + 12;
-    setHeight(next);
-  }
+    frame.style.height = applied;
+    setHeight((current) => (current === next ? current : next));
+  }, [full]);
 
   return (
     <iframe
@@ -2686,9 +2744,40 @@ function EmailFrame({
         highlightEmailDocument(doc, highlightQuery, highlightTerms);
         resize();
         window.requestAnimationFrame(resize);
-        window.setTimeout(resize, 120);
-        window.setTimeout(resize, 600);
-        window.setTimeout(resize, 1600);
+        // Tear down whatever the previous srcDoc wired up before observing the
+        // new document.
+        cleanupRef.current?.();
+        cleanupRef.current = null;
+        const cleanups: Array<() => void> = [];
+        const body = doc?.body;
+        const html = doc?.documentElement;
+        // A ResizeObserver replaces the old fixed 120/600/1600ms cascade that
+        // froze the height at 1.6s: reflow from width changes or layout shifts
+        // keeps the height following the content for the life of this load.
+        if (typeof ResizeObserver !== "undefined" && (body || html)) {
+          const observer = new ResizeObserver(() => resize());
+          if (html) observer.observe(html);
+          if (body) observer.observe(body);
+          cleanups.push(() => observer.disconnect());
+        } else {
+          // Engines without ResizeObserver keep the original settle-timer nudges.
+          window.setTimeout(resize, 120);
+          window.setTimeout(resize, 600);
+          window.setTimeout(resize, 1600);
+        }
+        if (doc) {
+          // A late image (or nested frame) can grow scrollHeight without
+          // enlarging the observed border-box, so the ResizeObserver alone would
+          // miss it. Remeasure whenever any subresource finishes loading; load
+          // does not bubble, so listen in the capture phase.
+          const onSubresourceLoad = () => resize();
+          doc.addEventListener("load", onSubresourceLoad, true);
+          cleanups.push(() => doc.removeEventListener("load", onSubresourceLoad, true));
+          // Fonts can change layout without resizing the observed box; nudge once
+          // when they settle.
+          doc.fonts?.ready?.then(() => resize()).catch(() => undefined);
+        }
+        cleanupRef.current = () => cleanups.forEach((fn) => fn());
       }}
     />
   );
