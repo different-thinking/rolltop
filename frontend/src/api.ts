@@ -100,9 +100,23 @@ function nonAPIErrorMessage(res: Response, body: string): string {
   return `${status}: ${excerpt}`;
 }
 
+// onUnauthorized is the one place the app learns that the server rejected the
+// session (HTTP 401) on a request. Without it an expired session surfaces only
+// as a generic error toast on whichever call happened to run, leaving the user
+// stranded on a screen the app can no longer talk to. The registered handler is
+// expected to be idempotent and to no-op when nobody is signed in, so the 401 a
+// failed sign-in attempt returns does not trip it.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
 // All API helpers flow through parse so callers see typed payloads on success
 // and a consistent ApiError on backend validation/session failures.
 async function parse<T>(res: Response): Promise<T> {
+  // Notify centrally before anything else: every 401 means the session is no
+  // longer accepted, whatever the body turns out to be.
+  if (res.status === 401) onUnauthorized?.();
   const text = await res.text();
   let data: Record<string, unknown> = {};
   if (text) {
@@ -513,6 +527,7 @@ function forgetFiledMessages() {
 // the route surface used by the current frontend and keeps response shapes close
 // to the call sites that depend on them.
 export const api = {
+  setUnauthorizedHandler,
   bootstrap: () => getJSON<Bootstrap>("/api/bootstrap"),
   setup: (csrf: string, body: { email: string; name: string; password: string }) =>
     postJSON<{ ok: boolean }>("/api/setup", csrf, body),
