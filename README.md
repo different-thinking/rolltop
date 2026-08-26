@@ -846,7 +846,11 @@ files that sender there for good, which is the correction for anything the
 rules read wrongly. When those rules change, mail that is already filed is
 re-read a batch at a time in the background (`store.CategoryVersion`); it keeps
 the category it has until the new answer replaces it, so no list goes blank
-while the pass runs.
+while the pass runs. That pass only ever improves an answer: mail whose raw
+message has aged out of blob retention is not re-read at all, because there is
+nothing left to read it from, and neither is a message the bounded scan could
+not get through - both keep what the headers, and the parse that had the whole
+message, already decided.
 
 Sent, Drafts, Trash and Junk are out of those lists by default, because they
 answer "what is on my plate" and the user's own writing is not on it - a Sent

@@ -443,13 +443,33 @@ func (f categoryFixture) ageCategoryGeneration(t *testing.T, messageID int64) {
 	}
 }
 
+// pruneBlobPath is what blob retention leaves behind: the row, without the raw
+// message it was classified from.
+func (f categoryFixture) pruneBlobPath(t *testing.T, messageID int64) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := f.db.dataDB(ctx, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET blob_path = '' WHERE user_id = ? AND id = ?`,
+		f.user.ID, messageID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestARuleChangeReachesMailThatIsAlreadyFiled(t *testing.T) {
 	ctx := context.Background()
 	f := newCategoryFixture(t)
 	current := f.create(t, f.inbox, 1, "news@example.test", mailparse.CategoryNewsletters)
 	stale := f.create(t, f.inbox, 2, "billing@shop.test", mailparse.CategoryNotifications)
 	pending := f.create(t, f.inbox, 3, "later@example.test", "")
+	// Blob retention has taken this one's raw message, so there is nothing left
+	// to re-read: it must not be selected and guessed at from its address.
+	pruned := f.create(t, f.inbox, 4, "news@example.test", mailparse.CategoryNewsletters)
 	f.ageCategoryGeneration(t, stale.ID)
+	f.ageCategoryGeneration(t, pruned.ID)
+	f.pruneBlobPath(t, pruned.ID)
 
 	// Unclassified mail is taken first: it is the only kind that is missing
 	// from every list while it waits.
@@ -465,8 +485,14 @@ func TestARuleChangeReachesMailThatIsAlreadyFiled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(candidates) != 2 || candidates[0].ID != pending.ID || candidates[1].ID != stale.ID {
-		t.Fatalf("candidates = %+v, want %d then %d (%d was filed by this generation)",
-			candidates, pending.ID, stale.ID, current.ID)
+		t.Fatalf("candidates = %+v, want %d then %d (%d was filed by this generation, %d has no stored message left)",
+			candidates, pending.ID, stale.ID, current.ID, pruned.ID)
+	}
+	// The candidate carries what it already holds, which is what lets the
+	// worker tell "decide this" from "improve this if you can".
+	if candidates[0].Category != "" || candidates[1].Category != mailparse.CategoryNotifications {
+		t.Fatalf("candidate categories = %q and %q, want empty then %q",
+			candidates[0].Category, candidates[1].Category, mailparse.CategoryNotifications)
 	}
 	// A re-pass is not a mailbox that came undone: the rows it will re-read are
 	// in a list and readable, so they are not reported as waiting.
@@ -503,5 +529,14 @@ func TestARuleChangeReachesMailThatIsAlreadyFiled(t *testing.T) {
 	}
 	if len(remaining) != 0 {
 		t.Fatalf("candidates after the pass = %+v, want none", remaining)
+	}
+	// The row whose raw message is gone kept the category its headers earned
+	// it, rather than being re-decided from its address.
+	kept, err := f.db.GetMessageForUser(ctx, f.user.ID, pruned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Category != mailparse.CategoryNewsletters {
+		t.Fatalf("category of mail with no stored message = %q, want %q", kept.Category, mailparse.CategoryNewsletters)
 	}
 }

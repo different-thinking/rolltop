@@ -18,10 +18,16 @@ import (
 // CategoryCandidate is one message the classifier still has to decide. Only what
 // classification reads is carried: the stored raw message when there is one, and
 // the sender the header-less fallback works from.
+//
+// Category is what the row holds right now, empty for mail that has never been
+// classified. It is the difference between the two kinds of candidate: an
+// unfiled message must come out of a pass with some answer, while a message an
+// older generation filed already has one, and a worse guess must not replace it.
 type CategoryCandidate struct {
 	ID       int64
 	FromAddr string
 	BlobPath string
+	Category string
 }
 
 // CategoryVersion is the classifier generation a message's category was decided
@@ -95,7 +101,7 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 	args := make([]any, 0, len(priorityArgs)+2)
 	args = append(args, priorityArgs...)
 	args = append(args, userID, limit)
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path,
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path, m.category,
 			CASE WHEN 1 = 1`+priority+` THEN 0 ELSE 1 END AS backlog
 		FROM messages m
 		LEFT JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
@@ -110,7 +116,7 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 	for rows.Next() {
 		var item CategoryCandidate
 		var backlog int
-		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath, &backlog); err != nil {
+		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath, &item.Category, &backlog); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -129,12 +135,19 @@ func (s *Store) ListMessagesNeedingCategory(ctx context.Context, userID int64, l
 }
 
 // listMessagesWithStaleCategory returns messages an older classifier generation
-// filed, oldest-id first.
+// filed and that a new one could still read: the stored message has to be there.
+// Blob retention prunes raw messages after ROLLTOP_BLOB_RETENTION and clears
+// blob_path with them, so on a default install most of a mailbox has nothing
+// left to re-read. Re-deciding those from the sender address alone would throw
+// away what their headers said at fetch time -- for the majority of the
+// mailbox, and in the direction of the default list -- so they are not selected
+// at all rather than selected and guessed at.
 //
 // The in-play priority the pending query applies is deliberately absent here.
 // These rows are already in a category and already visible; ordering them by
 // what a list can show would mean sorting the tenant's entire mailbox on every
-// pass to reorder work nobody is waiting on.
+// pass to reorder work nobody is waiting on. The order given is the index
+// order, so a batch is a range scan rather than a sort of everything stale.
 func (s *Store) listMessagesWithStaleCategory(ctx context.Context, userID int64, limit int) ([]CategoryCandidate, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -143,10 +156,10 @@ func (s *Store) listMessagesWithStaleCategory(ctx context.Context, userID int64,
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.from_addr, m.blob_path, m.category
 		FROM messages m
-		WHERE m.user_id = ? AND m.category <> '' AND m.category_version < ?
-		ORDER BY m.id
+		WHERE m.user_id = ? AND m.category <> '' AND m.category_version < ? AND m.blob_path <> ''
+		ORDER BY m.category_version, m.id
 		LIMIT ?`, userID, CategoryVersion, limit)
 	if err != nil {
 		return nil, err
@@ -155,7 +168,7 @@ func (s *Store) listMessagesWithStaleCategory(ctx context.Context, userID int64,
 	out := make([]CategoryCandidate, 0, limit)
 	for rows.Next() {
 		var item CategoryCandidate
-		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath); err != nil {
+		if err := rows.Scan(&item.ID, &item.FromAddr, &item.BlobPath, &item.Category); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

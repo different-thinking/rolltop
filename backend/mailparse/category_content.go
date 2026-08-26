@@ -53,8 +53,11 @@ const (
 	// reads. MIME is a stream, so a part cannot be skipped without passing over
 	// it, and without a bound the pass would read every attachment of every
 	// message in the mailbox from disk to learn a filename. A message whose
-	// evidence sits past the bound keeps the category its headers earned it --
-	// a miss, not a wrong answer, and the sender can still be filed by hand.
+	// evidence sits past the bound keeps the category it already has -- a miss,
+	// not a wrong answer, and the sender can still be filed by hand. That is a
+	// property of the scan and of what the caller does with a truncated one:
+	// scanCategoryContent says which it produced, and a truncated answer may
+	// fill an empty category but never replace one.
 	//
 	// New mail does not pay this: it is classified while the parser has the
 	// whole decoded message in hand.
@@ -102,15 +105,35 @@ func limitCategoryText(value string) string {
 // because the message is truncated, malformed, or simply longer than the scan
 // budget -- still leaves a header set and whatever text was collected, and
 // classifying from that is better than filing the message on its address alone.
-func scanCategoryContent(r io.Reader) (mail.Header, CategoryContent, error) {
-	msg, err := mail.ReadMessage(io.LimitReader(r, maxCategoryScanBytes))
+//
+// The second return says whether the scan reached the end of what it was given
+// rather than stopping at a budget. A truncated scan may have missed the very
+// attachment that names the message, so its answer is allowed to fill an empty
+// category but never to replace one a whole message produced.
+func scanCategoryContent(r io.Reader) (mail.Header, CategoryContent, bool, error) {
+	counted := &countingReader{r: io.LimitReader(r, maxCategoryScanBytes)}
+	msg, err := mail.ReadMessage(counted)
 	if err != nil {
-		return nil, CategoryContent{}, err
+		return nil, CategoryContent{}, false, err
 	}
 	subject, _ := wordDecoder().DecodeHeader(msg.Header.Get("Subject"))
 	scan := &categoryScan{subject: strings.TrimSpace(subject)}
 	scan.walk(textproto.MIMEHeader(msg.Header), msg.Body, 0)
-	return msg.Header, scan.content(), nil
+	complete := counted.n < maxCategoryScanBytes && !scan.droppedFile
+	return msg.Header, scan.content(), complete, nil
+}
+
+// countingReader reports how much of the message the scan actually pulled, which
+// is how hitting the byte budget is told apart from reaching the end.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // categoryScan collects the scan's findings while it walks the MIME tree.
@@ -118,6 +141,10 @@ type categoryScan struct {
 	subject string
 	text    strings.Builder
 	files   []CategoryFile
+	// droppedFile records that the message carried more attachments than the
+	// scan keeps names for, which is the other way it can miss the one file
+	// that would have named the message.
+	droppedFile bool
 }
 
 func (s *categoryScan) content() CategoryContent {
@@ -193,6 +220,7 @@ func (s *categoryScan) addText(value string) {
 
 func (s *categoryScan) addFile(filename, mediaType string) {
 	if len(s.files) >= maxCategoryContentFiles {
+		s.droppedFile = true
 		return
 	}
 	s.files = append(s.files, CategoryFile{Filename: filename, ContentType: mediaType})

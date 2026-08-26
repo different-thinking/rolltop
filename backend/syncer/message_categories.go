@@ -51,14 +51,39 @@ func (s *Service) ClassifyPendingCategoriesForUser(ctx context.Context, userID i
 	return len(updates), nil
 }
 
+// categorizeStoredMessage decides one candidate from its stored message, and
+// decides what to do when that message is not there to be read.
+//
+// The two kinds of candidate part company here. A message that has never been
+// classified must leave the pass with something, or it is selected forever, so
+// it falls back to what its address alone says. A message an older generation
+// filed already has an answer that was made with the headers in hand, and every
+// fallback below knows less than that: it keeps what it has and is only stamped
+// as seen. Otherwise a mailbox whose raw messages have aged out of blob
+// retention would empty its category lists into the default one.
 func (s *Service) categorizeStoredMessage(userID int64, candidate store.CategoryCandidate) string {
 	if s.Blobs == nil || candidate.BlobPath == "" {
-		return mailparse.CategorizeAddress(candidate.FromAddr)
+		return keptOrGuessedCategory(candidate)
 	}
 	f, err := s.Blobs.OpenUserBlob(userID, candidate.BlobPath)
 	if err != nil {
-		return mailparse.CategorizeAddress(candidate.FromAddr)
+		return keptOrGuessedCategory(candidate)
 	}
 	defer f.Close()
-	return mailparse.CategorizeReader(f, candidate.FromAddr)
+	category, complete := mailparse.CategorizeReaderScan(f, candidate.FromAddr)
+	// A scan that stopped at its budget may not have reached the attachment
+	// that names the message, while the parse that filed it read all of it.
+	if !complete && candidate.Category != "" {
+		return candidate.Category
+	}
+	return category
+}
+
+// keptOrGuessedCategory is the answer for a message that could not be read: the
+// one it already has, or the sender address for a message that has none.
+func keptOrGuessedCategory(candidate store.CategoryCandidate) string {
+	if candidate.Category != "" {
+		return candidate.Category
+	}
+	return mailparse.CategorizeAddress(candidate.FromAddr)
 }

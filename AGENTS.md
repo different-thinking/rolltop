@@ -228,10 +228,19 @@ site and in review.
   column reset.** The backfill re-reads mail an older generation filed, a batch
   at a time, while the rows keep the category they already have; emptying
   `messages.category` to force the same pass would blank every category list for
-  as long as it runs. New mail is classified from the whole parsed message and
-  stamped current; the backfill's scan of a stored message is bounded
-  (`maxCategoryScanBytes`), so it may see less -- a miss there is a message left
-  where it was, never a wrong list.
+  as long as it runs.
+- **A re-pass may only improve an answer, never guess at one that exists.** Every
+  fallback in classification -- the sender address, a scan that stopped at
+  `maxCategoryScanBytes` -- knows less than the headers and the whole-message
+  parse that filed the row in the first place, so it may fill an empty category
+  and must never replace a filled one (`CategoryCandidate.Category`,
+  `CategorizeReaderScan`). This is not a nicety: blob retention prunes raw
+  messages after `ROLLTOP_BLOB_RETENTION` (14 days by default) and clears
+  `blob_path` with them, so a pass that re-decided unreadable rows from their
+  address would drain most of a mailbox into the default list. Those rows are
+  not selected at all. A message that has *never* been classified is the
+  opposite case and must always leave a pass with something, or it is selected
+  forever.
 - The whole-account lists - All Mail, Inbox, and every category view - read one
   flag, `mailboxes.show_in_all_mail`, through `Store.inPlayMailScope`. Sent,
   Drafts, Trash and Junk default it off (`defaultMailboxShowInAllMail`), and that

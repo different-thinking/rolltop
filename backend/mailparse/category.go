@@ -126,14 +126,24 @@ func CategorizeWithContent(header mail.Header, from string, content CategoryCont
 // headers cannot be parsed still gets a category from its address so the
 // backfill always makes progress instead of revisiting the same row forever.
 func CategorizeReader(r io.Reader, from string) string {
+	category, _ := CategorizeReaderScan(r, from)
+	return category
+}
+
+// CategorizeReaderScan is CategorizeReader plus what the caller needs to know
+// before overwriting an answer that already exists: whether the scan read the
+// whole message, or stopped at one of its budgets. A message classified as it
+// arrived was read whole, so a truncated scan of it knows strictly less and
+// must not be allowed to move it.
+func CategorizeReaderScan(r io.Reader, from string) (string, bool) {
 	if r == nil {
-		return CategorizeAddress(from)
+		return CategorizeAddress(from), false
 	}
-	header, content, err := scanCategoryContent(r)
+	header, content, complete, err := scanCategoryContent(r)
 	if err != nil {
-		return CategorizeAddress(from)
+		return CategorizeAddress(from), false
 	}
-	return CategorizeWithContent(header, from, content)
+	return CategorizeWithContent(header, from, content), complete
 }
 
 // CategorizeAddress is the header-less fallback. It recognizes only the robot

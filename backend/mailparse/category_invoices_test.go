@@ -216,7 +216,7 @@ func TestCategoryScanKeepsAttachmentNamesAndDropsTheirBytes(t *testing.T) {
 		"--b1\r\nContent-Type: application/xml; name=\"zugferd-invoice.xml\"\r\n" +
 		"Content-Disposition: attachment; filename=\"zugferd-invoice.xml\"\r\n" +
 		"Content-Transfer-Encoding: base64\r\n\r\n" + payload + "\r\n--b1--\r\n"
-	_, content, err := scanCategoryContent(strings.NewReader(raw))
+	_, content, _, err := scanCategoryContent(strings.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,5 +229,42 @@ func TestCategoryScanKeepsAttachmentNamesAndDropsTheirBytes(t *testing.T) {
 	}
 	if strings.Contains(content.Text, "xxxx") {
 		t.Fatal("scanned text carries attachment bytes")
+	}
+}
+
+func TestATruncatedScanSaysSoInsteadOfAnsweringAsIfItReadEverything(t *testing.T) {
+	// The invoice is attached behind more body text than the scan budget, which
+	// is exactly the case where the scan knows less than the parse that filed
+	// the message when it arrived.
+	filler := strings.Repeat("Guten Tag, hier ist Ihre Sendungsverfolgung. ", (maxCategoryScanBytes/44)+1024)
+	raw := "From: Shop <no-reply@shop.test>\r\n" +
+		"Subject: Ihre Bestellung\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + filler + "\r\n" +
+		"--b1\r\nContent-Type: application/pdf; name=\"Rechnung.pdf\"\r\n" +
+		"Content-Disposition: attachment; filename=\"Rechnung.pdf\"\r\n\r\nbytes\r\n--b1--\r\n"
+	category, complete := CategorizeReaderScan(strings.NewReader(raw), "no-reply@shop.test")
+	if complete {
+		t.Fatal("a scan that stopped at its budget reported itself complete")
+	}
+	if category != CategoryNotifications {
+		t.Fatalf("truncated scan category = %q, want %q", category, CategoryNotifications)
+	}
+	// The parse of the same message, which reads all of it, does find the
+	// invoice -- which is why the truncated answer must not be allowed to
+	// replace one this produced.
+	parsed, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Category != CategoryInvoices {
+		t.Fatalf("parsed category = %q, want %q", parsed.Category, CategoryInvoices)
+	}
+	// A message that fits is reported complete, or nothing could ever be
+	// re-classified.
+	small := "From: no-reply@shop.test\r\nSubject: Ihre Rechnung\r\n\r\nDanke.\r\n"
+	if category, complete := CategorizeReaderScan(strings.NewReader(small), "no-reply@shop.test"); !complete || category != CategoryInvoices {
+		t.Fatalf("small message = %q complete=%v, want %q and true", category, complete, CategoryInvoices)
 	}
 }
