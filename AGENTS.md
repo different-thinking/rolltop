@@ -194,6 +194,17 @@ site and in review.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`
   account stores no password at all; do not add a fallback that reads one.
+- **Whether an IMAP connection is encrypted is asked of the socket, never of
+  the go-imap client** (`imapclient.transportEncrypted`). `client.New` leaves
+  its own `IsTLS` false for every connection the caller dialed, and this package
+  dials its own so it can wrap the socket for the fetch watchdog -- so the
+  cleartext gate that guards an XOAUTH2 token read `false` on a finished TLS
+  handshake and refused every Google account with "refusing to send an OAuth
+  access token over an unencrypted connection". The gate itself is right and
+  stays: a bearer token is as good as the password it replaced. Only its input
+  was wrong, and the socket is the one thing that cannot drift from what was
+  negotiated -- `UseTLS` says what was intended. Anything wrapping the socket
+  must stay unwrappable here, or the gate silently starts refusing again.
 - Gmail's label views (All Mail, Important, Starred) must stay excluded from
   sync by default. The data model stores one folder per message, so mirroring
   them duplicates most of the mailbox.
