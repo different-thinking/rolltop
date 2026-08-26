@@ -23,7 +23,7 @@ export function declaredManifestFiles(manifest) {
   return [
     manifest.frontend?.module,
     manifest.frontend?.css,
-    ...(manifest.themes ?? []).map((theme) => theme.css)
+    ...(manifest.themes ?? []).map((theme) => theme?.css)
   ]
     .filter(Boolean)
     .map(normalizeManifestRelative);

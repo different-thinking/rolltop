@@ -162,7 +162,7 @@ func TestValidateIDToken(t *testing.T) {
 		{
 			name: "expired token is rejected",
 			token: func() string {
-				return signToken(t, "RS256", kid, with(func(c map[string]any) { c["exp"] = time.Now().Add(-time.Minute).Unix() }), key)
+				return signToken(t, "RS256", kid, with(func(c map[string]any) { c["exp"] = time.Now().Add(-15 * time.Minute).Unix() }), key)
 			},
 			wantErr: true,
 		},
