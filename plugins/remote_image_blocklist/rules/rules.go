@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -143,6 +145,20 @@ func ListPatterns(ctx context.Context, db *sql.DB) ([]string, error) {
 
 // ReplaceRules atomically replaces the admin-maintained remote-image blocklist.
 func ReplaceRules(ctx context.Context, db *sql.DB, patterns []string) error {
+	// Reject patterns that do not compile before touching the table, naming the
+	// offending one. A bad regex used to be stored and then silently skipped at
+	// fetch time — a rule that looked saved but blocked nothing — so surfacing
+	// it as an error on save is the difference between a visible typo and an
+	// invisible hole in the blocklist.
+	for _, pattern := range patterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			continue
+		}
+		if _, err := regexp.Compile(trimmed); err != nil {
+			return fmt.Errorf("invalid blocklist pattern %q: %w", trimmed, err)
+		}
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

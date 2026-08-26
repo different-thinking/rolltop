@@ -3,6 +3,12 @@
 .cache
 data
 tmp
+# Runtime secrets (POSTGRES_PASSWORD, ROLLTOP_MASTER_KEY, …). These are handed
+# to containers at run time via env_file/environment, never needed in the build
+# context — keeping them out stops a stray local .env from being baked into an
+# image layer.
+.env
+.env.*
 node_modules
 frontend/dist
 plugins/*/frontend/dist

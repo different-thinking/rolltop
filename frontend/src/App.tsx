@@ -247,6 +247,7 @@ export default function App() {
   const runtimePluginLoadGenerationRef = useRef(0);
   const bootstrappedFromHTMLRef = useRef(bootstrap !== null);
   const bootstrapGenerationRef = useRef(0);
+  const unauthorizedRefreshRef = useRef(false);
   const loadedBuildIdentityRef = useRef("");
   const shellCheckRunningRef = useRef(false);
   const shellReloadingRef = useRef(false);
@@ -296,6 +297,28 @@ export default function App() {
   useEffect(() => {
     if (!bootstrappedFromHTMLRef.current) void refreshBootstrap();
   }, [refreshBootstrap]);
+
+  // A 401 on any authenticated request means the server no longer accepts this
+  // session. Re-run bootstrap so the app learns it is signed out and the routing
+  // effect sends it to /login, instead of leaving the expired session stranded
+  // behind a generic error toast on whatever call happened to notice. Guarded on
+  // a signed-in user so the 401 a failed sign-in attempt returns — which
+  // LoginView surfaces itself — does not kick off a bootstrap here.
+  useEffect(() => {
+    api.setUnauthorizedHandler(() => {
+      if (!bootstrap?.user) return;
+      // Several requests can 401 at once when the session expires; coalesce them
+      // into a single bootstrap refresh instead of firing one per response. The
+      // guard clears when the refresh settles, by which point bootstrap.user is
+      // gone and the check above absorbs any stragglers.
+      if (unauthorizedRefreshRef.current) return;
+      unauthorizedRefreshRef.current = true;
+      void refreshBootstrap().finally(() => {
+        unauthorizedRefreshRef.current = false;
+      });
+    });
+    return () => api.setUnauthorizedHandler(null);
+  }, [bootstrap?.user, refreshBootstrap]);
 
   // A browser or Android wrapper can keep a SPA document alive across server
   // deployments. Check only after a real background/foreground transition and
@@ -859,15 +882,24 @@ export default function App() {
       })());
     }
     await Promise.allSettled(cleanup);
-    await api.logout(csrf);
-    bootstrapGenerationRef.current += 1;
-    if (bootstrap.user) api.forgetUserMail(bootstrap.user.id);
-    applySecurityUnlock(emptySecurityUnlockState, true);
-    setSecurityUnlockOpen(false);
-    setSecurityUnlockIdentityID(null);
-    securityUnlockCallbackRef.current = null;
-    setBootstrap((current) => (current ? { ...current, user: null, mailboxes: [] } : current));
-    navigate("/login");
+    const userID = bootstrap.user?.id;
+    try {
+      await api.logout(csrf);
+    } finally {
+      // Tear down the local session whether or not the server round trip
+      // succeeded: a network error must not leave the user in a half-signed-out
+      // state with no way back to /login. A server cookie that was not cleared
+      // is re-discovered by the next bootstrap; locally we always end up signed
+      // out.
+      bootstrapGenerationRef.current += 1;
+      if (userID) api.forgetUserMail(userID);
+      applySecurityUnlock(emptySecurityUnlockState, true);
+      setSecurityUnlockOpen(false);
+      setSecurityUnlockIdentityID(null);
+      securityUnlockCallbackRef.current = null;
+      setBootstrap((current) => (current ? { ...current, user: null, mailboxes: [] } : current));
+      navigate("/login");
+    }
   }, [applySecurityUnlock, bootstrap?.csrf, bootstrap?.user, navigate]);
 
   const openCompose = useCallback((query = "") => {

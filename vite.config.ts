@@ -17,7 +17,14 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap
+    sourcemap,
+    // Ship no inline module-preload polyfill. Its <script> in index.html was the
+    // one executable inline script in the shell, and it forced script-src
+    // 'unsafe-inline' in the app CSP (server.go). The <link rel="modulepreload">
+    // hints stay; browsers old enough to lack native support for them simply
+    // load the modules without the preload speedup, which the app — already
+    // requiring native ES modules — never loses correctness over.
+    modulePreload: { polyfill: false }
   },
   server: {
     proxy: {

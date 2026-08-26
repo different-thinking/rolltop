@@ -3,11 +3,54 @@ package main
 import (
 	"context"
 	"database/sql"
+	"log"
 	"regexp"
+	"strings"
+	"sync"
 
 	"rolltop/backend/plugins"
 	"rolltop/plugins/remote_image_blocklist/rules"
 )
+
+// compiledBlocklist memoizes the compiled form of the whole blocklist across
+// image fetches. The blocklist changes only on an admin edit, but
+// AllowRemoteImageFetch runs on every remote image, so recompiling every stored
+// pattern on each fetch was pure repeated work. It caches exactly one snapshot —
+// the currently-stored set, keyed by the joined pattern text — and recompiles
+// only when that set actually changes, so a rule edited or deleted replaces the
+// snapshot rather than leaving a dead entry behind (the reason a per-pattern map
+// was the wrong shape: it grew by every distinct pattern ever seen). Patterns
+// that fail to compile are logged and dropped when the snapshot is built, not on
+// every fetch; ReplaceRules rejects uncompilable patterns at write time, so that
+// only happens for a row predating that check.
+var (
+	compiledBlocklistMu  sync.Mutex
+	compiledBlocklistKey string
+	compiledBlocklistSet []*regexp.Regexp
+	compiledBlocklistOK  bool
+)
+
+func compiledBlockers(patterns []string) []*regexp.Regexp {
+	key := strings.Join(patterns, "\n")
+	compiledBlocklistMu.Lock()
+	defer compiledBlocklistMu.Unlock()
+	if compiledBlocklistOK && key == compiledBlocklistKey {
+		return compiledBlocklistSet
+	}
+	set := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			log.Printf("remote_image_blocklist: skipping invalid pattern %q: %v", pattern, err)
+			continue
+		}
+		set = append(set, re)
+	}
+	compiledBlocklistKey = key
+	compiledBlocklistSet = set
+	compiledBlocklistOK = true
+	return set
+}
 
 // RolltopPlugin is the symbol loaded by plugin.Open.
 func RolltopPlugin() plugins.BackendPlugin {
@@ -51,11 +94,7 @@ func (remoteImageBlocklistHook) AllowRemoteImageFetch(ctx context.Context, db *s
 	if err != nil {
 		return plugins.RemoteImageFetchDecision{}, err
 	}
-	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			continue
-		}
+	for _, re := range compiledBlockers(patterns) {
 		if re.MatchString(req.URL) {
 			return plugins.RemoteImageFetchDecision{Allow: false, Reason: "remote image blocklist"}, nil
 		}

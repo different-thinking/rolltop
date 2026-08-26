@@ -81,10 +81,14 @@ const (
 // they are the mail it would reach first: the provider files a copy of every
 // forward, and a rule matching on the original's sender or subject matches that
 // copy as readily as the original. The Sent and Inbox exemptions are the lists'
-// (Store.inPlayMailScope) and are repeated here for the same reason the rest of
-// this predicate is: a filter reads the mail the lists show, and mail delivered
-// into the Inbox is mail that arrived whoever sent it.
-const filterScope = ` AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0 AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))`
+// too: a filter reads the mail the lists show, and mail delivered into the
+// Inbox is mail that arrived whoever sent it.
+//
+// This is the store's own scope predicate, shared rather than restated so the
+// two cannot drift; it assumes the messages table aliased m with its mailbox
+// joined as mb, which every query below provides. It omits the archived-folder
+// exclusion inPlayMailScope adds on purpose: filters reach archived mail.
+const filterScope = store.InPlayMailScopeSQL
 
 type mailFiltersBackend struct {
 	mu     sync.Mutex
@@ -97,7 +101,7 @@ func RolltopPlugin() plugins.BackendPlugin {
 	return &mailFiltersBackend{}
 }
 
-func (mailFiltersBackend) ID() string { return pluginID }
+func (*mailFiltersBackend) ID() string { return pluginID }
 
 func (p *mailFiltersBackend) Start(host plugins.BackendStartHost) error {
 	p.mu.Lock()
@@ -824,7 +828,10 @@ func applyActions(ctx context.Context, host plugins.StoredMessageHost, db *sql.D
 		err = host.ForwardMessage(ctx, msg.UserID, msg.MessageID, rule.Actions.ForwardTo, []plugins.MailHeader{{Name: forwarderHeader, Value: forwarderID}})
 		if err != nil {
 			results["forward"] = "failed"
-			if strings.Contains(strings.ToLower(err.Error()), "already forwarded") {
+			// A forward that would loop is an expected outcome, not a failure;
+			// match the host's sentinel rather than its error text so a reworded
+			// message cannot silently reclassify a prevented loop as a failure.
+			if errors.Is(err, plugins.ErrAlreadyForwarded) {
 				return mustJSON(results), false, statusLoop, err.Error()
 			}
 			return mustJSON(results), false, statusFailed, err.Error()

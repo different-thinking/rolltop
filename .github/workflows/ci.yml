@@ -313,9 +313,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Set Up Gradle
+        # No `gradle-version:` here on purpose: the build runs through the
+        # project's Gradle wrapper (`./android/gradlew`), which pins its own
+        # version, so pinning one on the action only installs a standalone
+        # Gradle the build never invokes. The action is kept for its
+        # dependency caching.
         uses: gradle/actions/setup-gradle@v5
-        with:
-          gradle-version: 8.10.2
 
       - name: Install Frontend Dependencies
         run: npm ci
@@ -340,6 +343,9 @@ jobs:
           cat test-results/typescript-test-report.md >> "$GITHUB_STEP_SUMMARY"
 
           exit "$status"
+
+      - name: Run Frontend Tests
+        run: npm run test
 
       - name: Build Frontend
         run: |

@@ -24,7 +24,10 @@ services:
     environment:
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Bound to loopback only: this is a throwaway superuser Postgres with a
+      # hard-coded password, so it must never be reachable from another host on
+      # the network. The test suite connects over 127.0.0.1.
+      - "127.0.0.1:5432:5432"
     tmpfs:
       - /var/lib/postgresql/data
     command:

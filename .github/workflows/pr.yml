@@ -109,7 +109,7 @@ jobs:
           # scripts/assemble-plugin-dist.mjs decides what reaches the image, so
           # both belong to the frontend and Docker areas even though they are
           # neither .ts nor Dockerfile.
-          emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^plugins/[^/]+/(frontend|themes)/'
+          emit frontend '^frontend/|^tsconfig\.json$|^package\.json$|^package-lock\.json$|^vite\.config\.ts$|^vitest\.config\.ts$|^vite\.plugins\.config\.ts$|^scripts/build-plugins\.mjs$|^plugins/[^/]+/(frontend|themes)/'
           # ^frontend/ is included because every plugin frontend imports from
           # frontend/src (the host's types, registry, Icon, api, SettingsUI):
           # a host change that breaks those imports must rebuild the plugin
@@ -184,13 +184,14 @@ jobs:
             exit 1
           fi
 
-      # There is deliberately no `go vet ./...` step. It currently reports 14
-      # pre-existing findings (copylocks in the client_side_pgp and mail_filters
-      # backends, lostcancel in backend/web/server.go, copylocks in
-      # backend/syncer/move_notification_test.go), so it cannot be a blocking
-      # gate until those are fixed. `go test` still runs vet's high-signal
-      # subset — printf, atomic, errorsas, ifaceassert, and friends — on every
-      # package it builds.
+      # go vet is a required gate: the tree is expected to pass `go vet ./...`
+      # cleanly. This runs the full analyzer set (copylocks, lostcancel, and the
+      # rest) — a superset of the high-signal subset `go test` runs while
+      # building each package — and does not need the compiled themes or the
+      # database, because vet type-checks and analyzes without running any test.
+      - name: Run go vet
+        if: needs.changes.outputs.go == 'true'
+        run: go vet ./...
 
       # `plugins.LoadManifests` stats the theme CSS a manifest declares, so the
       # Go suite needs the compiled themes. Build only those, not the full
@@ -308,6 +309,9 @@ jobs:
           cat test-results/typescript-test-report.md >> "$GITHUB_STEP_SUMMARY"
 
           exit "$status"
+
+      - name: Run Frontend Tests
+        run: npm run test
 
       - name: Build Frontend
         run: npm run build:vite

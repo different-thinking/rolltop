@@ -489,6 +489,10 @@ func New(opts Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleHome)
+	// Registered as its own exact pattern so ServeMux routes it here, ahead of
+	// the "/api/" subtree that requires a session: the probe must answer
+	// without authentication.
+	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/assets/", s.handleFrontendAsset)
 	mux.HandleFunc("/manifest.webmanifest", s.handleWebManifest)
@@ -526,7 +530,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// frame-ancestors 'none' (with the legacy X-Frame-Options below for old
 		// browsers) forbids embedding the app in any frame, which is what stops a
 		// clickjacking page from overlaying it.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		// script-src is 'self' plus 'wasm-unsafe-eval' (openpgp/pdfium compile
+		// WebAssembly) and no 'unsafe-inline': the shell loads one external module
+		// bundle, and the only inline <script> the server emits is the startup
+		// bootstrap, which is type="application/json" and never executes. Dropping
+		// the module-preload polyfill (vite.config.ts) removed the last executable
+		// inline script, so an injected inline <script> can no longer run.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http: https: cid:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Frame-Options", "DENY")
 		// HSTS only over a secure connection: sending it over plain HTTP is
 		// ignored by browsers, and a local http:// deployment must not pin itself
@@ -622,6 +632,25 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, defaultMailPath, http.StatusSeeOther)
+}
+
+// handleHealth is an unauthenticated liveness probe for container
+// orchestration (the compose healthcheck, load balancers, uptime monitors). It
+// reports only that the process is up and serving HTTP; it deliberately does
+// not touch the database. The app already blocks on the database at startup, so
+// a probe that failed on a transient database blip would only get the
+// orchestrator to restart a process that is otherwise working correctly.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = io.WriteString(w, "ok\n")
+	}
 }
 
 func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {

@@ -34,6 +34,32 @@ func emailDocumentWithBlocklist(bodyHTML, bodyText string, allowRemoteImages boo
 	return emailDocumentWithInlineAttachments(bodyHTML, bodyText, allowRemoteImages, blockedImagePatterns, nil)
 }
 
+// emailDocumentWithInlineAttachments builds the self-contained HTML document a
+// message body is rendered as.
+//
+// Security invariant — this output is safe only in combination with two other
+// layers, and the regex passes below are hardening on top of them, not the XSS
+// boundary on their own:
+//
+//  1. The frontend renders it in a sandboxed iframe WITHOUT allow-scripts
+//     (EmailFrame in features/mail/ThreadView.tsx), so no script in a body can
+//     execute regardless of what the regex passes missed.
+//  2. The document carries its own restrictive CSP meta (built at the bottom of
+//     this function): default-src 'none' with no script source at all, and a
+//     narrow img/style/font allowance that widens only when the reader has
+//     allowed remote images. That CSP is what actually forbids script execution
+//     and unexpected network fetches.
+//
+// The passes here (removeScriptElements, removeMetaElements, removeInlineScripting,
+// the remote-ref neutralizers) exist because a *blocked* script or fetch is not
+// silent — the browser logs a CSP/sandbox violation per occurrence, which would
+// bury real console output — and to enforce the remote-image policy the CSP
+// cannot express on its own. Regex HTML rewriting is inherently approximate, so
+// removing either layer above turns these passes from defense-in-depth into a
+// sole and insufficient defense. email_document_coupling_test.go pins the CSP
+// and the handler/javascript-URL stripping so a change that weakens either is
+// caught. If this document is ever rendered somewhere other than the no-scripts
+// sandbox, that new caller must keep an equivalent CSP.
 func emailDocumentWithInlineAttachments(bodyHTML, bodyText string, allowRemoteImages bool, blockedImagePatterns []string, attachments []store.Attachment) string {
 	plainTextDoc := false
 	if strings.TrimSpace(bodyHTML) == "" {

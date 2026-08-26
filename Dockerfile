@@ -21,7 +21,7 @@
 # runs stages concurrently (BuildKit, `docker buildx`) removes the shorter of
 # the two from the total on its own.
 
-FROM node:20-alpine AS frontend
+FROM node:24-alpine AS frontend
 
 WORKDIR /src
 COPY package.json package-lock.json ./

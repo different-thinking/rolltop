@@ -307,6 +307,16 @@ const allMailSource = "\n\t\t\tJOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.
 const snoozeJoin = `LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
 			AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)`
 
+// InPlayMailScopeSQL is the core predicate of inPlayMailScope, exported so the
+// mail_filters plugin acts on exactly the mail the whole-account lists show
+// without restating the rule and drifting from it. It assumes the messages
+// table aliased m with its mailbox joined as mb, and carries no leading space
+// dependency of its own beyond the " AND " it opens with. inPlayMailScope wraps
+// it with the optional archived-folder exclusion; a caller that wants filters
+// to reach archived mail uses this fragment on its own.
+const InPlayMailScopeSQL = " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" +
+	" AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))"
+
 // inPlayMailScope renders the predicate for mail a whole-account list shows:
 // folders that opt into All Mail, minus the hidden cross-account duplicates,
 // optionally minus each account's Archive folder, plus whatever narrows the
@@ -339,8 +349,7 @@ func (s *Store) inPlayMailScope(ctx context.Context, userID int64, excludeArchiv
 	args := make([]any, 0, len(extraArgs)+len(exclusionArgs))
 	args = append(args, extraArgs...)
 	args = append(args, exclusionArgs...)
-	return extra + " AND mb.show_in_all_mail = 1 AND mb.role <> 'junk' AND m.duplicate_of_message_id = 0" +
-		" AND (m.own_outgoing_copy = 0 OR mb.role IN ('sent', 'inbox'))" + exclusion, args, nil
+	return extra + InPlayMailScopeSQL + exclusion, args, nil
 }
 
 // ListAllMailScopeMessagesForUser lists the messages an All Mail selection
@@ -591,8 +600,13 @@ func latestThreadMessagesQuery(source, predicate, direction string) string {
 			SELECT COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id) AS thread_group,
 				-- A sortable composite of (effective date, id): both halves are
 				-- zero-padded to a fixed width so ordering the text orders the
-				-- numbers, and the id is read back out by offset below.
-				MAX(lpad((CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END)::text, 20, '0')
+				-- numbers, and the id is read back out by offset below. The date
+				-- is clamped to >= 0 first: a negative date_unix (a pre-1970 or
+				-- corrupt header date) renders as "-5", whose sign left-pads into
+				-- the middle of the field and makes lexical order stop tracking
+				-- numeric order. Real mail dates are positive; a bogus negative
+				-- one sorts as epoch 0 (oldest) instead of scrambling the page.
+				MAX(lpad(GREATEST(CASE WHEN COALESCE(sn.snoozed_until, 0) > m.date_unix THEN sn.snoozed_until ELSE m.date_unix END, 0)::text, 20, '0')
 					|| ':' || lpad(m.id::text, 20, '0')) AS latest_key
 			FROM messages m%[1]s
 			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id

@@ -35,6 +35,9 @@ func (gravatarSenderIconsHook) ErrorTTL(now time.Time) time.Time    { return gra
 func (gravatarSenderIconsHook) MissingTTL(now time.Time) time.Time  { return gravatar.MissingTTL(now) }
 func (gravatarSenderIconsHook) PositiveTTL(now time.Time) time.Time { return gravatar.PositiveTTL(now) }
 func (gravatarSenderIconsHook) MaxImageBytes() int64                { return gravatar.MaxImageBytes }
+func (gravatarSenderIconsHook) SupportedImageType(contentType string) bool {
+	return gravatar.SupportedImageType(contentType)
+}
 func (gravatarSenderIconsHook) ReadLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 	return gravatar.ReadLimited(r, maxBytes)
 }

@@ -252,16 +252,7 @@ func (s *Server) ArchiveMailboxID(ctx context.Context, userID, accountID int64) 
 	if s == nil || s.store == nil {
 		return 0, errors.New("message store is not configured")
 	}
-	targets, err := s.store.ArchiveMailboxesForUser(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
-	for _, target := range targets {
-		if target.AccountID == accountID {
-			return target.MailboxID, nil
-		}
-	}
-	return 0, nil
+	return s.store.ArchiveMailboxIDForAccount(ctx, userID, accountID)
 }
 
 func (s *Server) ForwardMessage(ctx context.Context, userID, messageID int64, to string, headers []plugins.MailHeader) error {

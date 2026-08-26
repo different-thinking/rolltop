@@ -887,7 +887,7 @@ each following job is gated on those flags:
 | Job | Runs when | What it does |
 | --- | --- | --- |
 | `Go` | `*.go`, `go.mod`, `go.sum`, spam model or training data changed | `gofmt` check, `go vet ./...`, `go test ./...`, `-buildmode=plugin` link check for changed plugin backends, checked-in spam model verification |
-| `Frontend` | `frontend/`, `plugins/*/frontend/`, `plugins/*/themes/`, `tsconfig.json`, `package*.json`, `vite.*.config.ts` changed | `npm run typecheck`, `npm run build:vite`, plus `npm run build:plugins` when a plugin frontend changed |
+| `Frontend` | `frontend/`, `plugins/*/frontend/`, `plugins/*/themes/`, `tsconfig.json`, `package*.json`, `vite.config.ts`, `vitest.config.ts`, `vite.plugins.config.ts` changed | `npm run typecheck`, `npm run test` (Vitest), `npm run build:vite`, plus `npm run build:plugins` when a plugin frontend changed |
 | `Android` | `android/` changed | `:app:testDebugUnitTest` and `:app:lintDebug` (both compile the debug variant, so no separate APK assembly) |
 | `Docker Image` | `Dockerfile` or `.dockerignore` changed | `docker build` without pushing |
 | `PR Checks` | always | Aggregates the results; use this one as the required status check |
@@ -898,6 +898,13 @@ two coordination jobs. Superseded runs are cancelled automatically, and every
 job has a hard timeout.
 
 `.github/workflows/ci.yml` runs on pushes to `main`, on `v*` tags, and on
-manual dispatch. It is the packaging pipeline: Go tests with coverage, frontend
-and plugin builds, the signed Android APK, plugin shared objects, godoc, build
-artifacts, and the GHCR image push. None of that runs per pull request.
+manual dispatch, and has two jobs. `verify` is the post-merge gate: on a normal
+reviewed merge it trusts the checks the pull request already ran and does almost
+nothing, but it re-runs the full Go suite when someone pushes straight to
+`main`, when a merge touches a path the pull-request filter does not cover, or
+when it cannot diff the push. That skip is only sound when pull requests are
+required to be up to date with `main` before merging (branch protection or a
+merge queue); see AGENTS.md. `release` is the packaging pipeline: frontend and
+plugin builds, the signed Android APK, plugin shared objects, godoc, build
+artifacts, and the GHCR image push — no coverage instrumentation, and none of it
+per pull request. It is gated to `v*` tags and manual dispatch.
