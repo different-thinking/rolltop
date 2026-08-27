@@ -545,6 +545,13 @@
     flex: none;
   }
 
+  // Narrow enough and the pill is what has to give: it shrinks and ellipsises
+  // its label rather than pushing the sender line wider than the card.
+  .message-category-pill {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
   .message-link-warning {
     gap: 8px;
     padding: 8px 10px;
