@@ -952,6 +952,16 @@ and notifies like any other. Its wait is bounded at 1800 seconds, generous
 because a cold Kaniko build of this image is slow; see the note at the top of
 the `Dockerfile` for the builder flags that make it less so.
 
+What the job does not decide is *which commit* ends up serving. A rebuild
+carries no ref: Hostim checks `main` out itself, so the build is of the tip at
+that moment, which a merge landing during the run has already moved. Running
+after `verify` means no deploy is started behind a red post-merge gate — it is
+not a guarantee that the commit named in the run is the one that went live, and
+the step summary says "requested for" rather than "deployed" for that reason.
+Pinning a deployment to a commit would mean an `image:` deploy of a per-commit
+tag, and therefore an image published per merge, which this repository
+deliberately does not do.
+
 Three repository settings drive it, under **Settings → Secrets and variables →
 Actions**:
 
@@ -962,12 +972,18 @@ Actions**:
 | `HOSTIM_APP` | Variable | The app name within that project |
 
 Only the token is a secret; the project ID and app name are variables so that
-the workflow can read them in a condition, which it cannot do with secrets. If
-both variables are unset the job is skipped — a fork gets a green pipeline
-instead of a deployment failure it could not fix. If they are set but the token
-is missing, the job fails with that as its message rather than half-deploying.
+the workflow can read them in a condition, which it cannot do with secrets.
+With **neither** variable set the job is skipped — a fork gets a green pipeline
+instead of a deployment failure it could not fix. With **either** of them set
+the job runs and insists on the whole set: a missing token, or a project ID
+without an app name, fails the run with a message naming what is missing. A
+half-configured repository must not go quietly green while its deploys stop,
+which is why the condition is an `or` and the check is a step.
 
-Deploys are not queued: the workflow's concurrency group cancels a superseded
-`main` run, deploy job included. That is deliberate, since a rebuild always
-builds the current tip of the branch — the newer run's rebuild carries the
-older commit with it.
+Deploys are serialised rather than cancelled. The workflow's concurrency group
+keeps its `cancel-in-progress` only for repositories that do not deploy:
+cancelling a run that is waiting on Hostim stops the waiting and nothing else —
+the requested build keeps going, rolls out unwatched, and the next run's rebuild
+lands on top of it. So a `main` run here waits for its predecessor instead.
+Bursts do not pile up: GitHub keeps at most one run pending per group, so a rush
+of merges collapses to the one in flight plus the newest.

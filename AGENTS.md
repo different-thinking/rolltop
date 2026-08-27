@@ -1003,16 +1003,32 @@ nothing consumes a per-merge `latest`. Do not move packaging back onto `main`
 without a consumer that needs it.
 
 `deploy` asks Hostim to rebuild the hosted instance and waits for it, and runs
-after `verify` for `main` only. Keep those two conditions: `needs: verify` is
-what stops a red merge gate from reaching the running instance, and the `main`
-restriction exists because a Hostim rebuild takes no ref — it builds the branch
-the app tracks, so dispatching the workflow from a tag would deploy `main`'s tip
-under a tag's name. Do not drop `wait: true` either; without it the job reports
-success as soon as the request is accepted, which is exactly the failure it is
-there to catch. The credentials are the `HOSTIM_API_TOKEN` secret plus the
-`HOSTIM_PROJECT` and `HOSTIM_APP` repository variables — variables rather than
-secrets because a job `if` can read `vars` and cannot read `secrets`, and that
-condition is what makes the job skip in a fork instead of failing in it.
+after `verify` for `main` only. Keep both conditions: `needs: verify` stops a
+deploy from being *started* behind a red merge gate, and the `main` restriction
+exists because a Hostim rebuild takes no ref — it builds the branch the app
+tracks, so dispatching the workflow from a tag would deploy `main`'s tip under a
+tag's name. That ref-lessness also bounds what the job can claim: Hostim checks
+`main` out when it starts building, so the commit that goes live is the tip at
+that moment, not necessarily the one the run was triggered by. Do not let the
+step summary say otherwise, and do not describe the job as gating what runs in
+production. Pinning that down needs an `image:` deploy of a per-commit tag, and
+therefore a per-merge image push — the thing `release` deliberately does not do.
+
+Do not drop `wait: true`; without it the job reports success as soon as the
+request is accepted, which is exactly the failure it is there to catch.
+
+The credentials are the `HOSTIM_API_TOKEN` secret plus the `HOSTIM_PROJECT` and
+`HOSTIM_APP` repository variables — variables rather than secrets because a job
+`if` can read `vars` and cannot read `secrets`. The condition is `or` over the
+two and the first step then demands all three: neither set is a fork and skips,
+one set is a misconfiguration and fails. Turning that `or` into an `and` gives a
+repository that lost a variable a green pipeline that silently stops deploying.
+
+The workflow-level `cancel-in-progress` is off wherever those variables are set,
+and that is not an oversight. Cancelling a run that is waiting on Hostim cancels
+the wait, not the build: it rolls out unobserved while the successor's rebuild
+lands on top of it. Serialised `main` runs are the price; GitHub keeps only one
+run pending per group, so the queue never grows past one.
 
 Two ordering constraints in `release` must survive any refactor: the Android
 step writes `frontend/public/android/{rolltop.apk,latest.json}`, which the

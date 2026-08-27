@@ -34,9 +34,10 @@ name: CI
 # `deploy` tells Hostim to rebuild the hosted instance, and runs only after
 # `verify` and only for `main`. It is a request plus a wait: the build itself
 # happens on Hostim, from this repository's `Dockerfile`, and the job fails if
-# the app does not come up. It is skipped entirely where the `HOSTIM_PROJECT`
-# and `HOSTIM_APP` repository variables are unset, so a fork inherits a green
-# pipeline rather than a red one.
+# the app does not come up. Where neither `HOSTIM_PROJECT` nor `HOSTIM_APP` is
+# set it is skipped entirely, so a fork inherits a green pipeline rather than a
+# red one — but a repository that set one of them and not the other is a
+# misconfiguration, not a fork, and fails.
 #
 # Pull requests are verified by `pr.yml`, which is gated on changed paths.
 
@@ -50,8 +51,18 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Superseded `main` builds are pointless; tag builds must always finish.
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  # Superseded `main` builds are pointless and tag builds must always finish —
+  # but once `deploy` is configured, a `main` run is not only a build. Cancelling
+  # it stops the job's wait and nothing else: the rebuild it already asked Hostim
+  # for keeps running, goes live unwatched, and the successor's rebuild lands on
+  # top of a build in flight. So a repository that deploys queues its `main` runs
+  # instead of cancelling them. GitHub keeps at most one run pending per group,
+  # so a burst of merges still collapses to "the one in flight, then the newest" —
+  # what cancelling was for, without abandoning a deploy mid-rollout.
+  cancel-in-progress: >-
+    ${{ github.ref == 'refs/heads/main'
+    && vars.HOSTIM_PROJECT == ''
+    && vars.HOSTIM_APP == '' }}
 
 permissions:
   contents: read
@@ -623,25 +634,27 @@ jobs:
     name: Deploy To Hostim
     needs: verify
     # `needs: verify` is the whole point of putting this in `ci.yml` rather than
-    # in a workflow of its own: a merge whose post-merge gate went red must not
-    # reach the running instance. `verify` skipping the Go suite is not a red
-    # result — that is the reviewed-merge case, where the pull request already
-    # ran it against this tree.
+    # in a workflow of its own: no deploy is started behind a red post-merge gate.
+    # It is not a promise that only verified code runs — a Hostim rebuild takes no
+    # ref, so what gets built is the tip of `main` at the moment Hostim checks it
+    # out, which a merge landing during the run has already moved. That gap closes
+    # only with an `image:` deploy of a per-commit tag, which would mean publishing
+    # an image per merge; `verify` skipping the Go suite is not a red result, and
+    # this is not the mechanism that decides which commit serves.
     #
-    # Restricted to `main` because a Hostim rebuild takes no ref: it builds
-    # whatever branch the app is configured to track. Dispatching this workflow
-    # from a tag would therefore deploy `main`'s tip under a tag's name, so a
-    # tag build runs `release` and nothing else. Tagged images go to GHCR for
-    # self-hosters; the hosted instance follows `main`.
+    # Restricted to `main` for the same reason: dispatching this workflow from a
+    # tag would deploy `main`'s tip under a tag's name. A tag build runs `release`
+    # and nothing else. Tagged images go to GHCR for self-hosters; the hosted
+    # instance follows `main`.
     #
-    # The two `vars` are what makes a fork inert instead of red: without them
-    # there is no app to deploy to, and the job is skipped rather than failed.
-    # A missing token is the opposite case — the repository is configured to
-    # deploy and cannot — and fails loudly in the first step below.
+    # `||`, not `&&`: either variable set means somebody meant to deploy here, and
+    # the step below then insists on the full set. With `&&` a repository that lost
+    # one of the two would skip its deploys silently and stay green — the failure
+    # mode a missing token is deliberately not allowed to have. Neither set is the
+    # fork case, and stays a skip.
     if: >-
       github.ref == 'refs/heads/main'
-      && vars.HOSTIM_PROJECT != ''
-      && vars.HOSTIM_APP != ''
+      && (vars.HOSTIM_PROJECT != '' || vars.HOSTIM_APP != '')
     runs-on: ubuntu-latest
     # The action waits out a Kaniko build of this repository's `Dockerfile`,
     # which is the slow kind: ~324 MB of plugin shared objects, and nothing is
@@ -652,21 +665,31 @@ jobs:
     # runner still fetches the action itself with an empty token.
     permissions: {}
 
-    # No job-level `concurrency` on purpose. The workflow-level group already
-    # cancels a superseded `main` run, and cancelling the older deploy is the
-    # behaviour we want: a rebuild always builds the branch tip, so the newer
-    # run's rebuild covers the older commit too.
+    # No job-level `concurrency`: it would add a second group without protecting
+    # anything, since cancelling a run cancels its jobs whatever group they are
+    # in. Serialisation lives in the workflow-level block at the top of this file.
 
     steps:
-      # `secrets` is not available in a step's `if`, so the guard has to be a
-      # step that runs and exits, not a condition that skips one.
-      - name: Check Deploy Credentials
+      # The job condition above establishes only that somebody configured a
+      # deploy here; this establishes that they finished. `secrets` is not
+      # available in a step's `if`, so the token half has to be a step that runs
+      # and exits rather than a condition that skips one — and the variables are
+      # checked here too, so a half-set pair is one message instead of a
+      # confusing failure inside the action.
+      - name: Check Deploy Configuration
         env:
           HOSTIM_API_TOKEN: ${{ secrets.HOSTIM_API_TOKEN }}
+          HOSTIM_PROJECT: ${{ vars.HOSTIM_PROJECT }}
+          HOSTIM_APP: ${{ vars.HOSTIM_APP }}
         run: |
-          if [ -z "$HOSTIM_API_TOKEN" ]; then
-            echo "HOSTIM_PROJECT and HOSTIM_APP are set, but the HOSTIM_API_TOKEN secret is empty." >&2
-            echo "Add it under Settings -> Secrets and variables -> Actions -> Secrets." >&2
+          missing=""
+          [ -n "$HOSTIM_PROJECT" ] || missing="$missing HOSTIM_PROJECT (variable)"
+          [ -n "$HOSTIM_APP" ] || missing="$missing HOSTIM_APP (variable)"
+          [ -n "$HOSTIM_API_TOKEN" ] || missing="$missing HOSTIM_API_TOKEN (secret)"
+          if [ -n "$missing" ]; then
+            echo "This repository is configured to deploy to Hostim but is missing:${missing}." >&2
+            echo "Set them under Settings -> Secrets and variables -> Actions." >&2
+            echo "To stop deploying from this repository, clear HOSTIM_PROJECT and HOSTIM_APP together." >&2
             exit 1
           fi
 
@@ -696,15 +719,25 @@ jobs:
           APP: ${{ vars.HOSTIM_APP }}
           PROJECT: ${{ vars.HOSTIM_PROJECT }}
           OUTCOME: ${{ steps.deploy.outcome }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "### Hostim Deployment"
             echo
             echo "App: \`${APP}\` in project \`${PROJECT}\`"
-            echo "Commit: \`${GITHUB_SHA}\`"
+            # Deliberately "requested for", not "deployed": the rebuild carries no
+            # ref, so Hostim builds whatever `main` points at when it checks out.
+            # That is this commit unless another merge landed in between.
+            echo "Requested for: \`${GITHUB_SHA}\` (Hostim builds the tip of \`main\` at checkout time)"
             case "$OUTCOME" in
-              success) echo "Status: live" ;;
-              "")      echo "Status: not attempted; the credential check failed" ;;
-              *)       echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
+              success)   echo "Status: live" ;;
+              cancelled) echo "Status: the wait was cancelled; the Hostim build it asked for is still running" ;;
+              failure)   echo "Status: failed — the app was not confirmed live" ;;
+              "")        if [ "$JOB_STATUS" = "cancelled" ]; then
+                           echo "Status: not attempted; the run was cancelled before the deploy started"
+                         else
+                           echo "Status: not attempted; the configuration check above failed"
+                         fi ;;
+              *)         echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
             esac
           } >> "$GITHUB_STEP_SUMMARY"
