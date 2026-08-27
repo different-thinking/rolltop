@@ -100,15 +100,18 @@ type Runner struct {
 	generationRecoveryTimeout  time.Duration
 	liveInboxSyncTimeout       time.Duration
 	senderStatsTimeout         time.Duration
-	attachmentYieldTimeout     time.Duration
-	rebuildRecoveryWake        chan struct{}
-	recoverySlots              chan struct{}
-	rebuildRecoveryBeforeStop  func()
-	queueRebuildMailbox        func(store.PendingMailboxGenerationRebuild)
-	replayGenerationRecovery   func(generationRecoveryReplay)
-	refreshSenderStatsForUser  func(context.Context, int64) error
-	indexAttachmentsForUser    func(context.Context, int64, int) (int, error)
-	classifyCategoriesForUser  func(context.Context, int64, int) (int, error)
+	// barrierWaitOverride replaces exclusiveWriterWaitTimeout on both waits
+	// that use it. Tests set it; zero means the constant.
+	barrierWaitOverride       time.Duration
+	attachmentYieldTimeout    time.Duration
+	rebuildRecoveryWake       chan struct{}
+	recoverySlots             chan struct{}
+	rebuildRecoveryBeforeStop func()
+	queueRebuildMailbox       func(store.PendingMailboxGenerationRebuild)
+	replayGenerationRecovery  func(generationRecoveryReplay)
+	refreshSenderStatsForUser func(context.Context, int64) error
+	indexAttachmentsForUser   func(context.Context, int64, int) (int, error)
+	classifyCategoriesForUser func(context.Context, int64, int) (int, error)
 }
 
 // NewRunner builds a process-lifetime scheduler using a background context. The
@@ -232,8 +235,46 @@ func (r *Runner) lockAfterSenderStatsCtx(waitCtx context.Context, userID int64) 
 	return false
 }
 
+// exclusiveWriterWaitTimeout bounds an admission wait that brought no deadline
+// of its own. The barrier it waits on is released by whoever holds it, so a
+// holder that never lets go used to mean a wait that never ends -- and these
+// callers are HTTP handlers: the sync webhook walks every user serially, so one
+// tenant's stuck barrier held the request open and every user behind them never
+// got their INBOX. Timing out reports the tenant as busy, which is a true
+// answer and one the next pass retries.
+//
+// The same budget bounds how long a barrier is held for workers that have not
+// checkpointed after its own caller gave up, so a barrier cannot outlive the
+// patience of everything waiting on it.
+//
+// Five minutes because a legitimate foreground turn plus the checkpointing of
+// the workers it preempts is a slow operation on a large mailbox, and cutting
+// one short would refuse sync for a tenant who is merely working.
+const exclusiveWriterWaitTimeout = 5 * time.Minute
+
+// barrierWait is how long either barrier wait gives up after.
+func (r *Runner) barrierWait() time.Duration {
+	if r.barrierWaitOverride > 0 {
+		return r.barrierWaitOverride
+	}
+	return exclusiveWriterWaitTimeout
+}
+
+// lockAfterExclusiveWriters waits for the tenant's foreground barrier under
+// exclusiveWriterWaitTimeout. lockAfterSenderStats keeps no cap of its own: it
+// waits on the sender-stat refresh, which runs under senderStatsRefreshTimeout
+// and therefore ends on its own, and going through here bounds it anyway.
 func (r *Runner) lockAfterExclusiveWriters(userID int64) bool {
-	return r.lockAfterExclusiveWritersCtx(r.context(), userID)
+	timeout := r.barrierWait()
+	waitCtx, cancel := context.WithTimeout(r.context(), timeout)
+	defer cancel()
+	locked := r.lockAfterExclusiveWritersCtx(waitCtx, userID)
+	// Only the wait context expiring is worth a line. A runner shutting down
+	// refuses everything by design, and says so elsewhere.
+	if !locked && r.context().Err() == nil && waitCtx.Err() != nil {
+		log.Printf("sync admission gave up waiting for the foreground barrier user_id=%d waited=%s", userID, timeout)
+	}
+	return locked
 }
 
 func (r *Runner) lockAfterExclusiveWritersCtx(waitCtx context.Context, userID int64) bool {
@@ -1421,7 +1462,18 @@ func (r *Runner) BeginForegroundOperation(ctx context.Context, userID int64) (fu
 		// Releasing it immediately can consume an incomplete replay and strand
 		// the remainder when an acquisition timeout races worker cleanup.
 		go func() {
-			_ = r.waitForForegroundYield(r.context(), userID, attachmentDone, senderStatsDone)
+			// Bounded, because this is the wait that strands the barrier. The
+			// caller has already given up; if the workers never hand their
+			// replay state back, holding the barrier for them costs the tenant
+			// every sync and every maintenance job from here on, which is worse
+			// than consuming an incomplete replay.
+			budget := r.barrierWait()
+			releaseCtx, cancel := context.WithTimeout(r.context(), budget)
+			defer cancel()
+			if yieldErr := r.waitForForegroundYield(releaseCtx, userID, attachmentDone, senderStatsDone); yieldErr != nil {
+				log.Printf("foreground barrier force-released user_id=%d waited=%s error_type=%T",
+					userID, budget, yieldErr)
+			}
 			finish()
 		}()
 		return func() {}, err

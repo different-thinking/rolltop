@@ -2523,3 +2523,85 @@ func waitForRunnerMaintenanceIdle(t *testing.T, r *Runner, userID int64) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A foreground barrier is held by whoever took it. When the workers it waits on
+// never check in, holding it forever costs the tenant every sync and every
+// maintenance job after it -- and because the sync webhook walks users
+// serially, it costs every user behind them too.
+func TestForegroundBarrierIsReleasedWhenWorkersNeverYield(t *testing.T) {
+	// No service: this exercises the runner's own admission machinery, and a
+	// half-built store would only give its background loops something to
+	// panic on.
+	runner := NewRunner(nil)
+	const userID = int64(3)
+
+	// A worker that took the tenant and never hands its channel back: the
+	// wedged Bleve writer, or anything else that stops observing cancellation.
+	wedged := make(chan struct{})
+	runner.mu.Lock()
+	runner.senderStatsRunning[userID] = true
+	runner.senderStatsDone[userID] = wedged
+	runner.mu.Unlock()
+	t.Cleanup(func() { close(wedged) })
+
+	runner.barrierWaitOverride = 40 * time.Millisecond
+	start := time.Now()
+	if runner.lockAfterExclusiveWriters(userID) {
+		runner.mu.Unlock()
+		t.Fatal("admission was granted while a worker still held the tenant")
+	}
+	waited := time.Since(start)
+	if waited < runner.barrierWaitOverride {
+		t.Fatalf("admission gave up after %s, before its own budget of %s", waited, runner.barrierWaitOverride)
+	}
+	if waited > time.Second {
+		t.Fatalf("admission waited %s, which is not bounded by its budget", waited)
+	}
+
+	// And the wait has to be over, not merely abandoned: a second caller must
+	// get the same bounded answer rather than inheriting an expired context.
+	if runner.lockAfterExclusiveWriters(userID) {
+		runner.mu.Unlock()
+		t.Fatal("a second admission was granted while the tenant was still held")
+	}
+}
+
+// The barrier a caller gave up on is retained for its workers, which is right
+// until the workers never come back. Then it has to be let go.
+func TestForegroundBarrierIsForceReleasedAfterAGivenUpYield(t *testing.T) {
+	runner := NewRunner(nil)
+	const userID = int64(4)
+	runner.barrierWaitOverride = 40 * time.Millisecond
+
+	// Take the barrier once so BeginForegroundOperation's second caller waits,
+	// then wedge the worker its yield will wait on.
+	wedged := make(chan struct{})
+	runner.mu.Lock()
+	runner.attachmentDone[userID] = wedged
+	runner.mu.Unlock()
+	t.Cleanup(func() { close(wedged) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	release, err := runner.BeginForegroundOperation(ctx, userID)
+	if err == nil {
+		release()
+		t.Fatal("the foreground turn was granted while its worker had not yielded")
+	}
+
+	// The barrier is deliberately retained past that error. What must not
+	// happen is that it is retained for good.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runner.mu.Lock()
+		held := runner.foregroundRunning[userID]
+		runner.mu.Unlock()
+		if held == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the foreground barrier was never released after its worker failed to yield")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
