@@ -1096,19 +1096,36 @@ therefore a per-merge image push — the thing `release` deliberately does not d
 Do not drop `wait: true`; without it the job reports success as soon as the
 request is accepted, which is exactly the failure it is there to catch.
 
-The credentials are the `HOSTIM_API_TOKEN` secret plus the `HOSTIM_PROJECT` and
-`HOSTIM_APP` repository variables — variables rather than secrets because a job
-`if` can read `vars` and cannot read `secrets`. The condition is `or` over the
-two and the first step then demands all three: neither variable set is the fork
-case and skips, exactly one set is a misconfiguration and fails. Turning that
-`or` into an `and` gives a repository that lost a variable a green pipeline that
-silently stops deploying.
+The credentials are three repository secrets: `HOSTIM_API_TOKEN`,
+`HOSTIM_PROJECT` and `HOSTIM_APP`. Do not move any of them to a repository
+variable to make the job conditionable again. That was the original shape —
+project and app as `vars` so the job `if` could gate on them — and it failed in
+the way that matters: the values were created under the Secrets tab, `vars` read
+empty, the job skipped, and three merges went out over four hours behind a green
+tick with no deploy and nothing in the run to say so. A skipped job leaves no
+log and no summary; it is indistinguishable from a job that had nothing to do.
 
-The workflow-level `cancel-in-progress` is off wherever those variables are set,
-and that is not an oversight. Cancelling a run that is waiting on Hostim cancels
-the wait, not the build: it rolls out unobserved while the successor's rebuild
-lands on top of it. Serialised `main` runs are the price; GitHub keeps only one
-run pending per group, so the queue never grows past one.
+So the job is gated on the branch alone and always starts on `main`, and the
+`Check Deploy Configuration` step decides between three states: none of the
+three set is a fork and exits green, all three set requests a rebuild, and
+some-but-not-all fails naming what is absent. Keep all three branches. The
+runner-seconds a fork spends reaching "nothing to do" are what buys a readable
+answer on every merge.
+
+That step also reads `vars` of the same three names, purely to diagnose the
+mistake above in its mirror image — credentials set, but under Variables. Keep
+it. It is what turns an invisible skip into an error naming the tab to fix.
+
+The step summary names neither app nor project, because both are secrets now.
+Do not add them back for legibility.
+
+The workflow-level `cancel-in-progress` is `false` throughout, and that is not
+an oversight. Cancelling a run that is waiting on Hostim cancels the wait, not
+the build: it rolls out unobserved while the successor's rebuild lands on top of
+it. Serialised `main` runs are the price; GitHub keeps only one run pending per
+group, so the queue never grows past one. It used to hold for non-deploying
+repositories, gated on the same `vars`; `concurrency` cannot read `secrets`
+either, so that distinction went with them.
 
 Two ordering constraints in `release` must survive any refactor: the Android
 step writes `frontend/public/android/{rolltop.apk,latest.json}`, which the
