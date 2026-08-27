@@ -19,9 +19,16 @@ import (
 // logged, never the value itself: a custom panic value can carry message-derived
 // data, and the same rule the caller sites follow (logging error_type, not the
 // error string) applies here. A returned error is handed back for the caller to
-// log with its own user/message context. These hooks are advisory (peer-metadata
-// discovery, stored-message classification), so degrading to "this plugin did
-// nothing" is always preferable to a failed import or a downed process.
+// log with its own user/message context.
+//
+// Deliberately no wall-clock budget, unlike the message-security guards. These
+// hooks act: mail_filters forwards over SMTP, moves over IMAP, and writes the
+// audit row that makes a message decided. plugins.CallHook can only abandon a
+// result, never cancel the work behind it -- so a budget here would let the
+// caller move on while the send was still in flight, and the audit write would
+// then land after the sync turn cancelled its context. The message would be
+// forwarded with no terminal row to say so, and the next pass would forward it
+// again. A slow forward is better than a duplicated one.
 func guardPluginHook(pluginID, phase string, fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {

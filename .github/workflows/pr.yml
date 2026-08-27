@@ -345,7 +345,7 @@ jobs:
       # Unit tests and lint already compile the debug variant, so assembling an
       # APK on a pull request would only repeat work `ci.yml` does on `main`.
       - name: Run Android Unit Tests And Lint
-        run: ./android/gradlew -p android :app:testDebugUnitTest :app:lintDebug
+        run: ./android/gradlew -p android :app:testDebugUnitTest :app:lintDebug --stacktrace
 
       - name: Upload Android Reports
         if: failure()

@@ -83,7 +83,17 @@ func (p *mailMCPPlugin) Start(host plugins.BackendStartHost) error {
 	p.issuedAt = time.Now()
 	p.mu.Unlock()
 
-	authorize, err := host.RegisterProtectedAPI(pluginID, plugins.ProtectedAPIRoute{Path: apiPath + "/oauth/authorize", Handle: p.authorize})
+	// The consent form is plain HTML served to the browser, so it can send no
+	// CSRF header, and the host exposes no way for a plugin to mint the token a
+	// hidden field would need. The consent token is the equivalent protection
+	// the opt-out asks for: an HMAC under the master key over the user and the
+	// exact query, ten-minute lifetime, only ever readable from the page itself
+	// -- so another origin can neither forge one nor read the victim's.
+	authorize, err := host.RegisterProtectedAPI(pluginID, plugins.ProtectedAPIRoute{
+		Path:          apiPath + "/oauth/authorize",
+		Handle:        p.authorize,
+		SkipCSRFCheck: true,
+	})
 	if err != nil {
 		return err
 	}

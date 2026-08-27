@@ -6,8 +6,20 @@ package syncer
 import (
 	"context"
 	"errors"
+	"log"
+	"time"
 
 	"rolltop/backend/plugins"
+)
+
+// Decrypting or verifying one message is arithmetic on bytes already in hand,
+// so these budgets are not a performance target: they are the difference
+// between a plugin that hangs and a sync -- or a rendered message -- that
+// hangs with it. The transform gets the longer one because it does the work
+// the detect only looked for.
+const (
+	messageSecurityDetectTimeout    = 5 * time.Second
+	messageSecurityTransformTimeout = 10 * time.Second
 )
 
 func (s *Service) detectMessageSecurity(ctx context.Context, userID int64, raw []byte, body plugins.MessageBody) (plugins.MessageSecurityState, bool, error) {
@@ -24,7 +36,16 @@ func (s *Service) detectMessageSecurity(ctx context.Context, userID int64, raw [
 			continue
 		}
 		generationRecoveryPhase(ctx, "plugin-security-detect", backendPlugin.ID())
-		state, stateErr := provider.DetectMessageSecurity(ctx, host, userID, raw, body)
+		state, stateErr := plugins.CallHook(messageSecurityDetectTimeout, func() (plugins.MessageSecurityState, error) {
+			return provider.DetectMessageSecurity(ctx, host, userID, raw, body)
+		})
+		if plugins.IsHookGuardFailure(stateErr) {
+			// A provider that cannot answer leaves the message unclassified
+			// rather than failing the import: the mail is mirrored either way,
+			// and an unread badge beats a folder that stops syncing.
+			log.Printf("message security detect skipped plugin_id=%s user_id=%d error_type=%T", backendPlugin.ID(), userID, stateErr)
+			continue
+		}
 		if errors.Is(stateErr, plugins.ErrUnsupported) {
 			continue
 		}
@@ -50,7 +71,15 @@ func (s *Service) transformMessageSecurityBody(ctx context.Context, userID int64
 			continue
 		}
 		generationRecoveryPhase(ctx, "plugin-security-transform", backendPlugin.ID())
-		transform, transformErr := provider.TransformMessageBody(ctx, host, userID, raw, state, body)
+		transform, transformErr := plugins.CallHook(messageSecurityTransformTimeout, func() (plugins.MessageBodyTransform, error) {
+			return provider.TransformMessageBody(ctx, host, userID, raw, state, body)
+		})
+		if plugins.IsHookGuardFailure(transformErr) {
+			// The untransformed body is still a body. Leaving it is what the
+			// reader sees anyway when no provider claims the message.
+			log.Printf("message security transform skipped plugin_id=%s user_id=%d error_type=%T", backendPlugin.ID(), userID, transformErr)
+			continue
+		}
 		if errors.Is(transformErr, plugins.ErrUnsupported) {
 			continue
 		}

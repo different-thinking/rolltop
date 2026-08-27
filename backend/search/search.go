@@ -773,25 +773,47 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 		}
 	}
 
+	// Ask for the restart first, before anything that touches the volume.
+	//
+	// The restart is the recovery: it releases the in-process writer gate and
+	// reopens the index. The marker only narrows how much is reindexed
+	// afterwards. Ordering them the other way made the recovery depend on a
+	// write to /data -- the same volume the stalled writer is blocked on -- and
+	// a volume in that state does not politely return an error. A wedged FUSE
+	// mount blocks in CreateTemp, in the fsync, or in the rename, so the marker
+	// write never returns and the restart is never asked for at all. That is
+	// the case that most needs it.
+	//
+	// The handler is a non-blocking send onto the restart channel, so putting
+	// it first costs the marker nothing: the process does not go away until the
+	// restart is served, and the write below still gets its turn.
+	s.activeStallOnce.Do(func() {
+		s.mu.Lock()
+		handler := s.activeStallHandler
+		s.mu.Unlock()
+		if handler != nil {
+			handler(details.UserID)
+		}
+	})
+
 	// The stalled batch owns a known message range, so recovery only has to
 	// reindex that range. A range this operation does not carry marshals as a
-	// full rebuild, which is what an operation nothing can attribute needs.
+	// full rebuild, which is what an operation nothing can attribute needs. A
+	// tenant that comes back with no marker at all rebuilds in full, which is
+	// slower and still correct.
 	markerErr := s.MarkSearchIndexRecoveryRequiredForDocuments(
 		details.UserID, details.FirstDocumentID, details.LastDocumentID)
-	if markerErr == nil {
-		s.activeStallOnce.Do(func() {
-			s.mu.Lock()
-			handler := s.activeStallHandler
-			s.mu.Unlock()
-			if handler != nil {
-				handler(details.UserID)
-			}
-		})
+	if markerErr != nil {
+		// One retry, because the write that just failed and the stall that
+		// brought us here often have the same cause and it may have passed.
+		time.Sleep(time.Second)
+		markerErr = s.MarkSearchIndexRecoveryRequiredForDocuments(
+			details.UserID, details.FirstDocumentID, details.LastDocumentID)
 	}
 	logger := s.logf()
-	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v recovery_scope=%s",
+	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=true marker_error_type=%T marker_error=%v recovery_scope=%s",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
-		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr,
+		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr, markerErr,
 		SearchIndexRecovery{Required: true, FirstDocumentID: details.FirstDocumentID, LastDocumentID: details.LastDocumentID}.Scope())
 	logger("%s", summary)
 	stack := filteredBleveBatchStack()

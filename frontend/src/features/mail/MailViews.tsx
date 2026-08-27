@@ -123,6 +123,18 @@ function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation[
  * rows when the URL changes, animates newly delivered messages on the first page,
  * and shows a folder-level sync clue when the selected mailbox is manual or off.
  */
+// The user whose page load has already spent its one queued folder sync, or
+// null before any has. A browser refresh, or reopening the app at a folder
+// route, should show what the server has rather than what the last scheduled
+// pass left behind.
+//
+// Module-level on purpose: it has to survive this component remounting during
+// in-app navigation, so that only a genuine page load spends it. Keyed by user
+// rather than a plain flag because signing out does not reload the page -- it
+// tears the session down inside React -- so a boolean would leave whoever signs
+// in next looking at what the previous scheduled pass had left them.
+let bootFolderSyncUserID: number | null = null;
+
 export function MailView({
   userID,
   csrf,
@@ -345,6 +357,40 @@ export function MailView({
       cancelled = true;
     };
   }, [userID, mailbox?.id, effectiveMode, csrf, addToast]);
+
+  // The folder a page load lands on gets one queued sync, whatever its sync
+  // mode, so a refreshed tab reflects the server without waiting for the next
+  // scheduled pass. Manual folders are left out because the effect above
+  // already syncs those on entering the view, and two requests for one arrival
+  // is one more than the folder needs. Pull-to-refresh stays the gesture for
+  // repeating this.
+  useEffect(() => {
+    if (bootFolderSyncUserID === userID || !csrf) return;
+    // Chrome may not have resolved the folder yet. Waiting keeps the one shot
+    // for the folder the reader is actually on rather than spending it on the
+    // whole account -- but only until the folder list arrives. A route naming a
+    // folder that is not in it (deleted since the link was made, or a chrome
+    // fetch that failed) would otherwise hold the shot for good and let the
+    // reader's next navigation spend it, which is the thing this must not do.
+    if (!mailbox && mailboxID && mailboxes.length === 0) return;
+    // Spent on the folder the load landed on, before asking whether that folder
+    // wants a sync. Skipping the spend as well would carry the shot forward to
+    // whichever folder the reader opened next, which is a navigation, not a
+    // page load, and already has its own rules about syncing.
+    bootFolderSyncUserID = userID;
+    if (mailbox && (effectiveMode === "never" || effectiveMode === "manual")) return;
+    let cancelled = false;
+    const request = mailbox ? api.syncFolder(csrf, mailbox.id) : api.syncAccount(csrf);
+    request.catch((err) => {
+      // Losing the race to a sync that was already running is the normal case
+      // on a busy account, and its event stream refreshes this view anyway.
+      if (err instanceof ApiError && (err.status === 409 || err.status === 503)) return;
+      if (!cancelled) addToast(`Folder refresh failed: ${messageFromError(err)}`, "error");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [userID, mailbox?.id, mailboxID, mailboxes.length, effectiveMode, csrf, addToast]);
 
   // Route changes should feel immediate: clear the old page before the server
   // responds so the user is not looking at stale rows for another folder.

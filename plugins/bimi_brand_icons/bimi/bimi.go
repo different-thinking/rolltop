@@ -246,8 +246,31 @@ func (r Resolver) fetchSVG(ctx context.Context, rawURL string) (string, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
-	originalCheck := client.CheckRedirect
 	clientCopy := *client
+	// validateLogoURL has already resolved this host and found it public, but
+	// the transport resolves it again when it dials, and a hostile nameserver
+	// is free to answer differently the second time. Validating the address the
+	// connection is actually made to is what closes that window -- the same
+	// defence backend/remoteimages applies to the images in a message body, for
+	// the same reason. The proxy goes with it: a connection handed to a proxy
+	// is one this side never resolves, so the guard would have nothing to check.
+	if clientCopy.Transport == nil {
+		clientCopy.Transport = http.DefaultTransport
+	}
+	if base, ok := clientCopy.Transport.(*http.Transport); ok {
+		transport := base.Clone()
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return safeDialContext(ctx, resolver, network, address)
+		}
+		// The clone carries its own connection pool, and a pool nobody closes
+		// keeps its idle sockets for a minute and a half. One per logo fetch
+		// accumulates; this pool serves exactly one request, so let it go with
+		// the request rather than leaving hundreds of them holding sockets.
+		defer transport.CloseIdleConnections()
+		clientCopy.Transport = transport
+	}
+	originalCheck := clientCopy.CheckRedirect
 	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if originalCheck != nil {
 			if err := originalCheck(req, via); err != nil {
@@ -304,6 +327,39 @@ func parseBIMITXT(record string) map[string]string {
 		out[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
 	}
 	return out
+}
+
+// safeDialContext resolves the target itself and dials only an address that
+// passes the same public-address check the URL passed. A transport left to its
+// own devices would resolve and connect in one step, with nothing in between to
+// refuse the answer.
+func safeDialContext(ctx context.Context, resolver *net.Resolver, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var firstErr error
+	dialer := &net.Dialer{Timeout: 8 * time.Second}
+	for _, candidate := range ips {
+		if !publicIP(candidate.IP) {
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, errors.New("BIMI logo host resolves only to private addresses")
 }
 
 func validateLogoURL(ctx context.Context, resolver *net.Resolver, rawURL string) error {

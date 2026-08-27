@@ -32,6 +32,64 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// setupAdvisoryLock serializes the create-the-first-admin window across
+// processes and connections. It shares PostgreSQL's single advisory-lock space
+// with schemaAdvisoryLock ("rolltop\0") and instanceAdvisoryLock ("rolltop\1")
+// and must differ from both.
+const setupAdvisoryLock int64 = 0x726F6C6C746F7002 // "rolltop\2"
+
+// ErrSetupAlreadyComplete reports that a user already existed when a caller
+// asked to create the initial admin.
+var ErrSetupAlreadyComplete = errors.New("setup is already complete")
+
+// CreateInitialAdminIfNone creates the first admin account, and only while
+// there is no user at all.
+//
+// The check and the insert have to be one indivisible step. /setup is reachable
+// without a session -- it is the route that hands out the first one -- so two
+// requests arriving together used to both read an empty users table and both
+// create an admin, which is an unauthenticated way onto a fresh instance for
+// whoever wins the second insert.
+//
+// A transaction alone does not close that: under PostgreSQL's default READ
+// COMMITTED both transactions take their snapshot before either inserts, so
+// both still count zero. The advisory lock is what serializes them, and it is
+// transaction-scoped, so it is released by the commit or the rollback and never
+// outlives a crashed request.
+func (s *Store) CreateInitialAdminIfNone(ctx context.Context, email, name, passwordHash string) (User, error) {
+	email = cleanEmail(email)
+	name = strings.TrimSpace(name)
+	if email == "" || name == "" || passwordHash == "" {
+		return User{}, errors.New("email, name, and password hash are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(?)`, setupAdvisoryLock); err != nil {
+		return User{}, err
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
+		return User{}, err
+	}
+	if existing > 0 {
+		return User{}, ErrSetupAlreadyComplete
+	}
+	ts := nowUnix()
+	var id int64
+	if err := tx.QueryRowContext(ctx, `INSERT INTO users (email, name, password_hash, is_admin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id`, email, name, passwordHash, boolInt(true), ts, ts).Scan(&id); err != nil {
+		return User{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(ctx, id)
+}
+
 // CreateUser inserts a system-level user row and seeds its per-user database in split mode.
 func (s *Store) CreateUser(ctx context.Context, email, name, passwordHash string, isAdmin bool) (User, error) {
 	email = cleanEmail(email)

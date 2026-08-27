@@ -218,6 +218,10 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	// This check is the courteous answer for the ordinary case: someone opening
+	// /setup on an instance that already has an admin. It is not what keeps the
+	// route safe -- the store's create is, because between this read and that
+	// write another request can do the whole thing.
 	usersExist, err := s.usersExist(r.Context())
 	if err != nil {
 		s.serverError(w, r, err)
@@ -247,7 +251,13 @@ func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	user, err := s.store.CreateUser(r.Context(), in.Email, in.Name, hash, true)
+	user, err := s.store.CreateInitialAdminIfNone(r.Context(), in.Email, in.Name, hash)
+	if errors.Is(err, store.ErrSetupAlreadyComplete) {
+		// Another request got there between the check above and this write.
+		// The loser is told setup is done, not handed a second admin account.
+		writeAPIError(w, http.StatusConflict, "setup is already complete")
+		return
+	}
 	if err != nil {
 		log.Printf("setup create admin user: %v", err)
 		writeAPIError(w, http.StatusBadRequest, "Could not create admin user.")

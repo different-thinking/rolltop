@@ -682,8 +682,14 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 	resp := struct {
 		Results []result `json:"results"`
 	}{Results: make([]result, 0, len(userIDs))}
+	// Bounded by the request, not only per user. Admission waits for one
+	// tenant's barrier under its own budget; walking the whole installation
+	// serially would otherwise pay that budget again for every stuck tenant,
+	// long after whoever called this webhook stopped listening. When the
+	// request ends, the users still in the list are reported unstarted rather
+	// than kept waiting for nobody.
 	for _, userID := range userIDs {
-		started := s.syncRunner.StartMailboxes(userID, []string{"INBOX"})
+		started := s.syncRunner.StartMailboxesWithinContext(r.Context(), userID, []string{"INBOX"})
 		resp.Results = append(resp.Results, result{UserID: userID, Started: started, Folder: "INBOX"})
 	}
 	w.Header().Set("Content-Type", "application/json")
