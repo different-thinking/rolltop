@@ -1068,8 +1068,9 @@ Because they are secrets, the job cannot be gated on them — a job condition ca
 read `vars` and cannot read `secrets` — so it runs on every push to `main` and
 decides in its first step:
 
-- **None of the three set** — the step says so and the job ends green. A fork
-  inherits a working pipeline instead of a deployment failure it could not fix.
+- **None of the three set, under either tab** — the step says so and the job ends
+  green. A fork inherits a working pipeline instead of a deployment failure it
+  could not fix.
 - **All three set** — the rebuild is requested and waited on.
 - **Some but not all** — the run fails with a message naming what is missing. If
   a missing value is present as a repository variable of the same name, the

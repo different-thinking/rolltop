@@ -795,17 +795,29 @@ jobs:
                 echo "Status: no Hostim credentials are set here; nothing was sent"
                 ;;
               true)
-                # Deliberately "requested for", not "deployed": the rebuild carries no
-                # ref, so Hostim builds whatever `main` points at when it checks out.
-                # That is this commit unless another merge landed in between.
-                echo "Requested for: \`${GITHUB_SHA}\` (Hostim builds the tip of \`main\` at checkout time)"
-                echo
-                case "$OUTCOME" in
-                  success)   echo "Status: live" ;;
-                  cancelled) echo "Status: the wait was cancelled; the Hostim build it asked for is still running" ;;
-                  failure)   echo "Status: failed — the app was not confirmed live" ;;
-                  *)         echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
-                esac
+                if [ -z "$OUTCOME" ]; then
+                  # The rebuild step recorded no outcome, so it never ran: the job
+                  # ended between the configuration check and the request. Nothing
+                  # was sent, and neither the "requested for" line below nor a
+                  # status built from an empty `$OUTCOME` may claim otherwise.
+                  if [ "$JOB_STATUS" = "cancelled" ]; then
+                    echo "Status: not attempted; the run was cancelled before the rebuild started"
+                  else
+                    echo "Status: not attempted; the rebuild step did not run"
+                  fi
+                else
+                  # Deliberately "requested for", not "deployed": the rebuild carries no
+                  # ref, so Hostim builds whatever `main` points at when it checks out.
+                  # That is this commit unless another merge landed in between.
+                  echo "Requested for: \`${GITHUB_SHA}\` (Hostim builds the tip of \`main\` at checkout time)"
+                  echo
+                  case "$OUTCOME" in
+                    success)   echo "Status: live" ;;
+                    cancelled) echo "Status: the wait was cancelled; the Hostim build it asked for is still running" ;;
+                    failure)   echo "Status: failed — the app was not confirmed live" ;;
+                    *)         echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
+                  esac
+                fi
                 ;;
               *)
                 if [ "$JOB_STATUS" = "cancelled" ]; then
