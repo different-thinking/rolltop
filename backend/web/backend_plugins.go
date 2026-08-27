@@ -451,6 +451,17 @@ func (s *Server) dispatchProtectedAPIPath(w http.ResponseWriter, r *http.Request
 	if _, ok := s.requireAPIAuth(w, r); !ok {
 		return true
 	}
+	// Default-deny CSRF on plugin mutations. A plugin that never calls
+	// VerifyCSRF used to be a cross-site target reachable with the reader's own
+	// session; now forgetting the check costs nothing, and remembering it is
+	// idempotent, so the bundled plugins that verify explicitly are unaffected.
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		if !route.skipCSRFCheck && !s.verifyCSRF(w, r) {
+			return true
+		}
+	}
 	route.handler(s, cleanAPIPath(apiPath), w, r)
 	return true
 }
@@ -567,11 +578,12 @@ type protectedAPIRouteRegistry struct {
 }
 
 type protectedAPIRouteEntry struct {
-	id       uint64
-	pluginID string
-	path     string
-	prefix   bool
-	handler  plugins.ProtectedAPIHandler
+	id            uint64
+	pluginID      string
+	path          string
+	prefix        bool
+	skipCSRFCheck bool
+	handler       plugins.ProtectedAPIHandler
 }
 
 type protectedAPIRouteHandle struct {
@@ -620,11 +632,12 @@ func (r *protectedAPIRouteRegistry) register(pluginID string, route plugins.Prot
 	r.nextID++
 	id := r.nextID
 	r.routes[id] = protectedAPIRouteEntry{
-		id:       id,
-		pluginID: pluginID,
-		path:     path,
-		prefix:   route.Prefix,
-		handler:  route.Handle,
+		id:            id,
+		pluginID:      pluginID,
+		path:          path,
+		prefix:        route.Prefix,
+		skipCSRFCheck: route.SkipCSRFCheck,
+		handler:       route.Handle,
 	}
 	return &protectedAPIRouteHandle{registry: r, id: id}, nil
 }
