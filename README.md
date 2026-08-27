@@ -923,7 +923,7 @@ two coordination jobs. Superseded runs are cancelled automatically, and every
 job has a hard timeout.
 
 `.github/workflows/ci.yml` runs on pushes to `main`, on `v*` tags, and on
-manual dispatch, and has two jobs. `verify` is the post-merge gate: on a normal
+manual dispatch, and has three jobs. `verify` is the post-merge gate: on a normal
 reviewed merge it trusts the checks the pull request already ran and does almost
 nothing, but it re-runs the full Go suite when someone pushes straight to
 `main`, when a merge touches a path the pull-request filter does not cover, or
@@ -933,3 +933,57 @@ merge queue); see AGENTS.md. `release` is the packaging pipeline: frontend and
 plugin builds, the signed Android APK, plugin shared objects, godoc, build
 artifacts, and the GHCR image push — no coverage instrumentation, and none of it
 per pull request. It is gated to `v*` tags and manual dispatch.
+
+### Deploying to Hostim
+
+`deploy` is the third job in `ci.yml`. It runs after `verify`, only for
+`main` — a push there, or a manual dispatch of the workflow on that branch —
+and asks Hostim to rebuild the hosted instance through the
+[`hostimdev/action@v2`](https://github.com/hostimdev/action) action. The app is
+a Git deployment: Hostim checks the repository out and builds this
+repository's `Dockerfile` itself, which is why the job requests a `rebuild`
+rather than pointing the app at an image. Nothing published by `release` is
+involved; that image exists for self-hosters and for tagged versions.
+
+The action waits for the build and the rollout, so the job goes green only once
+the new version is actually serving, and red when the build fails or the app
+never becomes healthy. A failed deployment is therefore a failed workflow run
+and notifies like any other. Its wait is bounded at 1800 seconds, generous
+because a cold Kaniko build of this image is slow; see the note at the top of
+the `Dockerfile` for the builder flags that make it less so.
+
+What the job does not decide is *which commit* ends up serving. A rebuild
+carries no ref: Hostim checks `main` out itself, so the build is of the tip at
+that moment, which a merge landing during the run has already moved. Running
+after `verify` means no deploy is started behind a red post-merge gate — it is
+not a guarantee that the commit named in the run is the one that went live, and
+the step summary says "requested for" rather than "deployed" for that reason.
+Pinning a deployment to a commit would mean an `image:` deploy of a per-commit
+tag, and therefore an image published per merge, which this repository
+deliberately does not do.
+
+Three repository settings drive it, under **Settings → Secrets and variables →
+Actions**:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `HOSTIM_API_TOKEN` | Secret | An API token from the Hostim dashboard, **Account Settings → API Tokens** |
+| `HOSTIM_PROJECT` | Variable | The project ID, e.g. `hpr-123456` |
+| `HOSTIM_APP` | Variable | The app name within that project |
+
+Only the token is a secret; the project ID and app name are variables so that
+the workflow can read them in a condition, which it cannot do with secrets.
+With **neither** variable set the job is skipped — a fork gets a green pipeline
+instead of a deployment failure it could not fix. With **either** of them set
+the job runs and insists on the whole set: a missing token, or a project ID
+without an app name, fails the run with a message naming what is missing. A
+half-configured repository must not go quietly green while its deploys stop,
+which is why the condition is an `or` and the check is a step.
+
+Deploys are serialised rather than cancelled. The workflow's concurrency group
+keeps its `cancel-in-progress` only for repositories that do not deploy:
+cancelling a run that is waiting on Hostim stops the waiting and nothing else —
+the requested build keeps going, rolls out unwatched, and the next run's rebuild
+lands on top of it. So a `main` run here waits for its predecessor instead.
+Bursts do not pile up: GitHub keeps at most one run pending per group, so a rush
+of merges collapses to the one in flight plus the newest.
