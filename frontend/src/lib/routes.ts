@@ -62,6 +62,17 @@ const legacyMailViews = new Map<string, MailView>([["unarchived", "inbox"]]);
  */
 export const defaultMailURL = "/mail/relevant";
 
+/**
+ * allMailRoute reports whether a list route names All Mail, which is the route
+ * with neither a folder nor a view: All Mail is what is left when nothing has
+ * narrowed the list. It is asked of the route rather than of a folder lookup,
+ * because a folder being deleted drops out of the chrome list while its page is
+ * still open, and that page would otherwise start calling itself All Mail.
+ */
+export function allMailRoute(route: { mailboxID: string | null; view: MailView }): boolean {
+  return !route.mailboxID && !route.view;
+}
+
 /** mailViewCategory reports the category a view names, or "" for the rest. */
 export function mailViewCategory(view: MailView): string {
   return view && !fixedMailViews.includes(view) ? view : "";

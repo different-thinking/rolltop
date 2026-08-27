@@ -17,7 +17,6 @@ import { archiveMailboxForAccount, junkMailboxForAccount, trashMailboxesByAccoun
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { HighlightedText, highlightEmailDocument } from "../../lib/searchHighlight";
 import { messageBackURL, messageHighlightQuery, messageHighlightTerms, messageSearchHitID } from "../../lib/routes";
-import { messageCategoryDisplay } from "../../lib/messageCategories";
 import { ComposeBox } from "../compose/ComposeViews";
 import { AttachmentPreviewSlot } from "../../plugins/attachmentPreview";
 import { brandDomainKeyForThread, loadBrandIconsForDomains } from "../../plugins/bimiBrandIcons";
@@ -32,6 +31,7 @@ import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustI
 import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
+import { MessageCategoryPill } from "./MessageCategoryPill";
 import { SnoozeControl } from "./SnoozeControl";
 
 type MessageLoadStatus = {
@@ -364,51 +364,6 @@ function ReportedAuthenticationIndicators({ indicators }: { indicators?: Message
           {label} {result.result}
         </span>
       ))}
-    </span>
-  );
-}
-
-// MessageCategoryPill names the category a message was filed into, on the
-// header line beside the sender the category was decided from. The sidebar
-// entry holding the message is off screen once a conversation is open, so
-// without this the reader has no way to tell where this message lives - or,
-// after correcting a sender, that the correction took.
-//
-// It reads as a label rather than a link, because there is no list it could
-// honestly open: a category list is the mail still in play narrowed to one
-// category, so an archived, snoozed, junked, or trashed message is not in the
-// list its own category names, and a pill that opened one would be a link to
-// somewhere the message the reader is looking at is not. The sidebar entry is
-// one click away for anyone who wants the list itself.
-function MessageCategoryPill({
-  category,
-  categories
-}: {
-  category?: string;
-  categories: MailCategorySummary[];
-}) {
-  // With no category registry in the chrome payload - an older server, or a
-  // bootstrap that arrived without one - this frontend knows nothing about
-  // categories at all, and neither a bare stored name nor "Not sorted yet"
-  // would be an honest thing to say about a message. It says nothing instead.
-  if (categories.length === 0) return null;
-  const display = messageCategoryDisplay(category, categories);
-  // Classification runs after a message is stored, so a message with no
-  // category yet says so rather than leaving the line silent: an empty slot
-  // reads as "this message has no category", which is never true for long.
-  if (!display) {
-    return (
-      <span className="message-category-pill pending" title="Not sorted into a category yet. Sorting reads each message's own headers and runs shortly after it arrives.">
-        <Icon name="clock" />
-        <span className="message-category-pill-label">Not sorted yet</span>
-      </span>
-    );
-  }
-  const tooltip = `Filed under ${display.label}, decided from this message itself.`;
-  return (
-    <span className="message-category-pill" title={tooltip} aria-label={tooltip} role="note">
-      <Icon name={display.icon} />
-      <span className="message-category-pill-label">{display.label}</span>
     </span>
   );
 }

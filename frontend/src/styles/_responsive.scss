@@ -553,6 +553,30 @@
     grid-column: 3 / 4;
   }
 
+  // A narrow subject line has no room to give the category a column beside it -
+  // "Newsletters" would arrive as "N...". So the chip drops to the preview line
+  // instead, which is the least of the three lines to shorten, and keeps the
+  // right edge the wide layout lines the chips up against.
+  .subject.names-category {
+    .subject-line {
+      grid-column: 1 / -1;
+    }
+
+    .snippet {
+      grid-column: 1;
+    }
+
+    .message-row-category {
+      grid-column: 2;
+      grid-row: 2;
+      // Enough for every category this build files into except the longest,
+      // "Invoices & Contracts", which arrives as "Invoices & C..." - and for
+      // "Not sorted yet" in full, which is the one a reader is scanning for.
+      // Wider than this and the preview beside it has nothing left.
+      max-width: 120px;
+    }
+  }
+
   .thread-summary {
     position: relative;
   }

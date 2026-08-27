@@ -268,8 +268,14 @@ Ein eigener Analyse- und Umsetzungsdurchgang
   Zurückgehen und Archivieren in einem Schritt.
 - **Der Antwort-Editor** öffnet sofort, ist auf 60 % der Fensterhöhe begrenzt und
   scrollt sich selbst in Sicht.
-- **Kategorie-Pille auf der Kopfzeile** — jede Nachricht sagt, wo sie einsortiert
-  wurde, und verlinkt dorthin.
+- **Kategorie-Pille** — jede Nachricht sagt, wo sie einsortiert wurde: auf der
+  Kopfzeile der Konversation, und in **All Mail** zusätzlich in jeder Zeile der
+  Liste. All Mail ist die einzige Liste, die alle Kategorien auf einmal hält, und
+  damit die einzige, in der eine noch nicht einsortierte Nachricht — „Not sorted
+  yet" — beim Durchsehen auffällt, statt gesucht werden zu müssen. Die Pille ist
+  eine Beschriftung und kein Link: eine Kategorieliste ist die noch anliegende
+  Post einer Kategorie, und archivierte, zurückgestellte oder gelöschte Post
+  steht nicht in der Liste, die ihre eigene Kategorie benennt.
 - **Zahlenkürzel in der Seitenleiste**, einklappbare Ordnergruppen pro Konto,
   deren Zustand Navigation und Drag überlebt.
 - **Sortierung nach Datum** in beide Richtungen in jeder Liste, pro Nutzer
