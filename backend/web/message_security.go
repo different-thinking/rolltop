@@ -6,8 +6,18 @@ package web
 import (
 	"context"
 	"errors"
+	"log"
+	"time"
 
 	"rolltop/backend/plugins"
+)
+
+// The display path mirrors the syncer's budgets, for a sharper reason: this
+// one runs inside an HTTP request. A provider that never returns would hold the
+// connection open until the browser gives up, on every open of that message.
+const (
+	displaySecurityDetectTimeout    = 5 * time.Second
+	displaySecurityTransformTimeout = 10 * time.Second
 )
 
 func (s *Server) hasMessageSecurityProvider(ctx context.Context) (bool, error) {
@@ -35,7 +45,13 @@ func (s *Server) detectMessageSecurity(ctx context.Context, userID int64, raw []
 		if !ok {
 			continue
 		}
-		state, stateErr := provider.DetectMessageSecurity(ctx, s, userID, raw, body)
+		state, stateErr := plugins.CallHook(displaySecurityDetectTimeout, func() (plugins.MessageSecurityState, error) {
+			return provider.DetectMessageSecurity(ctx, s, userID, raw, body)
+		})
+		if plugins.IsHookGuardFailure(stateErr) {
+			log.Printf("message security detect skipped plugin_id=%s user_id=%d error_type=%T", backendPlugin.ID(), userID, stateErr)
+			continue
+		}
 		if errors.Is(stateErr, plugins.ErrUnsupported) {
 			continue
 		}
@@ -59,7 +75,13 @@ func (s *Server) transformMessageSecurityBody(ctx context.Context, userID int64,
 		if !ok {
 			continue
 		}
-		transform, transformErr := provider.TransformMessageBody(ctx, s, userID, raw, state, body)
+		transform, transformErr := plugins.CallHook(displaySecurityTransformTimeout, func() (plugins.MessageBodyTransform, error) {
+			return provider.TransformMessageBody(ctx, s, userID, raw, state, body)
+		})
+		if plugins.IsHookGuardFailure(transformErr) {
+			log.Printf("message security transform skipped plugin_id=%s user_id=%d error_type=%T", backendPlugin.ID(), userID, transformErr)
+			continue
+		}
 		if errors.Is(transformErr, plugins.ErrUnsupported) {
 			continue
 		}

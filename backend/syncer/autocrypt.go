@@ -6,30 +6,38 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
 	"rolltop/backend/store"
 )
 
+// advisoryHookTimeout bounds an advisory hook. These read one message and
+// answer about it, so seconds is already generous; the budget exists for the
+// hook that never answers at all, not to hurry a slow one.
+const advisoryHookTimeout = 5 * time.Second
+
 // guardPluginHook runs one plugin hook so a misbehaving plugin can neither crash
-// the sync process nor abort the mail-sync operation that invoked it. A panic is
-// contained and swallowed by returning nil, so dispatch continues as if the
-// plugin learned nothing from this message. Only the panic value's type is
-// logged, never the value itself: a custom panic value can carry message-derived
-// data, and the same rule the caller sites follow (logging error_type, not the
-// error string) applies here. A returned error is handed back for the caller to
-// log with its own user/message context. These hooks are advisory (peer-metadata
-// discovery, stored-message classification), so degrading to "this plugin did
-// nothing" is always preferable to a failed import or a downed process.
-func guardPluginHook(pluginID, phase string, fn func() error) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("plugin hook panicked plugin_id=%s phase=%s panic_type=%T", pluginID, phase, r)
-			err = nil
-		}
-	}()
-	return fn()
+// the sync process, nor hold it, nor abort the mail-sync operation that invoked
+// it. A panic or a hook that outstays its budget is contained and swallowed by
+// returning nil, so dispatch continues as if the plugin learned nothing from
+// this message. Only the failure's type is logged, never a panic value or a
+// plugin error string: both can carry message-derived data, and the same rule
+// the caller sites follow (logging error_type, not the error string) applies
+// here. A returned error is handed back for the caller to log with its own
+// user/message context. These hooks are advisory (peer-metadata discovery,
+// stored-message classification), so degrading to "this plugin did nothing" is
+// always preferable to a failed import, a stalled sync, or a downed process.
+func guardPluginHook(pluginID, phase string, fn func() error) error {
+	_, err := plugins.CallHook(advisoryHookTimeout, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	if plugins.IsHookGuardFailure(err) {
+		log.Printf("plugin hook skipped plugin_id=%s phase=%s error_type=%T", pluginID, phase, err)
+		return nil
+	}
+	return err
 }
 
 func (s *Service) importIncomingMessageHooks(ctx context.Context, userID int64, raw []byte, parsedFrom string, junk bool) error {
