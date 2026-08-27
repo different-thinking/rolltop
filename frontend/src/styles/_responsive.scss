@@ -545,6 +545,13 @@
     flex: none;
   }
 
+  .message-category-pill {
+    flex: none;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .message-link-warning {
     gap: 8px;
     padding: 8px 10px;

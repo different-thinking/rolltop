@@ -16,7 +16,8 @@ import { displayDateTime, displaySnoozeUntil, displayTime, formatBytes, messageC
 import { archiveMailboxForAccount, junkMailboxForAccount, trashMailboxesByAccount } from "../../lib/folders";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { HighlightedText, highlightEmailDocument } from "../../lib/searchHighlight";
-import { messageBackURL, messageHighlightQuery, messageHighlightTerms, messageSearchHitID } from "../../lib/routes";
+import { mailURL, messageBackURL, messageHighlightQuery, messageHighlightTerms, messageSearchHitID } from "../../lib/routes";
+import { messageCategoryDisplay } from "../../lib/messageCategories";
 import { ComposeBox } from "../compose/ComposeViews";
 import { AttachmentPreviewSlot } from "../../plugins/attachmentPreview";
 import { brandDomainKeyForThread, loadBrandIconsForDomains } from "../../plugins/bimiBrandIcons";
@@ -363,6 +364,51 @@ function ReportedAuthenticationIndicators({ indicators }: { indicators?: Message
         </span>
       ))}
     </span>
+  );
+}
+
+// MessageCategoryPill names the category a message was filed into, on the
+// header line beside the sender the category was decided from. The sidebar
+// entry holding the message is off screen once a conversation is open, so
+// without this the reader has no way to tell where this message lives - or,
+// after correcting a sender, that the correction took. The pill opens that
+// category's list, and the message menu below still moves the sender.
+function MessageCategoryPill({
+  category,
+  categories,
+  onOpen
+}: {
+  category?: string;
+  categories: MailCategorySummary[];
+  onOpen: (name: string) => void;
+}) {
+  const display = messageCategoryDisplay(category, categories);
+  // Classification runs after a message is stored, so a message with no
+  // category yet says so rather than leaving the line silent: an empty slot
+  // reads as "this message has no category", which is never true for long.
+  if (!display) {
+    return (
+      <span className="message-category-pill pending" title="Not sorted into a category yet. Sorting reads each message's own headers and runs shortly after it arrives.">
+        <Icon name="clock" />
+        Not sorted yet
+      </span>
+    );
+  }
+  const tooltip = `Filed under ${display.label}, decided from this message itself. Open the ${display.label} list.`;
+  return (
+    <button
+      className="message-category-pill"
+      type="button"
+      title={tooltip}
+      aria-label={tooltip}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen(display.name);
+      }}
+    >
+      <Icon name={display.icon} />
+      {display.label}
+    </button>
   );
 }
 
@@ -2172,6 +2218,11 @@ export function ThreadView({
                         <HighlightedText text={item.sender_email} query={highlightQuery} terms={highlightTerms} />
                       </span>
                       <MessageSenderSecurityCaution indicators={item.security_indicators} />
+                      <MessageCategoryPill
+                        category={item.message.category}
+                        categories={mailCategories}
+                        onOpen={(name) => navigate(mailURL(null, 1, name))}
+                      />
                       {annotationNodes}
                       <OneClickUnsubscribeInlineAction
                         item={item}

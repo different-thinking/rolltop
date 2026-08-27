@@ -218,6 +218,51 @@
   }
 }
 
+// The category pill sits on the sender line, so it is sized like the security
+// chips beside it rather than like the sidebar entry it opens: a quiet accent
+// chip that reads as a label first and a link second.
+.message-category-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: pointer;
+
+  .icon {
+    width: 13px;
+    height: 13px;
+    flex: none;
+  }
+
+  &:hover {
+    border-color: var(--button-hover-border);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  // Nothing to open while a message is still waiting to be sorted, so the
+  // waiting state is plain text in the muted palette rather than a link.
+  &.pending {
+    background: var(--surface-subtle);
+    border-color: var(--border);
+    color: var(--muted);
+    cursor: default;
+  }
+}
+
 .unsubscribe-action {
   min-height: 24px;
   border: 0;
