@@ -38,9 +38,10 @@ name: CI
 # cannot be gated on them — a job `if` reads `vars` and not `secrets` — and it
 # starts on every `main` push instead, reporting in its first step which of the
 # three states it is in: none set is a fork and exits green, all three set
-# rebuilds, and some-but-not-all is a misconfiguration and fails naming what is
-# absent. Running a job that may have nothing to do buys the guarantee that
-# every merge leaves a readable answer to "did this deploy?" behind.
+# requests a rebuild, and some-but-not-all is a misconfiguration and fails
+# naming what is absent. Running a job that may have nothing to do buys the
+# guarantee that every merge leaves a readable answer to "did this deploy?"
+# behind.
 #
 # Pull requests are verified by `pr.yml`, which is gated on changed paths.
 

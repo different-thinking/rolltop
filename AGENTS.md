@@ -1107,9 +1107,10 @@ log and no summary; it is indistinguishable from a job that had nothing to do.
 
 So the job is gated on the branch alone and always starts on `main`, and the
 `Check Deploy Configuration` step decides between three states: none of the
-three set is a fork and exits green, all three set rebuilds, some-but-not-all
-fails naming what is absent. Keep all three branches. The runner-seconds a fork
-spends reaching "nothing to do" are what buys a readable answer on every merge.
+three set is a fork and exits green, all three set requests a rebuild, and
+some-but-not-all fails naming what is absent. Keep all three branches. The
+runner-seconds a fork spends reaching "nothing to do" are what buys a readable
+answer on every merge.
 
 That step also reads `vars` of the same three names, purely to diagnose the
 mistake above in its mirror image — credentials set, but under Variables. Keep
