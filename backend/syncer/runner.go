@@ -203,8 +203,22 @@ func (r *Runner) context() context.Context {
 // returns with r.mu held. Rechecking under the same mutex closes the admission
 // race where a new refresh could otherwise start between waiting and reserving
 // a mailbox writer.
+//
+// Bounded by the same budget as the foreground barrier. The refresh it waits on
+// runs under a timeout of its own, but that bounds the context, not the
+// goroutine: work that stops observing cancellation keeps running, and
+// senderStatsDone is closed only when the goroutine returns. These callers are
+// HTTP handlers -- the queueing reserves behind QueueAccountMailboxes reach
+// here from filing a message, rebuilding a folder and starting a plugin -- so
+// an unbounded wait here is a request that never answers.
 func (r *Runner) lockAfterSenderStats(userID int64) bool {
-	return r.lockAfterSenderStatsCtx(r.context(), userID)
+	waitCtx, cancel := context.WithTimeout(r.context(), r.barrierWait())
+	defer cancel()
+	locked := r.lockAfterSenderStatsCtx(waitCtx, userID)
+	if !locked && r.context().Err() == nil && waitCtx.Err() != nil {
+		log.Printf("sync admission gave up waiting for the sender-stat writer user_id=%d waited=%s", userID, r.barrierWait())
+	}
+	return locked
 }
 
 // lockAfterSenderStatsCtx is lockAfterSenderStats bounded by a caller-supplied
@@ -261,17 +275,29 @@ func (r *Runner) barrierWait() time.Duration {
 }
 
 // lockAfterExclusiveWriters waits for the tenant's foreground barrier under
-// exclusiveWriterWaitTimeout. lockAfterSenderStats keeps no cap of its own: it
-// waits on the sender-stat refresh, which runs under senderStatsRefreshTimeout
-// and therefore ends on its own, and going through here bounds it anyway.
+// exclusiveWriterWaitTimeout.
 func (r *Runner) lockAfterExclusiveWriters(userID int64) bool {
+	return r.lockAfterExclusiveWritersWithin(nil, userID)
+}
+
+// lockAfterExclusiveWritersWithin bounds the wait by the caller's context as
+// well as by the per-tenant budget, so a caller that waits for several tenants
+// in turn can cap the whole of it. A nil context means the budget alone.
+func (r *Runner) lockAfterExclusiveWritersWithin(callerCtx context.Context, userID int64) bool {
 	timeout := r.barrierWait()
-	waitCtx, cancel := context.WithTimeout(r.context(), timeout)
+	parent := r.context()
+	if callerCtx != nil {
+		parent = callerCtx
+	}
+	waitCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	locked := r.lockAfterExclusiveWritersCtx(waitCtx, userID)
-	// Only the wait context expiring is worth a line. A runner shutting down
-	// refuses everything by design, and says so elsewhere.
-	if !locked && r.context().Err() == nil && waitCtx.Err() != nil {
+	// Only the budget expiring is worth a line, and only when it was the budget
+	// that ended the wait. A runner shutting down refuses everything by design
+	// and says so elsewhere, and a caller that went away -- a closed request --
+	// did not wait the budget out, so reporting that it did would be untrue.
+	callerAlive := callerCtx == nil || callerCtx.Err() == nil
+	if !locked && r.context().Err() == nil && callerAlive && waitCtx.Err() != nil {
 		log.Printf("sync admission gave up waiting for the foreground barrier user_id=%d waited=%s", userID, timeout)
 	}
 	return locked
@@ -398,14 +424,27 @@ func (r *Runner) StartWithinContext(waitCtx context.Context, userID int64) bool 
 // StartMailboxes schedules named folders across all accounts for a user. It is
 // used after operations that should refresh source/destination mailboxes.
 func (r *Runner) StartMailboxes(userID int64, mailboxes []string) bool {
+	return r.StartMailboxesWithinContext(nil, userID, mailboxes)
+}
+
+// StartMailboxesWithinContext is StartMailboxes bounded by a caller-supplied
+// wait context. A caller that starts several users in turn needs this: the
+// admission budget is per tenant, so without one budget over the whole call a
+// handler walking every user pays it once per stuck tenant, and a request that
+// nobody is waiting for any more keeps going through the rest of the list.
+// A nil context means the runner's own, which is the per-tenant budget alone.
+func (r *Runner) StartMailboxesWithinContext(waitCtx context.Context, userID int64, mailboxes []string) bool {
 	if r.context().Err() != nil {
+		return false
+	}
+	if waitCtx != nil && waitCtx.Err() != nil {
 		return false
 	}
 	mailboxes = uniqueMailboxes(mailboxes)
 	if len(mailboxes) == 0 {
 		return false
 	}
-	keys, ok := r.reserveMailboxes(userID, mailboxes)
+	keys, ok := r.reserveMailboxesWithinContext(waitCtx, userID, mailboxes)
 	if !ok {
 		return false
 	}
@@ -867,8 +906,12 @@ func (r *Runner) runMailboxes(userID int64, mailboxes []string) bool {
 // a broad user/mailbox key and also checks account-qualified keys, because this
 // job will sync the requested mailbox name across every account for the user.
 func (r *Runner) reserveMailboxes(userID int64, mailboxes []string) ([]string, bool) {
+	return r.reserveMailboxesWithinContext(nil, userID, mailboxes)
+}
+
+func (r *Runner) reserveMailboxesWithinContext(waitCtx context.Context, userID int64, mailboxes []string) ([]string, bool) {
 	keys := mailboxKeys(userID, mailboxes)
-	if !r.lockAfterExclusiveWriters(userID) {
+	if !r.lockAfterExclusiveWritersWithin(waitCtx, userID) {
 		return nil, false
 	}
 	defer r.mu.Unlock()

@@ -2605,3 +2605,59 @@ func TestForegroundBarrierIsForceReleasedAfterAGivenUpYield(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// The sender-stat refresh runs under a timeout, but that bounds its context,
+// not its goroutine: work that stops observing cancellation keeps going, and
+// the channel this waits on is closed only when the goroutine returns. The
+// queueing reserves are reached from HTTP handlers, so an unbounded wait here
+// is a request that never answers.
+func TestSenderStatsAdmissionIsBoundedToo(t *testing.T) {
+	runner := NewRunner(nil)
+	const userID = int64(5)
+
+	wedged := make(chan struct{})
+	runner.mu.Lock()
+	runner.senderStatsRunning[userID] = true
+	runner.senderStatsDone[userID] = wedged
+	runner.mu.Unlock()
+	t.Cleanup(func() { close(wedged) })
+
+	runner.barrierWaitOverride = 40 * time.Millisecond
+	start := time.Now()
+	if runner.lockAfterSenderStats(userID) {
+		runner.mu.Unlock()
+		t.Fatal("admission was granted while the sender-stat writer still held the tenant")
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("admission waited %s, which is not bounded by its budget", waited)
+	}
+}
+
+// The per-tenant budget is per tenant. A caller that walks every user in turn
+// needs one budget over the whole walk, or a handler pays five minutes per
+// stuck tenant long after whoever called it stopped listening.
+func TestStartMailboxesStopsWhenItsCallerIsGone(t *testing.T) {
+	runner := NewRunner(nil)
+	const userID = int64(6)
+
+	wedged := make(chan struct{})
+	runner.mu.Lock()
+	runner.foregroundRunning[userID] = 1
+	runner.foregroundDone[userID] = wedged
+	runner.mu.Unlock()
+	t.Cleanup(func() { close(wedged) })
+
+	// A budget far longer than this test would tolerate: the caller's context
+	// has to be what ends the wait, not the budget.
+	runner.barrierWaitOverride = time.Hour
+	callerCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if runner.StartMailboxesWithinContext(callerCtx, userID, []string{"INBOX"}) {
+		t.Fatal("mailboxes were started while the tenant was held")
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("the call waited %s, so it was not bounded by its caller", waited)
+	}
+}
