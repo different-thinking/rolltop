@@ -1020,9 +1020,10 @@ request is accepted, which is exactly the failure it is there to catch.
 The credentials are the `HOSTIM_API_TOKEN` secret plus the `HOSTIM_PROJECT` and
 `HOSTIM_APP` repository variables — variables rather than secrets because a job
 `if` can read `vars` and cannot read `secrets`. The condition is `or` over the
-two and the first step then demands all three: neither set is a fork and skips,
-one set is a misconfiguration and fails. Turning that `or` into an `and` gives a
-repository that lost a variable a green pipeline that silently stops deploying.
+two and the first step then demands all three: neither variable set is the fork
+case and skips, exactly one set is a misconfiguration and fails. Turning that
+`or` into an `and` gives a repository that lost a variable a green pipeline that
+silently stops deploying.
 
 The workflow-level `cancel-in-progress` is off wherever those variables are set,
 and that is not an oversight. Cancelling a run that is waiting on Hostim cancels
