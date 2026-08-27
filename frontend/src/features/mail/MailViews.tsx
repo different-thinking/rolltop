@@ -355,8 +355,11 @@ export function MailView({
     if (bootFolderSyncUserID === userID || !csrf) return;
     // Chrome may not have resolved the folder yet. Waiting keeps the one shot
     // for the folder the reader is actually on rather than spending it on the
-    // whole account.
-    if (!mailbox && mailboxID) return;
+    // whole account -- but only until the folder list arrives. A route naming a
+    // folder that is not in it (deleted since the link was made, or a chrome
+    // fetch that failed) would otherwise hold the shot for good and let the
+    // reader's next navigation spend it, which is the thing this must not do.
+    if (!mailbox && mailboxID && mailboxes.length === 0) return;
     // Spent on the folder the load landed on, before asking whether that folder
     // wants a sync. Skipping the spend as well would carry the shot forward to
     // whichever folder the reader opened next, which is a navigation, not a
@@ -374,7 +377,7 @@ export function MailView({
     return () => {
       cancelled = true;
     };
-  }, [userID, mailbox?.id, mailboxID, effectiveMode, csrf, addToast]);
+  }, [userID, mailbox?.id, mailboxID, mailboxes.length, effectiveMode, csrf, addToast]);
 
   // Route changes should feel immediate: clear the old page before the server
   // responds so the user is not looking at stale rows for another folder.
