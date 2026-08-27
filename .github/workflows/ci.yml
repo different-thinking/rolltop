@@ -1,6 +1,6 @@
 name: CI
 
-# Two-stage pipeline for `main` and tags.
+# Three-stage pipeline for `main` and tags: verify, deploy, release.
 #
 # `verify` covers what a merge commit carries that no pull request check ran.
 # That set is smaller than it looks: GitHub builds a pull request's checks from
@@ -30,6 +30,13 @@ name: CI
 # in this repository consumes a per-merge `latest` image: the README points
 # self-hosters at the upstream image, and deployments build the `Dockerfile`
 # from source. Publishing on every merge produced an image nobody pulled.
+#
+# `deploy` tells Hostim to rebuild the hosted instance, and runs only after
+# `verify` and only for `main`. It is a request plus a wait: the build itself
+# happens on Hostim, from this repository's `Dockerfile`, and the job fails if
+# the app does not come up. It is skipped entirely where the `HOSTIM_PROJECT`
+# and `HOSTIM_APP` repository variables are unset, so a fork inherits a green
+# pipeline rather than a red one.
 #
 # Pull requests are verified by `pr.yml`, which is gated on changed paths.
 
@@ -611,3 +618,93 @@ jobs:
           name: packaging-results-${{ steps.build-meta.outputs.version }}
           path: test-results
           if-no-files-found: ignore
+
+  deploy:
+    name: Deploy To Hostim
+    needs: verify
+    # `needs: verify` is the whole point of putting this in `ci.yml` rather than
+    # in a workflow of its own: a merge whose post-merge gate went red must not
+    # reach the running instance. `verify` skipping the Go suite is not a red
+    # result — that is the reviewed-merge case, where the pull request already
+    # ran it against this tree.
+    #
+    # Restricted to `main` because a Hostim rebuild takes no ref: it builds
+    # whatever branch the app is configured to track. Dispatching this workflow
+    # from a tag would therefore deploy `main`'s tip under a tag's name, so a
+    # tag build runs `release` and nothing else. Tagged images go to GHCR for
+    # self-hosters; the hosted instance follows `main`.
+    #
+    # The two `vars` are what makes a fork inert instead of red: without them
+    # there is no app to deploy to, and the job is skipped rather than failed.
+    # A missing token is the opposite case — the repository is configured to
+    # deploy and cannot — and fails loudly in the first step below.
+    if: >-
+      github.ref == 'refs/heads/main'
+      && vars.HOSTIM_PROJECT != ''
+      && vars.HOSTIM_APP != ''
+    runs-on: ubuntu-latest
+    # The action waits out a Kaniko build of this repository's `Dockerfile`,
+    # which is the slow kind: ~324 MB of plugin shared objects, and nothing is
+    # cached unless the builder was told to cache. `timeout` below bounds the
+    # wait itself; this bounds the job around it.
+    timeout-minutes: 35
+    # Nothing here touches the repository — no checkout, no package push. The
+    # runner still fetches the action itself with an empty token.
+    permissions: {}
+
+    # No job-level `concurrency` on purpose. The workflow-level group already
+    # cancels a superseded `main` run, and cancelling the older deploy is the
+    # behaviour we want: a rebuild always builds the branch tip, so the newer
+    # run's rebuild covers the older commit too.
+
+    steps:
+      # `secrets` is not available in a step's `if`, so the guard has to be a
+      # step that runs and exits, not a condition that skips one.
+      - name: Check Deploy Credentials
+        env:
+          HOSTIM_API_TOKEN: ${{ secrets.HOSTIM_API_TOKEN }}
+        run: |
+          if [ -z "$HOSTIM_API_TOKEN" ]; then
+            echo "HOSTIM_PROJECT and HOSTIM_APP are set, but the HOSTIM_API_TOKEN secret is empty." >&2
+            echo "Add it under Settings -> Secrets and variables -> Actions -> Secrets." >&2
+            exit 1
+          fi
+
+      # `action: rebuild` because the hosted app is a Git deployment: Hostim
+      # builds the `Dockerfile` from source itself. It is deliberately not an
+      # `image:` deploy — `release` publishes to GHCR only for `v*` tags, so
+      # there is no per-merge image for this job to point at.
+      #
+      # `wait: true` is the action's default and is spelled out because the
+      # failure signal depends on it: without it the job goes green the moment
+      # Hostim accepts the request, and a build that fails or an app that never
+      # becomes healthy would be reported here as a successful deployment.
+      - name: Rebuild App
+        id: deploy
+        uses: hostimdev/action@v2
+        with:
+          api_token: ${{ secrets.HOSTIM_API_TOKEN }}
+          project: ${{ vars.HOSTIM_PROJECT }}
+          app: ${{ vars.HOSTIM_APP }}
+          action: rebuild
+          wait: true
+          timeout: 1800
+
+      - name: Deployment Summary
+        if: always()
+        env:
+          APP: ${{ vars.HOSTIM_APP }}
+          PROJECT: ${{ vars.HOSTIM_PROJECT }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          {
+            echo "### Hostim Deployment"
+            echo
+            echo "App: \`${APP}\` in project \`${PROJECT}\`"
+            echo "Commit: \`${GITHUB_SHA}\`"
+            case "$OUTCOME" in
+              success) echo "Status: live" ;;
+              "")      echo "Status: not attempted; the credential check failed" ;;
+              *)       echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"

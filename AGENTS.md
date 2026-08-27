@@ -967,7 +967,7 @@ Android (unit tests and lint), and a Docker build when the image definition
 changes. Keep the path filters in that workflow's `changes` job in sync when
 adding a new top-level area.
 
-`.github/workflows/ci.yml` has two jobs. `verify` runs on every push to `main`,
+`.github/workflows/ci.yml` has three jobs. `verify` runs on every push to `main`,
 and its `Classify Push` step decides whether the Go suite has to run at all. A
 push straight to `main` (a one-parent commit), a change to a path the `pr.yml`
 `go` filter misses, or a push it cannot diff runs the full suite: it builds the
@@ -1001,6 +1001,18 @@ binaries, godoc — and runs only for `v*` tags and manual dispatch. Deployments
 build the `Dockerfile` from source and self-hosters pull the upstream image, so
 nothing consumes a per-merge `latest`. Do not move packaging back onto `main`
 without a consumer that needs it.
+
+`deploy` asks Hostim to rebuild the hosted instance and waits for it, and runs
+after `verify` for `main` only. Keep those two conditions: `needs: verify` is
+what stops a red merge gate from reaching the running instance, and the `main`
+restriction exists because a Hostim rebuild takes no ref — it builds the branch
+the app tracks, so dispatching the workflow from a tag would deploy `main`'s tip
+under a tag's name. Do not drop `wait: true` either; without it the job reports
+success as soon as the request is accepted, which is exactly the failure it is
+there to catch. The credentials are the `HOSTIM_API_TOKEN` secret plus the
+`HOSTIM_PROJECT` and `HOSTIM_APP` repository variables — variables rather than
+secrets because a job `if` can read `vars` and cannot read `secrets`, and that
+condition is what makes the job skip in a fork instead of failing in it.
 
 Two ordering constraints in `release` must survive any refactor: the Android
 step writes `frontend/public/android/{rolltop.apk,latest.json}`, which the
