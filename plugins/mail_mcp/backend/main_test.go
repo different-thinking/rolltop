@@ -427,3 +427,62 @@ func TestListMessagesPaginatesQueryResultsWithoutLooping(t *testing.T) {
 		}
 	}
 }
+
+// recordingStartHost captures what Start registers, so a test can ask what the
+// host will enforce on each route rather than what the handler happens to do.
+type recordingStartHost struct {
+	plugins.BackendStartHost
+	protected []plugins.ProtectedAPIRoute
+	public    []plugins.PublicAPIRoute
+}
+
+type noopRouteHandle struct{}
+
+func (noopRouteHandle) Unregister() {}
+
+func (h *recordingStartHost) RegisterProtectedAPI(_ string, route plugins.ProtectedAPIRoute) (plugins.ProtectedAPIRouteHandle, error) {
+	h.protected = append(h.protected, route)
+	return noopRouteHandle{}, nil
+}
+
+func (h *recordingStartHost) RegisterPublicAPI(_ string, route plugins.PublicAPIRoute) (plugins.ProtectedAPIRouteHandle, error) {
+	h.public = append(h.public, route)
+	return noopRouteHandle{}, nil
+}
+
+// The consent page is plain HTML served to a browser: its form POST carries no
+// CSRF header, and a plugin has no way to mint the token a hidden field would
+// need. So the host's default-deny CSRF check would answer 403 to every client
+// authorization -- a break nothing else here would catch, because the tests
+// around p.authorize call it directly and never pass through that gate.
+//
+// The consent token is what the opt-out stands on: an HMAC under the master key
+// over the user and the exact query, ten minutes old at most, and readable only
+// from the page itself.
+func TestConsentRouteOptsOutOfTheHostCSRFCheck(t *testing.T) {
+	host := &recordingStartHost{}
+	plugin := &mailMCPPlugin{}
+	if err := plugin.Start(host); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(plugin.unregister)
+
+	wantPath := apiPath + "/oauth/authorize"
+	var found *plugins.ProtectedAPIRoute
+	for i := range host.protected {
+		route := host.protected[i]
+		if route.Path == wantPath {
+			found = &route
+			continue
+		}
+		if route.SkipCSRFCheck {
+			t.Fatalf("route %q opts out of the CSRF check with no reason recorded in this test", route.Path)
+		}
+	}
+	if found == nil {
+		t.Fatalf("the consent route %q is no longer registered", wantPath)
+	}
+	if !found.SkipCSRFCheck {
+		t.Fatalf("%q must set SkipCSRFCheck: its consent form sends no CSRF token, so the host would refuse every authorization", wantPath)
+	}
+}
