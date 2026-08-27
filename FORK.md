@@ -153,8 +153,8 @@ Dazu:
   Zeile für dieselbe Zustellung. Ausgeblendet wird nur, wenn genau ein Konto
   tatsächlich adressiert war; bei Bcc oder Verteilerlisten bleibt jede Kopie
   sichtbar, weil der Spiegel dann nicht sagen kann, welche das Original ist.
-  Einstellungen zeigt die Zahl pro Konto, kann nachträglich suchen und die
-  Kopien in den Papierkorb des einsammelnden Kontos verschieben.
+  Die Einstellungsseite zeigt die Zahl pro Konto, kann nachträglich suchen und
+  die Kopien in den Papierkorb des einsammelnden Kontos verschieben.
 - **`Ältere archivieren`** räumt eine ganze Liste vor einem gewählten Tag in die
   Archivordner der jeweiligen Konten — in SQL, in wiederholten Durchläufen, und
   ohne die eigene Post anzufassen.
@@ -185,8 +185,8 @@ geschrieben:
   trotzdem — nur die Weiterleitung unterbleibt, statt Jahre alter Post an einen
   Dritten zu schicken.
 - **Die Kopie, die der Anbieter von jeder Weiterleitung behält**, wird als eigene
-  ausgehende Post erkannt und aus den Listen gehalten. Ohne das fütterte eine
-  Weiterleitungsregel sich selbst.
+  ausgehende Post erkannt und aus den Listen gehalten. Ohne das griff eine
+  Weiterleitungsregel wieder auf die Kopie zu, die sie selbst erzeugt hatte.
 - **Ein Audit über 30 Tage**, das drei Ausgänge auseinanderhält — schon gelesen,
   eingereiht (lokal gelesen, `\Seen` wartet noch auf eine beweisbare
   Mailbox-Generation), fehlgeschlagen — und eine Seite, die beide Hälften zeigt:
@@ -225,11 +225,12 @@ Ein eigener Analyse- und Umsetzungsdurchgang
   gedeckelten Backoff.
 - **Jeder Mailbox-Durchgang ist zeitbegrenzt** und hält an einer
   Nachrichtengrenze an, committet, was er gespiegelt hat, und wird sofort neu
-  eingeplant. Jeder pausierte Durchgang verdoppelt den nächsten bis zehn
-  Minuten, damit ein Backfill seine Zeit mit Holen statt mit Neuplanen verbringt.
+  eingeplant. Jeder pausierte Durchgang verdoppelt das Zeitbudget des nächsten,
+  bis zu zehn Minuten, damit ein Backfill seine Zeit mit Holen statt mit
+  Neuplanen verbringt.
 - **Speicherbudget pro Durchgang.** Fetch-Batches werden aus den Größen geplant,
   die der Server *vor* den Bodies meldet — begrenzt in Bytes, nicht nur in
-  Nachrichten. Ein paar sehr große Mails in einem Ordner entscheiden damit nicht
+  Nachrichten. Ein paar sehr große Mails in einem Ordner bestimmen damit nicht
   mehr, wie viel Speicher der Prozess braucht.
 - **`ROLLTOP_MEMORY_LIMIT`** setzt dem Go-Heap eine weiche Decke, standardmäßig
   80 % des Container-Limits, und der Start sagt, welcher Wert gilt. Er warnt
@@ -237,12 +238,12 @@ Ein eigener Analyse- und Umsetzungsdurchgang
   der Fall, in dem jeder Index-Commit zu Major Faults wird und wie ein hängender
   Writer aussieht.
 - **Ein Ordner voll Post wird mit einem IMAP-Befehl verschoben** statt mit einem
-  pro Nachricht, und das Melden der Arbeit kostet nicht mehr pro Nachricht.
+  pro Nachricht, und das Melden der Arbeit fällt nicht mehr pro Nachricht an.
 - **Verschieben, das ankommt:** Ergebnisse werden pro Nachricht *und* pro Lauf
   festgeschrieben, ein Umzug scheitert nicht mehr an Post, die der Quellordner
   gar nicht mehr hat, ein Ordner, den ein Konto nicht besitzt, wird übersprungen
-  statt den ganzen Sync zu kippen, und ein abbrechendes „Papierkorb leeren"
-  macht weiter.
+  statt den ganzen Sync zu kippen, und „Papierkorb leeren" macht weiter,
+  wenn die Verbindung abbricht.
 - **Ordner, die für den Flag-Sync zu groß sind**, werden trotzdem abgeglichen.
 - Kaputte Bytes und beschädigte Anzeigenamen werden repariert, bevor sie in die
   Datenbank gehen.
@@ -264,7 +265,7 @@ Ein eigener Analyse- und Umsetzungsdurchgang
   Konto seinen Umzug nicht schafft, gibt es seine Zeilen zurück, während der Rest
   abgelegt bleibt.
 - **`Send & archive`**: `Ctrl`/`Cmd`+`Enter` auf eine Antwort ist Senden,
-  zurückgehen, archivieren in einem Schritt.
+  Zurückgehen und Archivieren in einem Schritt.
 - **Der Antwort-Editor** öffnet sofort, ist auf 60 % der Fensterhöhe begrenzt und
   scrollt sich selbst in Sicht.
 - **Kategorie-Pille auf der Kopfzeile** — jede Nachricht sagt, wo sie einsortiert
@@ -274,9 +275,10 @@ Ein eigener Analyse- und Umsetzungsdurchgang
 - **Sortierung nach Datum** in beide Richtungen in jeder Liste, pro Nutzer
   gespeichert.
 - **Themes sind ein Token-Tausch** statt einer Liste von Patches pro Komponente,
-  das System-Theme wird befolgt und das erste Bild schon darin gezeichnet, und
-  HTML-Post darf im Dunkelmodus die Farben ihres Absenders behalten. Eine
-  CI-Prüfung hält die Paletten davon ab, wieder auseinanderzulaufen.
+  das System-Theme wird befolgt und schon der erste Seitenaufbau darin
+  gezeichnet, und HTML-Post darf im Dunkelmodus die Farben ihres Absenders
+  behalten. Eine CI-Prüfung hält die Paletten davon ab, wieder
+  auseinanderzulaufen.
 - **`Syncs & Tasks`** im Kontomenü listet alles, was im Hintergrund für den
   angemeldeten Nutzer läuft, mit der Zahl der laufenden Durchgänge — ein
   hängender Sync ist sichtbar, ohne die Ansicht zu öffnen.
@@ -346,7 +348,7 @@ daraus mitbringt, teils zeitgleich und unabhängig vom Original entstanden:
 
 - **CI ist geteilt.** `pr.yml` bestimmt aus den geänderten Pfaden, welche Jobs
   überhaupt laufen müssen — Go, Frontend, Android, Docker —; ein reiner
-  Dokumentations-PR zahlt nur zwei Koordinationsjobs. `ci.yml` ist das Tor nach
+  Dokumentations-PR kostet nur zwei Koordinationsjobs. `ci.yml` ist das Tor nach
   dem Merge und die Paketierung, letztere an `v*`-Tags gebunden statt an jeden
   Merge.
 - **`go vet` als Tor**, plus Formatprüfung, `-buildmode=plugin`-Linktest für
@@ -355,9 +357,10 @@ daraus mitbringt, teils zeitgleich und unabhängig vom Original entstanden:
   nicht vorhanden.
 - **282 statt 150 Go-Testdateien**, darunter Nachweise für Mandantentrennung auf
   den Listenrouten und Tests, die unter dem Race-Detector laufen.
-- **Der Image-Build wurde deutlich billiger**: Layer-Reihenfolge, parallele
-  Builds nach Speicher bemessen, der Go-Schritt in einem Stück mit seinen Caches
-  verworfen, Phosphor-Icons aus den Plugin-Bundles heraus.
+- **Der Image-Build wurde deutlich schneller und sparsamer**:
+  Layer-Reihenfolge, parallele Builds nach Speicher bemessen, der Go-Schritt
+  in einem Stück gebaut und mit seinen Caches verworfen, Phosphor-Icons aus
+  den Plugin-Bundles heraus.
 - **Deployment nach Hostim** aus dem Merge-Tor heraus, das auf Build und Rollout
   wartet — ein fehlgeschlagenes Deployment ist ein roter Workflow-Lauf. Ohne
   gesetzte Variablen wird der Job übersprungen, damit ein Fork eine grüne
@@ -414,7 +417,8 @@ das ist ein anderer Ansatz auf dasselbe Problem, aber nicht dieselbe Grenze.
 Die vollständige Anleitung steht in [`README.md`](README.md); zwei Dinge sind
 beim Fork zu beachten:
 
-1. **`compose.yml` zeigt auf das Image des Originals** (`ghcr.io/grahamsz/rolltop:latest`).
+1. **`compose.yml` zeigt auf das Image des Originals**
+   (`ghcr.io/grahamsz/rolltop:latest`).
    Das enthält diesen Code nicht — und da das Original auf SQLite läuft, passt es
    auch nicht zu der PostgreSQL-Konfiguration daneben. Entweder das Image aus
    diesem Repository bauen (`docker build -t rolltop:local .`) und den Eintrag
