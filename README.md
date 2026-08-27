@@ -1051,28 +1051,41 @@ Pinning a deployment to a commit would mean an `image:` deploy of a per-commit
 tag, and therefore an image published per merge, which this repository
 deliberately does not do.
 
-Three repository settings drive it, under **Settings → Secrets and variables →
-Actions**:
+Three repository **secrets** drive it, under **Settings → Secrets and variables
+→ Actions → Secrets**:
 
-| Name | Kind | Value |
-| --- | --- | --- |
-| `HOSTIM_API_TOKEN` | Secret | An API token from the Hostim dashboard, **Account Settings → API Tokens** |
-| `HOSTIM_PROJECT` | Variable | The project ID, e.g. `hpr-123456` |
-| `HOSTIM_APP` | Variable | The app name within that project |
+| Name | Value |
+| --- | --- |
+| `HOSTIM_API_TOKEN` | An API token from the Hostim dashboard, **Account Settings → API Tokens** |
+| `HOSTIM_PROJECT` | The project ID, e.g. `hpr-123456` |
+| `HOSTIM_APP` | The app name within that project |
 
-Only the token is a secret; the project ID and app name are variables so that
-the workflow can read them in a condition, which it cannot do with secrets.
-With **neither** variable set the job is skipped — a fork gets a green pipeline
-instead of a deployment failure it could not fix. With **either** of them set
-the job runs and insists on the whole set: a missing token, or a project ID
-without an app name, fails the run with a message naming what is missing. A
-half-configured repository must not go quietly green while its deploys stop,
-which is why the condition is an `or` and the check is a step.
+All three are secrets, and none of them is a repository *variable*. That tab is
+the one thing to get right: a value under **Variables** is invisible to this
+workflow, and the job will tell you so rather than deploy.
 
-Deploys are serialised rather than cancelled. The workflow's concurrency group
-keeps its `cancel-in-progress` only for repositories that do not deploy:
-cancelling a run that is waiting on Hostim stops the waiting and nothing else —
-the requested build keeps going, rolls out unwatched, and the next run's rebuild
-lands on top of it. So a `main` run here waits for its predecessor instead.
-Bursts do not pile up: GitHub keeps at most one run pending per group, so a rush
-of merges collapses to the one in flight plus the newest.
+Because they are secrets, the job cannot be gated on them — a job condition can
+read `vars` and cannot read `secrets` — so it runs on every push to `main` and
+decides in its first step:
+
+- **None of the three set** — the step says so and the job ends green. A fork
+  inherits a working pipeline instead of a deployment failure it could not fix.
+- **All three set** — the rebuild is requested and waited on.
+- **Some but not all** — the run fails with a message naming what is missing. If
+  a missing value is present as a repository variable of the same name, the
+  message says that too, because from the outside that is indistinguishable from
+  a fork. A half-configured repository must not go quietly green while its
+  deploys stop.
+
+The step summary names no app and no project. Both are secrets, and a summary is
+not the place to test whether redaction holds.
+
+Deploys are serialised rather than cancelled: the workflow's concurrency group
+sets `cancel-in-progress: false` throughout. Cancelling a run that is waiting on
+Hostim stops the waiting and nothing else — the requested build keeps going,
+rolls out unwatched, and the next run's rebuild lands on top of it. So a `main`
+run waits for its predecessor instead. Bursts do not pile up: GitHub keeps at
+most one run pending per group, so a rush of merges collapses to the one in
+flight plus the newest. A fork pays a little for this, queueing `main` runs it
+would rather cancel, because the credentials that would tell the two apart are
+secrets and `concurrency` cannot read those either.

@@ -34,10 +34,13 @@ name: CI
 # `deploy` tells Hostim to rebuild the hosted instance, and runs only after
 # `verify` and only for `main`. It is a request plus a wait: the build itself
 # happens on Hostim, from this repository's `Dockerfile`, and the job fails if
-# the app does not come up. Where neither `HOSTIM_PROJECT` nor `HOSTIM_APP` is
-# set it is skipped entirely, so a fork inherits a green pipeline rather than a
-# red one — but a repository that set one of them and not the other is a
-# misconfiguration, not a fork, and fails.
+# the app does not come up. Its three credentials are all secrets, so the job
+# cannot be gated on them — a job `if` reads `vars` and not `secrets` — and it
+# starts on every `main` push instead, reporting in its first step which of the
+# three states it is in: none set is a fork and exits green, all three set
+# rebuilds, and some-but-not-all is a misconfiguration and fails naming what is
+# absent. Running a job that may have nothing to do buys the guarantee that
+# every merge leaves a readable answer to "did this deploy?" behind.
 #
 # Pull requests are verified by `pr.yml`, which is gated on changed paths.
 
@@ -51,18 +54,22 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Superseded `main` builds are pointless and tag builds must always finish —
-  # but once `deploy` is configured, a `main` run is not only a build. Cancelling
-  # it stops the job's wait and nothing else: the rebuild it already asked Hostim
-  # for keeps running, goes live unwatched, and the successor's rebuild lands on
-  # top of a build in flight. So a repository that deploys queues its `main` runs
-  # instead of cancelling them. GitHub keeps at most one run pending per group,
-  # so a burst of merges still collapses to "the one in flight, then the newest" —
-  # what cancelling was for, without abandoning a deploy mid-rollout.
-  cancel-in-progress: >-
-    ${{ github.ref == 'refs/heads/main'
-    && vars.HOSTIM_PROJECT == ''
-    && vars.HOSTIM_APP == '' }}
+  # Never cancel. Tag builds must always finish, and a `main` run is not only a
+  # build once `deploy` is configured: cancelling it stops the job's wait and
+  # nothing else — the rebuild it already asked Hostim for keeps running, goes
+  # live unwatched, and the successor's rebuild lands on top of a build in
+  # flight. Runs on `main` therefore queue. GitHub keeps at most one run pending
+  # per group, so a burst of merges still collapses to "the one in flight, then
+  # the newest", which is what cancelling was for.
+  #
+  # This used to hold only where the Hostim credentials were absent, so a fork
+  # kept cancelling its superseded `main` builds. That condition read `vars`, and
+  # the credentials are secrets now (see `deploy`); `concurrency` cannot read
+  # `secrets` any more than a job `if` can, so the distinction is gone. A fork
+  # pays for it by queueing `main` runs it would rather have cancelled — a job
+  # that exits in seconds when nothing is configured, against the alternative of
+  # abandoning a rollout mid-flight here.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -647,14 +654,18 @@ jobs:
     # and nothing else. Tagged images go to GHCR for self-hosters; the hosted
     # instance follows `main`.
     #
-    # `||`, not `&&`: either variable set means somebody meant to deploy here, and
-    # the step below then insists on the full set. With `&&` a repository that lost
-    # one of the two would skip its deploys silently and stay green — the failure
-    # mode a missing token is deliberately not allowed to have. Neither set is the
-    # fork case, and stays a skip.
-    if: >-
-      github.ref == 'refs/heads/main'
-      && (vars.HOSTIM_PROJECT != '' || vars.HOSTIM_APP != '')
+    # The branch is the whole condition, and that is the deliberate part. All
+    # three credentials are secrets, and a job `if` cannot read `secrets` — so
+    # whether this repository deploys at all is decided by the first step below,
+    # not here. The job therefore starts on every `main` push and costs a runner
+    # for a few seconds where nothing is configured. That is the price of the
+    # failure mode it buys out: gating the job on a value the condition could
+    # read meant a repository whose credentials were not where the condition
+    # looked skipped the job entirely, and a skipped job leaves nothing behind —
+    # no log, no summary, a green tick on a merge that never deployed. It went
+    # unnoticed across three merges. A job that always runs and reports what it
+    # found cannot fail that way.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # The action waits out a Kaniko build of this repository's `Dockerfile`,
     # which is the slow kind: ~324 MB of plugin shared objects, and nothing is
@@ -670,28 +681,79 @@ jobs:
     # in. Serialisation lives in the workflow-level block at the top of this file.
 
     steps:
-      # The job condition above establishes only that somebody configured a
-      # deploy here; this establishes that they finished. `secrets` is not
-      # available in a step's `if`, so the token half has to be a step that runs
-      # and exits rather than a condition that skips one — and the variables are
-      # checked here too, so a half-set pair is one message instead of a
-      # confusing failure inside the action.
+      # Three states, and the difference between them is the point of this step.
+      #
+      # Nothing set anywhere is a fork: it reports that and exits green, so a
+      # fork inherits a working pipeline rather than a failure it cannot fix.
+      #
+      # All three set is a deploying repository and the rebuild goes ahead.
+      #
+      # Some but not all is a misconfiguration, and it fails loudly naming what
+      # is absent. This is the case that has to be loud: a half-configured
+      # repository going quietly green while its deploys stop is the failure
+      # this whole step exists to prevent.
+      #
+      # `vars` of the same names are read here only to diagnose the fourth
+      # possibility — credentials set, but under the Variables tab instead of
+      # Secrets. That is not a hypothetical: it is what happened, and from the
+      # outside it is indistinguishable from a fork. Naming it costs three
+      # `env` lines and turns a silent skip into an error that says where to
+      # look. Keep it even if the tabs are never confused again.
       - name: Check Deploy Configuration
+        id: config
         env:
           HOSTIM_API_TOKEN: ${{ secrets.HOSTIM_API_TOKEN }}
-          HOSTIM_PROJECT: ${{ vars.HOSTIM_PROJECT }}
-          HOSTIM_APP: ${{ vars.HOSTIM_APP }}
+          HOSTIM_PROJECT: ${{ secrets.HOSTIM_PROJECT }}
+          HOSTIM_APP: ${{ secrets.HOSTIM_APP }}
+          HOSTIM_API_TOKEN_VAR: ${{ vars.HOSTIM_API_TOKEN }}
+          HOSTIM_PROJECT_VAR: ${{ vars.HOSTIM_PROJECT }}
+          HOSTIM_APP_VAR: ${{ vars.HOSTIM_APP }}
         run: |
+          present=""
           missing=""
-          [ -n "$HOSTIM_PROJECT" ] || missing="$missing HOSTIM_PROJECT (variable)"
-          [ -n "$HOSTIM_APP" ] || missing="$missing HOSTIM_APP (variable)"
-          [ -n "$HOSTIM_API_TOKEN" ] || missing="$missing HOSTIM_API_TOKEN (secret)"
+          misplaced=""
+
+          # $1 name, $2 value as a secret, $3 value as a repository variable.
+          classify() {
+            if [ -n "$2" ]; then
+              present="$present $1"
+            else
+              missing="$missing $1"
+              if [ -n "$3" ]; then
+                misplaced="$misplaced $1"
+              fi
+            fi
+          }
+
+          classify HOSTIM_API_TOKEN "$HOSTIM_API_TOKEN" "$HOSTIM_API_TOKEN_VAR"
+          classify HOSTIM_PROJECT "$HOSTIM_PROJECT" "$HOSTIM_PROJECT_VAR"
+          classify HOSTIM_APP "$HOSTIM_APP" "$HOSTIM_APP_VAR"
+
+          # Nothing under either tab: a fork, and not an error.
+          if [ -z "$present" ] && [ -z "$misplaced" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "No Hostim credentials are set in this repository."
+            echo "Nothing was sent to Hostim, and that is not a failure here:"
+            echo "a repository without credentials is not expected to deploy."
+            exit 0
+          fi
+
           if [ -n "$missing" ]; then
             echo "This repository is configured to deploy to Hostim but is missing:${missing}." >&2
-            echo "Set them under Settings -> Secrets and variables -> Actions." >&2
-            echo "To stop deploying from this repository, clear HOSTIM_PROJECT and HOSTIM_APP together." >&2
+            if [ -n "$misplaced" ]; then
+              echo >&2
+              echo "Set as repository variables rather than secrets:${misplaced}." >&2
+              echo "This workflow reads all three from secrets. Create them under" >&2
+              echo "the Secrets tab, then delete the variables of the same names." >&2
+            fi
+            echo >&2
+            echo "Set them under Settings -> Secrets and variables -> Actions -> Secrets." >&2
+            echo "To stop deploying from this repository, clear all three together." >&2
             exit 1
           fi
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          echo "All three Hostim credentials are present; requesting a rebuild."
 
       # `action: rebuild` because the hosted app is a Git deployment: Hostim
       # builds the `Dockerfile` from source itself. It is deliberately not an
@@ -704,40 +766,53 @@ jobs:
       # becomes healthy would be reported here as a successful deployment.
       - name: Rebuild App
         id: deploy
+        if: steps.config.outputs.configured == 'true'
         uses: hostimdev/action@v2
         with:
           api_token: ${{ secrets.HOSTIM_API_TOKEN }}
-          project: ${{ vars.HOSTIM_PROJECT }}
-          app: ${{ vars.HOSTIM_APP }}
+          project: ${{ secrets.HOSTIM_PROJECT }}
+          app: ${{ secrets.HOSTIM_APP }}
           action: rebuild
           wait: true
           timeout: 1800
 
+      # Deliberately names no app and no project. Both are secrets now, and a
+      # secret echoed into a summary is either redacted to `***` or, worse, is
+      # not — so the summary says what happened and leaves identifying the
+      # target to whoever holds the credentials.
       - name: Deployment Summary
         if: always()
         env:
-          APP: ${{ vars.HOSTIM_APP }}
-          PROJECT: ${{ vars.HOSTIM_PROJECT }}
+          CONFIGURED: ${{ steps.config.outputs.configured }}
           OUTCOME: ${{ steps.deploy.outcome }}
           JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "### Hostim Deployment"
             echo
-            echo "App: \`${APP}\` in project \`${PROJECT}\`"
-            # Deliberately "requested for", not "deployed": the rebuild carries no
-            # ref, so Hostim builds whatever `main` points at when it checks out.
-            # That is this commit unless another merge landed in between.
-            echo "Requested for: \`${GITHUB_SHA}\` (Hostim builds the tip of \`main\` at checkout time)"
-            case "$OUTCOME" in
-              success)   echo "Status: live" ;;
-              cancelled) echo "Status: the wait was cancelled; the Hostim build it asked for is still running" ;;
-              failure)   echo "Status: failed — the app was not confirmed live" ;;
-              "")        if [ "$JOB_STATUS" = "cancelled" ]; then
-                           echo "Status: not attempted; the run was cancelled before the deploy started"
-                         else
-                           echo "Status: not attempted; the configuration check above failed"
-                         fi ;;
-              *)         echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
+            case "$CONFIGURED" in
+              false)
+                echo "Status: no Hostim credentials are set here; nothing was sent"
+                ;;
+              true)
+                # Deliberately "requested for", not "deployed": the rebuild carries no
+                # ref, so Hostim builds whatever `main` points at when it checks out.
+                # That is this commit unless another merge landed in between.
+                echo "Requested for: \`${GITHUB_SHA}\` (Hostim builds the tip of \`main\` at checkout time)"
+                echo
+                case "$OUTCOME" in
+                  success)   echo "Status: live" ;;
+                  cancelled) echo "Status: the wait was cancelled; the Hostim build it asked for is still running" ;;
+                  failure)   echo "Status: failed — the app was not confirmed live" ;;
+                  *)         echo "Status: ${OUTCOME} — the app was not confirmed live" ;;
+                esac
+                ;;
+              *)
+                if [ "$JOB_STATUS" = "cancelled" ]; then
+                  echo "Status: not attempted; the run was cancelled before the configuration was checked"
+                else
+                  echo "Status: not attempted; the configuration check above failed"
+                fi
+                ;;
             esac
           } >> "$GITHUB_STEP_SUMMARY"
