@@ -237,15 +237,25 @@
     flex: 1 1 100%;
   }
 
+  // The toolbar travels with the page while a selection is live, so what it
+  // takes here it takes from the mail for as long as anything is selected. Two
+  // columns of labelled buttons wanted three rows of a phone screen; the icons
+  // carry the commands in one row instead, and the labels stay for screen
+  // readers in each button's title, the way the sort toggle below does.
   .selection-actions {
     width: 100%;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    justify-content: space-between;
     gap: 6px;
 
     button {
+      flex: 0 1 auto;
       min-width: 0;
-      padding-inline: 6px;
+      padding-inline: 8px;
+    }
+
+    button span {
+      display: none;
     }
   }
 
@@ -258,6 +268,22 @@
   // the subject into a column of wrapped words.
   .thread-head {
     flex-wrap: wrap;
+  }
+
+  // That header is sticky, so every pixel of it covers the message for as long
+  // as the conversation is open. A 25px display face wraps a real subject into
+  // three lines at this width, which with the toolbar row underneath took most
+  // of a phone screen; a reading size holds the same subject in two, and the
+  // clamp is what keeps the strip's height bounded rather than up to the
+  // subject.
+  .thread-head .thread-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    font-size: 17px;
+    line-height: 1.25;
   }
 
   .thread-head-actions {

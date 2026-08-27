@@ -8,9 +8,13 @@
 // and Delete leave with it: reaching them meant scrolling the whole message
 // back. The header travels under the 64px top bar instead, the way the list's
 // selection toolbar does, and carries that bar's surface so the two read as one
-// strip. Its ground has to be opaque - the message passes underneath it - and
-// the padding that gives the subject air is taken back out of .content-head's
-// margin, so the header sits where it always did while the page is at rest.
+// strip. Its ground has to be opaque, because the message passes underneath it.
+//
+// The padding is what gives the subject air once the strip is travelling, and
+// the margins hand every pixel of it back: -8px above and 4px of .content-head's
+// 14px below, so the subject and the conversation under it stay exactly where
+// they were while the page is at rest. The negative margin only moves where the
+// strip's ground starts, never the subject.
 .thread-head {
   position: sticky;
   top: 64px;
@@ -18,6 +22,7 @@
   align-items: flex-start;
   gap: 8px;
   padding: 8px 0 10px;
+  margin-top: -8px;
   margin-bottom: 4px;
   background: var(--surface);
   box-shadow: 0 6px 12px -10px color-mix(in srgb, var(--text) 55%, transparent);

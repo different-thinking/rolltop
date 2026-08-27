@@ -289,9 +289,19 @@
 .message-row {
   // j/k scroll a row into view, and "nearest" counts a row hidden behind
   // sticky chrome as already visible. The margin box reaches up past the top
-  // bar and past the selection toolbar when it is up, so the row the keyboard
-  // just moved to lands below both of them instead of underneath them.
-  scroll-margin-top: calc(64px + var(--selection-bar-height, 0px));
+  // bar, so the row the keyboard just moved to lands below it rather than
+  // underneath it.
+  scroll-margin-top: 64px;
+
+  // The selection toolbar joins the top bar only where `overflow: clip` let
+  // the list card give up the scrollport it used to claim (see
+  // .message-list-pane). Where the engine falls back to `hidden` the toolbar
+  // leaves with the list, and room reserved for it would send every jump 48px
+  // or more past the row it was aiming at.
+  @supports (overflow: clip) {
+    scroll-margin-top: calc(64px + var(--selection-bar-height, 0px));
+  }
+
   position: relative;
   display: grid;
   grid-template-columns: 22px 40px minmax(140px, 220px) minmax(0, 1fr) max-content;
