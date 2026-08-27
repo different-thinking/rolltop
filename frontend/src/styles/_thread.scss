@@ -258,6 +258,9 @@
 // its anonymous items, so "Invoices & Contracts" on a narrow screen would be
 // cut mid-character with no ellipsis to show for it.
 .message-category-pill-label {
+  // A flex item's min-width is auto, which floors it at its own content and
+  // would keep the label from ever shrinking far enough to ellipsise.
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

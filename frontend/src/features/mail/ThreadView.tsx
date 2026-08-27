@@ -386,6 +386,11 @@ function MessageCategoryPill({
   category?: string;
   categories: MailCategorySummary[];
 }) {
+  // With no category registry in the chrome payload - an older server, or a
+  // bootstrap that arrived without one - this frontend knows nothing about
+  // categories at all, and neither a bare stored name nor "Not sorted yet"
+  // would be an honest thing to say about a message. It says nothing instead.
+  if (categories.length === 0) return null;
   const display = messageCategoryDisplay(category, categories);
   // Classification runs after a message is stored, so a message with no
   // category yet says so rather than leaving the line silent: an empty slot
