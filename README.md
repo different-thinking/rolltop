@@ -1,10 +1,51 @@
 # rolltop
 
-> **This is a fork of [grahamsz/rolltop](https://github.com/grahamsz/rolltop).**
-> What it changes, improves and adds is described in **[FORK.md](FORK.md)** (in German).
-> Everything below is the project's own documentation and applies to this fork.
+> **Fork von [grahamsz/rolltop](https://github.com/grahamsz/rolltop)** — 488 Commits
+> seit dem 4. August 2026. Was sich geändert hat, steht direkt hier unter
+> [Über diesen Fork](#über-diesen-fork); ausführlich in **[FORK.md](FORK.md)**.
+> *This is a fork; the documentation below is the project's own and applies to it.*
 
 rolltop is a Go app that mirrors multiple IMAP inboxes per local user into storage you run, for search, viewing, composing, and mailbox moves. It needs a PostgreSQL database beside it; the compose file below runs both. Production mail data stays in the user's own instance. Project site: https://rolltop.app, coming soon. Contact: graham@rolltop.app.
+
+## Über diesen Fork
+
+Gmail wird zum Jahresende 2026 eingestellt, und damit fällt der Ort weg, an dem
+bei mir mehrere Adressen zusammengelaufen sind — samt Kontakten, Kalender und
+einer Ablage, die die Post sortiert hat, bevor ich sie gesehen habe. Rolltop war
+der beste Ausgangspunkt, den ich dafür gefunden habe. Dieser Fork ergänzt das,
+was Gmail über einen Mail-Client hinaus ausgemacht hat, und den Unterbau, den ein
+gewachsenes Postfach auf einem Hoster braucht.
+
+Die Unterschiede zum Original in Kürze:
+
+| Bereich | Was hier anders ist |
+| --- | --- |
+| **Datenbank** | PostgreSQL statt SQLite. Eine Datenbank für die Installation, jede Zeile über `user_id` getrennt — weil SQLite auf einem netzwerkgebundenen Volume irgendwann `database disk image is malformed` sagt. Dazu Preflight, Migrationskonsole, `pg_dump`-Backups und ein Advisory-Lock, der zwei Server auf einer Datenbank verhindert. |
+| **Google-Konten** | Verbunden per OAuth statt per App-Passwort, IMAP und SMTP melden sich mit XOAUTH2 an. Kontakte über die People API mit Rückschreiben, Google-Kalender gespiegelt inklusive Wochenansicht und Terminbearbeitung. Gmail-gerechte Voreinstellungen: All Mail/Wichtig/Markiert bleiben draußen, ein Sync-Startdatum begrenzt den ersten Durchlauf. |
+| **Ablage** | Die Seitenleiste führt mit **Inbox** (alles über alle Konten, was noch nicht archiviert ist). Darunter fünf Kategorien — Relevant, Newsletters, Forums, Notifications, Invoices&nbsp;&&nbsp;Contracts —, die ersten vier aus den Headern des Absenders entschieden, die letzte aus dem Inhalt (ZUGFeRD, Factur-X, XRechnung, Belegnummer neben Betrag). Kontenübergreifende Dubletten werden erkannt und ausgeblendet. |
+| **Regeln** | `mail_filters` weitgehend neu: Editor mit benannten Feldern, Aktionen für gelesen/weiterleiten/verschieben, Ziele relativ zum Konto der Nachricht, Weiterleitung wahlweise nur für neue Post, und ein Audit über 30 Tage, das auch zeigt, worauf die Filter noch warten. |
+| **Suche** | Zweites Backend auf PostgreSQL (`tsvector`) neben Bleve, umschaltbar über `ROLLTOP_SEARCH_BACKEND`, mit Fuzzy-Treffern bei Tippfehlern über `pg_trgm`, Ranking auf Relevanz und Sortierung nach Datum in beide Richtungen. |
+| **IMAP-Sync** | Verbindungen pro Durchlauf wiederverwendet, jeder Durchgang zeit- **und** speicherbegrenzt, Fetch-Batches nach den vom Server gemeldeten Größen geplant, ein Ordner voll Post mit einem Befehl verschoben. Ein paar sehr große Mails entscheiden nicht mehr, wie viel Speicher der Prozess braucht. |
+| **Bedienung** | Gmail-Optik für die Listen, Zeilenaktionen beim Überfahren, Befehlsleiste im Konversationskopf, `Send & archive`, Kategorie-Pille auf der Kopfzeile, `Ältere archivieren`, `Papierkorb leeren`, System-Theme mit Dunkelmodus für HTML-Post. |
+| **Betrieb** | `/api/health`, geordnetes Herunterfahren mit Budget pro Phase, Crash-Berichte im Datenvolumen, Warten statt Crash-Schleife beim Start, Admin-Seite für Datenbank und Logs, SMTP-Transkript für fehlgeschlagene Sendungen. |
+| **Sicherheit** | Vollständiger Review mit Umsetzung in fünf Phasen ([`docs/code-review-umsetzungsplan.md`](docs/code-review-umsetzungsplan.md)): Login-Drosselung, `ROLLTOP_PUBLIC_URL` als vertrauenswürdige Link-Basis, Webhook-Token nur aus Headern, CSP ohne `script-src 'unsafe-inline'`, validierte OIDC-`id_token`. |
+| **CI/Tests** | Zwei Workflows — ein PR-Tor, das nur die betroffenen Bereiche prüft, und ein Merge-Tor mit Paketierung an `v*`-Tags. `go vet` als Tor, Vitest im Frontend, 282 statt 150 Go-Testdateien. |
+
+**Was das Original hat und dieser Fork nicht:** einen echten Offline-Modus mit
+eingereihten Sendungen (seit dem 25. August im Original). Hier gibt es weiterhin
+nur die begrenzte PWA-Zwischenablage, die beide Zweige vom gemeinsamen Stand
+geerbt haben. Ein Teil der Sicherheitshärtung ist außerdem in beiden Zweigen
+unabhängig und weitgehend gleichlautend entstanden — das sind keine
+Alleinstellungsmerkmale, auch wenn der Diff sie so aussehen lässt.
+
+**Beim Betrieb dieses Forks zu beachten:** `compose.yml` zeigt auf das Image des
+Originals (`ghcr.io/grahamsz/rolltop:latest`). Das enthält diesen Code nicht und
+läuft auf SQLite, passt also nicht zur PostgreSQL-Konfiguration daneben. Bis hier
+ein `v*`-Tag veröffentlicht ist, das Image aus diesem Repository selbst bauen:
+`docker build -t rolltop:local .`
+
+Ausführlich, Bereich für Bereich, in **[FORK.md](FORK.md)**. Alles weitere unten
+ist die Dokumentation des Projekts selbst und gilt unverändert für diesen Fork.
 
 ## What It Stores
 
