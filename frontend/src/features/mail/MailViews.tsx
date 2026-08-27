@@ -122,12 +122,17 @@ function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation[
  * rows when the URL changes, animates newly delivered messages on the first page,
  * and shows a folder-level sync clue when the selected mailbox is manual or off.
  */
-// One queued sync per page load, for whichever folder the load lands on. A
-// browser refresh, or reopening the app at a folder route, should show what the
-// server has rather than what the last scheduled pass left behind. The flag is
-// module-level on purpose: it survives this component remounting during
-// in-app navigation, so only a genuine page load spends it.
-let bootFolderSyncPending = true;
+// The user whose page load has already spent its one queued folder sync, or
+// null before any has. A browser refresh, or reopening the app at a folder
+// route, should show what the server has rather than what the last scheduled
+// pass left behind.
+//
+// Module-level on purpose: it has to survive this component remounting during
+// in-app navigation, so that only a genuine page load spends it. Keyed by user
+// rather than a plain flag because signing out does not reload the page -- it
+// tears the session down inside React -- so a boolean would leave whoever signs
+// in next looking at what the previous scheduled pass had left them.
+let bootFolderSyncUserID: number | null = null;
 
 export function MailView({
   userID,
@@ -347,13 +352,13 @@ export function MailView({
   // is one more than the folder needs. Pull-to-refresh stays the gesture for
   // repeating this.
   useEffect(() => {
-    if (!bootFolderSyncPending || !csrf) return;
+    if (bootFolderSyncUserID === userID || !csrf) return;
     if (mailbox && (effectiveMode === "never" || effectiveMode === "manual")) return;
     // Chrome may not have resolved the folder yet. Waiting keeps the one shot
     // for the folder the reader is actually on rather than spending it on the
     // whole account.
     if (!mailbox && mailboxID) return;
-    bootFolderSyncPending = false;
+    bootFolderSyncUserID = userID;
     let cancelled = false;
     const request = mailbox ? api.syncFolder(csrf, mailbox.id) : api.syncAccount(csrf);
     request.catch((err) => {
