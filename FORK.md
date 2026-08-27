@@ -272,10 +272,12 @@ Ein eigener Analyse- und Umsetzungsdurchgang
   Kopfzeile der Konversation, und in **All Mail** zusätzlich in jeder Zeile der
   Liste. All Mail ist die einzige Liste, die alle Kategorien auf einmal hält, und
   damit die einzige, in der eine noch nicht einsortierte Nachricht — „Not sorted
-  yet" — beim Durchsehen auffällt, statt gesucht werden zu müssen. Die Pille ist
-  eine Beschriftung und kein Link: eine Kategorieliste ist die noch anliegende
-  Post einer Kategorie, und archivierte, zurückgestellte oder gelöschte Post
-  steht nicht in der Liste, die ihre eigene Kategorie benennt.
+  yet" — beim Durchsehen auffällt, statt gesucht werden zu müssen. Auf schmalen
+  Bildschirmen bleibt von der Pille ihr Symbol, damit die Vorschauzeile daneben
+  eine Vorschau bleibt; der Name steht weiter im Tooltip und im Screenreader.
+  Die Pille ist eine Beschriftung und kein Link: eine Kategorieliste ist die
+  noch anliegende Post einer Kategorie, und archivierte, zurückgestellte oder
+  gelöschte Post steht nicht in der Liste, die ihre eigene Kategorie benennt.
 - **Zahlenkürzel in der Seitenleiste**, einklappbare Ordnergruppen pro Konto,
   deren Zustand Navigation und Drag überlebt.
 - **Sortierung nach Datum** in beide Richtungen in jeder Liste, pro Nutzer

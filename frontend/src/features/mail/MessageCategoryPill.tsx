@@ -56,8 +56,17 @@ export function MessageCategoryPill({
   const tooltip = place === "list"
     ? `Filed under ${display.label}, decided from the message itself rather than from the folder holding it.`
     : `Filed under ${display.label}, decided from this message itself.`;
+  // In a list the chip's own text is its name, and the sentence stays in the
+  // tooltip alone: a screen reader working down All Mail would otherwise read
+  // the same explanation out on every row it passes, between the sender and the
+  // subject it is actually there to hear. One thread card can afford it.
+  //
+  // Which leaves the visible label carrying the name, so it stays in the
+  // document even where the narrow layout stops drawing it (see
+  // .message-category-pill-label in _responsive.scss) rather than being dropped
+  // for an aria-label that would go back to talking over the row.
   return (
-    <span className="message-category-pill" title={tooltip} aria-label={tooltip} role="note">
+    <span className="message-category-pill" title={tooltip} aria-label={place === "list" ? undefined : tooltip} role="note">
       <Icon name={display.icon} />
       <span className="message-category-pill-label">{display.label}</span>
     </span>

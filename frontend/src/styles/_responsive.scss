@@ -1,3 +1,5 @@
+@use "mixins/components" as *;
+
 @media (max-width: 1040px) {
   .settings-columns,
   .search-tuning-row,
@@ -566,14 +568,21 @@
       grid-column: 1;
     }
 
+    // Narrow enough and the chip is its icon: at 360px the text block is under
+    // 190px wide, and a chip wide enough to spell "Not sorted yet" would leave
+    // the preview beside it about eight characters - which is not a preview.
+    // The icon is the same one the sidebar entry for that category carries, the
+    // waiting chip stays the odd one out in the muted palette, and the name
+    // itself is still in the row for a screen reader to read and for the
+    // tooltip to show.
     .message-row-category {
       grid-column: 2;
       grid-row: 2;
-      // Enough for every category this build files into except the longest,
-      // "Invoices & Contracts", which arrives as "Invoices & C..." - and for
-      // "Not sorted yet" in full, which is the one a reader is scanning for.
-      // Wider than this and the preview beside it has nothing left.
-      max-width: 120px;
+      max-width: none;
+
+      .message-category-pill-label {
+        @include visually-hidden;
+      }
     }
   }
 
