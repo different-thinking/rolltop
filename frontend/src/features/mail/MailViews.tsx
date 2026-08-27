@@ -24,12 +24,13 @@ import { loadMailSortOrder, loadSearchSortOrder, saveMailSortOrder, saveSearchSo
 import type { MailSortOrder, SearchSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
 import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
-import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
+import { allMailRoute, composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
 import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
+import { MessageCategoryPill } from "./MessageCategoryPill";
 import { SnoozeControl } from "./SnoozeControl";
 import { ArchiveBeforeControl, DeleteBeforeControl, EmptyTrashControl } from "./MailListActions";
 
@@ -226,6 +227,12 @@ export function MailView({
   const viewLabel = activeCategory
     ? categorySummary?.label || activeCategory
     : view === "inbox" ? "Inbox" : view === "sent" ? "Sent" : view === "drafts" ? "Drafts" : "All Mail";
+  // All Mail is the one list that holds every category at once, and the only
+  // place a message nothing has filed yet can be found by looking rather than by
+  // knowing to look: every category list is one category by definition, and a
+  // folder list is a folder. So it is the list whose rows name their category -
+  // anywhere else the chip would repeat what the list is already called.
+  const rowCategories = allMailRoute(route) ? mailCategories : [];
   // The scope comes from the route, never from the folder lookup: a folder being
   // deleted drops out of the chrome list while its page is still open, and
   // falling back to 0 there would silently widen a delete to All Mail. When the
@@ -589,6 +596,7 @@ export function MailView({
                 onMessagesMoved={removeMovedConversations}
                 onListChanged={refreshList}
                 listScope={listScope}
+                rowCategories={rowCategories}
                 emptyState={showRecoveryEmptyState && mailbox ? (
                   <MailboxRecoveryEmptyState mailbox={mailbox} activeRun={accountActiveRun} />
                 ) : undefined}
@@ -1590,6 +1598,7 @@ function MessageList({
   onMessagesMoved,
   onListChanged,
   listScope,
+  rowCategories = [],
   snoozedView = false,
   currentMailboxID = 0,
   emptyState
@@ -1616,6 +1625,13 @@ function MessageList({
   onListChanged?: () => void;
   /** The filter this list shows, which enables whole-filter selection. */
   listScope?: MessageListScope;
+  /**
+   * The category registry, which a list passes only when its rows should name
+   * the category each message was filed into. Empty - the default, and what a
+   * category list passes, where every row would repeat the list's own name -
+   * leaves the rows saying nothing about categories at all.
+   */
+  rowCategories?: MailCategorySummary[];
   snoozedView?: boolean;
   /** The mailbox this list is showing, so Delete can skip rows already in it. */
   currentMailboxID?: number;
@@ -3278,7 +3294,7 @@ function MessageList({
               </span>
               {conversation.count > 1 ? <span className="thread-count">({conversation.count})</span> : null}
             </span>
-            <span className="subject">
+            <span className={`subject ${rowCategories.length > 0 ? "names-category" : ""}`}>
               <span className="subject-line">
                 <strong>
                   <HighlightedText text={msg.subject || "(no subject)"} query={searchQuery} terms={matchTerms} />
@@ -3299,6 +3315,15 @@ function MessageList({
               <span className={`snippet ${securitySnippetClass}`}>
                 <HighlightedText text={previewText} query={securitySnippetClass ? "" : searchQuery} terms={securitySnippetClass ? [] : matchTerms} />
               </span>
+              {/* The chip is a sibling of both lines rather than part of one,
+                  because which line it belongs beside depends on the width: a
+                  wide row has room for it on the subject line, and a narrow one
+                  only has room on the preview line under it. */}
+              {rowCategories.length > 0 ? (
+                <span className="message-row-category">
+                  <MessageCategoryPill category={msg.category} categories={rowCategories} place="list" />
+                </span>
+              ) : null}
             </span>
       <span className={`date ${snoozedView ? "snoozed-date" : ""}`}>
         {snoozedView ? (

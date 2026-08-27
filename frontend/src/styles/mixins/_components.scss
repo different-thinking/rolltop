@@ -5,6 +5,22 @@
   white-space: nowrap;
 }
 
+// Text that stays in the document for a screen reader to name an element by,
+// while the layout draws something else in its place. Not `display: none` and
+// not `visibility: hidden`: both take the text out of the accessibility tree
+// along with the picture, which is the one thing this is keeping.
+@mixin visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 @mixin icon-button($size: 28px, $radius: 6px) {
   min-width: $size;
   min-height: $size;
