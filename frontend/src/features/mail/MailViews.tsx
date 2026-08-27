@@ -122,6 +122,13 @@ function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation[
  * rows when the URL changes, animates newly delivered messages on the first page,
  * and shows a folder-level sync clue when the selected mailbox is manual or off.
  */
+// One queued sync per page load, for whichever folder the load lands on. A
+// browser refresh, or reopening the app at a folder route, should show what the
+// server has rather than what the last scheduled pass left behind. The flag is
+// module-level on purpose: it survives this component remounting during
+// in-app navigation, so only a genuine page load spends it.
+let bootFolderSyncPending = true;
+
 export function MailView({
   userID,
   csrf,
@@ -332,6 +339,33 @@ export function MailView({
       cancelled = true;
     };
   }, [userID, mailbox?.id, effectiveMode, csrf, addToast]);
+
+  // The folder a page load lands on gets one queued sync, whatever its sync
+  // mode, so a refreshed tab reflects the server without waiting for the next
+  // scheduled pass. Manual folders are left out because the effect above
+  // already syncs those on entering the view, and two requests for one arrival
+  // is one more than the folder needs. Pull-to-refresh stays the gesture for
+  // repeating this.
+  useEffect(() => {
+    if (!bootFolderSyncPending || !csrf) return;
+    if (mailbox && (effectiveMode === "never" || effectiveMode === "manual")) return;
+    // Chrome may not have resolved the folder yet. Waiting keeps the one shot
+    // for the folder the reader is actually on rather than spending it on the
+    // whole account.
+    if (!mailbox && mailboxID) return;
+    bootFolderSyncPending = false;
+    let cancelled = false;
+    const request = mailbox ? api.syncFolder(csrf, mailbox.id) : api.syncAccount(csrf);
+    request.catch((err) => {
+      // Losing the race to a sync that was already running is the normal case
+      // on a busy account, and its event stream refreshes this view anyway.
+      if (err instanceof ApiError && (err.status === 409 || err.status === 503)) return;
+      if (!cancelled) addToast(`Folder refresh failed: ${messageFromError(err)}`, "error");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [userID, mailbox?.id, mailboxID, effectiveMode, csrf, addToast]);
 
   // Route changes should feel immediate: clear the old page before the server
   // responds so the user is not looking at stale rows for another folder.
