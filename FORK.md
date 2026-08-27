@@ -221,8 +221,8 @@ Ein eigener Analyse- und Umsetzungsdurchgang
 ([`docs/imap-sync-analysis.md`](docs/imap-sync-analysis.md)) in vier Phasen:
 
 - **Verbindungen werden pro Durchlauf wiederverwendet** statt pro Nachricht neu
-  aufgebaut; Fetches sind am Fortschritt begrenzt; Fehlschläge laufen in einen
-  gedeckelten Backoff.
+  aufgebaut; wie weit ein Abruf reicht, richtet sich nach dem erreichten
+  Fortschritt; Fehlschläge laufen in einen gedeckelten Backoff.
 - **Jeder Mailbox-Durchgang ist zeitbegrenzt** und hält an einer
   Nachrichtengrenze an, committet, was er gespiegelt hat, und wird sofort neu
   eingeplant. Jeder pausierte Durchgang verdoppelt das Zeitbudget des nächsten,
