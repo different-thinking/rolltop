@@ -44,14 +44,14 @@ func (f *Fetcher) OpenExpungeSession(ctx context.Context, account store.MailAcco
 // ExpungeMessages deletes one batch on the held connection. Each batch still
 // selects the folder and proves its generation, so reusing the connection costs
 // nothing in safety: only the login is saved.
-func (s *ExpungeSession) ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+func (s *ExpungeSession) ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32, scope syncer.ExpungeScope) ([]uint32, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if s == nil || s.client == nil {
 		return nil, errors.New("expunge session is closed")
 	}
-	return expungeMessages(ctx, s.client, mailbox, uids, expectedUIDValidity)
+	return expungeMessages(ctx, s.client, mailbox, uids, expectedUIDValidity, scope)
 }
 
 // Close drops the held connection. It is safe to call more than once once all

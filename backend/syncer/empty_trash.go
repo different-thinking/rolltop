@@ -63,6 +63,31 @@ var ErrEmptyTrashUnsupported = errors.New("this IMAP connection cannot delete me
 // end, after that reconciliation, for work that wants the finished state — a
 // mailbox listing refresh, for instance.
 func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, releaseForeground, onDone func()) (store.SyncRun, error) {
+	return s.startTrashPurge(ctx, userID, mailboxID, time.Time{}, releaseForeground, onDone)
+}
+
+// StartTrashRetentionPurge deletes the mail one Trash folder has held since
+// before a cutoff, and leaves everything newer in place. It is the scheduled
+// half of the same operation StartEmptyTrash performs by hand, and it deletes
+// on the server in exactly the same way: the folder is listed live, its
+// generation is proved, and local rows follow only for the UIDs the server
+// reports gone.
+//
+// What it selects is narrower, and only in the safe direction. The messages are
+// the ones this mirror recorded arriving in that folder before the cutoff
+// (Store.ListTrashRetentionUIDs), intersected with what the folder actually
+// holds now. Mail the mirror has never seen has no measurable stay and is left
+// alone; emptying the folder by hand still takes all of it.
+func (s *Service) StartTrashRetentionPurge(ctx context.Context, userID, mailboxID int64, before time.Time, releaseForeground, onDone func()) (store.SyncRun, error) {
+	if before.IsZero() {
+		return store.SyncRun{}, errors.New("a retention purge needs the moment to delete before")
+	}
+	return s.startTrashPurge(ctx, userID, mailboxID, before, releaseForeground, onDone)
+}
+
+// startTrashPurge is both of the above. A zero cutoff empties the folder; a
+// cutoff narrows it to the mail that has been there long enough.
+func (s *Service) startTrashPurge(ctx context.Context, userID, mailboxID int64, before time.Time, releaseForeground, onDone func()) (store.SyncRun, error) {
 	if s.Fetcher == nil {
 		return store.SyncRun{}, errors.New("sync fetcher is not configured")
 	}
@@ -84,23 +109,29 @@ func (s *Service) StartEmptyTrash(ctx context.Context, userID, mailboxID int64, 
 	if err != nil {
 		return store.SyncRun{}, err
 	}
+	label := "Emptying " + mailbox.Name
+	subject := "Deleting messages on the server"
+	if !before.IsZero() {
+		label = "Clearing old mail from " + mailbox.Name
+		subject = "Deleting mail this folder has kept long enough"
+	}
 	progress := store.SyncProgress{
 		MailboxesTotal:   1,
-		CurrentMailbox:   "Emptying " + mailbox.Name,
+		CurrentMailbox:   label,
 		LatestNewFrom:    EmptyTrashSyncRunMarker,
-		LatestNewSubject: "Deleting messages on the server",
+		LatestNewSubject: subject,
 	}
 	if err := s.Store.UpdateSyncRunProgress(ctx, userID, run.ID, progress); err != nil {
 		s.failSyncRunInit(userID, run.ID, progress, err)
 		return store.SyncRun{}, err
 	}
 	s.notify(userID)
-	go s.runEmptyTrash(s.backgroundContext(), userID, account, mailbox, run.ID, progress, releaseForeground, onDone)
+	go s.runEmptyTrash(s.backgroundContext(), userID, account, mailbox, run.ID, before, progress, releaseForeground, onDone)
 	return run, nil
 }
 
 func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox,
-	runID int64, progress store.SyncProgress, releaseForeground, onDone func()) {
+	runID int64, before time.Time, progress store.SyncProgress, releaseForeground, onDone func()) {
 	ctx, finishRun := s.beginRunCancellation(ctx, userID, runID)
 	defer finishRun()
 	status := "ok"
@@ -121,7 +152,7 @@ func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store
 			onDone()
 		}
 	}()
-	deleted, err := s.emptyTrashRemotely(ctx, userID, account, mailbox, runID, &progress)
+	deleted, err := s.emptyTrashRemotely(ctx, userID, account, mailbox, runID, before, &progress)
 	if err != nil {
 		status = "failed"
 		errText = err.Error()
@@ -175,14 +206,22 @@ func (s *Service) runEmptyTrash(ctx context.Context, userID int64, account store
 // emptyTrashRemotely deletes the folder's current contents in batches and
 // returns how many messages the server confirmed gone.
 func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox,
-	runID int64, progress *store.SyncProgress) (int, error) {
+	runID int64, before time.Time, progress *store.SyncProgress) (int, error) {
 	expunger, ok := s.Fetcher.(ExpungeFetcher)
 	if !ok {
 		return 0, ErrEmptyTrashUnsupported
 	}
-	uids, uidValidity, err := s.trashSnapshot(ctx, account, mailbox)
+	uids, uidValidity, err := s.trashPurgeTargets(ctx, userID, account, mailbox, before)
 	if err != nil {
 		return 0, err
+	}
+	// A purge that named a cutoff means the UIDs it named and no others, so it
+	// may not fall back to the expunge that takes everything flagged \Deleted
+	// in the folder. Emptying the folder is the one case where that fallback is
+	// what was asked for.
+	scope := ExpungeWholeFolder
+	if !before.IsZero() {
+		scope = ExpungeNamedUIDsOnly
 	}
 	if len(uids) == 0 {
 		return 0, nil
@@ -207,7 +246,7 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 			return deleted, err
 		}
 		end := min(start+emptyTrashBatchSize, len(uids))
-		gone, err := s.expungeTrashBatch(ctx, session, expunger, userID, account, mailbox.Name, uids[start:end], uidValidity)
+		gone, err := s.expungeTrashBatch(ctx, session, expunger, userID, account, mailbox.Name, uids[start:end], uidValidity, scope)
 		deleted += len(gone)
 		progress.MessagesSeen += end - start
 		progress.MessagesStored = deleted
@@ -221,6 +260,12 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 			// getting through any more: giving up on the first dropped
 			// connection leaves most of a large Trash folder behind.
 			batchErr = err
+			// A server that cannot expunge selectively will answer every
+			// remaining batch the same way, and answering it once is the point:
+			// the purge stops with mail intact rather than widening itself.
+			if errors.Is(err, ErrSelectiveExpungeUnsupported) {
+				break
+			}
 			failedInARow++
 			log.Printf("empty trash batch failed user_id=%d run_id=%d mailbox_id=%d uids=%d-%d of %d: %v",
 				userID, runID, mailbox.ID, start+1, end, len(uids), err)
@@ -237,7 +282,10 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	// Give the connection back before the folder is listed again: a second
 	// concurrent login to the same account is what holding one exists to avoid.
 	session.close()
-	if batchErr != nil {
+	// A capability the server does not have is the one failure that flagged
+	// nothing, so there is no residue to recount and no folder listing worth
+	// spending on it: what the batches reported is already the whole story.
+	if batchErr != nil && !errors.Is(batchErr, ErrSelectiveExpungeUnsupported) {
 		// What the batches confirmed is no longer the whole story. A batch that
 		// failed after flagging its messages leaves them carrying \Deleted, and
 		// on a server without UIDPLUS the only expunge available removes
@@ -267,6 +315,47 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 		return deleted, fmt.Errorf("the server kept %d of %d messages in %s", len(uids)-deleted, len(uids), mailbox.Name)
 	}
 	return deleted, nil
+}
+
+// trashPurgeTargets names the UIDs one purge is going to delete, bound to the
+// generation they were listed under.
+//
+// Without a cutoff that is the folder as the server currently holds it. With
+// one it is the intersection of that live listing with the messages this mirror
+// recorded arriving in the folder before the cutoff: the mirror is the only
+// side that knows how long a message has been in the Trash, and the live
+// listing is what proves the UIDs still mean what the mirror thinks and still
+// belong to the generation being deleted from. Taking either one alone would be
+// wrong in a different direction -- the mirror alone would delete by UIDs the
+// server may have reassigned, and the server alone cannot tell old mail from
+// mail thrown away this morning.
+func (s *Service) trashPurgeTargets(ctx context.Context, userID int64, account store.MailAccount, mailbox store.Mailbox,
+	before time.Time) ([]uint32, uint32, error) {
+	uids, uidValidity, err := s.trashSnapshot(ctx, account, mailbox)
+	if err != nil {
+		return nil, 0, err
+	}
+	if before.IsZero() || len(uids) == 0 {
+		return uids, uidValidity, nil
+	}
+	due, err := s.Store.ListTrashRetentionUIDs(ctx, userID, mailbox.ID, before, uidValidity)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(due) == 0 {
+		return nil, uidValidity, nil
+	}
+	held := make(map[uint32]struct{}, len(uids))
+	for _, uid := range uids {
+		held[uid] = struct{}{}
+	}
+	out := make([]uint32, 0, len(due))
+	for _, candidate := range due {
+		if _, still := held[candidate.UID]; still {
+			out = append(out, candidate.UID)
+		}
+	}
+	return out, uidValidity, nil
 }
 
 // trashMessagesStillHeld counts how many of the messages a purge set out to
@@ -304,14 +393,18 @@ func (s *Service) trashMessagesStillHeld(ctx context.Context, account store.Mail
 // failing attempt itself, so the next one starts from a new login rather than a
 // dead socket.
 func (s *Service) expungeTrashBatch(ctx context.Context, session *expungeSessionHolder, expunger ExpungeFetcher,
-	userID int64, account store.MailAccount, mailbox string, uids []uint32, uidValidity uint32) ([]uint32, error) {
+	userID int64, account store.MailAccount, mailbox string, uids []uint32, uidValidity uint32, scope ExpungeScope) ([]uint32, error) {
 	var lastErr error
 	for attempt := 1; attempt <= emptyTrashBatchAttempts; attempt++ {
-		gone, err := session.expunge(ctx, expunger, account, mailbox, uids, uidValidity)
+		gone, err := session.expunge(ctx, expunger, account, mailbox, uids, uidValidity, scope)
 		if err == nil {
 			return gone, nil
 		}
 		lastErr = err
+		// A fresh login answers a missing capability exactly as this one did.
+		if errors.Is(err, ErrSelectiveExpungeUnsupported) {
+			return nil, lastErr
+		}
 		if ctx.Err() != nil || attempt == emptyTrashBatchAttempts {
 			return nil, lastErr
 		}
@@ -369,14 +462,14 @@ func (s *Service) openExpungeSession(ctx context.Context, userID int64, account 
 // expunge deletes one batch, over the held connection when there is one and
 // through the fetcher's own connection otherwise.
 func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetcher, account store.MailAccount,
-	mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+	mailbox string, uids []uint32, expectedUIDValidity uint32, scope ExpungeScope) ([]uint32, error) {
 	if h == nil {
-		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity, scope)
 	}
 	if h.session == nil {
 		opener, ok := h.service.Fetcher.(ExpungeSessionFetcher)
 		if !ok {
-			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity, scope)
 		}
 		session, err := opener.OpenExpungeSession(ctx, h.account)
 		if err != nil {
@@ -384,7 +477,7 @@ func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetc
 		}
 		h.session = session
 	}
-	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity)
+	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity, scope)
 	if err != nil {
 		// The held connection may itself be why this failed. Drop it so a retry
 		// of this purge starts from a fresh login rather than a dead socket.

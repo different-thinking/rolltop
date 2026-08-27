@@ -19,10 +19,89 @@ site and in review.
 - SMTP sending and message moves exist and are supported; extend them rather than
   reintroducing the old prohibition.
 - Remote delete exists in exactly one place: emptying a folder that carries the
-  Trash role (`syncer.ExpungeFetcher`, `Service.StartEmptyTrash`). Nothing else
-  may flag `\Deleted` or expunge. It lists the folder live rather than trusting
-  the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
-  the UIDs the server reports gone afterwards. Keep all four properties.
+  Trash role (`syncer.ExpungeFetcher`, `Service.StartEmptyTrash` and the
+  scheduled `Service.StartTrashRetentionPurge`, which share `startTrashPurge`).
+  Nothing else may flag `\Deleted` or expunge. It lists the folder live rather
+  than trusting the mirror, proves `UIDVALIDITY` before deleting, and drops local
+  rows only for the UIDs the server reports gone afterwards. Keep all four
+  properties.
+- **The expunge that takes a whole folder may only be asked for by the caller
+  that means a whole folder.** IMAP without RFC 4315 offers one expunge and it
+  removes every message in the folder carrying `\Deleted`. Emptying a Trash
+  folder can live with that; a retention purge cannot, because the messages it
+  did not name are mail that has not waited long enough or mail another client
+  flagged and has not expunged yet. So every expunge carries a
+  `syncer.ExpungeScope`, `ExpungeNamedUIDsOnly` refuses on a server with no UID
+  EXPUNGE (`ErrSelectiveExpungeUnsupported`), and the refusal happens **before**
+  anything is flagged — flagging first and finding out afterwards leaves exactly
+  the residue the next plain EXPUNGE from any client deletes. A missing
+  capability is not retried on a fresh login and does not spend a folder listing
+  on a recount, because nothing was flagged to recount.
+- **A schema change that starts deleting mail carries its own grandfathering.**
+  The `0010-retention` migration writes every account that already exists an
+  explicit `trash_enabled = 0` row, so an upgrade cannot begin permanently
+  removing anybody's Trash from their mail server on a default nobody chose;
+  the shipped default is the other way round and is carried by the *absence* of
+  a row, exactly as the absence of a category row carries "delete nothing". Any
+  future default that acts on mail by itself needs the same treatment.
+- **The retention purge narrows what is deleted; it never widens it, and it
+  never decides on its own what a folder holds.** `trashPurgeTargets` is the
+  intersection of the live listing with the rows this mirror recorded arriving
+  in that folder before the cutoff, and both halves are load-bearing: the mirror
+  alone would delete by UIDs the server may have reassigned, and the server
+  alone cannot tell mail that has waited out the policy from mail thrown away
+  this morning. Mail the mirror has never seen is therefore never purged on a
+  schedule — its stay cannot be measured — while emptying the folder by hand
+  still takes all of it, which is the one place the sync start date is
+  deliberately ignored.
+- **The Trash clock is arrival, not the message date, and `messages.created_at`
+  is what carries it.** A move is an IMAP MOVE, the source row reconciled away
+  and a *new* row created in the destination, so a row in a Trash folder is as
+  old as the message's stay in Trash rather than as old as the message. Nothing
+  else can answer this: the Date header is when the mail was *sent*, so counting
+  from it would delete a year-old newsletter the instant a category rule threw
+  it away — which is the whole two-step promise (`nothing leaves a server until
+  the Trash is emptied`) turned into a fiction — and IMAP's INTERNALDATE is
+  preserved across a MOVE by every server that implements it, so it says the
+  same thing. A change that made a move update the row's `mailbox_id` in place
+  instead would silently repoint this clock at the message's original arrival;
+  give the retention purge its own stamp in the same change if that ever
+  happens.
+- **A retention cutoff that resolves to nothing selects nothing, never
+  everything.** `CategoryRetention.Cutoff` returns a bool beside the instant and
+  every caller reads it, because a zero `ScopeFilter.Before` is "no filter" and
+  would take the whole category rather than its backlog. An unrecognised unit is
+  in that same class and is not read as days. A relative rule stores its own
+  unit (`cutoff_count`, `cutoff_unit`) rather than a number of days, so six
+  months is six calendar months and "30 days" and "1 month" stay two different
+  rules.
+- **"The pass ran" and "the folder is clear" are two different answers.** A
+  purge takes a bounded number of messages and a server may refuse some of what
+  it takes, so the Trash half asks the folder afterwards
+  (`Store.TrashRetentionStillDue`) rather than trusting that having run means
+  having finished. The question is scoped to the folder's own stored
+  `UIDVALIDITY`, the rows a purge could actually name: counting mail left under
+  an older generation would ask for a pass that can never come out clean.
+- **One reader's retention pass is bounded by its own clock, and every rule
+  shares one move plan.** The Trash half's budget starts when that reader's
+  half starts, not when the sweep over all readers did, or everybody queued
+  behind a reader with a very full Trash is skipped on every pass. The category
+  half collects every rule into a single `trashPlanForMessages`, because a plan
+  takes the tenant's exclusive foreground reservation and holds it until its
+  runs land: a plan per rule meant the second rule waiting out the whole
+  reservation timeout and then failing, so one rule applied per pass. For the
+  same reason the Trash half runs *first* — it waits for its purges and gives
+  the slot back, while the category half hands its moves to the background and
+  leaves the slot held behind it. A busy slot is a postponed pass, never a
+  logged failure: scheduled work yields to what the reader is doing.
+- **A retention pass records that it ran even when it failed**
+  (`MarkRetentionSwept`, written whatever the outcome). The alternative is a
+  reader whose account errors being retried in a loop rather than on the
+  interval. A pass that was cut short by the scope limit or the wall-clock
+  budget instead leaves a mark far enough back to come round again on
+  `retentionCatchUpInterval`, which is long enough for the moves it queued to
+  land — resuming immediately would resolve the same messages again and queue a
+  second move for them.
 - **A dropped connection pauses a Trash purge; it never ends one.** Emptying a
   full Trash folder is tens of thousands of messages over many minutes, and a
   mail host closing that connection partway through is ordinary — Gmail does it

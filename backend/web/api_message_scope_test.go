@@ -815,3 +815,88 @@ func TestParseScopeCutoffKeepsTheNamedDay(t *testing.T) {
 		t.Fatalf("cutoff = %s, want the offset resolved to 29 February 00:00 UTC", local)
 	}
 }
+
+// "Delete older" is the same whole-filter delete with a cutoff on it: it takes
+// the backlog behind the list and leaves the list itself alone. Unlike the
+// archive pass the cutoff is optional here, because a delete without one is the
+// whole-filter delete that already exists.
+func TestScopeTrashPlanWithACutoffTakesOnlyTheBacklog(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-delete-older@example.test")
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	older := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 801, "Older", cutoff.AddDate(0, 0, -1))
+	onTheDay := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 802, "On the cutoff", cutoff)
+	newer := createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 803, "Newer", cutoff.AddDate(0, 0, 1))
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012")}
+
+	plan, err := server.scopeTrashPlan(ctx, tenant.user, scopeSelection{Filter: store.ScopeFilter{Before: cutoff}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	if len(ids) != 1 || ids[0] != older.ID {
+		t.Fatalf("planned ids = %v, want only the message dated before the cutoff %d", ids, older.ID)
+	}
+	if slices.Contains(ids, onTheDay.ID) {
+		t.Fatalf("planned ids = %v, must keep mail stamped at the cutoff itself: the day the reader names is kept", ids)
+	}
+	if slices.Contains(ids, newer.ID) {
+		t.Fatalf("planned ids = %v, must not include mail newer than the cutoff", ids)
+	}
+}
+
+// The route reads the cutoff the same way the archive route does, so the two
+// header buttons cannot disagree about which day they keep.
+func TestScopeTrashRequestReadsTheCutoff(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "scope-delete-cutoff@example.test")
+	createScopeTestMessageDated(t, ctx, db, tenant, tenant.inbox, 811, "Newer", time.Now().UTC())
+	server := &Server{store: db, masterKey: []byte("12345678901234567890123456789012"), syncer: &syncer.Service{}}
+
+	post := func(before string) *httptest.ResponseRecorder {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{"scope_mailbox_id": 0, "scope_query": "", "before": before})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/messages/scope-trash", bytes.NewReader(payload))
+		req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: tenant.user}))
+		csrfBase := "scope-trash-csrf"
+		req.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfBase})
+		req.Header.Set("X-CSRF-Token", server.csrfForBase(csrfBase))
+		res := httptest.NewRecorder()
+		server.apiScopeTrashMessages(res, req)
+		return res
+	}
+
+	if res := post("last tuesday"); res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a cutoff the server cannot read", res.Code)
+	}
+	// A cutoff before every message resolves to nothing to move, which is a
+	// finished pass rather than an error.
+	res := post("2001-01-01")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", res.Code, res.Body.String())
+	}
+	var answer struct {
+		OK      bool `json:"ok"`
+		Queued  bool `json:"queued"`
+		Matched int  `json:"matched"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&answer); err != nil {
+		t.Fatal(err)
+	}
+	if !answer.OK || answer.Queued || answer.Matched != 0 {
+		t.Fatalf("answer = %+v, want a finished pass that matched nothing", answer)
+	}
+}

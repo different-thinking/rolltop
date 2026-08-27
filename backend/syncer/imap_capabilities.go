@@ -227,13 +227,40 @@ type BatchUIDValidityExistenceFetcher interface {
 	ExistingUIDsWithValidity(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32) (existingUIDs []uint32, uidValidity uint32, err error)
 }
 
+// ExpungeScope says what an expunge may remove beyond the UIDs it names, and
+// exists because IMAP without RFC 4315 offers only one expunge: the one that
+// removes every message in the folder carrying \Deleted. That is nobody's
+// answer to "delete these three".
+//
+// Emptying a Trash folder can live with it — the whole folder is what the user
+// asked to throw away, so anything else flagged there is going too. A retention
+// purge cannot: the messages it did not name are mail that has not waited long
+// enough, or mail another client flagged and has not expunged yet, and deleting
+// either is deleting mail nobody asked about. So the caller states which it is,
+// and a server that cannot honour ExpungeNamedUIDsOnly refuses the request
+// instead of quietly widening it.
+type ExpungeScope string
+
+const (
+	// ExpungeWholeFolder permits the folder-wide fallback. Only emptying a
+	// Trash folder may ask for it.
+	ExpungeWholeFolder ExpungeScope = "whole-folder"
+	// ExpungeNamedUIDsOnly requires UID EXPUNGE and fails without it.
+	ExpungeNamedUIDsOnly ExpungeScope = "named-uids"
+)
+
+// ErrSelectiveExpungeUnsupported reports a server with no UID EXPUNGE asked to
+// remove only the UIDs it was given. It is a capability answer rather than a
+// failure, and it is returned before anything is flagged.
+var ErrSelectiveExpungeUnsupported = errors.New("this mail server can only expunge every message flagged deleted in a folder, so mail cannot be removed from the Trash selectively")
+
 // ExpungeFetcher is the one capability that deletes mail on the server instead
 // of moving it. It exists for emptying a Trash folder: the messages are named
 // by UID under a proven UIDVALIDITY, and the returned list is the UIDs the
 // server no longer has, so local rows are only dropped for mail that is really
 // gone. Nothing else in sync may use it.
 type ExpungeFetcher interface {
-	ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+	ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32, scope ExpungeScope) (goneUIDs []uint32, err error)
 }
 
 // ExpungeSession deletes several batches out of one folder over one held
@@ -242,7 +269,7 @@ type ExpungeFetcher interface {
 // purge costs — and is what mail hosts throttle. Methods must be called
 // sequentially, and the session is bound to its account at open time.
 type ExpungeSession interface {
-	ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32) (goneUIDs []uint32, err error)
+	ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, expectedUIDValidity uint32, scope ExpungeScope) (goneUIDs []uint32, err error)
 	Close() error
 }
 

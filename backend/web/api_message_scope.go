@@ -284,11 +284,14 @@ func (s *Server) scopeSelectionFromRequest(w http.ResponseWriter, r *http.Reques
 	}, true
 }
 
-// parseScopeCutoff reads the moment the "older than" selection starts from. Mail
+// parseScopeCutoff reads the moment an "older than" selection starts from. Mail
 // stamped at or after it is not older than it, so the day the user names is
 // itself kept. The browser sends a timestamp because only it knows which
 // instant the reader's chosen day begins at; a bare calendar date from another
 // API client is read as the start of that day in UTC.
+//
+// Archiving, deleting and the stored retention rules all name their cutoff this
+// way, so the reading of it is written once here.
 func parseScopeCutoff(raw string) (time.Time, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -299,7 +302,7 @@ func parseScopeCutoff(raw string) (time.Time, error) {
 	}
 	moment, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		return time.Time{}, errors.New("could not read the date to archive before")
+		return time.Time{}, errors.New("could not read the cutoff date")
 	}
 	return moment.UTC(), nil
 }

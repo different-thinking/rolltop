@@ -10,6 +10,8 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/responses"
+
+	"rolltop/backend/syncer"
 )
 
 type fakeExpungeClient struct {
@@ -105,7 +107,7 @@ func (c *fakeExpungeClient) Execute(command imap.Commander, _ responses.Handler)
 func TestExpungeMessagesUsesUIDExpungeAndReportsWhatWent(t *testing.T) {
 	client := &fakeExpungeClient{uids: []uint32{7, 8, 9}, uidValidity: 4321, uidPlus: true}
 
-	gone, err := expungeMessages(context.Background(), client, " Trash ", []uint32{7, 9}, 4321)
+	gone, err := expungeMessages(context.Background(), client, " Trash ", []uint32{7, 9}, 4321, syncer.ExpungeWholeFolder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +150,7 @@ func TestExpungeMessagesUsesUIDExpungeAndReportsWhatWent(t *testing.T) {
 func TestExpungeMessagesFallsBackToPlainExpunge(t *testing.T) {
 	client := &fakeExpungeClient{uids: []uint32{4, 5}, uidValidity: 12, uidPlus: false}
 
-	gone, err := expungeMessages(context.Background(), client, "Trash", []uint32{4, 5}, 12)
+	gone, err := expungeMessages(context.Background(), client, "Trash", []uint32{4, 5}, 12, syncer.ExpungeWholeFolder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +162,44 @@ func TestExpungeMessagesFallsBackToPlainExpunge(t *testing.T) {
 	}
 }
 
+// The plain-EXPUNGE fallback removes every message in the folder carrying
+// \Deleted, which is only what was asked for when the whole folder is going. A
+// caller that named its UIDs is refused instead, and refused before anything is
+// flagged: flagging first would leave exactly the residue the next plain
+// EXPUNGE from any client deletes.
+func TestExpungeMessagesRefusesToWidenASelectiveDeleteWithoutUIDPlus(t *testing.T) {
+	client := &fakeExpungeClient{uids: []uint32{4, 5, 6}, uidValidity: 12, uidPlus: false}
+
+	_, err := expungeMessages(context.Background(), client, "Trash", []uint32{4}, 12, syncer.ExpungeNamedUIDsOnly)
+	if !errors.Is(err, syncer.ErrSelectiveExpungeUnsupported) {
+		t.Fatalf("error = %v, want ErrSelectiveExpungeUnsupported", err)
+	}
+	if client.storedSeqSet != "" || client.plainExpunges != 0 || client.command != nil {
+		t.Fatalf("the refusal still touched the folder: stored=%q plain=%d command=%v",
+			client.storedSeqSet, client.plainExpunges, client.command)
+	}
+	if !slices.Equal(client.uids, []uint32{4, 5, 6}) {
+		t.Fatalf("server holds %v, want the folder untouched", client.uids)
+	}
+}
+
+// A server that does have UID EXPUNGE removes exactly the named UIDs, so a
+// selective delete is served normally.
+func TestExpungeMessagesServesASelectiveDeleteWithUIDPlus(t *testing.T) {
+	client := &fakeExpungeClient{uids: []uint32{4, 5, 6}, uidValidity: 12, uidPlus: true}
+
+	gone, err := expungeMessages(context.Background(), client, "Trash", []uint32{5}, 12, syncer.ExpungeNamedUIDsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(gone, []uint32{5}) {
+		t.Fatalf("gone = %v, want only the named UID", gone)
+	}
+	if !slices.Equal(client.uids, []uint32{4, 6}) {
+		t.Fatalf("server holds %v, want the unnamed mail kept", client.uids)
+	}
+}
+
 func TestExpungeMessagesReportsUIDsTheServerKept(t *testing.T) {
 	client := &fakeExpungeClient{uids: []uint32{1, 2}, uidValidity: 77, uidPlus: true}
 	// A server that acknowledges the command without removing anything must not
@@ -168,7 +208,7 @@ func TestExpungeMessagesReportsUIDsTheServerKept(t *testing.T) {
 	client.storedSeqSet = ""
 	stubborn := &stubbornExpungeClient{fakeExpungeClient: client}
 
-	gone, err := expungeMessages(context.Background(), stubborn, "Trash", []uint32{1, 2}, 77)
+	gone, err := expungeMessages(context.Background(), stubborn, "Trash", []uint32{1, 2}, 77, syncer.ExpungeWholeFolder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +230,7 @@ func (c *stubbornExpungeClient) Execute(command imap.Commander, _ responses.Hand
 func TestExpungeMessagesRefusesAnotherMailboxGeneration(t *testing.T) {
 	client := &fakeExpungeClient{uids: []uint32{3}, uidValidity: 99, uidPlus: true}
 
-	_, err := expungeMessages(context.Background(), client, "Trash", []uint32{3}, 98)
+	_, err := expungeMessages(context.Background(), client, "Trash", []uint32{3}, 98, syncer.ExpungeWholeFolder)
 	if err == nil || !strings.Contains(err.Error(), "UIDVALIDITY") {
 		t.Fatalf("error = %v, want a refusal naming UIDVALIDITY", err)
 	}

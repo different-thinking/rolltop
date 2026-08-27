@@ -727,6 +727,21 @@ func (s *Store) ListCategoryLatestThreadMessagesForUser(ctx context.Context, use
 // category covers, so acting on everything a category shows reaches exactly the
 // rows it shows and no archived mail behind them.
 func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID int64, category string, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
+	return s.listCategoryMailScopeMessagesForUser(ctx, userID, category, filter, limit, true)
+}
+
+// ListCategoryRetentionScopeMessagesForUser lists the same category across every
+// folder it reaches, the archived mail behind the list included. A retention
+// rule is a statement about the category rather than about the list: mail filed
+// into an Archive folder is still a newsletter, and a rule that stopped at the
+// list would leave the one folder such mail accumulates in untouched. Sent,
+// Drafts, Trash and Junk stay out either way, because they are out of the
+// whole-account scope every one of these lists is built from.
+func (s *Store) ListCategoryRetentionScopeMessagesForUser(ctx context.Context, userID int64, category string, filter ScopeFilter, limit int) ([]ScopeMessage, error) {
+	return s.listCategoryMailScopeMessagesForUser(ctx, userID, category, filter, limit, false)
+}
+
+func (s *Store) listCategoryMailScopeMessagesForUser(ctx context.Context, userID int64, category string, filter ScopeFilter, limit int, excludeArchived bool) ([]ScopeMessage, error) {
 	normalized, err := validCategoryOrError(category)
 	if err != nil {
 		return nil, err
@@ -735,7 +750,7 @@ func (s *Store) ListCategoryMailScopeMessagesForUser(ctx context.Context, userID
 	if err != nil {
 		return nil, err
 	}
-	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, true, " AND m.category = ?", normalized)
+	predicate, predicateArgs, err := s.inPlayMailScope(ctx, userID, excludeArchived, " AND m.category = ?", normalized)
 	if err != nil {
 		return nil, err
 	}

@@ -165,6 +165,7 @@ type Server struct {
 	snoozePushRunning         map[int64]bool
 	snoozePushDirty           map[int64]bool
 	snoozeSchedulerWake       chan struct{}
+	retentionSchedulerWake    chan struct{}
 	startedAt                 time.Time
 }
 
@@ -436,6 +437,7 @@ func New(opts Options) (*Server, error) {
 		snoozePushRunning:         map[int64]bool{},
 		snoozePushDirty:           map[int64]bool{},
 		snoozeSchedulerWake:       make(chan struct{}, 1),
+		retentionSchedulerWake:    make(chan struct{}, 1),
 		startedAt:                 time.Now().UTC(),
 		// Login backs off per client IP (not per account -- see loginGateKey), so
 		// the burst is a little roomier to absorb a few users' typos behind a
@@ -479,6 +481,7 @@ func New(opts Options) (*Server, error) {
 		srv.resumeNewMailWebPushAsync()
 		srv.resumeSnoozeReminderWebPushAsync()
 		srv.startSnoozeScheduler()
+		srv.startRetentionScheduler()
 	}
 	return srv, nil
 }

@@ -915,20 +915,64 @@ preview of the message you were answering and stays where that date puts it; the
 reply is still in the thread when the conversation is opened, and still counts
 towards the row's message count and its batch actions.
 
-Two list-header actions work on a whole list rather than on selected rows.
+Three list-header actions work on a whole list rather than on selected rows.
 `Archive older` moves everything the current list holds that is dated before a
-chosen day into each account's Archive folder. The day itself is kept, and it is
-the reader's own calendar day: the browser sends the instant that day begins at
-in its timezone. Sent, Drafts, Trash, and Junk are never swept up, whether or not
-a whole-account list is set to show them, so filing a received backlog leaves the
-user's own mail alone. The cutoff and that exclusion are applied in SQL rather than
-after the fact, and a very large backlog is archived in repeated passes that say
-how much they covered. `Empty Trash`
+chosen cutoff into each account's Archive folder. `Delete older` is its
+counterpart and moves the same selection into each account's Trash instead; it
+reaches every folder the list draws from rather than the Inbox alone, so
+clearing a year of Newsletters reaches the newsletters filed away in folders of
+their own. Both cutoffs can be named either way round — "older than 30 days",
+which moves with the calendar, or one fixed day — and the day itself is kept, in
+the reader's own calendar: the browser sends the instant that day begins at in
+its timezone. Sent, Drafts, Trash, and Junk are never swept up by `Archive
+older`, whether or not a whole-account list is set to show them, so filing a
+received backlog leaves the user's own mail alone. The cutoff and that exclusion
+are applied in SQL rather than after the fact, and a very large backlog is
+handled in repeated passes that say how much they covered. `Empty Trash`
 appears only on a folder carrying the Trash role and is the one place rolltop
 deletes mail on the server instead of moving it: the folder is listed live,
 flagged `\Deleted`, and expunged under a proven `UIDVALIDITY`, so mail the
 mirror never downloaded goes too, and local rows, blobs, and search documents
 are removed only for the UIDs the server confirms are gone.
+
+### Retention
+
+Deleting always means moving to the Trash; nothing leaves a mail server until a
+Trash folder is emptied. Retention automates both halves of that, under
+Settings, Preferences, Retention.
+
+Each category — Relevant, Newsletters, Forums, Notifications, and the rest —
+can name its own cutoff, again either relative or a fixed day, and mail past it
+is moved into its own account's Trash exactly as pressing Delete would. A
+category rule reaches the category across every folder it is filed in, archived
+mail included, because a rule about Newsletters is a statement about newsletters
+rather than about one list; Sent, Drafts, Trash, and Junk stay out, because they
+are outside the whole-account scope those lists are built from. A category with
+no rule deletes nothing, which is the state every category starts in.
+
+The Trash is then emptied on a schedule, on every account, for everything it has
+held longer than the retention length — 30 days by default, and switchable off.
+That step is permanent and reaches the mail server, through the same expunge
+`Empty Trash` uses: the folder is listed live and its `UIDVALIDITY` proved
+before anything is deleted. Three things bound what it takes. The clock is when
+a message *arrived* in the Trash rather than when it was sent, so mail thrown
+away today keeps its full stay however old the mail itself is — which is what
+makes the two halves compose rather than delete a year-old newsletter the moment
+a category rule throws it away. It only ever names mail rolltop has mirrored,
+since a message this install has never seen has no measurable stay. And it needs
+a server that supports `UID EXPUNGE` (RFC 4315, advertised as `UIDPLUS`), which
+most do: without it IMAP offers only the expunge that removes everything in the
+folder flagged deleted, so a partial purge would take mail nobody asked about,
+and rolltop refuses and says so rather than widening itself. Emptying a Trash
+folder by hand still takes all of it, on any server.
+
+Upgrading an existing install does not switch the automatic emptying on. The
+migration records it as off for every account that already exists, because
+nobody chose it; accounts created afterwards get the default above. Either way
+it is one checkbox on the Retention page.
+
+A saved policy runs shortly afterwards and then on a several-hour interval, per
+user, yielding to whatever the reader is doing at the time.
 
 rolltop uses IMAP `IDLE` for INBOX wakeups when the server supports it and keeps the scheduled INBOX poll as a fallback. Remote deletes and moves are reconciled after folder syncs by comparing local UIDs with the server's current UID set.
 
