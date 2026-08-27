@@ -1,7 +1,7 @@
 // File overview: Height measurement for the sticky chrome the mail views park
 // under the top bar - the list's selection toolbar, a conversation's header.
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 /**
@@ -15,13 +15,21 @@ import type { CSSProperties } from "react";
  *
  * It is a ref callback rather than an effect because the strips come and go -
  * the toolbar with the selection, the header with the conversation - so the
- * measurement belongs to the node itself. React 19 calls the cleanup a ref
- * callback returns when that node leaves, which is when the offset the rows
- * keep for it has to go back to zero.
+ * measurement belongs to the node itself.
+ *
+ * The observer is kept in a ref and taken down by the next call rather than
+ * returned as the callback's cleanup: React only honours a returned cleanup
+ * from 19 on, and a version that ignored it would keep an observer alive on
+ * every strip that ever left. Every call ends the previous observation first,
+ * so the call React makes with null when the node goes is what both stops the
+ * observer and sends the offset the rows keep for the strip back to zero.
  */
-export function useStickyChromeHeight<T extends HTMLElement>(): [(node: T | null) => (() => void) | void, number] {
+export function useStickyChromeHeight<T extends HTMLElement>(): [(node: T | null) => void, number] {
   const [height, setHeight] = useState(0);
+  const observer = useRef<ResizeObserver | null>(null);
   const measure = useCallback((node: T | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
     if (!node) {
       setHeight(0);
       return;
@@ -29,12 +37,8 @@ export function useStickyChromeHeight<T extends HTMLElement>(): [(node: T | null
     const apply = () => setHeight(node.getBoundingClientRect().height);
     apply();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(apply);
-    observer.observe(node);
-    return () => {
-      observer.disconnect();
-      setHeight(0);
-    };
+    observer.current = new ResizeObserver(apply);
+    observer.current.observe(node);
   }, []);
   return [measure, height];
 }
