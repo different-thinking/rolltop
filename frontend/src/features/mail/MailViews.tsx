@@ -353,12 +353,16 @@ export function MailView({
   // repeating this.
   useEffect(() => {
     if (bootFolderSyncUserID === userID || !csrf) return;
-    if (mailbox && (effectiveMode === "never" || effectiveMode === "manual")) return;
     // Chrome may not have resolved the folder yet. Waiting keeps the one shot
     // for the folder the reader is actually on rather than spending it on the
     // whole account.
     if (!mailbox && mailboxID) return;
+    // Spent on the folder the load landed on, before asking whether that folder
+    // wants a sync. Skipping the spend as well would carry the shot forward to
+    // whichever folder the reader opened next, which is a navigation, not a
+    // page load, and already has its own rules about syncing.
     bootFolderSyncUserID = userID;
+    if (mailbox && (effectiveMode === "never" || effectiveMode === "manual")) return;
     let cancelled = false;
     const request = mailbox ? api.syncFolder(csrf, mailbox.id) : api.syncAccount(csrf);
     request.catch((err) => {

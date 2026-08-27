@@ -263,6 +263,11 @@ func (r Resolver) fetchSVG(ctx context.Context, rawURL string) (string, error) {
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			return safeDialContext(ctx, resolver, network, address)
 		}
+		// The clone carries its own connection pool, and a pool nobody closes
+		// keeps its idle sockets for a minute and a half. One per logo fetch
+		// accumulates; this pool serves exactly one request, so let it go with
+		// the request rather than leaving hundreds of them holding sockets.
+		defer transport.CloseIdleConnections()
 		clientCopy.Transport = transport
 	}
 	originalCheck := clientCopy.CheckRedirect
