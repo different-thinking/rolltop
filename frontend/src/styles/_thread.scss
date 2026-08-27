@@ -219,13 +219,14 @@
 }
 
 // The category pill sits on the sender line, so it is sized like the security
-// chips beside it rather than like the sidebar entry it opens: a quiet accent
-// chip that reads as a label first and a link second.
+// chips beside it rather than like the sidebar entry naming the same category:
+// a quiet accent chip that reads as a label.
 .message-category-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-height: 22px;
+  min-width: 0;
   max-width: 100%;
   padding: 2px 8px;
   border: 1px solid transparent;
@@ -236,7 +237,6 @@
   font-weight: 700;
   line-height: 1.35;
   white-space: nowrap;
-  cursor: pointer;
 
   .icon {
     width: 13px;
@@ -244,23 +244,23 @@
     flex: none;
   }
 
-  &:hover {
-    border-color: var(--button-hover-border);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 1px;
-  }
-
-  // Nothing to open while a message is still waiting to be sorted, so the
-  // waiting state is plain text in the muted palette rather than a link.
+  // A message still waiting to be sorted says so in the muted palette, so the
+  // line does not claim a category it has not been given.
   &.pending {
     background: var(--surface-subtle);
     border-color: var(--border);
     color: var(--muted);
-    cursor: default;
   }
+}
+
+// The label carries the truncation rather than the pill around it: the pill is
+// a flex container, and text-overflow applies to neither a flex container nor
+// its anonymous items, so "Invoices & Contracts" on a narrow screen would be
+// cut mid-character with no ellipsis to show for it.
+.message-category-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .unsubscribe-action {
