@@ -19,10 +19,51 @@ site and in review.
 - SMTP sending and message moves exist and are supported; extend them rather than
   reintroducing the old prohibition.
 - Remote delete exists in exactly one place: emptying a folder that carries the
-  Trash role (`syncer.ExpungeFetcher`, `Service.StartEmptyTrash`). Nothing else
-  may flag `\Deleted` or expunge. It lists the folder live rather than trusting
-  the mirror, proves `UIDVALIDITY` before deleting, and drops local rows only for
-  the UIDs the server reports gone afterwards. Keep all four properties.
+  Trash role (`syncer.ExpungeFetcher`, `Service.StartEmptyTrash` and the
+  scheduled `Service.StartTrashRetentionPurge`, which share `startTrashPurge`).
+  Nothing else may flag `\Deleted` or expunge. It lists the folder live rather
+  than trusting the mirror, proves `UIDVALIDITY` before deleting, and drops local
+  rows only for the UIDs the server reports gone afterwards. Keep all four
+  properties.
+- **The retention purge narrows what is deleted; it never widens it, and it
+  never decides on its own what a folder holds.** `trashPurgeTargets` is the
+  intersection of the live listing with the rows this mirror recorded arriving
+  in that folder before the cutoff, and both halves are load-bearing: the mirror
+  alone would delete by UIDs the server may have reassigned, and the server
+  alone cannot tell mail that has waited out the policy from mail thrown away
+  this morning. Mail the mirror has never seen is therefore never purged on a
+  schedule — its stay cannot be measured — while emptying the folder by hand
+  still takes all of it, which is the one place the sync start date is
+  deliberately ignored.
+- **The Trash clock is arrival, not the message date, and `messages.created_at`
+  is what carries it.** A move is an IMAP MOVE, the source row reconciled away
+  and a *new* row created in the destination, so a row in a Trash folder is as
+  old as the message's stay in Trash rather than as old as the message. Nothing
+  else can answer this: the Date header is when the mail was *sent*, so counting
+  from it would delete a year-old newsletter the instant a category rule threw
+  it away — which is the whole two-step promise (`nothing leaves a server until
+  the Trash is emptied`) turned into a fiction — and IMAP's INTERNALDATE is
+  preserved across a MOVE by every server that implements it, so it says the
+  same thing. A change that made a move update the row's `mailbox_id` in place
+  instead would silently repoint this clock at the message's original arrival;
+  give the retention purge its own stamp in the same change if that ever
+  happens.
+- **A retention cutoff that resolves to nothing selects nothing, never
+  everything.** `CategoryRetention.Cutoff` returns a bool beside the instant and
+  every caller reads it, because a zero `ScopeFilter.Before` is "no filter" and
+  would take the whole category rather than its backlog. An unrecognised unit is
+  in that same class and is not read as days. A relative rule stores its own
+  unit (`cutoff_count`, `cutoff_unit`) rather than a number of days, so six
+  months is six calendar months and "30 days" and "1 month" stay two different
+  rules.
+- **A retention pass records that it ran even when it failed**
+  (`MarkRetentionSwept`, written whatever the outcome). The alternative is a
+  reader whose account errors being retried in a loop rather than on the
+  interval. A pass that was cut short by the scope limit or the wall-clock
+  budget instead leaves a mark far enough back to come round again on
+  `retentionCatchUpInterval`, which is long enough for the moves it queued to
+  land — resuming immediately would resolve the same messages again and queue a
+  second move for them.
 - **A dropped connection pauses a Trash purge; it never ends one.** Emptying a
   full Trash folder is tens of thousands of messages over many minutes, and a
   mail host closing that connection partway through is ordinary — Gmail does it

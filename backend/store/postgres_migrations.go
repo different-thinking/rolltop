@@ -286,6 +286,57 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_messages_category_version ON messages (user_id, category_version, id)`,
 		},
 	},
+	{
+		// Retention: how long mail is kept before it is thrown away, and how
+		// long the Trash keeps what was thrown away before the server is told
+		// to delete it for good.
+		//
+		// Two tables because the two answers are shaped differently. The Trash
+		// rule is one number per reader -- it is the same rule for every
+		// account, since a Trash folder is a Trash folder -- and it carries the
+		// sweep bookkeeping, so a restart does not re-run a purge that has just
+		// happened. The category rules are one row per category the reader has
+		// an opinion about; a category with no row is one nothing is deleted
+		// from, which is why the absence of a row is the off state rather than
+		// a default that would start deleting mail on upgrade.
+		//
+		// A cutoff is expressed either relatively ("older than 30 days", which
+		// moves with the calendar) or as one fixed day, and both spellings are
+		// stored rather than resolved on save: a relative rule that had been
+		// resolved to a date once would stop being a retention policy the day
+		// after it was written.
+		//
+		// A relative cutoff keeps its own unit rather than being reduced to a
+		// number of days, because the calendar is what the reader meant: six
+		// months is six months, not a hundred and eighty days, and reducing it
+		// would also make "30 days" and "1 month" the same stored rule and read
+		// one of them back as the other.
+		Version: "0010-retention",
+		Statements: []string{
+			`CREATE TABLE retention_settings (
+				user_id bigint PRIMARY KEY,
+				trash_enabled bigint NOT NULL DEFAULT 1,
+				trash_days bigint NOT NULL DEFAULT 30,
+				categories_swept_at bigint NOT NULL DEFAULT 0,
+				trash_swept_at bigint NOT NULL DEFAULT 0,
+				created_at bigint NOT NULL,
+				updated_at bigint NOT NULL
+			)`,
+			`ALTER TABLE retention_settings ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+			`CREATE TABLE category_retention_rules (
+				user_id bigint NOT NULL,
+				category text COLLATE "C" NOT NULL,
+				mode text COLLATE "C" NOT NULL DEFAULT 'off' CHECK(mode IN ('off', 'relative', 'fixed')),
+				cutoff_count bigint NOT NULL DEFAULT 0,
+				cutoff_unit text COLLATE "C" NOT NULL DEFAULT 'days' CHECK(cutoff_unit IN ('days', 'months', 'years')),
+				before_unix bigint NOT NULL DEFAULT 0,
+				created_at bigint NOT NULL,
+				updated_at bigint NOT NULL,
+				PRIMARY KEY (user_id, category)
+			)`,
+			`ALTER TABLE category_retention_rules ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

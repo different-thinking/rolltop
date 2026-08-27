@@ -26,6 +26,7 @@ import type {
   MessageSnooze,
   MessageOriginalSource,
   PluginSetting,
+  RetentionSettings,
   SMTPAccount,
   SMTPLogSession,
   SMTPTestResult,
@@ -622,11 +623,17 @@ export const api = {
   // not limited to the IDs one page happens to have loaded. The server resolves
   // the matches, groups them per account Trash, and answers with the runs it
   // started; progress arrives through the normal sync-run events.
-  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView }) =>
+  //
+  // The optional cutoff narrows it to the backlog behind the list: with one,
+  // this is "delete everything older than", and it is the exact instant the
+  // chosen day begins in the reader's own timezone, so the day they name is
+  // kept whole wherever they are.
+  scopeTrashMessages: (csrf: string, scope: { mailboxID: number; query: string; view?: MailView; before?: string }) =>
     postJSON<ScopeMoveResponse>("/api/messages/scope-trash", csrf, {
       scope_mailbox_id: scope.mailboxID,
       scope_query: scope.query,
-      scope_view: scope.view || ""
+      scope_view: scope.view || "",
+      before: scope.before || ""
     }),
   // Archiving by date uses the same scope description plus the cutoff. The
   // cutoff is the exact instant the chosen day begins in the reader's own
@@ -817,6 +824,9 @@ export const api = {
     postJSON<{ user: User }>("/api/profile", csrf, profile),
   saveSwipePreferences: (csrf: string, preferences: SwipePreferences) =>
     postJSON<{ swipe_preferences: SwipePreferences }>("/api/profile/swipes", csrf, preferences),
+  retention: () => getJSON<{ retention: RetentionSettings }>("/api/profile/retention"),
+  saveRetention: (csrf: string, retention: RetentionSettings) =>
+    postJSON<{ retention: RetentionSettings }>("/api/profile/retention", csrf, retention),
   requestPasswordReset: (csrf: string, email: string) =>
     postJSON<{ ok: boolean }>("/api/password-reset/request", csrf, { email }),
   completePasswordReset: (csrf: string, token: string, password: string) =>

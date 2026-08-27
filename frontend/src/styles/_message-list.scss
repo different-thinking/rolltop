@@ -74,7 +74,8 @@
   }
 }
 
-// The cutoff row of the archive-by-date dialog: presets first, then the exact day.
+// The cutoff rows of the act-by-date dialogs, shared by archiving and deleting:
+// presets first, then the two spellings of a cutoff the reader picks between.
 .date-cutoff-presets {
   display: flex;
   flex-wrap: wrap;
@@ -99,6 +100,43 @@
   input {
     width: auto;
     min-width: 150px;
+  }
+}
+
+.date-cutoff-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.date-cutoff-mode {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+
+  input[type="radio"] {
+    width: auto;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    width: 76px;
+  }
+
+  input[type="date"],
+  select {
+    width: auto;
+    min-width: 120px;
+  }
+
+  // A row whose spelling is not the selected one stays readable but plainly
+  // inactive: it is the alternative, not something that has gone wrong.
+  &:has(input[type="radio"]:not(:checked)) {
+    opacity: .6;
   }
 }
 

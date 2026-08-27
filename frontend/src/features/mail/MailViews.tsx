@@ -31,7 +31,7 @@ import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { SnoozeControl } from "./SnoozeControl";
-import { ArchiveBeforeControl, EmptyTrashControl } from "./MailListActions";
+import { ArchiveBeforeControl, DeleteBeforeControl, EmptyTrashControl } from "./MailListActions";
 
 type SearchActionPlugin = RuntimePlugin & {
   renderSearchActions?: (context: {
@@ -244,6 +244,12 @@ export function MailView({
   // list, which this button cannot narrow.
   const archiveOlderAvailable = view !== "drafts" && view !== "sent"
     && !["sent", "drafts", "trash", "junk"].includes(mailbox?.role || "");
+  // Deleting by date is the counterpart, and it is offered on every list that
+  // has a backlog to clear -- including Sent and Drafts, where throwing old mail
+  // away is a thing a reader means, unlike filing it into Archive. The one list
+  // it is left off is a Trash folder, where every match is already in the folder
+  // it would be moved to; that folder has Empty Trash instead.
+  const deleteOlderAvailable = mailbox?.role !== "trash";
   const refreshKey = `${mailGeneration}:${manualRefreshGeneration}:${mailboxRefreshKey(latestSyncRun, mailbox)}`;
   const listScopeKey = `${userID}:${mailboxID || view || "all"}:${sortOrder}`;
   const listKey = listScopeKey + ":" + page;
@@ -499,6 +505,21 @@ export function MailView({
                 disabled={listPending}
                 addToast={addToast}
                 onArchived={() => {
+                  refreshList();
+                  void refreshChrome();
+                }}
+              />
+            ) : null}
+            {listScope && deleteOlderAvailable ? (
+              <DeleteBeforeControl
+                // Like the Empty Trash confirmation, an open dialog must not
+                // retarget itself at whichever list the reader navigated to next.
+                key={listScope.mailboxID || listScope.view || "all"}
+                csrf={csrf}
+                scope={{ mailboxID: listScope.mailboxID, query: listScope.query, view: listScope.view, label: listScope.label }}
+                disabled={listPending}
+                addToast={addToast}
+                onDeleted={() => {
                   refreshList();
                   void refreshChrome();
                 }}

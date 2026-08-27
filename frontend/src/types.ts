@@ -41,6 +41,42 @@ export type SwipePreferences = {
   archive_mailboxes: AccountMailboxChoice[];
 };
 
+/**
+ * RetentionMode says how a retention cutoff is expressed: "relative" keeps mail
+ * for a number of days and moves with the calendar, "fixed" names one day and
+ * stays there, and "off" deletes nothing.
+ */
+export type RetentionMode = "off" | "relative" | "fixed";
+
+/** RetentionUnit is the calendar step a relative cutoff counts in. */
+export type RetentionUnit = "days" | "months" | "years";
+
+/** CategoryRetention is one category's answer to how long its mail is kept. */
+export type CategoryRetention = {
+  category: string;
+  mode: RetentionMode;
+  /**
+   * The relative cutoff, on the calendar: six months is six months rather than
+   * a rounded number of days. Both are zero and empty unless the mode is
+   * relative.
+   */
+  count: number;
+  unit: RetentionUnit | "";
+  /** The fixed cutoff as an RFC 3339 timestamp, empty unless the mode is fixed. */
+  before: string;
+};
+
+/**
+ * RetentionSettings is the whole policy: how long the Trash keeps what was
+ * thrown away, and what each category keeps before it is thrown away. Only the
+ * categories with a rule are listed; a category that is absent deletes nothing.
+ */
+export type RetentionSettings = {
+  trash_enabled: boolean;
+  trash_days: number;
+  categories: CategoryRetention[];
+};
+
 /** Mailbox mirrors a folder summary row including sync, visibility, and indexing counters. */
 export type Mailbox = {
   id: number;

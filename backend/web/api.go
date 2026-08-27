@@ -30,6 +30,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiProfile(w, r)
 	case path == "profile/swipes":
 		s.apiSwipePreferences(w, r)
+	case path == "profile/retention":
+		s.apiRetention(w, r)
 	case path == "mail":
 		s.apiMail(w, r)
 	case path == "snoozes":

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api } from "../../api";
 import type { DatePrefs, LocationState, Toast } from "../../appTypes";
-import type { Account, AccountPurgeEstimate, Bootstrap, DuplicateCopyReport, FolderProgress, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageIndexBreakdown, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
+import type { Account, AccountPurgeEstimate, Bootstrap, DuplicateCopyReport, FolderProgress, MailCategorySummary, MailIdentity, PluginSetting, Mailbox, SMTPAccount, StorageIndexBreakdown, StorageStats, SwipeAction, SwipePreferences, SwipeSnoozePreset, SyncFolder, SyncRun, SyncRunLiveDetail, ThemeDefinition, User } from "../../types";
 import { Icon } from "../../components/Icon";
 import { Field, Stat } from "../../components/common";
 import { emptyAccountForm, accountToForm, suggestedSyncStart, AUTH_GOOGLE, AUTH_PASSWORD } from "../../lib/accountForm";
@@ -21,6 +21,7 @@ import type { RuntimePlugin, RuntimePlugins } from "../../plugins/runtime";
 import { identitySecuritySettings } from "../../plugins/identitySecurity";
 import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/AdminRemoteImageBlocklist";
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
+import { RetentionSettingsPanel } from "./RetentionSettings";
 import { SMTPTrafficPanel } from "./SMTPTraffic";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
 import { GmailSubmissionPortField, GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
@@ -454,7 +455,7 @@ function cloneMailIdentity(identity: MailIdentity): MailIdentity {
 }
 
 type SettingsRoute = {
-  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "preferences" | "swipes" | "search" | "plugins" | "unknown";
+  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "preferences" | "swipes" | "search" | "retention" | "plugins" | "unknown";
   id: number | null;
   isNew: boolean;
 };
@@ -475,6 +476,7 @@ function settingsRouteFromPath(path: string): SettingsRoute {
   if (path === "/settings/account/preferences") return { kind: "preferences", id: null, isNew: false };
   if (path === "/settings/account/preferences/swipes") return { kind: "swipes", id: null, isNew: false };
   if (path === "/settings/account/preferences/search") return { kind: "search", id: null, isNew: false };
+  if (path === "/settings/account/preferences/retention") return { kind: "retention", id: null, isNew: false };
   if (path === "/settings/account/plugins") return { kind: "plugins", id: null, isNew: false };
   if (path === "/settings/account/mail/identities" || path === "/settings/account/identities") return { kind: "identities", id: null, isNew: false };
   if (path === "/settings/account/mail/imap/new" || path === "/settings/account/imap/new") return { kind: "imap", id: null, isNew: true };
@@ -719,6 +721,7 @@ export function SettingsView({
   user,
   swipePreferences,
   mailboxes,
+  mailCategories,
   latestSyncRun,
   activeSyncRuns,
   syncRunning,
@@ -735,6 +738,8 @@ export function SettingsView({
   user: User;
   swipePreferences: SwipePreferences;
   mailboxes: Mailbox[];
+  /** The category registry, so the retention page names categories the way the sidebar does. */
+  mailCategories: MailCategorySummary[];
   latestSyncRun: SyncRun | null;
   activeSyncRuns: SyncRun[];
   syncRunning: boolean;
@@ -2843,7 +2848,7 @@ export function SettingsView({
     if (route.kind === "plugins" || route.kind === "unknown") return "plugins";
     if (["mail", "imap", "smtp", "identities"].includes(route.kind)) return "mail";
     if (route.kind === "google") return "google";
-    if (["preferences", "swipes", "search"].includes(route.kind)) return "preferences";
+    if (["preferences", "swipes", "search", "retention"].includes(route.kind)) return "preferences";
     return "general";
   };
 
@@ -3077,6 +3082,18 @@ export function SettingsView({
     page = <SettingsPage title="Swipe actions" description="Choose what left and right swipes do on touch devices, and which folder the Archive action uses." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSwipeSettings()}</SettingsPage>;
   } else if (route.kind === "search") {
     page = <SettingsPage title="Search tuning" description="Control typo tolerance, ranking, and attachment matching." backPath="/settings/account/preferences" navigate={navigate}>{noticeNode}{renderSearchSettings()}</SettingsPage>;
+  } else if (route.kind === "retention") {
+    page = (
+      <SettingsPage
+        title="Retention"
+        description="How long each category keeps mail, and how long the Trash keeps what you threw away."
+        backPath="/settings/account/preferences"
+        navigate={navigate}
+      >
+        {noticeNode}
+        <RetentionSettingsPanel csrf={csrf} categories={mailCategories} addToast={addToast} />
+      </SettingsPage>
+    );
   } else if (route.kind === "mail") {
     page = (
       <SettingsPage title="Mail" description="Incoming servers, outgoing delivery, folders, and identities." navigate={navigate}>
@@ -3128,6 +3145,7 @@ export function SettingsView({
         <SettingsIndex ariaLabel="Mail preferences">
           <SettingsIndexRow icon="arrow_back" title="Swipe actions" description="Configure left and right gestures, archive folders, and snooze timing." meta={`Left: ${swipeLabel(swipeDraft.left_action)} · Right: ${swipeLabel(swipeDraft.right_action)}`} path="/settings/account/preferences/swipes" navigate={navigate} />
           <SettingsIndexRow icon="search" title="Search tuning" description="Adjust ranking, typo matching, contacts, and attachment text." meta={profileForm.search_preset || "Balanced"} path="/settings/account/preferences/search" navigate={navigate} />
+          <SettingsIndexRow icon="delete" title="Retention" description="Throw away old mail per category, and empty the Trash on a schedule." meta="Trash and categories" path="/settings/account/preferences/retention" navigate={navigate} />
         </SettingsIndex>
       </SettingsPage>
     );

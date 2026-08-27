@@ -197,7 +197,7 @@ func (f emptyTrashFixture) runEmpty(t *testing.T) store.SyncRun {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.service.runEmptyTrash(ctx, f.userID, f.account, f.trash, run.ID, store.SyncProgress{}, nil, nil)
+	f.service.runEmptyTrash(ctx, f.userID, f.account, f.trash, run.ID, time.Time{}, store.SyncProgress{}, nil, nil)
 	finished, err := f.store.GetSyncRunForUser(ctx, f.userID, run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func TestEmptyTrashReleasesForegroundBeforeLocalCleanup(t *testing.T) {
 	}
 
 	var order []string
-	fixture.service.runEmptyTrash(ctx, fixture.userID, fixture.account, fixture.trash, run.ID, store.SyncProgress{},
+	fixture.service.runEmptyTrash(ctx, fixture.userID, fixture.account, fixture.trash, run.ID, time.Time{}, store.SyncProgress{},
 		func() { order = append(order, "release") },
 		func() { order = append(order, "done") })
 
