@@ -1,5 +1,9 @@
 # rolltop
 
+> **This is a fork of [grahamsz/rolltop](https://github.com/grahamsz/rolltop).**
+> What it changes, improves and adds is described in **[FORK.md](FORK.md)** (in German).
+> Everything below is the project's own documentation and applies to this fork.
+
 rolltop is a Go app that mirrors multiple IMAP inboxes per local user into storage you run, for search, viewing, composing, and mailbox moves. It needs a PostgreSQL database beside it; the compose file below runs both. Production mail data stays in the user's own instance. Project site: https://rolltop.app, coming soon. Contact: graham@rolltop.app.
 
 ## What It Stores
