@@ -778,20 +778,36 @@ func (s *Service) watchActiveWriter(done <-chan struct{}, details bleveErrorCont
 	// full rebuild, which is what an operation nothing can attribute needs.
 	markerErr := s.MarkSearchIndexRecoveryRequiredForDocuments(
 		details.UserID, details.FirstDocumentID, details.LastDocumentID)
-	if markerErr == nil {
-		s.activeStallOnce.Do(func() {
-			s.mu.Lock()
-			handler := s.activeStallHandler
-			s.mu.Unlock()
-			if handler != nil {
-				handler(details.UserID)
-			}
-		})
+	if markerErr != nil {
+		// One retry, because the write that just failed and the stall that
+		// brought us here often have the same cause and it may have passed.
+		time.Sleep(time.Second)
+		markerErr = s.MarkSearchIndexRecoveryRequiredForDocuments(
+			details.UserID, details.FirstDocumentID, details.LastDocumentID)
 	}
+	// The restart happens whether or not the marker was written. Skipping it on
+	// a failed marker made recovery conditional on /data being writable -- and
+	// the marker lands on the same volume the stalled writer is blocked on, so
+	// a full disk or a wedged FUSE mount fails both at once. The case that most
+	// needs the restart was the one case that never got it.
+	//
+	// The marker decides how much is reindexed afterwards, not whether this
+	// process recovers: the restart is what releases the writer gate and reopens
+	// the index. Without a marker the tenant comes back with an index that is
+	// stale for the batch this stall swallowed, and the next repair closes that;
+	// without the restart it does not come back at all.
+	s.activeStallOnce.Do(func() {
+		s.mu.Lock()
+		handler := s.activeStallHandler
+		s.mu.Unlock()
+		if handler != nil {
+			handler(details.UserID)
+		}
+	})
 	logger := s.logf()
-	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=%t marker_error_type=%T marker_error=%v recovery_scope=%s",
+	summary := fmt.Sprintf("bleve active writer stalled operation=%q user_id=%d account_id=%d mailbox_id=%d documents=%d batch_bytes=%d first_document_id=%d last_document_id=%d document_ids=%v threshold=%s marker_written=%t restart_required=true marker_error_type=%T marker_error=%v recovery_scope=%s",
 		details.Operation, details.UserID, details.AccountID, details.MailboxID, details.Documents, details.BatchBytes,
-		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr == nil, markerErr, markerErr,
+		details.FirstDocumentID, details.LastDocumentID, details.DocumentIDs, s.activeWriterStallAfter(), markerErr == nil, markerErr, markerErr,
 		SearchIndexRecovery{Required: true, FirstDocumentID: details.FirstDocumentID, LastDocumentID: details.LastDocumentID}.Scope())
 	logger("%s", summary)
 	stack := filteredBleveBatchStack()

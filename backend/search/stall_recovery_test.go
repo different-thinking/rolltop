@@ -408,3 +408,92 @@ rolltop/backend/search.(*Service).commitBatch.func1()
 		t.Fatalf("filtered stack length = %d, want <= %d", len(filtered), maxBleveStackBytes)
 	}
 }
+
+// The marker lands on the same volume the stalled writer is blocked on, so the
+// two fail together: a full disk or a wedged mount takes the marker write down
+// with the batch. Recovery therefore may not be conditional on the marker.
+func TestActiveWriterStallRestartsWhenMarkerCannotBeWritten(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "users")
+	svc, err := OpenPerUser(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := svc.indexForUser(23)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := &blockingBatchIndex{
+		delegatedBleveIndex: base,
+		started:             make(chan struct{}),
+		release:             make(chan struct{}),
+		finished:            make(chan struct{}),
+	}
+	svc.mu.Lock()
+	svc.indexes[23] = blocking
+	svc.mu.Unlock()
+	t.Cleanup(func() {
+		blocking.unblock()
+		_ = svc.Close()
+	})
+
+	// A directory where the marker file belongs fails every write onto it, for
+	// root as much as for anyone else -- which a permission bit would not.
+	markerPath, _, err := svc.searchIndexRecoveryMarkerPath(23, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(markerPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.activeStallAfter = 20 * time.Millisecond
+	logs := &capturedBleveLogs{}
+	svc.bleveErrorLog = logs.Printf
+	stalledUsers := make(chan int64, 2)
+	svc.SetActiveWriterStallHandler(func(userID int64) {
+		stalledUsers <- userID
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = svc.IndexMessage(ctx, store.MessageRecord{
+			ID: 77, UserID: 23, AccountID: 1, MailboxID: 2,
+			Subject: "stalled", BodyText: "stalled", Date: time.Now(),
+		}, nil)
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("Bleve batch did not start")
+	}
+
+	select {
+	case userID := <-stalledUsers:
+		if userID != 23 {
+			t.Fatalf("stalled user = %d, want 23", userID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchdog did not signal a restart after the marker write failed")
+	}
+
+	const stallLine = `bleve active writer stalled operation="index-batch"`
+	var output string
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		output = logs.String()
+		if strings.Contains(output, stallLine) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stall diagnostics missing %q: %q", stallLine, output)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The operator has to be able to tell the two apart: the process is
+	// restarting, and it is going to come back without a repair scope.
+	for _, want := range []string{`marker_written=false`, `restart_required=true`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stall diagnostics missing %q: %q", want, output)
+		}
+	}
+}
