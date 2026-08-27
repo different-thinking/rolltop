@@ -452,3 +452,35 @@ func (s *Store) ListTrashRetentionUIDs(ctx context.Context, userID, mailboxID in
 	}
 	return out, rows.Err()
 }
+
+// TrashRetentionStillDue reports whether one Trash folder still holds mail that
+// arrived before the cutoff.
+//
+// A purge takes at most maxTrashRetentionUIDs in one go, and the server may
+// refuse some of what it does take, so "the pass ran" and "the folder is clear"
+// are two different answers. Asking the folder afterwards gives the second one
+// without the purge having to report its own arithmetic back through a
+// background run. The generation is compared against the folder's own stored
+// UIDVALIDITY, the same rows a purge can actually name: mail left behind under
+// an older generation is not work the next pass could finish, so counting it
+// would ask for a pass that can never come out clean.
+func (s *Store) TrashRetentionStillDue(ctx context.Context, userID, mailboxID int64, before time.Time) (bool, error) {
+	if before.IsZero() {
+		return false, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	var due bool
+	err = db.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM messages m
+		JOIN mailboxes mb ON mb.user_id = m.user_id AND mb.id = m.mailbox_id
+		WHERE m.user_id = ? AND m.mailbox_id = ? AND m.created_at < ?
+			AND m.uid > 0 AND m.uid_validity = mb.uidvalidity)`,
+		userID, mailboxID, before.UTC().Unix()).Scan(&due)
+	if err != nil {
+		return false, err
+	}
+	return due, nil
+}

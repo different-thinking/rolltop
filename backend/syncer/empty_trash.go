@@ -215,6 +215,14 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	if err != nil {
 		return 0, err
 	}
+	// A purge that named a cutoff means the UIDs it named and no others, so it
+	// may not fall back to the expunge that takes everything flagged \Deleted
+	// in the folder. Emptying the folder is the one case where that fallback is
+	// what was asked for.
+	scope := ExpungeWholeFolder
+	if !before.IsZero() {
+		scope = ExpungeNamedUIDsOnly
+	}
 	if len(uids) == 0 {
 		return 0, nil
 	}
@@ -238,7 +246,7 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 			return deleted, err
 		}
 		end := min(start+emptyTrashBatchSize, len(uids))
-		gone, err := s.expungeTrashBatch(ctx, session, expunger, userID, account, mailbox.Name, uids[start:end], uidValidity)
+		gone, err := s.expungeTrashBatch(ctx, session, expunger, userID, account, mailbox.Name, uids[start:end], uidValidity, scope)
 		deleted += len(gone)
 		progress.MessagesSeen += end - start
 		progress.MessagesStored = deleted
@@ -252,6 +260,12 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 			// getting through any more: giving up on the first dropped
 			// connection leaves most of a large Trash folder behind.
 			batchErr = err
+			// A server that cannot expunge selectively will answer every
+			// remaining batch the same way, and answering it once is the point:
+			// the purge stops with mail intact rather than widening itself.
+			if errors.Is(err, ErrSelectiveExpungeUnsupported) {
+				break
+			}
 			failedInARow++
 			log.Printf("empty trash batch failed user_id=%d run_id=%d mailbox_id=%d uids=%d-%d of %d: %v",
 				userID, runID, mailbox.ID, start+1, end, len(uids), err)
@@ -268,7 +282,10 @@ func (s *Service) emptyTrashRemotely(ctx context.Context, userID int64, account 
 	// Give the connection back before the folder is listed again: a second
 	// concurrent login to the same account is what holding one exists to avoid.
 	session.close()
-	if batchErr != nil {
+	// A capability the server does not have is the one failure that flagged
+	// nothing, so there is no residue to recount and no folder listing worth
+	// spending on it: what the batches reported is already the whole story.
+	if batchErr != nil && !errors.Is(batchErr, ErrSelectiveExpungeUnsupported) {
 		// What the batches confirmed is no longer the whole story. A batch that
 		// failed after flagging its messages leaves them carrying \Deleted, and
 		// on a server without UIDPLUS the only expunge available removes
@@ -376,14 +393,18 @@ func (s *Service) trashMessagesStillHeld(ctx context.Context, account store.Mail
 // failing attempt itself, so the next one starts from a new login rather than a
 // dead socket.
 func (s *Service) expungeTrashBatch(ctx context.Context, session *expungeSessionHolder, expunger ExpungeFetcher,
-	userID int64, account store.MailAccount, mailbox string, uids []uint32, uidValidity uint32) ([]uint32, error) {
+	userID int64, account store.MailAccount, mailbox string, uids []uint32, uidValidity uint32, scope ExpungeScope) ([]uint32, error) {
 	var lastErr error
 	for attempt := 1; attempt <= emptyTrashBatchAttempts; attempt++ {
-		gone, err := session.expunge(ctx, expunger, account, mailbox, uids, uidValidity)
+		gone, err := session.expunge(ctx, expunger, account, mailbox, uids, uidValidity, scope)
 		if err == nil {
 			return gone, nil
 		}
 		lastErr = err
+		// A fresh login answers a missing capability exactly as this one did.
+		if errors.Is(err, ErrSelectiveExpungeUnsupported) {
+			return nil, lastErr
+		}
 		if ctx.Err() != nil || attempt == emptyTrashBatchAttempts {
 			return nil, lastErr
 		}
@@ -441,14 +462,14 @@ func (s *Service) openExpungeSession(ctx context.Context, userID int64, account 
 // expunge deletes one batch, over the held connection when there is one and
 // through the fetcher's own connection otherwise.
 func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetcher, account store.MailAccount,
-	mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+	mailbox string, uids []uint32, expectedUIDValidity uint32, scope ExpungeScope) ([]uint32, error) {
 	if h == nil {
-		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+		return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity, scope)
 	}
 	if h.session == nil {
 		opener, ok := h.service.Fetcher.(ExpungeSessionFetcher)
 		if !ok {
-			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity)
+			return expunger.ExpungeMessages(ctx, account, mailbox, uids, expectedUIDValidity, scope)
 		}
 		session, err := opener.OpenExpungeSession(ctx, h.account)
 		if err != nil {
@@ -456,7 +477,7 @@ func (h *expungeSessionHolder) expunge(ctx context.Context, expunger ExpungeFetc
 		}
 		h.session = session
 	}
-	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity)
+	gone, err := h.session.ExpungeMessages(ctx, mailbox, uids, expectedUIDValidity, scope)
 	if err != nil {
 		// The held connection may itself be why this failed. Drop it so a retry
 		// of this purge starts from a fresh login rather than a dead socket.

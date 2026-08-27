@@ -909,13 +909,22 @@ The Trash is then emptied on a schedule, on every account, for everything it has
 held longer than the retention length — 30 days by default, and switchable off.
 That step is permanent and reaches the mail server, through the same expunge
 `Empty Trash` uses: the folder is listed live and its `UIDVALIDITY` proved
-before anything is deleted. Two things bound what it takes. The clock is when a
-message *arrived* in the Trash rather than when it was sent, so mail thrown away
-today keeps its full stay however old the mail itself is — which is what makes
-the two halves compose rather than delete a year-old newsletter the moment a
-category rule throws it away. And it only ever names mail rolltop has mirrored,
-since a message this install has never seen has no measurable stay; emptying a
-Trash folder by hand still takes all of it.
+before anything is deleted. Three things bound what it takes. The clock is when
+a message *arrived* in the Trash rather than when it was sent, so mail thrown
+away today keeps its full stay however old the mail itself is — which is what
+makes the two halves compose rather than delete a year-old newsletter the moment
+a category rule throws it away. It only ever names mail rolltop has mirrored,
+since a message this install has never seen has no measurable stay. And it needs
+a server that supports `UID EXPUNGE` (RFC 4315, advertised as `UIDPLUS`), which
+most do: without it IMAP offers only the expunge that removes everything in the
+folder flagged deleted, so a partial purge would take mail nobody asked about,
+and rolltop refuses and says so rather than widening itself. Emptying a Trash
+folder by hand still takes all of it, on any server.
+
+Upgrading an existing install does not switch the automatic emptying on. The
+migration records it as off for every account that already exists, because
+nobody chose it; accounts created afterwards get the default above. Either way
+it is one checkbox on the Retention page.
 
 A saved policy runs shortly afterwards and then on a several-hour interval, per
 user, yielding to whatever the reader is doing at the time.

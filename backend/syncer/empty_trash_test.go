@@ -21,6 +21,7 @@ type emptyTrashExpungeCall struct {
 	mailbox     string
 	uids        []uint32
 	uidValidity uint32
+	scope       ExpungeScope
 }
 
 // emptyTrashFetcher is a Trash folder on a fake server. Expunging removes UIDs
@@ -35,10 +36,13 @@ type emptyTrashFetcher struct {
 	highestUID uint32
 	// keep names UIDs the server refuses to remove, so a partial delete can be
 	// distinguished from a finished one.
-	keep         []uint32
-	expungeErr   error
-	expungeCalls []emptyTrashExpungeCall
-	snapshots    int
+	keep []uint32
+	// noSelectiveExpunge stands in for a server with no UID EXPUNGE, where the
+	// only expunge available takes everything flagged \Deleted in the folder.
+	noSelectiveExpunge bool
+	expungeErr         error
+	expungeCalls       []emptyTrashExpungeCall
+	snapshots          int
 }
 
 func (f *emptyTrashFetcher) ListMailboxes(context.Context, store.MailAccount) ([]MailboxInfo, error) {
@@ -96,8 +100,13 @@ func (f *emptyTrashFetcher) SnapshotMailboxUIDs(context.Context, store.MailAccou
 	return MailboxUIDSnapshot{UIDs: slices.Clone(f.uids), UIDValidity: emptyTrashUIDValidity, UIDNext: next + 100}, nil
 }
 
-func (f *emptyTrashFetcher) ExpungeMessages(_ context.Context, _ store.MailAccount, mailbox string, uids []uint32, uidValidity uint32) ([]uint32, error) {
-	f.expungeCalls = append(f.expungeCalls, emptyTrashExpungeCall{mailbox: mailbox, uids: slices.Clone(uids), uidValidity: uidValidity})
+func (f *emptyTrashFetcher) ExpungeMessages(_ context.Context, _ store.MailAccount, mailbox string, uids []uint32, uidValidity uint32, scope ExpungeScope) ([]uint32, error) {
+	f.expungeCalls = append(f.expungeCalls, emptyTrashExpungeCall{mailbox: mailbox, uids: slices.Clone(uids), uidValidity: uidValidity, scope: scope})
+	// A server without UIDPLUS answers a request for only the named UIDs the
+	// way the real client does: it refuses, before flagging anything.
+	if f.noSelectiveExpunge && scope != ExpungeWholeFolder {
+		return nil, ErrSelectiveExpungeUnsupported
+	}
 	if f.expungeErr != nil {
 		return nil, f.expungeErr
 	}

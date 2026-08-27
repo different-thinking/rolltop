@@ -7,9 +7,112 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"rolltop/backend/store/pgtestdb"
 )
+
+// retentionBackfillStatement is the shipped statement that switches the
+// automatic Trash purge off for accounts that predate retention. The test runs
+// the real SQL rather than a copy of it: what is being checked is that the
+// statement in the migration list does what the migration says it does.
+func retentionBackfillStatement(t *testing.T) string {
+	t.Helper()
+	for _, migration := range postgresMigrations {
+		if migration.Version != "0010-retention" {
+			continue
+		}
+		for _, statement := range migration.Statements {
+			if strings.Contains(statement, "INSERT INTO retention_settings") {
+				return statement
+			}
+		}
+	}
+	t.Fatal("the 0010-retention migration no longer backfills retention_settings, so upgrading an existing install now switches an irreversible purge on for everybody")
+	return ""
+}
+
+// Upgrading must not start deleting anybody's mail off their mail server. The
+// migration writes every account that already exists an explicit "off" row; an
+// account created afterwards has no row, and the absence of one carries the
+// shipped default, which is that the Trash empties itself after 30 days.
+func TestUpgradingLeavesExistingReadersOutOfTheAutomaticTrashPurge(t *testing.T) {
+	dsn := pgtestdb.New(t)
+	conn, ctx := openMigrationTestConn(t, dsn)
+
+	// A user the migration has not seen: the schema was applied to an empty
+	// database above, so this row stands in for one that predates it.
+	var userID int64
+	if err := conn.QueryRowContext(ctx, `INSERT INTO users (email, name, password_hash, is_admin, created_at, updated_at)
+		VALUES ('grandfathered@example.test', 'Existing', 'hash', 0, 0, 0) RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, retentionBackfillStatement(t)); err != nil {
+		t.Fatalf("run the shipped backfill: %v", err)
+	}
+
+	var enabled, days int64
+	if err := conn.QueryRowContext(ctx,
+		`SELECT trash_enabled, trash_days FROM retention_settings WHERE user_id = $1`, userID).
+		Scan(&enabled, &days); err != nil {
+		t.Fatalf("read the backfilled row: %v", err)
+	}
+	if enabled != 0 {
+		t.Fatal("an account that predates retention came out of the upgrade with the automatic purge on, which deletes their mail from their mail server without anybody asking")
+	}
+	if days != DefaultTrashRetentionDays {
+		t.Fatalf("Trash days = %d, want the default %d waiting to be switched on", days, DefaultTrashRetentionDays)
+	}
+
+	// It is a backfill, not an overwrite: a reader who has already chosen keeps
+	// their choice if the statement ever runs again.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE retention_settings SET trash_enabled = 1, trash_days = 7 WHERE user_id = $1`, userID); err != nil {
+		t.Fatalf("record a choice: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, retentionBackfillStatement(t)); err != nil {
+		t.Fatalf("re-run the shipped backfill: %v", err)
+	}
+	if err := conn.QueryRowContext(ctx,
+		`SELECT trash_enabled, trash_days FROM retention_settings WHERE user_id = $1`, userID).
+		Scan(&enabled, &days); err != nil {
+		t.Fatalf("re-read the row: %v", err)
+	}
+	if enabled != 1 || days != 7 {
+		t.Fatalf("row after a second backfill = enabled %d days %d, want the reader's own choice kept", enabled, days)
+	}
+}
+
+// A sweep mark must not switch the purge on behind a reader who has it off.
+func TestMarkRetentionSweptDoesNotSwitchTheTrashPurgeOn(t *testing.T) {
+	ctx := context.Background()
+	db, err := openTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "retention-off@example.test", "Off", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveRetentionSettings(ctx, RetentionSettings{UserID: user.ID, TrashEnabled: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.MarkRetentionSwept(ctx, user.ID, time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := db.GetRetentionSettings(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.TrashEnabled {
+		t.Fatal("recording a sweep switched the automatic purge on")
+	}
+}
 
 func TestRetentionSettingsDefaultToAnEmptyingTrashAndNoCategoryRules(t *testing.T) {
 	ctx := context.Background()

@@ -25,6 +25,25 @@ site and in review.
   than trusting the mirror, proves `UIDVALIDITY` before deleting, and drops local
   rows only for the UIDs the server reports gone afterwards. Keep all four
   properties.
+- **The expunge that takes a whole folder may only be asked for by the caller
+  that means a whole folder.** IMAP without RFC 4315 offers one expunge and it
+  removes every message in the folder carrying `\Deleted`. Emptying a Trash
+  folder can live with that; a retention purge cannot, because the messages it
+  did not name are mail that has not waited long enough or mail another client
+  flagged and has not expunged yet. So every expunge carries a
+  `syncer.ExpungeScope`, `ExpungeNamedUIDsOnly` refuses on a server with no UID
+  EXPUNGE (`ErrSelectiveExpungeUnsupported`), and the refusal happens **before**
+  anything is flagged — flagging first and finding out afterwards leaves exactly
+  the residue the next plain EXPUNGE from any client deletes. A missing
+  capability is not retried on a fresh login and does not spend a folder listing
+  on a recount, because nothing was flagged to recount.
+- **A schema change that starts deleting mail carries its own grandfathering.**
+  The `0010-retention` migration writes every account that already exists an
+  explicit `trash_enabled = 0` row, so an upgrade cannot begin permanently
+  removing anybody's Trash from their mail server on a default nobody chose;
+  the shipped default is the other way round and is carried by the *absence* of
+  a row, exactly as the absence of a category row carries "delete nothing". Any
+  future default that acts on mail by itself needs the same treatment.
 - **The retention purge narrows what is deleted; it never widens it, and it
   never decides on its own what a folder holds.** `trashPurgeTargets` is the
   intersection of the live listing with the rows this mirror recorded arriving
@@ -56,6 +75,25 @@ site and in review.
   unit (`cutoff_count`, `cutoff_unit`) rather than a number of days, so six
   months is six calendar months and "30 days" and "1 month" stay two different
   rules.
+- **"The pass ran" and "the folder is clear" are two different answers.** A
+  purge takes a bounded number of messages and a server may refuse some of what
+  it takes, so the Trash half asks the folder afterwards
+  (`Store.TrashRetentionStillDue`) rather than trusting that having run means
+  having finished. The question is scoped to the folder's own stored
+  `UIDVALIDITY`, the rows a purge could actually name: counting mail left under
+  an older generation would ask for a pass that can never come out clean.
+- **One reader's retention pass is bounded by its own clock, and every rule
+  shares one move plan.** The Trash half's budget starts when that reader's
+  half starts, not when the sweep over all readers did, or everybody queued
+  behind a reader with a very full Trash is skipped on every pass. The category
+  half collects every rule into a single `trashPlanForMessages`, because a plan
+  takes the tenant's exclusive foreground reservation and holds it until its
+  runs land: a plan per rule meant the second rule waiting out the whole
+  reservation timeout and then failing, so one rule applied per pass. For the
+  same reason the Trash half runs *first* — it waits for its purges and gives
+  the slot back, while the category half hands its moves to the background and
+  leaves the slot held behind it. A busy slot is a postponed pass, never a
+  logged failure: scheduled work yields to what the reader is doing.
 - **A retention pass records that it ran even when it failed**
   (`MarkRetentionSwept`, written whatever the outcome). The alternative is a
   reader whose account errors being retried in a loop rather than on the

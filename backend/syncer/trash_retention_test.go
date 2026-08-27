@@ -130,3 +130,66 @@ func TestStartTrashRetentionPurgeRefusesAMissingCutoff(t *testing.T) {
 		t.Fatal("StartTrashRetentionPurge with no cutoff = nil error, want a refusal: an empty cutoff must never read as everything")
 	}
 }
+
+// A retention purge names the UIDs it means, so the expunge must be the one
+// that removes exactly those. Emptying the folder by hand is the only caller
+// allowed the fallback that takes everything flagged \Deleted with it.
+func TestTrashRetentionPurgeAsksForASelectiveExpungeAndEmptyingDoesNot(t *testing.T) {
+	fixture := newEmptyTrashFixture(t, []uint32{61, 62})
+	backdateTrashArrival(t, fixture, 61, time.Now().UTC().AddDate(0, 0, -90))
+
+	fixture.runRetention(t, time.Now().UTC().AddDate(0, 0, -30))
+	if len(fixture.fetcher.expungeCalls) != 1 {
+		t.Fatalf("expunge calls = %d, want one", len(fixture.fetcher.expungeCalls))
+	}
+	if fixture.fetcher.expungeCalls[0].scope != ExpungeNamedUIDsOnly {
+		t.Fatalf("retention purge scope = %q, want %q", fixture.fetcher.expungeCalls[0].scope, ExpungeNamedUIDsOnly)
+	}
+
+	fixture.fetcher.expungeCalls = nil
+	fixture.runEmpty(t)
+	if len(fixture.fetcher.expungeCalls) != 1 {
+		t.Fatalf("expunge calls = %d, want one", len(fixture.fetcher.expungeCalls))
+	}
+	if fixture.fetcher.expungeCalls[0].scope != ExpungeWholeFolder {
+		t.Fatalf("empty-trash scope = %q, want %q", fixture.fetcher.expungeCalls[0].scope, ExpungeWholeFolder)
+	}
+}
+
+// A server whose only expunge takes the whole folder cannot serve a retention
+// purge at all. The run says so and leaves every message where it is, rather
+// than deleting mail that has not waited long enough or that another client
+// flagged and has not expunged yet.
+func TestTrashRetentionPurgeStopsRatherThanWidenOnAServerWithoutUIDPlus(t *testing.T) {
+	fixture := newEmptyTrashFixture(t, []uint32{71, 72, 73})
+	fixture.fetcher.noSelectiveExpunge = true
+	backdateTrashArrival(t, fixture, 71, time.Now().UTC().AddDate(0, 0, -90))
+
+	run := fixture.runRetention(t, time.Now().UTC().AddDate(0, 0, -30))
+
+	if run.Status != "failed" {
+		t.Fatalf("run status = %q, want failed: a purge that cannot be served must say so", run.Status)
+	}
+	if !slices.Equal(fixture.fetcher.uids, []uint32{71, 72, 73}) {
+		t.Fatalf("server holds %v, want the folder untouched", fixture.fetcher.uids)
+	}
+	// One answer, not one per batch and not one per retry: a missing capability
+	// reads the same way on a fresh login.
+	if len(fixture.fetcher.expungeCalls) != 1 {
+		t.Fatalf("expunge calls = %d, want exactly one: a missing capability is not worth retrying",
+			len(fixture.fetcher.expungeCalls))
+	}
+	for uid, message := range fixture.messages {
+		if _, err := fixture.store.GetMessageForUser(context.Background(), fixture.userID, message.ID); err != nil {
+			t.Fatalf("local row for uid %d = %v, want it kept alongside the remote message", uid, err)
+		}
+	}
+
+	// Emptying the folder by hand is still served: there, taking everything
+	// flagged is what was asked for.
+	fixture.fetcher.expungeCalls = nil
+	fixture.runEmpty(t)
+	if len(fixture.fetcher.uids) != 0 {
+		t.Fatalf("server holds %v after emptying by hand, want nothing", fixture.fetcher.uids)
+	}
+}

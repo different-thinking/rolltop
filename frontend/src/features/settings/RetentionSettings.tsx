@@ -2,7 +2,7 @@
 // policy: how long each category keeps mail before it is thrown away, and how long
 // the Trash keeps what was thrown away before the server is told to delete it.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
@@ -98,28 +98,46 @@ export function RetentionSettingsPanel({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [stored, setStored] = useState<RetentionSettings | null>(null);
   const [trashEnabled, setTrashEnabled] = useState(true);
   const [trashDays, setTrashDays] = useState(30);
   const [drafts, setDrafts] = useState<categoryDraft[]>([]);
+
+  // The category registry arrives from the chrome payload, which is rebuilt and
+  // handed down as a fresh array on every sync event. Neither the fetch nor the
+  // rebuild below may hang off that array's identity: a reader half way through
+  // typing a cutoff would have the form reload and their draft cleared by any
+  // mail arriving. What either of them actually depends on is *which* categories
+  // exist, so that is what they are keyed on.
+  const categoryKey = categories.map((category) => category.name).join("\u0000");
+  const latestCategories = useRef(categories);
+  latestCategories.current = categories;
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api.retention();
-      setTrashEnabled(data.retention.trash_enabled);
-      setTrashDays(data.retention.trash_days || 30);
-      setDrafts(draftsFor(categories, data.retention));
+      setStored(data.retention);
       setLoadError("");
     } catch (err) {
       setLoadError(messageFromError(err));
     } finally {
       setLoading(false);
     }
-  }, [categories]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Drafts are rebuilt from the stored policy, so saving and reloading both
+  // land here and there is one definition of what the form starts as.
+  useEffect(() => {
+    if (!stored) return;
+    setTrashEnabled(stored.trash_enabled);
+    setTrashDays(stored.trash_days || 30);
+    setDrafts(draftsFor(latestCategories.current, stored));
+  }, [stored, categoryKey]);
 
   function updateDraft(category: string, patch: Partial<categoryDraft>) {
     setDrafts((current) => current.map((draft) => draft.category === category ? { ...draft, ...patch } : draft));
@@ -149,9 +167,7 @@ export function RetentionSettingsPanel({
         trash_days: trashDays,
         categories: drafts.map(ruleFor)
       });
-      setTrashEnabled(saved.retention.trash_enabled);
-      setTrashDays(saved.retention.trash_days || 30);
-      setDrafts(draftsFor(categories, saved.retention));
+      setStored(saved.retention);
       addToast("Retention saved. The next pass runs shortly.");
     } catch (err) {
       addToast(`Retention could not be saved: ${messageFromError(err)}`, "error");

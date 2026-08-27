@@ -335,6 +335,20 @@ var postgresMigrations = []postgresMigration{
 				PRIMARY KEY (user_id, category)
 			)`,
 			`ALTER TABLE category_retention_rules ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+			// Everyone who already has an account gets the Trash rule switched
+			// off, explicitly, so that upgrading cannot start deleting their
+			// mail off a mail server. The shipped default for a reader created
+			// after this point is the other way round -- the Trash empties
+			// itself after 30 days -- and the absence of a row is what carries
+			// it, exactly as the absence of a category row carries "delete
+			// nothing". A row here is a decision, and this is the one decision
+			// an upgrade is allowed to make on somebody's behalf: the safe one.
+			`INSERT INTO retention_settings
+				(user_id, trash_enabled, trash_days, categories_swept_at, trash_swept_at, created_at, updated_at)
+			SELECT id, 0, 30, 0, 0,
+				EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint
+			FROM users
+			ON CONFLICT (user_id) DO NOTHING`,
 		},
 	},
 }

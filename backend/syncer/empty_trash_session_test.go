@@ -63,7 +63,7 @@ type fakeExpungeSession struct {
 	closed  bool
 }
 
-func (s *fakeExpungeSession) ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, uidValidity uint32) ([]uint32, error) {
+func (s *fakeExpungeSession) ExpungeMessages(ctx context.Context, mailbox string, uids []uint32, uidValidity uint32, scope ExpungeScope) ([]uint32, error) {
 	if s.closed {
 		return nil, errors.New("expunge session is closed")
 	}
@@ -74,7 +74,7 @@ func (s *fakeExpungeSession) ExpungeMessages(ctx context.Context, mailbox string
 			return nil, err
 		}
 	}
-	return s.fetcher.emptyTrashFetcher.ExpungeMessages(ctx, store.MailAccount{}, mailbox, uids, uidValidity)
+	return s.fetcher.emptyTrashFetcher.ExpungeMessages(ctx, store.MailAccount{}, mailbox, uids, uidValidity, scope)
 }
 
 func (s *fakeExpungeSession) Close() error {

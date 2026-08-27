@@ -48,8 +48,15 @@ func TestCategoryRetentionPlanReachesEveryFolderTheCategoryIsFiledIn(t *testing.
 	alreadyTrashed := createScopeTestMessageFrom(t, ctx, db, tenant, tenant.trash, 706, "", "list@example.test", "newsletters", old)
 	server := &Server{store: db, masterKey: bytes.Repeat([]byte{9}, 32)}
 
-	plan, err := server.categoryRetentionPlan(ctx, tenant.user,
-		store.CategoryRetention{Category: "newsletters", Mode: store.RetentionModeRelative, Count: 30, Unit: store.RetentionUnitDays}, now)
+	messages, complete, err := server.categoryRetentionMessages(ctx, tenant.user,
+		[]store.CategoryRetention{{Category: "newsletters", Mode: store.RetentionModeRelative, Count: 30, Unit: store.RetentionUnitDays}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatal("pass reported itself cut short for three messages")
+	}
+	plan, err := server.trashPlanForMessages(ctx, tenant.user, messages)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,14 +94,15 @@ func TestCategoryRetentionPlanSelectsNothingWithoutACutoff(t *testing.T) {
 	for _, rule := range []store.CategoryRetention{
 		{Category: "newsletters", Mode: store.RetentionModeOff},
 		{Category: "newsletters", Mode: store.RetentionModeRelative, Count: 0, Unit: store.RetentionUnitDays},
+		{Category: "newsletters", Mode: store.RetentionModeRelative, Count: 30, Unit: "fortnights"},
 		{Category: "newsletters", Mode: store.RetentionModeFixed},
 	} {
-		plan, err := server.categoryRetentionPlan(ctx, tenant.user, rule, time.Now().UTC())
+		messages, _, err := server.categoryRetentionMessages(ctx, tenant.user, []store.CategoryRetention{rule}, time.Now().UTC())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.Matched != 0 || len(plan.Groups) != 0 {
-			t.Fatalf("plan for %+v = matched %d groups %d, want nothing selected", rule, plan.Matched, len(plan.Groups))
+		if len(messages) != 0 {
+			t.Fatalf("selection for %+v = %d messages, want nothing selected", rule, len(messages))
 		}
 	}
 }
@@ -204,5 +212,92 @@ func TestRetentionCatchUpMarkBringsTheNextPassForward(t *testing.T) {
 	}
 	if !retentionDue(time.Time{}, now) {
 		t.Fatal("a cleared mark is not due, which is what saving a policy leaves behind")
+	}
+}
+
+// Every category's mail goes into one move plan. A plan per rule took the
+// tenant's exclusive foreground reservation and held it until its runs landed,
+// so the second rule waited out the whole reservation timeout and then failed:
+// one rule applied per pass and the sweep stalled on each of the others.
+func TestCategoryRetentionCollectsEveryRuleIntoOneMovePlan(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "retention-one-plan@example.test")
+	now := time.Now().UTC()
+	old := now.AddDate(0, 0, -90)
+	newsletter := createScopeTestMessageFrom(t, ctx, db, tenant, tenant.inbox, 721, "", "list@example.test", "newsletters", old)
+	forum := createScopeTestMessageFrom(t, ctx, db, tenant, tenant.inbox, 722, "", "forum@example.test", "forums", old)
+	relevant := createScopeTestMessageFrom(t, ctx, db, tenant, tenant.inbox, 723, "", "friend@example.test", "relevant", old)
+	server := &Server{store: db, masterKey: bytes.Repeat([]byte{9}, 32)}
+
+	messages, complete, err := server.categoryRetentionMessages(ctx, tenant.user, []store.CategoryRetention{
+		{Category: "newsletters", Mode: store.RetentionModeRelative, Count: 30, Unit: store.RetentionUnitDays},
+		{Category: "forums", Mode: store.RetentionModeRelative, Count: 30, Unit: store.RetentionUnitDays},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatal("pass reported itself cut short for two messages")
+	}
+	plan, err := server.trashPlanForMessages(ctx, tenant.user, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := planMessageIDs(plan)
+	slices.Sort(ids)
+	want := []int64{newsletter.ID, forum.ID}
+	slices.Sort(want)
+	if !slices.Equal(ids, want) {
+		t.Fatalf("planned ids = %v, want both rules' mail in one plan %v", ids, want)
+	}
+	if slices.Contains(ids, relevant.ID) {
+		t.Fatalf("planned ids = %v, must not include the category with no rule", ids)
+	}
+	if len(plan.Groups) != 1 {
+		t.Fatalf("plan groups = %d, want one move for the account rather than one per rule", len(plan.Groups))
+	}
+}
+
+// A folder the pass could not finish clearing brings the next pass forward
+// rather than waiting out the full interval. That covers both the bounded
+// selection one purge takes and the mail a server refused.
+func TestTrashRetentionSweepAsksWhetherTheFolderIsActuallyClear(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenant := newScopeTestTenant(t, ctx, db, "retention-still-due@example.test")
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+
+	due, err := db.TrashRetentionStillDue(ctx, tenant.user.ID, tenant.trash.ID, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due {
+		t.Fatal("an empty Trash folder reported mail still due")
+	}
+
+	message := createScopeTestMessageDated(t, ctx, db, tenant, tenant.trash, 731, "Old", time.Now().UTC())
+	userDB, err := db.UserDB(ctx, tenant.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := userDB.ExecContext(ctx, `UPDATE messages SET created_at = ? WHERE user_id = ? AND id = ?`,
+		time.Now().UTC().AddDate(0, 0, -90).Unix(), tenant.user.ID, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	due, err = db.TrashRetentionStillDue(ctx, tenant.user.ID, tenant.trash.ID, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !due {
+		t.Fatal("a folder still holding mail that arrived before the cutoff reported itself clear")
 	}
 }

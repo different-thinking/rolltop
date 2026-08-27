@@ -57,7 +57,7 @@ type expungeCommandClient interface {
 // The returned list is the evidence local rows are removed on. It is read back
 // from the server after the expunge, so a partial or silently ignored delete
 // never presents itself as a finished one.
-func (f *Fetcher) ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+func (f *Fetcher) ExpungeMessages(ctx context.Context, account store.MailAccount, mailbox string, uids []uint32, expectedUIDValidity uint32, scope syncer.ExpungeScope) ([]uint32, error) {
 	if err := validateExpungeRequest(ctx, mailbox, uids, expectedUIDValidity); err != nil {
 		return nil, err
 	}
@@ -69,10 +69,10 @@ func (f *Fetcher) ExpungeMessages(ctx context.Context, account store.MailAccount
 		return nil, err
 	}
 	defer terminateClientOnContext(ctx, c)()
-	return expungeMessages(ctx, c, mailbox, uids, expectedUIDValidity)
+	return expungeMessages(ctx, c, mailbox, uids, expectedUIDValidity, scope)
 }
 
-func expungeMessages(ctx context.Context, c expungeCommandClient, mailbox string, uids []uint32, expectedUIDValidity uint32) ([]uint32, error) {
+func expungeMessages(ctx context.Context, c expungeCommandClient, mailbox string, uids []uint32, expectedUIDValidity uint32, scope syncer.ExpungeScope) ([]uint32, error) {
 	if err := validateExpungeRequest(ctx, mailbox, uids, expectedUIDValidity); err != nil {
 		return nil, err
 	}
@@ -93,12 +93,18 @@ func expungeMessages(ctx context.Context, c expungeCommandClient, mailbox string
 	for _, uid := range uids {
 		seqset.AddNum(uid)
 	}
-	// Ask which expunge is available before flagging anything: a message left
-	// carrying \Deleted with nothing to remove it is a message the next plain
-	// EXPUNGE from any client deletes without anyone confirming it.
+	// Ask which expunge is available before flagging anything, for two reasons.
+	// A message left carrying \Deleted with nothing to remove it is a message
+	// the next plain EXPUNGE from any client deletes without anyone confirming
+	// it. And a caller that named its UIDs because it means only those has to
+	// be refused here, while refusing still costs nothing: flagging first and
+	// finding out afterwards would leave exactly that residue behind.
 	uidPlus, err := c.Support("UIDPLUS")
 	if err != nil {
 		return nil, fmt.Errorf("check IMAP UIDPLUS support: %w", err)
+	}
+	if !uidPlus && scope != syncer.ExpungeWholeFolder {
+		return nil, fmt.Errorf("mailbox %q: %w", mailbox, syncer.ErrSelectiveExpungeUnsupported)
 	}
 	if err := c.UidStore(seqset, imap.FormatFlagsOp(imap.AddFlags, true), []any{imap.DeletedFlag}, nil); err != nil {
 		return nil, fmt.Errorf("flag mailbox %q messages deleted: %w", mailbox, err)
@@ -109,8 +115,9 @@ func expungeMessages(ctx context.Context, c expungeCommandClient, mailbox string
 	if uidPlus {
 		// UID EXPUNGE removes exactly the named messages. Without UIDPLUS the
 		// only expunge available removes everything currently flagged \Deleted in
-		// the folder, which is why this is limited to emptying a Trash folder:
-		// there, the whole folder is what the user asked to delete anyway.
+		// the folder, which is why the fallback below is reachable only under
+		// ExpungeWholeFolder: there, the whole folder is what the user asked to
+		// delete anyway.
 		command := &commands.Uid{Cmd: &uidExpungeCommand{SeqSet: seqset}}
 		status, execErr := c.Execute(command, nil)
 		if execErr != nil {
