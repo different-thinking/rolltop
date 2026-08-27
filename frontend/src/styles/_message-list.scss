@@ -137,7 +137,15 @@
   font-size: 13px;
 }
 
+// The bar follows the page down while a selection is live. Selecting a row far
+// down a long list and then having to scroll back up to reach Delete was the
+// whole cost of the old static bar; it now parks under the 64px top bar, which
+// is sticky itself, so the two read as one strip of chrome. Its ground is
+// opaque and it outranks .message-row's z-index so rows pass underneath it.
 .selection-action-bar {
+  position: sticky;
+  top: 64px;
+  z-index: 3;
   min-height: 48px;
   display: flex;
   align-items: center;
@@ -147,6 +155,9 @@
   border-bottom: 1px solid var(--border);
   background: var(--surface-subtle);
   color: var(--text);
+  // A hairline alone leaves rows looking as if they run into the bar rather
+  // than under it, so the strip carries a shallow shadow while it travels.
+  box-shadow: 0 6px 12px -10px color-mix(in srgb, var(--text) 55%, transparent);
 }
 
 .selection-action-summary,
@@ -276,6 +287,11 @@
 }
 
 .message-row {
+  // j/k scroll a row into view, and "nearest" counts a row hidden behind
+  // sticky chrome as already visible. The margin box reaches up past the top
+  // bar and past the selection toolbar when it is up, so the row the keyboard
+  // just moved to lands below both of them instead of underneath them.
+  scroll-margin-top: calc(64px + var(--selection-bar-height, 0px));
   position: relative;
   display: grid;
   grid-template-columns: 22px 40px minmax(140px, 220px) minmax(0, 1fr) max-content;
@@ -704,7 +720,14 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 16px;
+  // clip, not hidden: `hidden` makes this card a scroll container, and a
+  // sticky child then sticks to a scrollport that never scrolls - which is to
+  // say it does not stick at all. `clip` keeps the corners trimming the rows
+  // while leaving the page itself as the selection bar's scrollport. The
+  // `hidden` under it is what an engine without `clip` keeps: rounded corners,
+  // and a selection bar that rides with the list the way it used to.
   overflow: hidden;
+  overflow: clip;
 }
 
 .message-list-pane.outgoing {
