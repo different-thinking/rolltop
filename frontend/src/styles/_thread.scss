@@ -3,9 +3,24 @@
 // The detail header carries the same commands the list offers on row hover, so
 // the toolbar is built from the same small icon buttons rather than a second
 // visual language. It never collapses on touch: a thread has no row to swipe.
+//
+// A long message pushes the header off the top of the page, and Reply, Archive
+// and Delete leave with it: reaching them meant scrolling the whole message
+// back. The header travels under the 64px top bar instead, the way the list's
+// selection toolbar does, and carries that bar's surface so the two read as one
+// strip. Its ground has to be opaque - the message passes underneath it - and
+// the padding that gives the subject air is taken back out of .content-head's
+// margin, so the header sits where it always did while the page is at rest.
 .thread-head {
+  position: sticky;
+  top: 64px;
+  z-index: 3;
   align-items: flex-start;
   gap: 8px;
+  padding: 8px 0 10px;
+  margin-bottom: 4px;
+  background: var(--surface);
+  box-shadow: 0 6px 12px -10px color-mix(in srgb, var(--text) 55%, transparent);
 }
 
 .thread-head-actions {

@@ -1,7 +1,7 @@
 // File overview: Mailbox and search result lists. These components fetch paged conversations,
 // surface sync clues, keep selection state stable, and link rows back to their source page.
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, ReactNode, TouchEvent } from "react";
 import { ApiError, api, bulkMessageIDLimit } from "../../api";
 import type { AddToast, DatePrefs, LocationState } from "../../appTypes";
@@ -23,6 +23,7 @@ import { mailPageSize } from "../../lib/constants";
 import { loadMailSortOrder, loadSearchSortOrder, saveMailSortOrder, saveSearchSortOrder } from "../../lib/mailSort";
 import type { MailSortOrder, SearchSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
+import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
 import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
@@ -1621,10 +1622,9 @@ function MessageList({
   const [scopeDeletePending, setScopeDeletePending] = useState(false);
   const [scopeDeleteBusy, setScopeDeleteBusy] = useState(false);
   // The selection toolbar sticks below the top bar while rows are selected, so
-  // a row scrolled into view by j/k has to clear both. The toolbar wraps onto
-  // two or three rows at narrow widths, so its height is measured rather than
-  // assumed, and the rows read it back as `--selection-bar-height`.
-  const [selectionBarHeight, setSelectionBarHeight] = useState(0);
+  // a row scrolled into view by j/k has to clear both. The rows read its height
+  // back as `--selection-bar-height`.
+  const [measureSelectionBar, selectionBarHeight] = useStickyChromeHeight<HTMLDivElement>();
   const selectionAnchorID = useRef<number | null>(null);
   const moveOutTimers = useRef<Map<number, number>>(new Map());
   const swipeCompletionTimer = useRef<number | null>(null);
@@ -1691,26 +1691,6 @@ function MessageList({
   const selectedDragAccountIDs = uniquePositiveIDs(selectedDragItems.flatMap(conversationTransferAccountIDs));
 
   keyboardIndexRef.current = keyboardIndex;
-
-  // A ref callback rather than an effect: the toolbar comes and goes with the
-  // selection, so the measurement is tied to the node itself. React 19 calls
-  // the returned cleanup when that node leaves, which is also when the offset
-  // the rows keep for it has to go back to zero.
-  const measureSelectionBar = useCallback((node: HTMLDivElement | null) => {
-    if (!node) {
-      setSelectionBarHeight(0);
-      return;
-    }
-    const apply = () => setSelectionBarHeight(node.getBoundingClientRect().height);
-    apply();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(apply);
-    observer.observe(node);
-    return () => {
-      observer.disconnect();
-      setSelectionBarHeight(0);
-    };
-  }, []);
 
   // Filing is recorded outside React, so the list is told when it changes -
   // by this view's own mutations and by a message view that found its message
@@ -3047,7 +3027,7 @@ function MessageList({
   return (
     <div
       className={`message-table ${arrivalActive ? "mail-arrival-shift" : ""}`}
-      style={selectionBarHeight > 0 ? { "--selection-bar-height": `${Math.round(selectionBarHeight)}px` } as CSSProperties : undefined}
+      style={stickyChromeStyle("--selection-bar-height", selectionBarHeight)}
     >
       {selectedConversations.length > 0 || scopeSelected ? (
         <div

@@ -90,8 +90,10 @@
   border-top: 1px solid var(--border);
 
   // Opening a reply scrolls this row into view. The top bar is sticky and 64px
-  // tall, so without the margin the composer lands underneath it.
-  scroll-margin-top: 84px;
+  // tall and the conversation header sticks below it, so without the margin the
+  // composer lands underneath them. The header's height is measured because the
+  // subject wraps; the fallback is the one-line header this margin was cut for.
+  scroll-margin-top: calc(84px + var(--thread-head-height, 0px));
   scroll-margin-bottom: 20px;
 }
 

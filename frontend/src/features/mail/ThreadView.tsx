@@ -26,6 +26,7 @@ import { RemoteImageNotice } from "../../plugins/remoteImageBlocklist/RemoteImag
 import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
 import { displayInitial } from "../../lib/senderIdentity";
+import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
 import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
@@ -937,6 +938,11 @@ export function ThreadView({
   const brandDomainKey = useMemo(() => brandDomainKeyForThread(thread, pluginSet), [thread, pluginSet]);
   const [brandIcons, setBrandIcons] = useState<Record<string, string>>({});
   const inlineReplyRowRef = useRef<HTMLDivElement | null>(null);
+  // The header sticks below the top bar for as long as the conversation is
+  // open, so the composer scrolled into view underneath has to clear both. Its
+  // height moves with the subject, which wraps at any width, so the shell
+  // publishes the measurement as `--thread-head-height`.
+  const [measureThreadHead, threadHeadHeight] = useStickyChromeHeight<HTMLDivElement>();
   const replyRequestRef = useRef(0);
   const loadRequestRef = useRef(0);
   const autoPGPVerificationRef = useRef<Set<string>>(new Set());
@@ -1939,7 +1945,7 @@ export function ThreadView({
 
   return (
     <>
-      <div className="content-head thread-head">
+      <div className="content-head thread-head" ref={measureThreadHead}>
         <div className="thread-head-main">
           {!androidNativeAvailable() ? (
             <button className="ghost" type="button" onClick={() => navigate(backURL)} title="Back to results">
@@ -2095,7 +2101,7 @@ export function ThreadView({
         </div>
       ) : null}
       {!loading ? (
-        <section className="thread-shell">
+        <section className="thread-shell" style={stickyChromeStyle("--thread-head-height", threadHeadHeight)}>
           {thread.map((item, index) => {
             const isExpanded = expanded.has(item.message.id);
             // A reply owns this message's slot from the click onwards: while
