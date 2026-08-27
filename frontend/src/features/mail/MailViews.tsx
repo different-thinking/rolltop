@@ -23,6 +23,7 @@ import { mailPageSize } from "../../lib/constants";
 import { loadMailSortOrder, loadSearchSortOrder, saveMailSortOrder, saveSearchSortOrder } from "../../lib/mailSort";
 import type { MailSortOrder, SearchSortOrder } from "../../lib/mailSort";
 import { usePullToRefresh } from "../../lib/pullToRefresh";
+import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
 import { composeURL, mailRoute, mailURL, mailViewCategory, messageURL, routeWithSearch, searchRoute, searchURL } from "../../lib/routes";
 import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
@@ -1620,6 +1621,10 @@ function MessageList({
   const [scopeSelected, setScopeSelected] = useState(false);
   const [scopeDeletePending, setScopeDeletePending] = useState(false);
   const [scopeDeleteBusy, setScopeDeleteBusy] = useState(false);
+  // The selection toolbar sticks below the top bar while rows are selected, so
+  // a row scrolled into view by j/k has to clear both. The rows read its height
+  // back as `--selection-bar-height`.
+  const [measureSelectionBar, selectionBarHeight] = useStickyChromeHeight<HTMLDivElement>();
   const selectionAnchorID = useRef<number | null>(null);
   const moveOutTimers = useRef<Map<number, number>>(new Map());
   const swipeCompletionTimer = useRef<number | null>(null);
@@ -3020,9 +3025,18 @@ function MessageList({
       : `All messages in ${listScope.label} are selected`;
   const pageOnlyHint = "Only Delete covers the whole filter. Clear the selection to act on single messages.";
   return (
-    <div className={`message-table ${arrivalActive ? "mail-arrival-shift" : ""}`}>
+    <div
+      className={`message-table ${arrivalActive ? "mail-arrival-shift" : ""}`}
+      style={stickyChromeStyle("--selection-bar-height", selectionBarHeight)}
+    >
       {selectedConversations.length > 0 || scopeSelected ? (
-        <div className="selection-action-bar" role="toolbar" aria-label="Selected message actions" aria-busy={selectionBusy}>
+        <div
+          className="selection-action-bar"
+          role="toolbar"
+          aria-label="Selected message actions"
+          aria-busy={selectionBusy}
+          ref={measureSelectionBar}
+        >
           <div className="selection-action-summary">
             <button className="selection-clear" type="button" onClick={clearSelection} title="Clear selection" aria-label="Clear selection">
               <Icon name="close" />
