@@ -501,3 +501,103 @@ func TestExtractDeliveryNoticesKeepsBareNumbersToTheCarriersOwnMail(t *testing.T
 		t.Errorf("want no parcels from a shop's bare number, got %+v", notices)
 	}
 }
+
+// A carrier is a company that also sends invoices, newsletters and service
+// mail. The bare-number rule must not turn every correctly sized digit run in
+// them into a parcel.
+func TestExtractDeliveryNoticesGatesTheBareNumberRule(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		subject string
+		text    string
+		from    string
+	}{
+		{
+			name:    "invoice from the postal arm",
+			subject: "Ihre Rechnung",
+			text:    "Rechnung 100234567890 über 24,90 EUR.",
+			from:    "service@deutschepost.de",
+		},
+		{
+			name:    "service number in a newsletter",
+			subject: "Neuigkeiten für Sie",
+			text:    "Erreichen Sie uns unter 022843331120.",
+			from:    "newsletter@dhl.de",
+		},
+		{
+			name:    "contract number",
+			subject: "Ihre Vertragsunterlagen",
+			text:    "Ihre Vertragsnummer 12345678901 finden Sie oben rechts.",
+			from:    "info@gls-group.eu",
+		},
+		{
+			// The subject says parcel, so the first gate lets it through; the
+			// label beside the number is what stops it.
+			name:    "customer number in a parcel mail",
+			subject: "Ihre Sendung ist unterwegs",
+			text:    "Ihre Kundennummer lautet 100234567890.",
+			from:    "noreply@dhl.de",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := CategoryContent{Subject: tc.subject, Text: tc.text}
+			if notices := ExtractDeliveryNotices(content, tc.from, sentAt(t)); len(notices) > 0 {
+				t.Errorf("want no parcels, got %+v", notices)
+			}
+		})
+	}
+}
+
+// The eight-notice cap is filled in order, so the number the message actually
+// labelled must be taken before any bare one.
+func TestExtractDeliveryNoticesPrefersALabelledNumberOverBareOnes(t *testing.T) {
+	var items strings.Builder
+	for i := 0; i < 9; i++ {
+		items.WriteString("Artikel 90000000000")
+		items.WriteByte(byte('0' + i))
+		items.WriteString(". ")
+	}
+	content := CategoryContent{
+		Subject: "Ihre Sendung kommt heute",
+		Text:    items.String() + "Sendungsnummer: 00340434652966959030",
+	}
+	notices := ExtractDeliveryNotices(content, "noreply@dhl.de", sentAt(t))
+	found := false
+	for _, notice := range notices {
+		if notice.TrackingNumber == "00340434652966959030" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the labelled number was crowded out by bare ones: %+v", notices)
+	}
+}
+
+// "Sendungsstatus" heads a section rather than labelling a number, and what
+// follows it is as often a date as anything else.
+func TestExtractDeliveryNoticesDoesNotReadADateAsATrackingNumber(t *testing.T) {
+	for _, text := range []string{
+		"Sendungsstatus vom 2026-08-28: in Bearbeitung.",
+		"Sendungsstatus aktualisiert: 2026-08-28",
+		"Sendungsstatus: offen seit 2026-08-25",
+	} {
+		t.Run(text, func(t *testing.T) {
+			content := CategoryContent{Subject: "Statusmeldung", Text: text}
+			for _, notice := range ExtractDeliveryNotices(content, "info@beispiel.de", sentAt(t)) {
+				if notice.TrackingNumber == "20260828" || notice.TrackingNumber == "20260825" {
+					t.Errorf("a date became tracking number %q", notice.TrackingNumber)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeTrackingNumberRefusesACompactDate(t *testing.T) {
+	if got := normalizeTrackingNumber("2026-08-28"); got != "" {
+		t.Errorf("normalized a date to %q", got)
+	}
+	// A real number of the same length is not a date and must survive.
+	if got := normalizeTrackingNumber("99887766"); got != "99887766" {
+		t.Errorf("normalized a plain number to %q", got)
+	}
+}

@@ -482,3 +482,45 @@ func TestSetShipmentManualStatusRefusesAnUnknownValueAndAStrangersParcel(t *test
 		t.Errorf("another reader could correct this parcel: %v", err)
 	}
 }
+
+// An undated parcel marked as arrived has to stay visible. The Rückgängig that
+// takes the correction back lives on the row, so a row that disappears is a
+// correction that cannot be undone.
+func TestSetShipmentManualStatusKeepsAnUndatedParcelVisible(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-undated-manual@example.test")
+	date := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Bestellung versandbereit", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "hermes", TrackingNumber: "11223344556677", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-08-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 1 {
+		t.Fatalf("want the undated parcel listed, got %d", len(shipments))
+	}
+	if _, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, ShipmentManualDelivered); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err = db.ListShipments(ctx, user.ID, "2026-08-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 1 {
+		t.Fatalf("the parcel vanished when it was marked arrived, leaving no way to undo it: %+v", shipments)
+	}
+	if shipments[0].EffectiveStatus() != mailparse.DeliveryDelivered {
+		t.Errorf("effective status = %q", shipments[0].EffectiveStatus())
+	}
+	// And it is still undoable.
+	reverted, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, ShipmentManualNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverted.EffectiveStatus() != mailparse.DeliveryAnnounced {
+		t.Errorf("undo left %q", reverted.EffectiveStatus())
+	}
+}

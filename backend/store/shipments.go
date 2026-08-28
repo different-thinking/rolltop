@@ -28,7 +28,12 @@ import (
 // Bump it whenever a change to mailparse's delivery rules should reach stored
 // mail. It costs one blob read per message, spread over the background worker's
 // turns, and it only reaches what blob retention still holds.
-const DeliveryVersion = 1
+//
+// 2: the carriers' own mail carries its number behind a click-tracking redirect
+// and prints it under a heading rather than a label, so a bare number in the
+// sender's own shape counts now. Without the bump the very mail that rule was
+// written for stays unread until the next one arrives.
+const DeliveryVersion = 2
 
 // DeliveryBackfillLimit bounds one backfill pass and is the batch size the
 // worker uses. It matches the category backfill's, because the two do the same
@@ -229,12 +234,16 @@ func (s *Store) ListShipments(ctx context.Context, userID int64, today string) (
 	// for two months, renewed every time the backfill re-read the message.
 	// A dismissed parcel is gone from every read: the reader said it was never
 	// one, and a list that kept showing it would be asking them again.
+	//
+	// An undated parcel is kept on its recency alone, whatever its status. It
+	// used to be dropped once it counted as delivered, which quietly took the
+	// reader's own "it arrived" off the page along with the Rückgängig that
+	// undoes it -- a correction that cannot be seen cannot be taken back.
 	rows, err := db.QueryContext(ctx, `SELECT id, carrier, tracking_number, expected_date, window_start, window_end,
 			status, manual_status, reported_at, updated_at
 		FROM shipments
 		WHERE user_id = ? AND manual_status <> 'dismissed'
-			AND (expected_date >= ? OR (expected_date = '' AND status <> 'delivered' AND manual_status = ''
-				AND reported_at >= ?))
+			AND (expected_date >= ? OR (expected_date = '' AND reported_at >= ?))
 		ORDER BY (expected_date = '') ASC, expected_date ASC, id ASC
 		LIMIT ?`, userID, recent, quiet, shipmentListLimit)
 	if err != nil {

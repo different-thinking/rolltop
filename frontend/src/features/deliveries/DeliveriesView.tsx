@@ -17,6 +17,7 @@ import { Icon } from "../../components/Icon";
 import { messageURL } from "../../lib/routes";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime } from "../../lib/format";
+import { notifyDeliveriesChanged } from "./revision";
 
 /** localDay is the reader's own day, which is the day the list is answered in. */
 export function localDay(now = new Date()): string {
@@ -137,6 +138,8 @@ export function DeliveriesView({
         if (manualStatus === "dismissed") return rows.filter((item) => item.id !== shipment.id);
         return rows.map((item) => (item.id === shipment.id ? { ...result.shipment, messages: item.messages } : item));
       });
+      // The header chip reads its own count and cannot see this list's state.
+      notifyDeliveriesChanged();
       if (manualStatus === "delivered") addToast("Als zugestellt vermerkt.");
       if (manualStatus === "dismissed") addToast("Nicht mehr als Paket geführt.");
     } catch (err) {
