@@ -78,6 +78,11 @@ const (
 	// the fetch path, where the whole decoded message is in hand. The scan path
 	// is already bounded by the text budget it shares with classification.
 	maxDeliveryLinkScanBytes = 256 * 1024
+	// maxDeliveryLinkCandidates bounds how many URLs are examined, as against
+	// how many are kept. A marketing mail carries hundreds and none of them is a
+	// carrier; without this the scan pays for every one of them on every message
+	// fetched. A carrier's own link is not the five hundredth in a message.
+	maxDeliveryLinkCandidates = 200
 )
 
 // urlRE matches an absolute http(s) URL. Markup is searched with it directly
@@ -103,7 +108,7 @@ func appendDeliveryLinks(dst []string, text string) []string {
 	// DeliveryLinks exists to avoid. Slicing the match keeps the substring
 	// pointing into the text; only a link that is kept, or one carrying an
 	// entity, allocates.
-	for offset := 0; offset < len(text) && len(dst) < maxDeliveryLinks; {
+	for offset, seen := 0, 0; offset < len(text) && len(dst) < maxDeliveryLinks && seen < maxDeliveryLinkCandidates; seen++ {
 		match := urlRE.FindStringIndex(text[offset:])
 		if match == nil {
 			break

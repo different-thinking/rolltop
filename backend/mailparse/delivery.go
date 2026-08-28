@@ -234,26 +234,16 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 	if text == "" && len(content.DeliveryLinks) == 0 {
 		return nil
 	}
-	// The status and the date describe the message, not each number in it: a
-	// dispatch mail listing three parcels announces all three for the same day.
-	status := deliveryStatus(text)
-	date, windowStart, windowEnd := deliveryDate(text, sent, status)
-	// A parcel announced for the day its mail was written is on the van, not
-	// merely on its way. The carriers say so in words often enough, but a shop
-	// forwarding the carrier's date does not, and the reader's answer to "is it
-	// coming today" should not depend on which of the two wrote to them.
-	if status == DeliveryAnnounced && date != "" && date == plainDate(sent) {
-		status = DeliveryOutForDelivery
-	}
-	// The other direction: "kommt heute" and "wurde zugestellt" are both a date
-	// as well as a status, and neither is written next to one. The message's own
-	// day is what they mean, and taking it here is what puts a parcel on the
-	// reader's list on the one day they care about it.
-	if date == "" && !sent.IsZero() && (status == DeliveryOutForDelivery || status == DeliveryDelivered) {
-		date = plainDate(sent)
-	}
-	senderCarrier := carrierForSender(from)
-
+	// The numbers are looked for before anything else, and the day and the
+	// status are only worked out once one has been found.
+	//
+	// That order is the whole performance story of this function. Nearly no mail
+	// names a parcel, and reading a day out of a message is the expensive half:
+	// it walks every delivery word in the body and tries six spellings of a date
+	// in a window around each. A newsletter that says "Lieferung" four hundred
+	// times pays all of that and answers "no parcel here" anyway -- 37ms per
+	// message measured, enough to push a sync turn past its budget. Finding no
+	// number first costs three regex passes and skips the rest.
 	found := make([]DeliveryNotice, 0, 4)
 	// The number alone is the identity here, not the number and the carrier.
 	// One parcel is routinely found twice in one message -- once through the
@@ -289,14 +279,7 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 		if len(found) >= maxDeliveryNoticesPerMessage {
 			return
 		}
-		found = append(found, DeliveryNotice{
-			Carrier:        carrier,
-			TrackingNumber: number,
-			ExpectedDate:   date,
-			WindowStart:    windowStart,
-			WindowEnd:      windowEnd,
-			Status:         status,
-		})
+		found = append(found, DeliveryNotice{Carrier: carrier, TrackingNumber: number})
 	}
 
 	// Links first: a carrier's own tracking URL says both things at once, and
@@ -326,12 +309,40 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 	// Then labelled numbers. Whose they are is not stated beside the number, so
 	// the message as a whole answers it: the carrier its links point at, the
 	// carrier that sent it, or a carrier it names in words.
-	labelCarrier := firstNonEmpty(linkCarrier, senderCarrier, carrierNamedIn(text))
-	for _, number := range labelledTrackingNumbers(text) {
-		add(labelCarrier, number)
+	labelled := labelledTrackingNumbers(text)
+	if len(labelled) > 0 {
+		labelCarrier := firstNonEmpty(linkCarrier, carrierForSender(from), carrierNamedIn(text))
+		for _, number := range labelled {
+			add(labelCarrier, number)
+		}
 	}
 	if len(found) == 0 {
 		return nil
+	}
+
+	// The status and the date describe the message, not each number in it: a
+	// dispatch mail listing three parcels announces all three for the same day.
+	status := deliveryStatus(text)
+	date, windowStart, windowEnd := deliveryDate(text, sent, status)
+	// A parcel announced for the day its mail was written is on the van, not
+	// merely on its way. The carriers say so in words often enough, but a shop
+	// forwarding the carrier's date does not, and the reader's answer to "is it
+	// coming today" should not depend on which of the two wrote to them.
+	if status == DeliveryAnnounced && date != "" && date == plainDate(sent) {
+		status = DeliveryOutForDelivery
+	}
+	// The other direction: "kommt heute" and "wurde zugestellt" are both a date
+	// as well as a status, and neither is written next to one. The message's own
+	// day is what they mean, and taking it here is what puts a parcel on the
+	// reader's list on the one day they care about it.
+	if date == "" && !sent.IsZero() && (status == DeliveryOutForDelivery || status == DeliveryDelivered) {
+		date = plainDate(sent)
+	}
+	for i := range found {
+		found[i].ExpectedDate = date
+		found[i].WindowStart = windowStart
+		found[i].WindowEnd = windowEnd
+		found[i].Status = status
 	}
 	return found
 }
