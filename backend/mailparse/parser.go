@@ -128,6 +128,11 @@ type ParsedMessage struct {
 	// paperwork. Reading it back later means re-opening the raw message, which
 	// is what the backfill has to do for mail stored before categories.
 	Category string
+	// Deliveries are the parcels the message talks about, extracted while it is
+	// open for the same reason the category is: the alternative is re-opening
+	// the raw message, and blob retention means most of a mailbox no longer has
+	// one to open.
+	Deliveries []DeliveryNotice
 }
 
 // Parse is the indexing/parser entrypoint. It decodes headers, walks MIME parts,
@@ -154,30 +159,43 @@ func Parse(raw []byte) (ParsedMessage, error) {
 	// What the walk collects can only refine it, in categorize below.
 	parsed.Category = Categorize(msg.Header, parsed.From)
 	parsed.HasAutocryptHeader = strings.TrimSpace(msg.Header.Get("Autocrypt")) != ""
+	// The message's own date is kept in the zone it was written in as well as
+	// in UTC. "Arrives tomorrow" is relative to the sender's day, and a message
+	// written just after midnight in another zone resolves to the wrong day when
+	// that offset has already been folded away.
+	sent := time.Time{}
 	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
 		parsed.Date = d.UTC()
+		sent = d
 	}
 	if err := parsePart(textproto.MIMEHeader(msg.Header), msg.Body, &parsed, 0); err != nil {
 		if isTolerableEOF(err) {
 			parsed.Text = cleanIndexedText(parsed.Text)
 			parsed.Sanitize()
-			parsed.categorize()
+			parsed.classify(sent)
 			return parsed, nil
 		}
 		return ParsedMessage{}, err
 	}
 	parsed.Text = cleanIndexedText(parsed.Text)
 	parsed.Sanitize()
-	parsed.categorize()
+	parsed.classify(sent)
 	return parsed, nil
 }
 
-// categorize settles the category once the body and the attachment names are
-// known. It runs after Sanitize so the text it reads is the text the rest of
-// the app stores, and it is the same decision the backfill makes from a stored
-// message -- only from a whole message rather than a bounded scan of one.
-func (p *ParsedMessage) categorize() {
-	p.Category = applyInvoiceEvidence(p.Category, p.CategoryContent())
+// classify settles everything the body decides once the body and the attachment
+// names are known: the category, and the parcels the message announces. It runs
+// after Sanitize so the text it reads is the text the rest of the app stores,
+// and both readings are the same ones the backfill makes from a stored message
+// -- only from a whole message rather than a bounded scan of one.
+//
+// The content is reduced once and read twice. Building it is the copy the whole
+// design of CategoryContent exists to keep small, and doing it per reader would
+// double it for every message fetched.
+func (p *ParsedMessage) classify(sent time.Time) {
+	content := p.CategoryContent()
+	p.Category = applyInvoiceEvidence(p.Category, content)
+	p.Deliveries = ExtractDeliveryNotices(content, p.From, sent)
 }
 
 // ParseDisplayBody is the lighter display path used when a raw message is loaded

@@ -17,6 +17,7 @@ import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShort
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
+import { useExpectedDeliveries, type ExpectedDeliveries } from "../deliveries/useExpectedDeliveries";
 
 /**
  * AppShell renders everything that survives route changes after login: topbar,
@@ -43,6 +44,7 @@ export function AppShell({
   enabledPlugins,
   mailCategories,
   mailCategoriesPending,
+  mailGeneration,
   location,
   navigate,
   onMoveMessages,
@@ -421,6 +423,7 @@ export function AppShell({
     <>
       <Topbar
         user={user}
+        mailGeneration={mailGeneration}
         mailboxes={mailboxes}
         enabledPlugins={enabledPlugins}
         location={location}
@@ -697,6 +700,7 @@ function buildDisplayLabel(version: string, buildDate: string, fallbackLabel: st
 // a specific mailbox or message view.
 function Topbar({
   user,
+  mailGeneration,
   mailboxes,
   enabledPlugins,
   location,
@@ -714,6 +718,7 @@ function Topbar({
   onToggleSidebar
 }: {
   user: User;
+  mailGeneration: number;
   mailboxes: Mailbox[];
   enabledPlugins: string[];
   location: LocationState;
@@ -738,6 +743,10 @@ function Topbar({
   const pluginKey = enabledPlugins.join("|");
   const pluginSet = useMemo(() => createPluginSet(enabledPlugins), [pluginKey]);
   const securityUnlocked = securityUnlock.keys.length > 0 && securityUnlock.unlockedUntil > Date.now();
+  // Nothing is rendered on a day with no parcel due, which is most days. A
+  // permanently visible icon that is usually empty is chrome; a chip that is
+  // only there when something is coming is the notice it is meant to be.
+  const expectedDeliveries = useExpectedDeliveries(mailGeneration);
   const autocomplete = useSearchAutocomplete({
     query,
     focused,
@@ -833,7 +842,22 @@ function Topbar({
         />
         {focused ? <SearchAutocomplete items={autocomplete.items} activeIndex={autocomplete.activeIndex} onChoose={autocomplete.choose} /> : null}
       </form>
+      {/* The chip belongs in the actions column and not beside the search:
+          the topbar is a five-column grid on a desktop, the spare column
+          between the two is minmax(0, 1fr) and squeezes anything put in it to
+          nothing, and this column is the max-content one. */}
       <nav className="top-actions" aria-label="Account">
+        {expectedDeliveries.count > 0 ? (
+          <button
+            className="delivery-chip"
+            type="button"
+            title={deliveryChipTitle(expectedDeliveries)}
+            onClick={() => navigate("/deliveries")}
+          >
+            <Icon name="package" weight="fill" />
+            <span className="delivery-chip-label">{deliveryChipLabel(expectedDeliveries)}</span>
+          </button>
+        ) : null}
         {securityUnlockAvailable ? (
           <button
             className={securityUnlocked ? "ghost security-lock-toggle active" : "ghost security-lock-toggle"}
@@ -903,6 +927,21 @@ function Topbar({
       </nav>
     </header>
   );
+}
+
+// deliveryChipLabel names one parcel by its carrier and several by their count.
+// "DHL" is more use at a glance than "1 Paket": it is the thing the reader is
+// waiting for, and it is what the doorbell will say.
+function deliveryChipLabel(expected: ExpectedDeliveries): string {
+  if (expected.count === 1) return `Heute: ${expected.carrierLabel || "1 Paket"}`;
+  return `Heute: ${expected.count.toLocaleString()} Pakete`;
+}
+
+function deliveryChipTitle(expected: ExpectedDeliveries): string {
+  const what = expected.count === 1
+    ? `Ein Paket${expected.carrierLabel ? ` von ${expected.carrierLabel}` : ""} wird heute erwartet`
+    : `${expected.count.toLocaleString()} Pakete werden heute erwartet`;
+  return `${what} - alle Sendungen ansehen`;
 }
 
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,
@@ -1281,6 +1320,17 @@ function Sidebar({
           <span className="folder-name">
             <Icon name="calendar" weight={currentPath.startsWith("/calendar") ? "bold" : undefined} />
             Calendar
+          </span>
+        </a>
+        <div className="side-section">Pakete</div>
+        <a
+          href="/deliveries"
+          className={`folder ${currentPath === "/deliveries" ? "active" : ""}`}
+          onClick={(event) => open(event, "/deliveries")}
+        >
+          <span className="folder-name">
+            <Icon name="package" weight={currentPath === "/deliveries" ? "bold" : undefined} />
+            Pakete
           </span>
         </a>
         <div className="side-section">Address Book</div>

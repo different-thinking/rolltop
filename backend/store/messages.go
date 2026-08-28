@@ -47,6 +47,10 @@ type CreateMessage struct {
 	// per-message Autocrypt key-import probe without refetching the raw source.
 	HasAutocryptHeader bool
 	ImportPending      bool
+	// DeliveryScanned says the caller read this message for parcels while it
+	// was parsed, so the row starts at the current extraction generation
+	// instead of waiting for the backfill to open it again.
+	DeliveryScanned bool
 	// Category is the header-derived category the parser already decided.
 	// Leaving it empty is not an error: the row then joins the classification
 	// backfill, which reads the stored message and fills it in.
@@ -104,9 +108,18 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 	if category != "" {
 		categoryVersion = CategoryVersion
 	}
+	// The parcels were read from the same parse that filed the category, so the
+	// row is stamped here rather than by a second statement per message. Nearly
+	// no mail names a parcel, and paying a transaction each to record that would
+	// be most of what an initial sync does. A message whose parse failed is left
+	// pending: nothing read it, so the backfill still owes it a reading.
+	deliveryVersion := 0
+	if m.DeliveryScanned {
+		deliveryVersion = DeliveryVersion
+	}
 	var id int64
 	err = tx.QueryRowContext(ctx, `INSERT INTO messages
-			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, own_outgoing_copy, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, has_autocrypt_header, import_completed_at, created_at, updated_at, category_version)
+			(user_id, account_id, mailbox_id, blob_id, message_id_header, canonical_sha256, message_id_hash, in_reply_to, references_header, thread_key, thread_headers_checked_at, subject, language_code, from_addr, sender_address, category, own_outgoing_copy, to_addr, cc_addr, date_unix, internal_date_unix, uid, uid_validity, size, blob_path, body_text, body_html, is_read, is_starred, has_attachments, is_encrypted, is_signed, has_autocrypt_header, import_completed_at, created_at, updated_at, category_version, delivery_version)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			-- A correction the user made for this sender outranks what the
 			-- headers say, so incoming mail lands where they put the sender's
@@ -122,7 +135,7 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 			-- writing the row.
 			COALESCE((SELECT 1 FROM outgoing_message_ids sent
 				WHERE sent.user_id = ? AND sent.account_id = ? AND sent.message_id_header = ?), 0),
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		-- The conflict is handled rather than raised. Recovering from the error
 		-- would mean continuing inside a transaction PostgreSQL has already
 		-- aborted, so the "this UID is already mirrored" path below is reached
@@ -131,7 +144,7 @@ func (s *Store) CreateMessage(ctx context.Context, m CreateMessage) (MessageReco
 		RETURNING id`,
 		m.UserID, m.AccountID, m.MailboxID, m.BlobID, m.MessageIDHeader, m.CanonicalSHA256, m.MessageIDHash, m.InReplyTo, m.ReferencesHeader, m.ThreadKey, ts, m.Subject, strings.ToLower(strings.TrimSpace(m.LanguageCode)), m.FromAddr, senderAddress, m.UserID, senderAddress, category, category,
 		m.UserID, m.AccountID, strings.TrimSpace(m.MessageIDHeader), m.ToAddr, m.CCAddr,
-		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), boolInt(m.HasAutocryptHeader), importCompletedAt, ts, ts, categoryVersion).Scan(&id)
+		m.Date.UTC().Unix(), m.InternalDate.UTC().Unix(), m.UID, m.UIDValidity, m.Size, m.BlobPath, m.BodyText, m.BodyHTML, boolInt(m.IsRead), boolInt(m.IsStarred), boolInt(m.HasAttachments), boolInt(m.IsEncrypted), boolInt(m.IsSigned), boolInt(m.HasAutocryptHeader), importCompletedAt, ts, ts, categoryVersion, deliveryVersion).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			var existingID int64

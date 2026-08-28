@@ -1,0 +1,378 @@
+// The parcel list and the header chip that points at it.
+//
+// The two share their colours on purpose: the chip is a promise that something
+// on that page is about today, and a reader who follows it should recognise the
+// row it meant.
+
+.delivery-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  // The topbar is a crowded flex row and the search beside it is happy to take
+  // every pixel. Without all three of these the chip is squeezed to its icon
+  // and its label wraps to three lines, which overflows the bar: it must keep
+  // its content width, refuse to shrink, and never break its line.
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-height: 34px;
+  margin-right: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .icon {
+    flex: 0 0 auto;
+  }
+}
+
+.deliveries-idle {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+
+  > .icon {
+    flex: 0 0 auto;
+    color: var(--muted);
+  }
+
+  p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    max-width: 62ch;
+  }
+}
+
+.deliveries-section {
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+.deliveries-section-count {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.deliveries-section-hint {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.deliveries-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deliveries-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+
+  // A delivered parcel is history: it stays readable and stops competing with
+  // the rows that are still about something that has not happened.
+  &.status-delivered {
+    background: var(--surface-subtle);
+
+    .deliveries-carrier {
+      color: var(--muted);
+    }
+  }
+}
+
+.deliveries-row-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.deliveries-carrier {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 96px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.deliveries-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.deliveries-subject {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.deliveries-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.deliveries-day {
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.deliveries-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  font-size: 12px;
+
+  &.status-out_for_delivery {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
+
+  &.status-delivered {
+    background: var(--surface-sunken);
+    color: var(--muted);
+  }
+}
+
+.deliveries-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.deliveries-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.deliveries-expand .icon {
+  transition: transform 120ms ease;
+}
+
+.deliveries-expand.expanded .icon {
+  transform: rotate(180deg);
+}
+
+.deliveries-row-details {
+  border-top: 1px solid var(--separator);
+  padding: 10px 12px;
+
+  dl {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 0;
+  }
+
+  dt {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    user-select: all;
+  }
+}
+
+.deliveries-history {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.deliveries-history-title {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deliveries-history-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  color: var(--text-soft);
+  text-decoration: none;
+  font-size: 13px;
+
+  &:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+}
+
+.deliveries-history-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deliveries-history-date {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+// Narrow layouts: the chip keeps its icon and drops its words, the way the
+// other header controls do, and a parcel row stacks instead of scrolling.
+@media (max-width: 900px) {
+  .delivery-chip-label {
+    display: none;
+  }
+
+  .delivery-chip {
+    padding: 6px 8px;
+  }
+}
+
+@media (max-width: 640px) {
+  .deliveries-row-main {
+    flex-wrap: wrap;
+  }
+
+  .deliveries-carrier {
+    min-width: 0;
+  }
+
+  .deliveries-row-actions {
+    margin-left: auto;
+  }
+}
+
+// The parcel marker on a message. It sits among the subject-line chips, so it
+// borrows their proportions rather than the parcel list's.
+.shipment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+
+  // Today is the one day the marker is worth colouring for.
+  &.due-today {
+    border-color: var(--accent-soft);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
+}
+
+.shipment-details {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+
+  dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 12px;
+    margin: 8px 0 0;
+    font-size: 13px;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    user-select: all;
+  }
+}
+
+.shipment-details-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.shipment-details-count {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shipment-details-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    font-size: 13px;
+  }
+}
+
+// A list row is tight, so past a certain width the marker keeps its icon and
+// drops its words, the way the category pill beside it does.
+@media (max-width: 900px) {
+  .message-row .shipment-chip-label {
+    display: none;
+  }
+}

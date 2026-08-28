@@ -123,6 +123,7 @@ export function mailRouteView(path: string, isAdmin: boolean): boolean {
   const claimed = path === "/compose"
     || path === "/calendar" || path.startsWith("/calendar/")
     || path === "/contacts"
+    || path === "/deliveries"
     || path === "/settings/account" || path.startsWith("/settings/account/")
     || ((path === "/admin/users" || path === "/admin/database") && isAdmin)
     || path === "/activity"

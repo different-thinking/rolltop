@@ -351,6 +351,9 @@ var spaRoutes = []spaRoute{
 	// Everything running in the background, in one place rather than beside the
 	// mailbox it happens to be touching.
 	{path: "/activity", exact: true},
+	// The parcels the mail announced. Exact: the list is the whole view, and a
+	// single parcel is a row in it rather than a page of its own.
+	{path: "/deliveries", exact: true},
 	{path: "/settings/account", exact: true, prefix: true},
 	{path: "/admin/users", exact: true},
 	{path: "/admin/database", exact: true},

@@ -12,11 +12,13 @@
 package mailparse
 
 import (
+	"html"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/mail"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -26,6 +28,12 @@ type CategoryContent struct {
 	Subject string
 	Text    string
 	Files   []CategoryFile
+	// DeliveryLinks are the carrier tracking links the message carries, and
+	// only those: a link to a carrier's own tracking page says both which
+	// carrier and which parcel, which is more than any wording in the body can.
+	// Everything else a message links to is dropped where it is found, so a
+	// marketing mail's hundred links never reach a caller or the heap.
+	DeliveryLinks []string
 }
 
 // CategoryFile is one attachment as content classification sees it: what it
@@ -62,13 +70,74 @@ const (
 	// New mail does not pay this: it is classified while the parser has the
 	// whole decoded message in hand.
 	maxCategoryScanBytes = 1024 * 1024
+	// maxDeliveryLinks bounds how many tracking links one message contributes.
+	// A dispatch mail for a large order links one per parcel; past this it is
+	// listing something else.
+	maxDeliveryLinks = 16
+	// maxDeliveryLinkScanBytes bounds how much markup is searched for them on
+	// the fetch path, where the whole decoded message is in hand. The scan path
+	// is already bounded by the text budget it shares with classification.
+	maxDeliveryLinkScanBytes = 256 * 1024
+	// maxDeliveryLinkCandidates bounds how many URLs are examined, as against
+	// how many are kept. A marketing mail carries hundreds and none of them is a
+	// carrier; without this the scan pays for every one of them on every message
+	// fetched. A carrier's own link is not the five hundredth in a message.
+	maxDeliveryLinkCandidates = 200
 )
+
+// urlRE matches an absolute http(s) URL. Markup is searched with it directly
+// rather than parsed: an href's value is a URL wherever it sits, and a real
+// parse of a marketing mail's DOM would cost more than every rule that reads
+// the result.
+var urlRE = regexp.MustCompile(`https?://[^\s"'<>)\]]+`)
+
+// appendDeliveryLinks adds the tracking links one piece of text carries. HTML
+// entities are undone first: a query string is written "?a=1&amp;b=2" in
+// markup, and the carrier's parcel number is routinely the parameter after it.
+func appendDeliveryLinks(dst []string, text string) []string {
+	if len(text) > maxDeliveryLinkScanBytes {
+		text = text[:maxDeliveryLinkScanBytes]
+	}
+	if !strings.Contains(text, "http") {
+		return dst
+	}
+	// The matches are walked one at a time rather than collected. A marketing
+	// mail carries hundreds of links and all but a handful are dropped by the
+	// filter below, so gathering them all first would put every one of them on
+	// the heap of the worker holding this tenant's turn -- which is the cost
+	// DeliveryLinks exists to avoid. Slicing the match keeps the substring
+	// pointing into the text; only a link that is kept, or one carrying an
+	// entity, allocates.
+	for offset, seen := 0, 0; offset < len(text) && len(dst) < maxDeliveryLinks && seen < maxDeliveryLinkCandidates; seen++ {
+		match := urlRE.FindStringIndex(text[offset:])
+		if match == nil {
+			break
+		}
+		candidate := text[offset+match[0] : offset+match[1]]
+		offset += match[1]
+		if !strings.Contains(candidate, "&amp;") && !DeliveryLinkCandidate(candidate) {
+			// The host decides, and an entity cannot appear in one, so an
+			// unescaped candidate is rejected before it is unescaped.
+			continue
+		}
+		candidate = strings.TrimRight(html.UnescapeString(candidate), ".,;:")
+		if !DeliveryLinkCandidate(candidate) || containsString(dst, candidate) {
+			continue
+		}
+		dst = append(dst, candidate)
+	}
+	return dst
+}
 
 // CategoryContent reduces an already-parsed message to what classification
 // reads. Parsing has decoded all of it anyway, so the fetch path pays nothing
 // for content classification beyond this copy.
 func (p ParsedMessage) CategoryContent() CategoryContent {
 	content := CategoryContent{Subject: p.Subject, Text: limitCategoryText(p.Text)}
+	// Links are read from the markup, not from the indexed text: stripping HTML
+	// keeps what a reader sees and throws away every href, which is exactly
+	// where a carrier's tracking link lives.
+	content.DeliveryLinks = appendDeliveryLinks(appendDeliveryLinks(nil, p.Text), p.HTML)
 	// A message that is only HTML still says what it is; the indexed text is
 	// empty for it, so the markup is stripped here the way display does it.
 	if strings.TrimSpace(content.Text) == "" && strings.TrimSpace(p.HTML) != "" {
@@ -141,6 +210,7 @@ type categoryScan struct {
 	subject string
 	text    strings.Builder
 	files   []CategoryFile
+	links   []string
 	// droppedFile records that the message carried more attachments than the
 	// scan keeps names for, which is the other way it can miss the one file
 	// that would have named the message.
@@ -148,7 +218,7 @@ type categoryScan struct {
 }
 
 func (s *categoryScan) content() CategoryContent {
-	return CategoryContent{Subject: s.subject, Text: s.text.String(), Files: s.files}
+	return CategoryContent{Subject: s.subject, Text: s.text.String(), Files: s.files, DeliveryLinks: s.links}
 }
 
 // walk descends one MIME part. Errors are absorbed rather than propagated: a
@@ -200,6 +270,9 @@ func (s *categoryScan) walk(header textproto.MIMEHeader, body io.Reader, depth i
 			return
 		}
 		text := decodeTextBytes(decoded, params["charset"])
+		// The links are taken before the markup is stripped, for the same
+		// reason the fetch path reads them out of the raw HTML.
+		s.links = appendDeliveryLinks(s.links, text)
 		if lowerMediaType == "text/html" {
 			text = stripHTML(text)
 		}

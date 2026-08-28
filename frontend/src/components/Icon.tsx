@@ -2,6 +2,7 @@
 // maps them to concrete icon components, aliases, and default weights.
 
 import {
+  Package,
   AndroidLogo,
   Archive,
   ArrowBendUpLeft,
@@ -90,6 +91,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   briefcase: Briefcase,
   building: Buildings,
   calendar: CalendarBlank,
+  package: Package,
   arrow_back: ArrowLeft,
   arrow_forward: ArrowRight,
   attach_file: Paperclip,

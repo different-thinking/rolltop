@@ -32,6 +32,7 @@ import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/runtime";
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
 import { MessageCategoryPill } from "./MessageCategoryPill";
+import { ShipmentChip, ShipmentDetails } from "../deliveries/ShipmentChip";
 import { SnoozeControl } from "./SnoozeControl";
 
 type MessageLoadStatus = {
@@ -2187,6 +2188,7 @@ export function ThreadView({
                       </span>
                       <MessageSenderSecurityCaution indicators={item.security_indicators} />
                       <MessageCategoryPill category={item.message.category} categories={mailCategories} />
+                      {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
                       {annotationNodes}
                       <OneClickUnsubscribeInlineAction
                         item={item}
@@ -2338,6 +2340,11 @@ export function ThreadView({
                 </RemoteImageNotice>
                 <div className="thread-body">
                   <MessageLinkSecurityNotice indicators={item.security_indicators} />
+                  {/* The parcel this message is about, before the message
+                      itself: a carrier mail buries its number in a page of
+                      boilerplate, and the number is what the reader opened it
+                      for. */}
+                  {item.message.shipment ? <ShipmentDetails shipment={item.message.shipment} navigate={navigate} /> : null}
                   {item.body_preview_only ? (
                     <div className="body-notice">
                       <Icon name="report" />

@@ -112,6 +112,7 @@ type Runner struct {
 	refreshSenderStatsForUser func(context.Context, int64) error
 	indexAttachmentsForUser   func(context.Context, int64, int) (int, error)
 	classifyCategoriesForUser func(context.Context, int64, int) (int, error)
+	scanDeliveriesForUser     func(context.Context, int64, int) (int, error)
 }
 
 // NewRunner builds a process-lifetime scheduler using a background context. The
@@ -888,6 +889,13 @@ func (r *Runner) classifyPendingCategoriesForUser(ctx context.Context, userID in
 		return r.classifyCategoriesForUser(ctx, userID, limit)
 	}
 	return r.Service.ClassifyPendingCategoriesForUser(ctx, userID, limit)
+}
+
+func (r *Runner) scanPendingDeliveriesForUser(ctx context.Context, userID int64, limit int) (int, error) {
+	if r.scanDeliveriesForUser != nil {
+		return r.scanDeliveriesForUser(ctx, userID, limit)
+	}
+	return r.Service.ScanPendingDeliveriesForUser(ctx, userID, limit)
 }
 
 func (r *Runner) runMailboxes(userID int64, mailboxes []string) bool {
@@ -1704,6 +1712,29 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			categorizedAny = true
 		}
 		drainMore = drainMore || categorized == store.CategoryBackfillLimit
+		// The parcel backfill rides the same turn for the same reason the
+		// category one does: it opens the stored messages this worker is
+		// already reading, so it inherits the yielding and cancellation built
+		// around it instead of competing for the tenant's database.
+		if ctx.Err() != nil {
+			return
+		}
+		scanned, err := r.scanPendingDeliveriesForUser(ctx, userID, store.DeliveryBackfillLimit)
+		if err != nil {
+			indexFailed = true
+			if ctx.Err() == nil {
+				log.Printf("delivery backfill user_id=%d: %v", userID, err)
+			}
+			return
+		}
+		if scanned > 0 {
+			log.Printf("delivery backfill user_id=%d scanned=%d", userID, scanned)
+			// The header badge and the parcel list are chrome, so a pass that
+			// found something has to reach the open tabs the same way a newly
+			// filed category does.
+			categorizedAny = true
+		}
+		drainMore = drainMore || scanned == store.DeliveryBackfillLimit
 	}()
 	return true
 }

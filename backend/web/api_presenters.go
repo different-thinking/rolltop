@@ -446,6 +446,13 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 			CopyIDs:            view.CopyIDs,
 		})
 	}
+	// The parcel a message named is attached after the loop for the same reason
+	// the annotations are looked up before it: one query for the thread rather
+	// than one per message.
+	shipments := s.messageShipments(ctx, userID, messageIDs)
+	for i := range out {
+		out[i].Message.Shipment = shipments[out[i].Message.ID]
+	}
 	return out
 }
 

@@ -132,6 +132,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		IsSigned:           parsed.IsSigned,
 		HasAutocryptHeader: parsed.HasAutocryptHeader,
 		ImportPending:      true,
+		DeliveryScanned:    !parseFailed,
 	})
 	if err != nil {
 		_, cleanupErr := s.deleteUnreferencedBlob(ctx, userID, blobRec.ID, blobPath)
@@ -146,6 +147,20 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	if msg.LanguageCode != languageCode {
 		msg.LanguageCode = languageCode
 		if err := s.Store.UpdateMessageLanguage(ctx, userID, msg.ID, languageCode); err != nil {
+			return store.MessageRecord{}, parsed, nil, err
+		}
+	}
+	// Parcels are recorded from the same parse, for the same reason the category
+	// is: blob retention throws the raw message away after a fortnight, so a
+	// message not read for a tracking number while it is open is a message most
+	// of whose parcels can never be recovered. A message that names none is
+	// stamped as read all the same, so the backfill does not keep selecting it.
+	// Only a message that actually named one pays for a write here; the row was
+	// already stamped as read by CreateMessage, so mail with no parcel in it --
+	// which is nearly all of it -- costs nothing beyond the parse.
+	if len(parsed.Deliveries) > 0 {
+		generationRecoveryPhase(ctx, "sqlite-message-shipments", "")
+		if err := s.Store.ReplaceMessageShipments(ctx, userID, msg.ID, date.Unix(), parsed.Deliveries); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
 		}
 	}
