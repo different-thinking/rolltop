@@ -909,6 +909,10 @@ export const api = {
     getJSON<{ shipments: Shipment[] }>(`/api/deliveries?${new URLSearchParams({ day })}`),
   // The header chip asks this and not the list above: it is read on every page
   // and again whenever a sync stores mail, so it must stay one bounded query.
+  // What the reader knows that the mail never said: a parcel that arrived
+  // without the carrier reporting it, or a number that was never a parcel.
+  setShipmentManualStatus: (csrf: string, id: number, manualStatus: "" | "delivered" | "dismissed") =>
+    postJSON<{ shipment: Shipment }>(`/api/deliveries/${id}`, csrf, { manual_status: manualStatus }),
   expectedDeliveries: (day: string) =>
     getJSON<{ count: number; carrier_label: string }>(`/api/deliveries/expected?${new URLSearchParams({ day })}`),
   // The reservation key embeds a raw IMAP mailbox name, which may contain any

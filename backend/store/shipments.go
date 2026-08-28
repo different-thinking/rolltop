@@ -12,6 +12,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -26,7 +28,12 @@ import (
 // Bump it whenever a change to mailparse's delivery rules should reach stored
 // mail. It costs one blob read per message, spread over the background worker's
 // turns, and it only reaches what blob retention still holds.
-const DeliveryVersion = 1
+//
+// 2: the carriers' own mail carries its number behind a click-tracking redirect
+// and prints it under a heading rather than a label, so a bare number in the
+// sender's own shape counts now. Without the bump the very mail that rule was
+// written for stays unread until the next one arrives.
+const DeliveryVersion = 2
 
 // DeliveryBackfillLimit bounds one backfill pass and is the batch size the
 // worker uses. It matches the category backfill's, because the two do the same
@@ -46,13 +53,53 @@ type Shipment struct {
 	ExpectedDate string
 	WindowStart  string
 	WindowEnd    string
+	// Status is what the mail said. ManualStatus is what the reader said about
+	// it, empty when they have said nothing; it outranks Status wherever the
+	// two disagree, and Status keeps being updated underneath it so taking the
+	// correction back returns the carrier's own answer rather than a stale one.
 	Status       string
+	ManualStatus string
 	// ReportedAt is the date of the message the current answer came from. It is
 	// what decides whether a message may overwrite it.
 	ReportedAt int64
 	UpdatedAt  int64
 	// Messages are the mails that named this parcel, newest first.
 	Messages []ShipmentMessage
+}
+
+// Manual statuses a reader can put on a parcel. Dismissed is for a number that
+// was never a parcel; delivered is for one that arrived without the carrier
+// saying so, which is most of what an old row on this list is.
+const (
+	ShipmentManualNone      = ""
+	ShipmentManualDelivered = "delivered"
+	ShipmentManualDismissed = "dismissed"
+)
+
+// ValidShipmentManualStatus keeps anything the column would refuse out of the
+// query. It arrives from a request, so it is checked rather than trusted.
+func ValidShipmentManualStatus(value string) bool {
+	switch value {
+	case ShipmentManualNone, ShipmentManualDelivered, ShipmentManualDismissed:
+		return true
+	default:
+		return false
+	}
+}
+
+// EffectiveStatus is what the parcel counts as: the reader's answer when they
+// gave one, the mail's otherwise. Everything that groups, counts or hides a
+// parcel reads this rather than either column.
+func (s Shipment) EffectiveStatus() string {
+	if s.ManualStatus == ShipmentManualDelivered {
+		return mailparse.DeliveryDelivered
+	}
+	return s.Status
+}
+
+// Dismissed reports a parcel the reader said was never one.
+func (s Shipment) Dismissed() bool {
+	return s.ManualStatus == ShipmentManualDismissed
 }
 
 // ShipmentMessage is one mail that mentioned a parcel, reduced to what a link
@@ -185,10 +232,18 @@ func (s *Store) ListShipments(ctx context.Context, userID int64, today string) (
 	// years of old dispatch mail in one afternoon, and by the row's age every
 	// parcel a reader ever received would be "recently shipped, no date yet"
 	// for two months, renewed every time the backfill re-read the message.
-	rows, err := db.QueryContext(ctx, `SELECT id, carrier, tracking_number, expected_date, window_start, window_end, status, reported_at, updated_at
+	// A dismissed parcel is gone from every read: the reader said it was never
+	// one, and a list that kept showing it would be asking them again.
+	//
+	// An undated parcel is kept on its recency alone, whatever its status. It
+	// used to be dropped once it counted as delivered, which quietly took the
+	// reader's own "it arrived" off the page along with the Rückgängig that
+	// undoes it -- a correction that cannot be seen cannot be taken back.
+	rows, err := db.QueryContext(ctx, `SELECT id, carrier, tracking_number, expected_date, window_start, window_end,
+			status, manual_status, reported_at, updated_at
 		FROM shipments
-		WHERE user_id = ?
-			AND (expected_date >= ? OR (expected_date = '' AND status <> 'delivered' AND reported_at >= ?))
+		WHERE user_id = ? AND manual_status <> 'dismissed'
+			AND (expected_date >= ? OR (expected_date = '' AND reported_at >= ?))
 		ORDER BY (expected_date = '') ASC, expected_date ASC, id ASC
 		LIMIT ?`, userID, recent, quiet, shipmentListLimit)
 	if err != nil {
@@ -200,7 +255,8 @@ func (s *Store) ListShipments(ctx context.Context, userID int64, today string) (
 	for rows.Next() {
 		var item Shipment
 		if err := rows.Scan(&item.ID, &item.Carrier, &item.TrackingNumber, &item.ExpectedDate,
-			&item.WindowStart, &item.WindowEnd, &item.Status, &item.ReportedAt, &item.UpdatedAt); err != nil {
+			&item.WindowStart, &item.WindowEnd, &item.Status, &item.ManualStatus,
+			&item.ReportedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		index[item.ID] = len(out)
@@ -304,7 +360,7 @@ func (s *Store) ShipmentsExpectedOn(ctx context.Context, userID int64, today str
 	}
 	rows, err := db.QueryContext(ctx, `SELECT s.carrier
 		FROM shipments s
-		WHERE s.user_id = ? AND s.expected_date = ? AND s.status <> 'delivered'
+		WHERE s.user_id = ? AND s.expected_date = ? AND s.status <> 'delivered' AND s.manual_status = ''
 			AND EXISTS (SELECT 1 FROM shipment_messages sm WHERE sm.user_id = s.user_id AND sm.shipment_id = s.id)
 		ORDER BY s.id
 		LIMIT ?`, userID, today, maxCountedExpectedShipments)
@@ -487,12 +543,14 @@ func (s *Store) ShipmentsForMessages(ctx context.Context, userID int64, messageI
 	}
 	// Undated parcels sort last within their status: a day nobody stated cannot
 	// be nearer than one that was.
-	rows, err := db.QueryContext(ctx, `SELECT sm.message_id, s.id, s.carrier, s.tracking_number, s.expected_date, s.status
+	rows, err := db.QueryContext(ctx, `SELECT sm.message_id, s.id, s.carrier, s.tracking_number, s.expected_date,
+			CASE WHEN s.manual_status = 'delivered' THEN 'delivered' ELSE s.status END AS effective_status
 		FROM shipment_messages sm
 		JOIN shipments s ON s.id = sm.shipment_id AND s.user_id = sm.user_id
-		WHERE sm.user_id = ? AND sm.message_id IN (`+strings.Join(placeholders, ", ")+`)
+		WHERE sm.user_id = ? AND s.manual_status <> 'dismissed'
+			AND sm.message_id IN (`+strings.Join(placeholders, ", ")+`)
 		ORDER BY sm.message_id,
-			CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END,
+			CASE WHEN s.manual_status = 'delivered' OR s.status = 'delivered' THEN 1 ELSE 0 END,
 			(s.expected_date = '') ASC, s.expected_date ASC, s.id ASC`, args...)
 	if err != nil {
 		return nil, err
@@ -516,4 +574,39 @@ func (s *Store) ShipmentsForMessages(ctx context.Context, userID int64, messageI
 		out[messageID] = item
 	}
 	return out, rows.Err()
+}
+
+// SetShipmentManualStatus records what the reader said about one parcel, or
+// clears it when value is empty. It returns the parcel as it now reads.
+//
+// The extracted status is left alone on purpose. A carrier that reports the
+// delivery a day later still updates its own column underneath, so taking the
+// correction back does not leave the reader with the answer they were
+// correcting.
+func (s *Store) SetShipmentManualStatus(ctx context.Context, userID, shipmentID int64, value string) (Shipment, error) {
+	if !ValidShipmentManualStatus(value) {
+		return Shipment{}, fmt.Errorf("shipments: unsupported manual status %q", value)
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return Shipment{}, err
+	}
+	now := nowUnix()
+	at := now
+	if value == ShipmentManualNone {
+		at = 0
+	}
+	var item Shipment
+	err = db.QueryRowContext(ctx, `UPDATE shipments
+		SET manual_status = ?, manual_status_at = ?, updated_at = ?
+		WHERE user_id = ? AND id = ?
+		RETURNING id, carrier, tracking_number, expected_date, window_start, window_end,
+			status, manual_status, reported_at, updated_at`,
+		value, at, now, userID, shipmentID).Scan(&item.ID, &item.Carrier, &item.TrackingNumber,
+		&item.ExpectedDate, &item.WindowStart, &item.WindowEnd, &item.Status, &item.ManualStatus,
+		&item.ReportedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Shipment{}, ErrNotFound
+	}
+	return item, err
 }

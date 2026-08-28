@@ -315,6 +315,15 @@ site and in review.
   match. The sender is a hint for *whose* number it is and never a gate on
   whether to look: the earliest notice of a parcel is the shop's dispatch mail,
   not the carrier's.
+- **The reader outranks the classifier here too.** `shipments.manual_status`
+  holds what the reader said about a parcel, beside what the mail said rather
+  than over it: a parcel that arrived without the carrier ever reporting it, and
+  a number that was never a parcel, are the two states extraction can never
+  reach on its own. Everything that groups, counts or hides a parcel reads
+  `Shipment.EffectiveStatus()`, never `status` directly, and the extracted
+  column keeps being updated underneath so taking a correction back returns the
+  carrier's answer instead of a stale one. This is the same shape as
+  `category_sender_overrides`, for the same reason.
 - **A later message wins, an earlier one does not.** `shipments.reported_at`
   holds the date of the message the stored day and status came from, and
   `ReplaceMessageShipments` only overwrites from a message at least as recent.

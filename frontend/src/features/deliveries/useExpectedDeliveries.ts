@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { localDay } from "./DeliveriesView";
+import { useDeliveriesRevision } from "./revision";
 
 export type ExpectedDeliveries = {
   /** Parcels due today that have not been reported delivered. */
@@ -25,6 +26,9 @@ const nothingExpected: ExpectedDeliveries = { count: 0, carrierLabel: "" };
 export function useExpectedDeliveries(mailGeneration: number): ExpectedDeliveries {
   const [expected, setExpected] = useState<ExpectedDeliveries>(nothingExpected);
   const [today] = useState(() => localDay());
+  // A sync is one way the answer changes; the reader marking a parcel arrived
+  // or dismissing it is the other, and only this carries that one.
+  const revision = useDeliveriesRevision();
 
   useEffect(() => {
     let cancelled = false;
@@ -40,7 +44,7 @@ export function useExpectedDeliveries(mailGeneration: number): ExpectedDeliverie
     return () => {
       cancelled = true;
     };
-  }, [today, mailGeneration]);
+  }, [today, mailGeneration, revision]);
 
   return expected;
 }

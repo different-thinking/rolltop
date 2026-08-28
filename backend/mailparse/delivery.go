@@ -89,6 +89,10 @@ type DeliveryCarrier struct {
 	// names one has said which carrier it means. Nil where the carrier's numbers
 	// are plain digits that anything else could be.
 	numberShape *regexp.Regexp
+	// bareShape matches the digit lengths this carrier issues. Unlike
+	// numberShape it says nothing on its own -- plenty of numbers are twenty
+	// digits long -- so it is only read out of mail the carrier itself sent.
+	bareShape *regexp.Regexp
 	// trackURL builds the page a reader can follow the parcel on. Empty for a
 	// carrier whose tracking page needs more than the number.
 	trackURL func(number string) string
@@ -103,8 +107,9 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"dhl.de", "dhl.com", "deutschepost.de", "dpdhl.com"},
 		linkHosts:     []string{"nolp.dhl.de", "dhl.de", "dhl.com"},
 		linkParams:    []string{"piececode", "idc", "tracking-id", "trackingnumber"},
-		// 12, 14, 16 or 20 digits, all of which other things are too, so DHL is
-		// recognised by its link or its sender and not by the number alone.
+		// 12, 16 or 20 digits, all of which other things are too, so a bare one
+		// counts only in DHL's own mail.
+		bareShape: regexp.MustCompile(`\b(?:\d{20}|\d{16}|\d{12})\b`),
 		trackURL: func(number string) string {
 			return "https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=" + number
 		},
@@ -115,6 +120,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"dpd.de", "dpd.com", "dpdgroup.com"},
 		linkHosts:     []string{"tracking.dpd.de", "my.dpd.de", "dpd.com", "dpd.de"},
 		linkParams:    []string{"parcelno", "pknr", "query"},
+		bareShape:     regexp.MustCompile(`\b\d{14}\b`),
 		trackURL: func(number string) string {
 			return "https://tracking.dpd.de/status/de_DE/parcel/" + number
 		},
@@ -125,6 +131,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"gls-group.eu", "gls-group.com", "gls-pakete.de", "gls-germany.de"},
 		linkHosts:     []string{"gls-group.eu", "gls-group.com", "gls-pakete.de"},
 		linkParams:    []string{"match", "txtaction", "trackingnumber"},
+		bareShape:     regexp.MustCompile(`\b\d{11,12}\b`),
 		trackURL: func(number string) string {
 			return "https://gls-group.eu/DE/de/paketverfolgung?match=" + number
 		},
@@ -147,6 +154,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"fedex.com"},
 		linkHosts:     []string{"fedex.com"},
 		linkParams:    []string{"trknbr", "tracknumbers"},
+		bareShape:     regexp.MustCompile(`\b(?:\d{20}|\d{15}|\d{12})\b`),
 		trackURL: func(number string) string {
 			return "https://www.fedex.com/fedextrack/?trknbr=" + number
 		},
@@ -157,6 +165,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"myhermes.de", "hermesworld.com", "hermes-europe.co.uk", "evri.com"},
 		linkHosts:     []string{"myhermes.de", "hermesworld.com", "tracking.hermesworld.com"},
 		linkParams:    []string{"trackid", "trackingid"},
+		bareShape:     regexp.MustCompile(`\b\d{14}\b`),
 		trackURL: func(number string) string {
 			return "https://www.myhermes.de/empfangen/sendungsverfolgung/sendungsinformation/#" + number
 		},
@@ -306,15 +315,46 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 			add(carrier.Key, match)
 		}
 	}
-	// Then labelled numbers. Whose they are is not stated beside the number, so
-	// the message as a whole answers it: the carrier its links point at, the
-	// carrier that sent it, or a carrier it names in words.
+	// Labelled numbers before the bare ones below, because the eight-notice cap
+	// is filled in order and a labelled number is the better answer. A carrier
+	// mail listing item numbers would otherwise spend the whole budget on them
+	// and drop the one number the message actually labelled.
+	//
+	// Whose a labelled number is is not stated beside it, so the message as a
+	// whole answers it: the carrier its links point at, the carrier that sent
+	// it, or a carrier it names in words.
+	senderCarrier := carrierForSender(from)
 	labelled := labelledTrackingNumbers(text)
 	if len(labelled) > 0 {
-		labelCarrier := firstNonEmpty(linkCarrier, carrierForSender(from), carrierNamedIn(text))
+		labelCarrier := firstNonEmpty(linkCarrier, senderCarrier, carrierNamedIn(text))
 		for _, number := range labelled {
 			add(labelCarrier, number)
 		}
+	}
+	// Last, a bare number in the shape the sender's own carrier issues. It
+	// exists because the carriers put their number behind a click-tracking
+	// redirect and print it in the body under a heading -- "Sendungsstatus
+	// einsehen" -- that is not a label. Without it their own "arrives today"
+	// mail, the one the reader most wants on the list, yields nothing.
+	//
+	// It is the weakest rule in this file and carries two gates for it. A
+	// carrier is a company that also sends invoices, newsletters and service
+	// mail, and twelve digits is a phone number, a customer number and a
+	// contract number as readily as a parcel.
+	for _, carrier := range deliveryCarriers {
+		if carrier.Key != senderCarrier || carrier.bareShape == nil {
+			continue
+		}
+		if !aboutAShipment(content.Subject) {
+			break
+		}
+		for _, at := range carrier.bareShape.FindAllStringIndex(text, maxDeliveryNoticesPerMessage) {
+			if labelledAsSomethingElse(text, at[0]) {
+				continue
+			}
+			add(carrier.Key, text[at[0]:at[1]])
+		}
+		break
 	}
 	if len(found) == 0 {
 		return nil
@@ -346,6 +386,43 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 	}
 	return found
 }
+
+// shipmentSubjectRE is the first gate on a bare number: the message has to say
+// it is about a parcel where a message says what it is about. A carrier's
+// invoice is headed "Ihre Rechnung" and its newsletter is headed anything else;
+// its parcel mail says so in the subject, every time, because that is the whole
+// point of sending it.
+var shipmentSubjectRE = regexp.MustCompile(`(?i)sendung|paket|lieferung|zustell|shipment|parcel|delivery|tracking`)
+
+func aboutAShipment(subject string) bool {
+	return shipmentSubjectRE.MatchString(subject)
+}
+
+// competingLabelRE is the second gate: the words that claim a number for
+// something that is not a parcel. A parcel number is never introduced by one of
+// these, and every number that is stands right after one.
+// The case-insensitivity is scoped to the word rather than written once at the
+// front, because `(?i)` reaches the negated class too: `[^0-9A-Z]` under it also
+// excludes lower case, and the filler it has to cross -- " lautet ", " ist: " --
+// is all lower case. That is the difference between this gate firing and not.
+var competingLabelRE = regexp.MustCompile(
+	`(?i:(?:rechnung|vertrag|kunde|telefon|tel\.|hotline|service|bestell|auftrag|iban|konto|beleg|mitglied|zahler|zähler|steuer|ust|mandat|referenz|artikel|position)[a-zäöüß]*(?:[\s.:-]*(?:nr\.?|nummer|no\.?|number|id))?)[^0-9A-Z]{0,12}$`)
+
+// labelledAsSomethingElse reports whether the text just before a bare number
+// claims it for something other than a parcel. RE2 has no lookbehind, so the
+// window is cut out and matched against its end.
+func labelledAsSomethingElse(text string, at int) bool {
+	from := at - competingLabelWindow
+	if from < 0 {
+		from = 0
+	}
+	return competingLabelRE.MatchString(text[from:at])
+}
+
+// competingLabelWindow is how far back a claim on the number can stand. Long
+// enough for "Ihre Kundennummer lautet: ", short enough that the sentence
+// before it cannot reach.
+const competingLabelWindow = 40
 
 // deliveryText is the message as the extractor reads it: the subject first,
 // because a subject line is where "arrives today" is stated, then the body.
@@ -386,7 +463,25 @@ func normalizeTrackingNumber(number string) string {
 	if countDigits(normalized) < 6 {
 		return ""
 	}
+	// A date written without separators clears every rule above -- eight digits,
+	// all of them digits -- and is not a parcel. Mail is full of them, in a URL
+	// parameter as readily as in a sentence.
+	if looksLikeCompactDate(normalized) {
+		return ""
+	}
 	return normalized
+}
+
+// looksLikeCompactDate recognises YYYYMMDD, and only that: eight digits whose
+// halves are a plausible year, month and day. No shape any carrier issues is
+// eight digits long, so nothing real is lost by refusing them all when they
+// read as a date.
+func looksLikeCompactDate(value string) bool {
+	if len(value) != 8 || countDigits(value) != 8 {
+		return false
+	}
+	year, month, day := atoi(value[:4]), atoi(value[4:6]), atoi(value[6:8])
+	return year >= 1990 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31
 }
 
 func countDigits(value string) int {
@@ -621,7 +716,13 @@ func containsString(values []string, needle string) bool {
 	return false
 }
 
-// labelledTrackingRE matches a number a message says the purpose of. The label
+// labelledTrackingRE matches a number a message says the purpose of.
+//
+// "Status" is deliberately not one of the nouns. "Sendungsstatus" reads like a
+// label and is not one: it heads a section, and what follows it is as often a
+// date ("Sendungsstatus vom 2026-08-28") as a number -- which this expression
+// would then hand on as tracking number 20260828. The carrier's own mail is
+// reached by the bare-number rule instead, which knows whose number it is. The label
 // is matched case-insensitively; the number itself is not, because restricting
 // it to upper case and digits is what stops the match running on into the words
 // after it -- "Sendungsnummer: 1234567890 und weitere" ends at the lower-case
