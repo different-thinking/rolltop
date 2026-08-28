@@ -36,25 +36,36 @@ func (s *Service) ScanPendingDeliveriesForUser(ctx context.Context, userID int64
 		return 0, err
 	}
 	read := 0
+	// The three outcomes are kept apart because they cost different things. A
+	// message that named a parcel is written one at a time, because the upsert
+	// is per parcel; the other two are the overwhelming majority and are
+	// stamped in one statement each at the end of the batch.
 	unreadable := make([]int64, 0, len(candidates))
+	empty := make([]int64, 0, len(candidates))
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			break
 		}
 		notices, ok := s.deliveriesInStoredMessage(userID, candidate)
-		if !ok {
+		switch {
+		case !ok:
 			unreadable = append(unreadable, candidate.ID)
-			continue
+		case len(notices) == 0:
+			empty = append(empty, candidate.ID)
+		default:
+			if err := s.Store.ReplaceMessageShipments(ctx, userID, candidate.ID, candidate.Date, notices); err != nil {
+				return read, err
+			}
+			read++
 		}
-		if err := s.Store.ReplaceMessageShipments(ctx, userID, candidate.ID, candidate.Date, notices); err != nil {
-			return read, err
-		}
-		read++
+	}
+	if err := s.Store.ClearMessageShipments(ctx, userID, empty); err != nil {
+		return read, err
 	}
 	if err := s.Store.MarkMessagesDeliveryScanned(ctx, userID, unreadable); err != nil {
 		return read, err
 	}
-	return read + len(unreadable), ctx.Err()
+	return read + len(empty) + len(unreadable), ctx.Err()
 }
 
 // deliveriesInStoredMessage reads one candidate's stored message. The second

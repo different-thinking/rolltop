@@ -96,9 +96,24 @@ func appendDeliveryLinks(dst []string, text string) []string {
 	if !strings.Contains(text, "http") {
 		return dst
 	}
-	for _, candidate := range urlRE.FindAllString(text, -1) {
-		if len(dst) >= maxDeliveryLinks {
-			return dst
+	// The matches are walked one at a time rather than collected. A marketing
+	// mail carries hundreds of links and all but a handful are dropped by the
+	// filter below, so gathering them all first would put every one of them on
+	// the heap of the worker holding this tenant's turn -- which is the cost
+	// DeliveryLinks exists to avoid. Slicing the match keeps the substring
+	// pointing into the text; only a link that is kept, or one carrying an
+	// entity, allocates.
+	for offset := 0; offset < len(text) && len(dst) < maxDeliveryLinks; {
+		match := urlRE.FindStringIndex(text[offset:])
+		if match == nil {
+			break
+		}
+		candidate := text[offset+match[0] : offset+match[1]]
+		offset += match[1]
+		if !strings.Contains(candidate, "&amp;") && !DeliveryLinkCandidate(candidate) {
+			// The host decides, and an entity cannot appear in one, so an
+			// unescaped candidate is rejected before it is unescaped.
+			continue
 		}
 		candidate = strings.TrimRight(html.UnescapeString(candidate), ".,;:")
 		if !DeliveryLinkCandidate(candidate) || containsString(dst, candidate) {

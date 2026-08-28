@@ -333,3 +333,101 @@ func TestParseLeavesOrdinaryMailWithoutParcels(t *testing.T) {
 		t.Errorf("want no parcels, got %+v", parsed.Deliveries)
 	}
 }
+
+// One parcel found twice -- once by the carrier's link, once by the label in
+// the text that does not name a carrier -- is one parcel. Keyed on the carrier
+// as well as the number it was two, which the store then wrote as two rows.
+func TestExtractDeliveryNoticesMergesOnTheNumberAlone(t *testing.T) {
+	content := CategoryContent{Text: "Tracking number: 1Z999AA10123456784. Vielen Dank für Ihre Bestellung."}
+	notice := onlyNotice(t, ExtractDeliveryNotices(content, "shop@beispielshop.de", sentAt(t)))
+	if notice.Carrier != "ups" {
+		t.Errorf("carrier = %q, want the one the number's own shape names", notice.Carrier)
+	}
+}
+
+// An announcement is not a report. Both of these name a day in the future, and
+// filing them as delivered took the parcel off the list before it arrived.
+func TestExtractDeliveryNoticesDoesNotReadAnnouncementsAsDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"german", "Ihre Sendung wird voraussichtlich zugestellt am 07.09.2026."},
+		{"english", "Your parcel will be delivered on September 7, 2026."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := CategoryContent{Text: tc.text + " Sendungsnummer: 00340434212345678901"}
+			notice := onlyNotice(t, ExtractDeliveryNotices(content, "noreply@dhl.de", sentAt(t)))
+			if notice.Status == DeliveryDelivered {
+				t.Errorf("status = %q for a message about a day that has not come", notice.Status)
+			}
+			if notice.ExpectedDate != "2026-09-07" {
+				t.Errorf("expected date = %q, want 2026-09-07", notice.ExpectedDate)
+			}
+		})
+	}
+}
+
+// "Auf dem Weg zu Ihnen" is what a shop writes when it hands a parcel over. It
+// says the parcel is moving, not that it arrives today.
+func TestExtractDeliveryNoticesDoesNotReadDispatchAsToday(t *testing.T) {
+	content := CategoryContent{Text: "Dein Paket ist auf dem Weg zu Ihnen. Sendungsnummer: 12345678901"}
+	notice := onlyNotice(t, ExtractDeliveryNotices(content, "shop@beispielshop.de", sentAt(t)))
+	if notice.Status == DeliveryOutForDelivery {
+		t.Errorf("status = %q for a dispatch note", notice.Status)
+	}
+	if notice.ExpectedDate != "" {
+		t.Errorf("expected date = %q, want none: the message named no day", notice.ExpectedDate)
+	}
+}
+
+// A link to a carrier is usually not a link to a parcel. A shop link and a help
+// anchor both end in something that reads as a number.
+func TestExtractDeliveryNoticesIgnoresNonTrackingCarrierLinks(t *testing.T) {
+	for _, link := range []string{
+		"https://www.amazon.de/dp/3442267749",
+		"https://www.dhl.de/de/privatkunden/hilfe.html#faq-1234567890",
+		"https://www.ups.com/de/de/support/contact.page",
+	} {
+		t.Run(link, func(t *testing.T) {
+			content := CategoryContent{Text: "Viele Grüße von uns.", DeliveryLinks: []string{link}}
+			if notices := ExtractDeliveryNotices(content, "newsletter@beispiel.de", sentAt(t)); len(notices) > 0 {
+				t.Errorf("want no parcels from %q, got %+v", link, notices)
+			}
+		})
+	}
+}
+
+// The real tracking pages still have to work, including the two carriers whose
+// number is in the path and in the fragment rather than in a named parameter.
+func TestExtractDeliveryNoticesReadsTrackingPagePaths(t *testing.T) {
+	for _, tc := range []struct {
+		link    string
+		carrier string
+		number  string
+	}{
+		{"https://tracking.dpd.de/status/de_DE/parcel/01234567890123", "dpd", "01234567890123"},
+		{"https://www.myhermes.de/empfangen/sendungsverfolgung/sendungsinformation/#11223344556677", "hermes", "11223344556677"},
+	} {
+		t.Run(tc.carrier, func(t *testing.T) {
+			content := CategoryContent{Text: "Verfolgen Sie Ihre Sendung.", DeliveryLinks: []string{tc.link}}
+			notice := onlyNotice(t, ExtractDeliveryNotices(content, "noreply@beispiel.de", sentAt(t)))
+			if notice.Carrier != tc.carrier || notice.TrackingNumber != tc.number {
+				t.Errorf("got %+v, want %s/%s", notice, tc.carrier, tc.number)
+			}
+		})
+	}
+}
+
+// A window holding a reference number and a real date must yield the date. The
+// reference matches the German date expression and the calendar rejects it, and
+// stopping there lost the answer standing beside it.
+func TestExtractDeliveryNoticesLooksPastAnImplausibleMatch(t *testing.T) {
+	content := CategoryContent{
+		Text: "Voraussichtliche Zustellung 12.34.56 am 07.09.2026. Sendungsnummer: 00340434212345678901",
+	}
+	notice := onlyNotice(t, ExtractDeliveryNotices(content, "noreply@dhl.de", sentAt(t)))
+	if notice.ExpectedDate != "2026-09-07" {
+		t.Errorf("expected date = %q, want 2026-09-07", notice.ExpectedDate)
+	}
+}

@@ -255,25 +255,40 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 	senderCarrier := carrierForSender(from)
 
 	found := make([]DeliveryNotice, 0, 4)
-	seen := make(map[string]int, 4)
+	// The number alone is the identity here, not the number and the carrier.
+	// One parcel is routinely found twice in one message -- once through the
+	// carrier's link, which names the carrier, and once through the label in the
+	// text, which does not -- and keying on both would make those two parcels.
+	// They would then be two rows under the store's unique index, listed twice
+	// and counted twice.
+	//
+	// The list is at most maxDeliveryNoticesPerMessage long, so it is scanned
+	// rather than indexed: a map keyed on the number would need a second pass to
+	// answer the one question that is not equality, which is what to do when two
+	// different carriers are named for one number.
 	add := func(carrier, number string) {
 		number = normalizeTrackingNumber(number)
 		if number == "" {
 			return
 		}
-		key := carrier + "\x00" + number
-		if index, ok := seen[key]; ok {
-			// A message names the same parcel in its text and in its link; the
-			// one that arrived with a carrier keeps it.
-			if found[index].Carrier == "" && carrier != "" {
-				found[index].Carrier = carrier
+		for i := range found {
+			if found[i].TrackingNumber != number {
+				continue
 			}
-			return
+			// The half that knows the carrier wins. Two *different* named
+			// carriers for one number are not the same parcel -- the numbering
+			// schemes overlap -- so those stay apart and the loop keeps looking.
+			if found[i].Carrier == "" {
+				found[i].Carrier = carrier
+				return
+			}
+			if carrier == "" || found[i].Carrier == carrier {
+				return
+			}
 		}
 		if len(found) >= maxDeliveryNoticesPerMessage {
 			return
 		}
-		seen[key] = len(found)
 		found = append(found, DeliveryNotice{
 			Carrier:        carrier,
 			TrackingNumber: number,
@@ -529,14 +544,59 @@ func trackingNumberFromLink(rawURL string, carrier DeliveryCarrier) string {
 			return number
 		}
 	}
-	if number := normalizeTrackingNumber(fragment); number != "" {
+	// A named parameter says what it holds. The two fallbacks below do not, so
+	// they are only read from a URL whose path says it is a tracking page: every
+	// other link to a carrier is a shop page, a help article or a footer, and
+	// their last path segment and their fragment are an article id and an anchor
+	// that read as a number just as well.
+	if !trackingPagePath(value) {
+		return ""
+	}
+	if number := trackedNumberFromSegment(fragment, carrier); number != "" {
 		return number
 	}
 	value = strings.TrimSuffix(value, "/")
 	if slash := strings.LastIndex(value, "/"); slash >= 0 {
-		if number := normalizeTrackingNumber(value[slash+1:]); number != "" {
+		if number := trackedNumberFromSegment(value[slash+1:], carrier); number != "" {
 			return number
 		}
+	}
+	return ""
+}
+
+// trackingPageMarkers are what a carrier calls the page a parcel is followed on.
+// One of them has to be in the path before an unlabelled part of the URL is read
+// as a parcel number.
+var trackingPageMarkers = []string{
+	"track", "verfolg", "sendungsinformation", "sendungsstatus",
+	"parcel", "paket", "shipment", "nextt-online-public", "progress-tracker",
+}
+
+func trackingPagePath(url string) bool {
+	lower := strings.ToLower(url)
+	for _, marker := range trackingPageMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// trackedNumberFromSegment reads a number out of a part of a URL that does not
+// say what it is. Beyond the ordinary shape rules it has to look like a number a
+// carrier issued: all digits, or a shape only this carrier uses. An anchor like
+// "#faq-1234567890" and an article id both clear the shape rules and neither is
+// a parcel.
+func trackedNumberFromSegment(segment string, carrier DeliveryCarrier) string {
+	number := normalizeTrackingNumber(segment)
+	if number == "" {
+		return ""
+	}
+	if carrier.numberShape != nil && carrier.numberShape.MatchString(number) {
+		return number
+	}
+	if countDigits(number) == len(number) {
+		return number
 	}
 	return ""
 }
@@ -583,9 +643,23 @@ func labelledTrackingNumbers(text string) []string {
 // The German forms are all past tense on purpose. "Die Zustellung erfolgt" and
 // "wird zugestellt" are announcements, and reading them as arrivals would clear
 // the day's list before anything had been delivered.
-var deliveredRE = regexp.MustCompile(`(?i)(?:wurde|wurden|ist|sind)\s+(?:heute\s+|bereits\s+|erfolgreich\s+)?(?:zugestellt|abgeliefert|geliefert)|zugestellt\s+am|erfolgreich\s+zugestellt|(?:paket|sendung|lieferung)\s+zugestellt|(?:has|have)\s+been\s+delivered|(?:was|were)\s+delivered|delivered\s+on|your\s+(?:package|parcel|order)\s+(?:has|was)\s+deliver`)
+// Every alternative here is past tense, and that is the whole rule rather than
+// a stylistic one. "Zustellung erfolgt am 07.09." and "will be delivered on
+// September 7" are announcements, and the tense-free forms that used to sit in
+// this list -- a bare "zugestellt am", a bare "delivered on" -- matched both
+// them and the reports, which cleared a parcel off the day's list before
+// anything had been delivered. A real delivery report says who did what:
+// "wurde zugestellt", "has been delivered". RE2 has no lookbehind to exclude
+// the future forms with, so the past forms are named instead.
+var deliveredRE = regexp.MustCompile(`(?i)(?:wurde|wurden|ist|sind)\s+(?:heute\s+|bereits\s+|erfolgreich\s+)?(?:zugestellt|abgeliefert|geliefert)|erfolgreich\s+zugestellt|(?:paket|sendung|lieferung)\s+zugestellt|(?:has|have)\s+been\s+delivered|(?:was|were)\s+delivered|your\s+(?:package|parcel|order)\s+(?:has|was)\s+deliver`)
 
-var outForDeliveryRE = regexp.MustCompile(`(?i)in\s+zustellung|out\s+for\s+delivery|kommt\s+heute|wird\s+heute\s+(?:zugestellt|geliefert)|heute\s+(?:zugestellt|geliefert)|zustellung\s+heute|noch\s+heute|arriv\w*\s+today|on\s+its\s+way\s+today|im\s+zustellfahrzeug|auf\s+dem\s+weg\s+zu\s+ihnen`)
+// Every alternative here says *today*, either in the word or in the state: a
+// parcel in Zustellung is on the van now. "Auf dem Weg zu Ihnen" used to be in
+// this list and is not, because it is what a shop writes the moment it hands a
+// parcel over -- it says the parcel is moving, not that it arrives today, and
+// reading it as today put a chip in the header days early through the date
+// fallback that gives an out-for-delivery message the day it was written.
+var outForDeliveryRE = regexp.MustCompile(`(?i)in\s+zustellung|out\s+for\s+delivery|kommt\s+heute|wird\s+heute\s+(?:zugestellt|geliefert)|heute\s+(?:zugestellt|geliefert)|zustellung\s+heute|noch\s+heute|arriv\w*\s+today|on\s+its\s+way\s+today|im\s+zustellfahrzeug`)
 
 // deliveryStatus grades what the message reports about the parcel.
 func deliveryStatus(text string) string {
@@ -758,20 +832,38 @@ func findDeliveryDate(window string, sent time.Time, status string) (string, boo
 	year, month, day := sent.Date()
 	sentDay := time.Date(year, month, day, 0, 0, 0, 0, sent.Location())
 
-	if match := isoDateRE.FindStringSubmatch(window); match != nil {
-		return plausibleDate(atoi(match[1]), time.Month(atoi(match[2])), atoi(match[3]), sentDay, status)
-	}
-	if match := germanDateRE.FindStringSubmatch(window); match != nil {
-		return dateWithOptionalYear(atoi(match[1]), time.Month(atoi(match[2])), match[3], sentDay, status)
-	}
-	if match := dayMonthNameRE.FindStringSubmatch(window); match != nil {
-		if month, ok := monthNames[strings.ToLower(match[2])]; ok {
-			return dateWithOptionalYear(atoi(match[1]), month, match[3], sentDay, status)
+	// Every spelling is tried, and every match of each is tried, until one
+	// yields a date that survives plausibleDate. A match is not an answer: a
+	// reference number reads as "12.34.56" and a price as "1.234,56", both of
+	// which the German date expression matches and the calendar then rejects.
+	// Stopping at the first *match* rather than the first *answer* -- which is
+	// what this used to do -- lost the real date standing beside it.
+	for _, match := range isoDateRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
+		if date, ok := plausibleDate(atoi(match[1]), time.Month(atoi(match[2])), atoi(match[3]), sentDay, status); ok {
+			return date, true
 		}
 	}
-	if match := monthNameDayRE.FindStringSubmatch(window); match != nil {
-		if month, ok := monthNames[strings.ToLower(match[1])]; ok {
-			return dateWithOptionalYear(atoi(match[2]), month, match[3], sentDay, status)
+	for _, match := range germanDateRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
+		if date, ok := dateWithOptionalYear(atoi(match[1]), time.Month(atoi(match[2])), match[3], sentDay, status); ok {
+			return date, true
+		}
+	}
+	for _, match := range dayMonthNameRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
+		month, ok := monthNames[strings.ToLower(match[2])]
+		if !ok {
+			continue
+		}
+		if date, ok := dateWithOptionalYear(atoi(match[1]), month, match[3], sentDay, status); ok {
+			return date, true
+		}
+	}
+	for _, match := range monthNameDayRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
+		month, ok := monthNames[strings.ToLower(match[1])]
+		if !ok {
+			continue
+		}
+		if date, ok := dateWithOptionalYear(atoi(match[2]), month, match[3], sentDay, status); ok {
+			return date, true
 		}
 	}
 	if match := relativeDayRE.FindStringSubmatch(window); match != nil {
@@ -791,6 +883,11 @@ func findDeliveryDate(window string, sent time.Time, status string) (string, boo
 	}
 	return "", false
 }
+
+// maxDeliveryDateCandidates bounds how many matches of one spelling are checked
+// inside a window. The window is deliveryDateProximity bytes; past a handful of
+// candidates it is a table of numbers rather than a sentence about a delivery.
+const maxDeliveryDateCandidates = 4
 
 // dateWithOptionalYear settles a day and month that may or may not have said
 // which year they are in. A carrier writing "04.01." on the 29th of December

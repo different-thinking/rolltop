@@ -294,3 +294,79 @@ func TestShipmentsForMessagesIsUserScoped(t *testing.T) {
 		t.Errorf("another reader's parcels are listed: %+v", shipments)
 	}
 }
+
+// A re-reading that finds nothing detaches the message, and does so for the
+// whole batch in one statement rather than one transaction per message.
+func TestClearMessageShipmentsDetachesAndStamps(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-clear@example.test")
+	date := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	first := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Versand", date)
+	second := shipmentTestMessage(t, ctx, db, user, account, mailbox, 2, "Newsletter", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, first.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "dhl", TrackingNumber: "00340434212345678901", ExpectedDate: "2026-09-02", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ClearMessageShipments(ctx, user.ID, []int64{first.ID, second.ID}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-09-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 0 {
+		t.Errorf("a detached parcel is still listed: %+v", shipments)
+	}
+	pending, err := db.ListMessagesNeedingDeliveryScan(ctx, user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("cleared messages are still pending a scan: %+v", pending)
+	}
+}
+
+// An unreadable message keeps what an earlier reading found. Blob retention
+// prunes raw mail, so clearing here would throw a parcel away on the first pass
+// after its message aged out.
+func TestMarkMessagesDeliveryScannedKeepsWhatWasFound(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-unreadable@example.test")
+	date := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Versand", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "dhl", TrackingNumber: "00340434212345678901", ExpectedDate: "2026-09-02", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkMessagesDeliveryScanned(ctx, user.ID, []int64{message.ID}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-09-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 1 {
+		t.Errorf("stamping an unreadable message dropped its parcel: %+v", shipments)
+	}
+}
+
+// An undated parcel ages by the date of the mail that announced it. Reading an
+// old mailbox writes those rows today, and by the row's age every parcel ever
+// shipped would sit in the undated group for two months.
+func TestListShipmentsAgesUndatedParcelsByTheMessageDate(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-aging@example.test")
+	old := time.Date(2024, 3, 4, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Versandbestätigung von 2024", old)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, old.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "hermes", TrackingNumber: "11223344556677", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-09-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 0 {
+		t.Errorf("a parcel announced two years ago is listed as still coming: %+v", shipments)
+	}
+}

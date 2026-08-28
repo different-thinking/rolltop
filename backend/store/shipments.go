@@ -179,10 +179,16 @@ func (s *Store) ListShipments(ctx context.Context, userID int64, today string) (
 	}
 	recent := day.AddDate(0, 0, -shipmentHistoryDays).Format(plainDateLayout)
 	quiet := day.AddDate(0, 0, -shipmentQuietDays).Unix()
+	// An undated parcel is aged by reported_at -- the date of the mail that
+	// announced it -- and not by updated_at, which is when the row was written.
+	// The two part company exactly where it matters: an initial sync parses
+	// years of old dispatch mail in one afternoon, and by the row's age every
+	// parcel a reader ever received would be "recently shipped, no date yet"
+	// for two months, renewed every time the backfill re-read the message.
 	rows, err := db.QueryContext(ctx, `SELECT id, carrier, tracking_number, expected_date, window_start, window_end, status, reported_at, updated_at
 		FROM shipments
 		WHERE user_id = ?
-			AND (expected_date >= ? OR (expected_date = '' AND status <> 'delivered' AND updated_at >= ?))
+			AND (expected_date >= ? OR (expected_date = '' AND status <> 'delivered' AND reported_at >= ?))
 		ORDER BY (expected_date = '') ASC, expected_date ASC, id ASC
 		LIMIT ?`, userID, recent, quiet, shipmentListLimit)
 	if err != nil {
@@ -225,8 +231,9 @@ const (
 	// enough to answer "when did that arrive?", short enough that the list is
 	// about what is coming.
 	shipmentHistoryDays = 14
-	// shipmentQuietDays is how long an undated parcel is kept waiting. A shop
-	// that said "shipped" and never followed up is not news after two months.
+	// shipmentQuietDays is how long an undated parcel is kept waiting, counted
+	// from the mail that announced it. A shop that said "shipped" and never
+	// followed up is not news after two months.
 	shipmentQuietDays = 60
 	plainDateLayout   = "2006-01-02"
 )
@@ -375,9 +382,26 @@ func (s *Store) ListMessagesNeedingDeliveryScan(ctx context.Context, userID int6
 }
 
 // MarkMessagesDeliveryScanned stamps messages the pass could not read, so an
-// unreadable one is not selected forever. Messages that were read are stamped by
-// ReplaceMessageShipments inside the same transaction that stored what they said.
+// unreadable one is not selected forever. Their shipment links are deliberately
+// left alone: a message whose stored copy has gone is not a message that has
+// stopped naming a parcel, and clearing what an earlier reading found would
+// throw the parcel away on the first pass after retention pruned the mail.
 func (s *Store) MarkMessagesDeliveryScanned(ctx context.Context, userID int64, ids []int64) error {
+	return s.stampMessagesDeliveryScanned(ctx, userID, ids, false)
+}
+
+// ClearMessageShipments stamps messages that were read and named no parcel, and
+// detaches whatever an older generation attached to them.
+//
+// It takes the whole batch because that is nearly the whole batch: almost no
+// mail names a parcel, and running the per-message upsert for each of them --
+// one transaction, a DELETE and an UPDATE, to record that there was nothing to
+// record -- is the same cost the fetch path had removed from it.
+func (s *Store) ClearMessageShipments(ctx context.Context, userID int64, ids []int64) error {
+	return s.stampMessagesDeliveryScanned(ctx, userID, ids, true)
+}
+
+func (s *Store) stampMessagesDeliveryScanned(ctx context.Context, userID int64, ids []int64, detach bool) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -385,16 +409,35 @@ func (s *Store) MarkMessagesDeliveryScanned(ctx context.Context, userID int64, i
 	if err != nil {
 		return err
 	}
-	args := make([]any, 0, len(ids)+2)
-	args = append(args, DeliveryVersion, userID)
 	placeholders := make([]string, 0, len(ids))
+	idArgs := make([]any, 0, len(ids))
 	for _, id := range ids {
-		args = append(args, id)
+		idArgs = append(idArgs, id)
 		placeholders = append(placeholders, "?")
 	}
-	_, err = db.ExecContext(ctx, `UPDATE messages SET delivery_version = ?
-		WHERE user_id = ? AND id IN (`+strings.Join(placeholders, ", ")+`)`, args...)
-	return err
+	list := strings.Join(placeholders, ", ")
+	if !detach {
+		args := append([]any{DeliveryVersion, userID}, idArgs...)
+		_, err = db.ExecContext(ctx, `UPDATE messages SET delivery_version = ?
+			WHERE user_id = ? AND id IN (`+list+`)`, args...)
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	deleteArgs := append([]any{userID}, idArgs...)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM shipment_messages
+		WHERE user_id = ? AND message_id IN (`+list+`)`, deleteArgs...); err != nil {
+		return err
+	}
+	updateArgs := append([]any{DeliveryVersion, userID}, idArgs...)
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET delivery_version = ?
+		WHERE user_id = ? AND id IN (`+list+`)`, updateArgs...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MessageShipment is the parcel one message is about, as a message list shows
