@@ -10,8 +10,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../../api";
-import type { Shipment } from "../../types";
-import { localDay, shipmentsExpectedOn } from "./DeliveriesView";
+import { localDay } from "./DeliveriesView";
 
 export type ExpectedDeliveries = {
   /** Parcels due today that have not been reported delivered. */
@@ -21,19 +20,21 @@ export type ExpectedDeliveries = {
   carrierLabel: string;
 };
 
+const nothingExpected: ExpectedDeliveries = { count: 0, carrierLabel: "" };
+
 export function useExpectedDeliveries(mailGeneration: number): ExpectedDeliveries {
-  const [shipments, setShipments] = useState<readonly Shipment[]>([]);
+  const [expected, setExpected] = useState<ExpectedDeliveries>(nothingExpected);
   const [today] = useState(() => localDay());
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const next = await api.deliveries(today);
-        if (!cancelled) setShipments(next.shipments || []);
+        const next = await api.expectedDeliveries(today);
+        if (!cancelled) setExpected({ count: next.count || 0, carrierLabel: next.carrier_label || "" });
       } catch {
-        // The chip is an extra. A reader whose parcel list cannot be read is
-        // told so on the parcel page, not by an error in the header.
+        // The chip is an extra. A reader whose parcels cannot be read is told so
+        // on the parcel page, not by an error in the header.
       }
     })();
     return () => {
@@ -41,6 +42,5 @@ export function useExpectedDeliveries(mailGeneration: number): ExpectedDeliverie
     };
   }, [today, mailGeneration]);
 
-  const due = shipmentsExpectedOn(shipments, today);
-  return { count: due.length, carrierLabel: due.length === 1 ? due[0].carrier_label : "" };
+  return expected;
 }

@@ -907,6 +907,10 @@ export const api = {
   // only one that puts "arrives today" on the right row.
   deliveries: (day: string) =>
     getJSON<{ shipments: Shipment[] }>(`/api/deliveries?${new URLSearchParams({ day })}`),
+  // The header chip asks this and not the list above: it is read on every page
+  // and again whenever a sync stores mail, so it must stay one bounded query.
+  expectedDeliveries: (day: string) =>
+    getJSON<{ count: number; carrier_label: string }>(`/api/deliveries/expected?${new URLSearchParams({ day })}`),
   // The reservation key embeds a raw IMAP mailbox name, which may contain any
   // separator a URL scheme could pick, so it travels in the body.
   cancelWorker: (csrf: string, key: string) =>

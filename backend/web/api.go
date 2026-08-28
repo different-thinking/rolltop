@@ -72,6 +72,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiBackendPlugin(w, r, strings.TrimPrefix(path, "plugins/"))
 	case path == "deliveries":
 		s.apiDeliveries(w, r)
+	case path == "deliveries/expected":
+		s.apiDeliveriesExpected(w, r)
 	case path == "contacts":
 		s.apiContacts(w, r)
 	case strings.HasPrefix(path, "contacts/"):

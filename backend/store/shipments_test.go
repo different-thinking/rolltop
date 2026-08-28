@@ -90,12 +90,15 @@ func TestReplaceMessageShipmentsMergesMessagesOntoOneParcel(t *testing.T) {
 		t.Errorf("messages are not newest first: %+v", parcel.Messages)
 	}
 
-	count, err := db.CountShipmentsExpectedOn(ctx, user.ID, "2026-09-03")
+	expected, err := db.ShipmentsExpectedOn(ctx, user.ID, "2026-09-03")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Errorf("count for the day = %d, want 1", count)
+	if expected.Count != 1 {
+		t.Errorf("count for the day = %d, want 1", expected.Count)
+	}
+	if expected.Carrier != "dhl" {
+		t.Errorf("carrier = %q, want the single parcel's own", expected.Carrier)
 	}
 }
 
@@ -134,12 +137,12 @@ func TestReplaceMessageShipmentsIgnoresOlderClaims(t *testing.T) {
 		t.Errorf("want both messages linked, got %d", len(shipments[0].Messages))
 	}
 	// A delivered parcel is not what "coming today" means.
-	count, err := db.CountShipmentsExpectedOn(ctx, user.ID, "2026-09-03")
+	expected, err := db.ShipmentsExpectedOn(ctx, user.ID, "2026-09-03")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Errorf("count = %d, want 0 for a parcel that has arrived", count)
+	if expected.Count != 0 {
+		t.Errorf("count = %d, want 0 for a parcel that has arrived", expected.Count)
 	}
 }
 

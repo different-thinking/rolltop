@@ -1,6 +1,7 @@
 package mailparse
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -232,5 +233,103 @@ func TestDeliveryTrackingURL(t *testing.T) {
 	}
 	if got := DeliveryCarrierLabel(""); got != "Paket" {
 		t.Errorf("label for an unclaimed number = %q", got)
+	}
+}
+
+// deliveryRawMessage is a carrier mail as one actually arrives: multipart, with
+// the tracking link only in the HTML part, and its query string entity-escaped
+// the way markup writes it.
+const deliveryRawMessage = "From: DHL Paket <noreply@dhl.de>\r\n" +
+	"To: reader@example.test\r\n" +
+	"Subject: Ihre Sendung kommt heute\r\n" +
+	"Date: Thu, 03 Sep 2026 07:14:00 +0200\r\n" +
+	"Auto-Submitted: auto-generated\r\n" +
+	"MIME-Version: 1.0\r\n" +
+	"Content-Type: multipart/alternative; boundary=\"sep\"\r\n" +
+	"\r\n" +
+	"--sep\r\n" +
+	"Content-Type: text/plain; charset=utf-8\r\n" +
+	"\r\n" +
+	"Guten Tag, Ihre Sendung wird heute zwischen 10:12 und 13:12 Uhr zugestellt.\r\n" +
+	"\r\n" +
+	"--sep\r\n" +
+	"Content-Type: text/html; charset=utf-8\r\n" +
+	"\r\n" +
+	"<html><body><p>Ihre Sendung wird <b>heute</b> zugestellt.</p>" +
+	"<a href=\"https://nolp.dhl.de/nextt-online-public/set_identcodes.do?idc=00340434212345678901&amp;lang=de\">" +
+	"Sendung verfolgen</a></body></html>\r\n" +
+	"--sep--\r\n"
+
+// The whole fetch path: a raw message in, a parcel out, with the number coming
+// from a link that only exists in markup the indexed text throws away.
+func TestParseExtractsDeliveriesFromMarkupLinks(t *testing.T) {
+	parsed, err := Parse([]byte(deliveryRawMessage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice := onlyNotice(t, parsed.Deliveries)
+	if notice.Carrier != "dhl" {
+		t.Errorf("carrier = %q, want dhl", notice.Carrier)
+	}
+	if notice.TrackingNumber != "00340434212345678901" {
+		t.Errorf("tracking number = %q -- the entity-escaped query may have swallowed the next parameter", notice.TrackingNumber)
+	}
+	// The message was written on 3 September in +02:00, and "heute" is its own
+	// day and not the day the test happens to run on.
+	if notice.ExpectedDate != "2026-09-03" {
+		t.Errorf("expected date = %q, want 2026-09-03", notice.ExpectedDate)
+	}
+	if notice.Status != DeliveryOutForDelivery {
+		t.Errorf("status = %q", notice.Status)
+	}
+	if notice.WindowStart != "10:12" || notice.WindowEnd != "13:12" {
+		t.Errorf("window = %q..%q", notice.WindowStart, notice.WindowEnd)
+	}
+	// Reading a parcel out of a message must not move it out of the category
+	// its headers put it in.
+	if parsed.Category != CategoryNotifications {
+		t.Errorf("category = %q, want the header answer to be untouched", parsed.Category)
+	}
+}
+
+// The backfill path has to reach the same answer from the stored message.
+func TestDeliveryNoticesReaderScanMatchesTheFetchPath(t *testing.T) {
+	scanned, complete, err := DeliveryNoticesReaderScan(strings.NewReader(deliveryRawMessage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Error("a message this size should scan whole")
+	}
+	parsed, err := Parse([]byte(deliveryRawMessage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scanned) != len(parsed.Deliveries) {
+		t.Fatalf("scan found %d parcels, the parse found %d", len(scanned), len(parsed.Deliveries))
+	}
+	for i := range scanned {
+		if scanned[i] != parsed.Deliveries[i] {
+			t.Errorf("parcel %d differs: scan %+v, parse %+v", i, scanned[i], parsed.Deliveries[i])
+		}
+	}
+}
+
+// Ordinary mail must come out of the same path with nothing at all, or every
+// list in the app grows a chip it should not have.
+func TestParseLeavesOrdinaryMailWithoutParcels(t *testing.T) {
+	raw := "From: Anna <anna@example.test>\r\n" +
+		"To: reader@example.test\r\n" +
+		"Subject: Rechnung 2026-0004711\r\n" +
+		"Date: Thu, 03 Sep 2026 09:00:00 +0200\r\n" +
+		"\r\n" +
+		"Hallo, anbei die Rechnung ueber 129,00 EUR. Die Lieferung der Ware erfolgt\r\n" +
+		"wie besprochen. Meine Nummer ist 0049 30 123456789.\r\n"
+	parsed, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Deliveries) != 0 {
+		t.Errorf("want no parcels, got %+v", parsed.Deliveries)
 	}
 }

@@ -67,6 +67,38 @@ func (s *Server) apiDeliveries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"shipments": apiShipmentsFromStore(shipments)})
 }
 
+// apiDeliveriesExpected is the header chip's own read. It is a separate route
+// from the list because it is asked on every page and again whenever a sync
+// stores mail, while the list is asked only by the page that draws it.
+func (s *Server) apiDeliveriesExpected(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAPIAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	day := r.URL.Query().Get("day")
+	if day == "" {
+		day = time.Now().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", day); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "A day has to be written YYYY-MM-DD.")
+		return
+	}
+	expected, err := s.store.ShipmentsExpectedOn(r.Context(), cu.User.ID, day)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	carrierLabel := ""
+	if expected.Count == 1 {
+		carrierLabel = mailparse.DeliveryCarrierLabel(expected.Carrier)
+	}
+	writeJSON(w, map[string]any{"count": expected.Count, "carrier_label": carrierLabel})
+}
+
 func apiShipmentsFromStore(shipments []store.Shipment) []apiShipment {
 	out := make([]apiShipment, 0, len(shipments))
 	for _, item := range shipments {

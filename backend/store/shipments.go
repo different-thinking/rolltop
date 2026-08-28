@@ -267,25 +267,63 @@ func (s *Store) attachShipmentMessages(ctx context.Context, userID int64, shipme
 	return rows.Err()
 }
 
-// CountShipmentsExpectedOn reports how many parcels are due on one day and have
-// not arrived yet. It is what the header badge is, so it is deliberately the
-// narrowest question: not "open parcels", which is a list, but "is something
-// coming today", which is a number a reader can act on.
-func (s *Store) CountShipmentsExpectedOn(ctx context.Context, userID int64, today string) (int, error) {
+// ExpectedShipments is the header's whole answer: how many parcels are due
+// today, and which carrier when there is exactly one.
+type ExpectedShipments struct {
+	Count int
+	// Carrier is the single due parcel's carrier key, empty when there is not
+	// exactly one. A reader waiting on one parcel is told which; a reader
+	// waiting on three is told there are three.
+	Carrier string
+}
+
+// maxCountedExpectedShipments bounds the header's query. It is a chip, not a
+// list: past this the answer is "several" however many there are, and the bound
+// is what keeps a query the whole app carries on every page from ever growing
+// with the mailbox.
+const maxCountedExpectedShipments = 50
+
+// ShipmentsExpectedOn answers "is a parcel coming today". It is deliberately
+// the narrowest question -- not "open parcels", which is a list -- because it is
+// read on every page load and again whenever a sync stores mail, and the parcel
+// list itself is the expensive read that only the parcel page should pay for.
+func (s *Store) ShipmentsExpectedOn(ctx context.Context, userID int64, today string) (ExpectedShipments, error) {
 	if _, err := parsePlainDate(today); err != nil {
-		return 0, err
+		return ExpectedShipments{}, err
 	}
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
-		return 0, err
+		return ExpectedShipments{}, err
 	}
-	var count int
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*)
+	rows, err := db.QueryContext(ctx, `SELECT s.carrier
 		FROM shipments s
 		WHERE s.user_id = ? AND s.expected_date = ? AND s.status <> 'delivered'
-			AND EXISTS (SELECT 1 FROM shipment_messages sm WHERE sm.user_id = s.user_id AND sm.shipment_id = s.id)`,
-		userID, today).Scan(&count)
-	return count, err
+			AND EXISTS (SELECT 1 FROM shipment_messages sm WHERE sm.user_id = s.user_id AND sm.shipment_id = s.id)
+		ORDER BY s.id
+		LIMIT ?`, userID, today, maxCountedExpectedShipments)
+	if err != nil {
+		return ExpectedShipments{}, err
+	}
+	defer rows.Close()
+	out := ExpectedShipments{}
+	first := ""
+	for rows.Next() {
+		var carrier string
+		if err := rows.Scan(&carrier); err != nil {
+			return ExpectedShipments{}, err
+		}
+		if out.Count == 0 {
+			first = carrier
+		}
+		out.Count++
+	}
+	if err := rows.Err(); err != nil {
+		return ExpectedShipments{}, err
+	}
+	if out.Count == 1 {
+		out.Carrier = first
+	}
+	return out, nil
 }
 
 // parsePlainDate is the one place a day arrives from outside. It is a request
