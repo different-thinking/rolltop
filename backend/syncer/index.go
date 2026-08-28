@@ -133,7 +133,14 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		HasAutocryptHeader: parsed.HasAutocryptHeader,
 		ImportPending:      true,
 		DeliveryScanned:    !parseFailed,
-		InvoiceScanned:     !parseFailed,
+		// Only a message the parser actually read for a bill counts as read,
+		// and it only reads the ones it filed as paperwork itself. The stored
+		// category can differ from that one: a per-sender correction is applied
+		// in SQL as the row is written, so a message the reader has filed under
+		// Invoices arrives here classified as something else. Stamping those as
+		// read would leave them stamped and never read, because the backfill
+		// selects on the stored category.
+		InvoiceScanned: !parseFailed && parsed.Category == mailparse.CategoryInvoices,
 	})
 	if err != nil {
 		_, cleanupErr := s.deleteUnreferencedBlob(ctx, userID, blobRec.ID, blobPath)
