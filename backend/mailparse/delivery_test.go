@@ -431,3 +431,73 @@ func TestExtractDeliveryNoticesLooksPastAnImplausibleMatch(t *testing.T) {
 		t.Errorf("expected date = %q, want 2026-09-07", notice.ExpectedDate)
 	}
 }
+
+// realDHLArrivingToday is rebuilt from a DHL "kommt heute" mail as it actually
+// arrives: filed under Newsletters because it carries an unsubscribe route, the
+// delivery window written with a stray double space, and the parcel number
+// printed in the body under "Sendungsstatus einsehen" -- which is a heading and
+// not a label. The href varies: sometimes it is the tracking page, and often it
+// is the click-tracking redirect this fixture's second form uses.
+func realDHLArrivingToday(link string) string {
+	return "From: DHL Paket <noreply@dhl.de>\r\n" +
+		"To: reader@example.test\r\n" +
+		"Subject: Ihre CrowdFarming Sendung kommt heute - Jetzt Live verfolgen\r\n" +
+		"Date: Fri, 28 Aug 2026 09:12:00 +0200\r\n" +
+		"List-Unsubscribe: <mailto:unsub@dhl.de>\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n" +
+		"\r\n" +
+		`<html><body><p>Ihre Sendung wird zugestellt</p><p>Hallo,</p>` +
+		`<p>Ihre <b>CrowdFarming</b> Sendung wird Ihnen <b>heute zwischen 12:20  - 13:50 Uhr</b> ` +
+		`durch Ihre Paketzustellkraft zugestellt.</p>` +
+		`<a href="` + link + `">Jetzt live verfolgen</a>` +
+		`<p>Sendungsstatus einsehen</p><p>00340434652966959030</p>` +
+		`<p>Sie möchten keine oder nur noch bestimmte Informationen zu Ihrer Sendung erhalten?</p>` +
+		`</body></html>` + "\r\n"
+}
+
+func TestParseReadsARealArrivingTodayMail(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		link string
+	}{
+		{"tracking link", "https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434652966959030"},
+		// The carrier's own number, behind a redirect that says nothing. The
+		// body still prints it, and the sender is what makes a bare number safe
+		// to read.
+		{"click-tracking redirect", "https://links.dhl-news.de/r/abc123XYZ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := Parse([]byte(realDHLArrivingToday(tc.link)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			notice := onlyNotice(t, parsed.Deliveries)
+			if notice.Carrier != "dhl" || notice.TrackingNumber != "00340434652966959030" {
+				t.Errorf("got %+v", notice)
+			}
+			if notice.ExpectedDate != "2026-08-28" {
+				t.Errorf("expected date = %q, want the day the mail was written", notice.ExpectedDate)
+			}
+			if notice.WindowStart != "12:20" || notice.WindowEnd != "13:50" {
+				t.Errorf("window = %q..%q", notice.WindowStart, notice.WindowEnd)
+			}
+			if notice.Status != DeliveryOutForDelivery {
+				t.Errorf("status = %q", notice.Status)
+			}
+			// "wird zugestellt" is an announcement; only the report is a delivery.
+			if notice.Status == DeliveryDelivered {
+				t.Error("an announcement was read as an arrival")
+			}
+		})
+	}
+}
+
+// The bare-number rule is gated on the sender. The same body from a shop, with
+// no label and no tracking link, must still yield nothing.
+func TestExtractDeliveryNoticesKeepsBareNumbersToTheCarriersOwnMail(t *testing.T) {
+	content := CategoryContent{Text: "Vielen Dank. Ihre Kundennummer lautet 00340434652966959030."}
+	if notices := ExtractDeliveryNotices(content, "shop@beispielshop.de", sentAt(t)); len(notices) > 0 {
+		t.Errorf("want no parcels from a shop's bare number, got %+v", notices)
+	}
+}

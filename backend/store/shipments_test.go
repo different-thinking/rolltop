@@ -370,3 +370,115 @@ func TestListShipmentsAgesUndatedParcelsByTheMessageDate(t *testing.T) {
 		t.Errorf("a parcel announced two years ago is listed as still coming: %+v", shipments)
 	}
 }
+
+// The case the reader is left with: a parcel from weeks ago that the carrier
+// never reported delivered. Saying so must take it off the open list, and must
+// survive the mail continuing to say what it always said.
+func TestSetShipmentManualStatusOutranksTheMail(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-manual@example.test")
+	date := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Ihr Paket ist unterwegs", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "dhl", TrackingNumber: "00340434212345678901", ExpectedDate: "2026-08-21", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-08-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 1 || shipments[0].EffectiveStatus() != mailparse.DeliveryAnnounced {
+		t.Fatalf("want one open parcel, got %+v", shipments)
+	}
+
+	updated, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, ShipmentManualDelivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.EffectiveStatus() != mailparse.DeliveryDelivered {
+		t.Errorf("effective status = %q after the reader said it arrived", updated.EffectiveStatus())
+	}
+	if updated.Status != mailparse.DeliveryAnnounced {
+		t.Errorf("the mail's own answer was overwritten: %q", updated.Status)
+	}
+	expected, err := db.ShipmentsExpectedOn(ctx, user.ID, "2026-08-21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected.Count != 0 {
+		t.Errorf("a parcel the reader marked arrived is still expected: %d", expected.Count)
+	}
+
+	// Taking the correction back returns the carrier's answer, not a stale one.
+	reverted, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, ShipmentManualNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverted.EffectiveStatus() != mailparse.DeliveryAnnounced {
+		t.Errorf("effective status = %q after taking the correction back", reverted.EffectiveStatus())
+	}
+}
+
+// A number that was never a parcel goes away entirely -- from the list, from
+// the header count, and from the message rows that named it.
+func TestSetShipmentManualStatusDismissedHidesItEverywhere(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-dismiss@example.test")
+	date := time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Rechnung", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "", TrackingNumber: "12345678901", ExpectedDate: "2026-09-03", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-09-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 1 {
+		t.Fatalf("want one parcel to dismiss, got %d", len(shipments))
+	}
+	if _, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, ShipmentManualDismissed); err != nil {
+		t.Fatal(err)
+	}
+	if shipments, err = db.ListShipments(ctx, user.ID, "2026-09-03"); err != nil {
+		t.Fatal(err)
+	} else if len(shipments) != 0 {
+		t.Errorf("a dismissed parcel is still listed: %+v", shipments)
+	}
+	expected, err := db.ShipmentsExpectedOn(ctx, user.ID, "2026-09-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected.Count != 0 {
+		t.Errorf("a dismissed parcel is still expected: %d", expected.Count)
+	}
+	found, err := db.ShipmentsForMessages(ctx, user.ID, []int64{message.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Errorf("a dismissed parcel still marks its message: %+v", found)
+	}
+}
+
+func TestSetShipmentManualStatusRefusesAnUnknownValueAndAStrangersParcel(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-manual-guard@example.test")
+	other := createPendingMoveTestUser(t, ctx, db, "parcel-manual-guard-other@example.test")
+	date := time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Versand", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "gls", TrackingNumber: "12345678901", ExpectedDate: "2026-09-03", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shipments, err := db.ListShipments(ctx, user.ID, "2026-09-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetShipmentManualStatus(ctx, user.ID, shipments[0].ID, "erledigt"); err == nil {
+		t.Error("an unknown manual status was accepted")
+	}
+	if _, err := db.SetShipmentManualStatus(ctx, other.ID, shipments[0].ID, ShipmentManualDelivered); !IsNotFound(err) {
+		t.Errorf("another reader could correct this parcel: %v", err)
+	}
+}

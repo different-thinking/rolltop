@@ -376,3 +376,36 @@
     display: none;
   }
 }
+
+.deliveries-arrived,
+.deliveries-track {
+  white-space: nowrap;
+}
+
+.deliveries-correction {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.deliveries-correction-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.deliveries-dismiss {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+
+  &:hover {
+    color: var(--danger);
+  }
+}

@@ -409,6 +409,28 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_messages_delivery_version ON messages (user_id, delivery_version, id)`,
 		},
 	},
+	{
+		// What the reader says about a parcel, which outranks what the mail said.
+		//
+		// The classifier can only ever report what a message stated, and two
+		// states it cannot get out of that: a parcel that arrived without the
+		// carrier ever writing to say so, and a number that was never a parcel.
+		// Both leave a row sitting on the list with nothing that will ever move
+		// it, and the reader is the only one who knows. So they get a column,
+		// and it wins: the same shape as the per-sender category corrections,
+		// for the same reason.
+		//
+		// It is deliberately not a rewrite of `status`. Keeping the reader's
+		// answer beside the extracted one means a later message still updates
+		// what the carrier says without stepping on the correction, and the
+		// correction can be taken back.
+		Version: "0012-shipment-manual-status",
+		Statements: []string{
+			`ALTER TABLE shipments ADD COLUMN manual_status text COLLATE "C" NOT NULL DEFAULT ''
+				CHECK(manual_status IN ('', 'delivered', 'dismissed'))`,
+			`ALTER TABLE shipments ADD COLUMN manual_status_at bigint NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

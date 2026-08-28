@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
-import type { DatePrefs } from "../../appTypes";
+import type { AddToast, DatePrefs } from "../../appTypes";
 import type { Shipment } from "../../types";
 import { Icon } from "../../components/Icon";
 import { messageURL } from "../../lib/routes";
@@ -26,7 +26,10 @@ export function localDay(now = new Date()): string {
 }
 
 /** shipmentsExpectedOn is the parcels due on one day that have not arrived. It
- * is what the header chip counts, so it is defined once and read from both. */
+ * is what the header chip counts, so it is defined once and read from both.
+ *
+ * status already carries the reader's own answer, so a parcel they marked as
+ * arrived drops out here without this having to know about the correction. */
 export function shipmentsExpectedOn(shipments: readonly Shipment[], day: string): Shipment[] {
   return shipments.filter((item) => item.expected_date === day && item.status !== "delivered");
 }
@@ -83,18 +86,23 @@ const statusLabels: Record<Shipment["status"], string> = {
 };
 
 export function DeliveriesView({
+  csrf,
   datePrefs,
   mailGeneration,
-  navigate
+  navigate,
+  addToast
 }: {
+  csrf: string;
   datePrefs: DatePrefs;
   /** Bumps when a sync stores messages, which is when a parcel can change. */
   mailGeneration: number;
   navigate: (url: string) => void;
+  addToast: AddToast;
 }) {
   const [shipments, setShipments] = useState<Shipment[] | null>(null);
   const [error, setError] = useState("");
   const [openRows, setOpenRows] = useState<Set<number>>(() => new Set());
+  const [busyRows, setBusyRows] = useState<Set<number>>(() => new Set());
   // The day is read once per load rather than per render: a tab left open over
   // midnight should not silently re-group under the reader while they scroll.
   const [today] = useState(() => localDay());
@@ -115,6 +123,32 @@ export function DeliveriesView({
 
   const groups = useMemo(() => groupShipments(shipments || [], today), [shipments, today]);
   const openCount = (shipments || []).filter((item) => item.status !== "delivered").length;
+
+  // The corrected row is replaced in place rather than the list refetched: the
+  // answer the server returns is the whole change, and a refetch would regroup
+  // the list under the reader's hand while they work down a backlog of old
+  // parcels -- which is exactly when this is used.
+  async function correct(shipment: Shipment, manualStatus: Shipment["manual_status"]) {
+    setBusyRows((current) => new Set(current).add(shipment.id));
+    try {
+      const result = await api.setShipmentManualStatus(csrf, shipment.id, manualStatus);
+      setShipments((current) => {
+        const rows = current || [];
+        if (manualStatus === "dismissed") return rows.filter((item) => item.id !== shipment.id);
+        return rows.map((item) => (item.id === shipment.id ? { ...result.shipment, messages: item.messages } : item));
+      });
+      if (manualStatus === "delivered") addToast("Als zugestellt vermerkt.");
+      if (manualStatus === "dismissed") addToast("Nicht mehr als Paket geführt.");
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setBusyRows((current) => {
+        const next = new Set(current);
+        next.delete(shipment.id);
+        return next;
+      });
+    }
+  }
 
   function toggleRow(id: number) {
     setOpenRows((current) => {
@@ -164,7 +198,9 @@ export function DeliveriesView({
                 today={today}
                 datePrefs={datePrefs}
                 expanded={openRows.has(item.id)}
+                busy={busyRows.has(item.id)}
                 onToggle={() => toggleRow(item.id)}
+                onCorrect={(manualStatus) => void correct(item, manualStatus)}
                 navigate={navigate}
               />
             ))}
@@ -180,14 +216,18 @@ function DeliveryRow({
   today,
   datePrefs,
   expanded,
+  busy,
   onToggle,
+  onCorrect,
   navigate
 }: {
   shipment: Shipment;
   today: string;
   datePrefs: DatePrefs;
   expanded: boolean;
+  busy: boolean;
   onToggle: () => void;
+  onCorrect: (manualStatus: Shipment["manual_status"]) => void;
   navigate: (url: string) => void;
 }) {
   // The newest mail is the one that said what the row now claims, so it is the
@@ -223,6 +263,21 @@ function DeliveryRow({
           </div>
         </div>
         <div className="deliveries-row-actions">
+          {/* The one action a reader needs on an old row: the carrier never
+              reported the delivery, and only they know it happened. It is not
+              offered on a parcel that already counts as arrived. */}
+          {shipment.status !== "delivered" ? (
+            <button
+              className="secondary deliveries-arrived"
+              type="button"
+              disabled={busy}
+              title="Dieses Paket ist angekommen"
+              onClick={() => onCorrect("delivered")}
+            >
+              <Icon name="check" />
+              Angekommen
+            </button>
+          ) : null}
           {shipment.tracking_url ? (
             <a
               className="secondary deliveries-track"
@@ -252,6 +307,32 @@ function DeliveryRow({
             <dt>Sendungsnummer</dt>
             <dd><code>{shipment.tracking_number}</code></dd>
           </dl>
+          <div className="deliveries-correction">
+            {shipment.manual_status === "delivered" ? (
+              <>
+                <span className="deliveries-correction-note">
+                  <Icon name="check" />
+                  Von dir als zugestellt vermerkt.
+                </span>
+                <button className="ghost" type="button" disabled={busy} onClick={() => onCorrect("")}>
+                  Rückgängig
+                </button>
+              </>
+            ) : (
+              // A number read out of mail is sometimes not a parcel at all.
+              // Saying so is what stops the list asking again.
+              <button
+                className="ghost deliveries-dismiss"
+                type="button"
+                disabled={busy}
+                title="Diese Nummer gehört zu keinem Paket - nicht mehr anzeigen"
+                onClick={() => onCorrect("dismissed")}
+              >
+                <Icon name="close" />
+                Kein Paket
+              </button>
+            )}
+          </div>
           {others.length > 0 ? (
             <div className="deliveries-history">
               <span className="deliveries-history-title">Weitere Mails zu dieser Sendung</span>

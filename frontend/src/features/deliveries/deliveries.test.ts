@@ -17,6 +17,7 @@ function parcel(overrides: Partial<Shipment>): Shipment {
     window_start: "",
     window_end: "",
     status: "announced",
+    manual_status: "",
     messages: [{ id: 10, mailbox_id: 1, subject: "Versand", from: "noreply@dhl.de", date: "2026-09-01T10:00:00Z" }],
     ...overrides
   };
@@ -119,5 +120,25 @@ describe("shipmentChipText", () => {
 
   it("falls back to the status when no day was announced", () => {
     expect(shipmentChipText({ ...base, expected_date: "" }, today)).toBe("Paket angekündigt");
+  });
+});
+
+// A parcel the reader marked as arrived is done: out of the open groups, out of
+// today's count, and into the history where they can find it again.
+describe("a reader's own answer", () => {
+  it("moves a marked parcel into the delivered group", () => {
+    const marked = parcel({ id: 1, expected_date: "2026-08-21", status: "delivered", manual_status: "delivered" });
+    const groups = groupShipments([marked], today);
+    expect(groups.map((group) => group.key)).toEqual(["delivered"]);
+  });
+
+  it("takes it out of what is expected today", () => {
+    const marked = parcel({ id: 1, expected_date: today, status: "delivered", manual_status: "delivered" });
+    expect(shipmentsExpectedOn([marked], today)).toEqual([]);
+  });
+
+  it("leaves an uncorrected parcel where the mail put it", () => {
+    const open = parcel({ id: 1, expected_date: "2026-08-21", status: "announced" });
+    expect(groupShipments([open], today).map((group) => group.key)).toEqual(["overdue"]);
   });
 });

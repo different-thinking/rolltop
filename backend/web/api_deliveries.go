@@ -15,16 +15,20 @@ import (
 // tracking URL are resolved here rather than in the browser so the one list of
 // carriers stays in Go, where extraction reads it too.
 type apiShipment struct {
-	ID             int64                `json:"id"`
-	Carrier        string               `json:"carrier"`
-	CarrierLabel   string               `json:"carrier_label"`
-	TrackingNumber string               `json:"tracking_number"`
-	TrackingURL    string               `json:"tracking_url"`
-	ExpectedDate   string               `json:"expected_date"`
-	WindowStart    string               `json:"window_start"`
-	WindowEnd      string               `json:"window_end"`
-	Status         string               `json:"status"`
-	Messages       []apiShipmentMessage `json:"messages"`
+	ID             int64  `json:"id"`
+	Carrier        string `json:"carrier"`
+	CarrierLabel   string `json:"carrier_label"`
+	TrackingNumber string `json:"tracking_number"`
+	TrackingURL    string `json:"tracking_url"`
+	ExpectedDate   string `json:"expected_date"`
+	WindowStart    string `json:"window_start"`
+	WindowEnd      string `json:"window_end"`
+	// Status is what the parcel counts as, the reader's own answer included.
+	// ManualStatus is that answer on its own, so the browser can say who
+	// decided and offer to take it back.
+	Status       string               `json:"status"`
+	ManualStatus string               `json:"manual_status"`
+	Messages     []apiShipmentMessage `json:"messages"`
 }
 
 // apiShipmentMessage is one mail that named a parcel, reduced to what opening it
@@ -99,6 +103,48 @@ func (s *Server) apiDeliveriesExpected(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"count": expected.Count, "carrier_label": carrierLabel})
 }
 
+// apiDeliveryByID handles the one thing a reader can do to a parcel: say what
+// they know about it that the mail never said.
+func (s *Server) apiDeliveryByID(w http.ResponseWriter, r *http.Request, rest string) {
+	cu, ok := s.requireAPIAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.verifyCSRF(w, r) {
+		return
+	}
+	shipmentID, ok := parsePositiveID(w, rest)
+	if !ok {
+		return
+	}
+	var in struct {
+		ManualStatus string `json:"manual_status"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if !store.ValidShipmentManualStatus(in.ManualStatus) {
+		writeAPIError(w, http.StatusBadRequest, "A parcel is either delivered, dismissed, or left to the mail to say.")
+		return
+	}
+	updated, err := s.store.SetShipmentManualStatus(r.Context(), cu.User.ID, shipmentID, in.ManualStatus)
+	if err != nil {
+		if store.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, r, err)
+		return
+	}
+	// The row is returned without its messages: the browser already has them
+	// and only the status it just set has changed.
+	writeJSON(w, map[string]any{"shipment": apiShipmentsFromStore([]store.Shipment{updated})[0]})
+}
+
 func apiShipmentsFromStore(shipments []store.Shipment) []apiShipment {
 	out := make([]apiShipment, 0, len(shipments))
 	for _, item := range shipments {
@@ -121,7 +167,8 @@ func apiShipmentsFromStore(shipments []store.Shipment) []apiShipment {
 			ExpectedDate:   item.ExpectedDate,
 			WindowStart:    item.WindowStart,
 			WindowEnd:      item.WindowEnd,
-			Status:         item.Status,
+			Status:         item.EffectiveStatus(),
+			ManualStatus:   item.ManualStatus,
 			Messages:       messages,
 		})
 	}

@@ -1037,7 +1037,10 @@ export type Shipment = {
   expected_date: string;
   window_start: string;
   window_end: string;
+  /** status is what the parcel counts as, the reader's own answer included.
+   * manual_status is that answer alone: "" when the mail is the only source. */
   status: "announced" | "out_for_delivery" | "delivered";
+  manual_status: "" | "delivered" | "dismissed";
   messages: ShipmentMessage[];
 };
 

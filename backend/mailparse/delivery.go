@@ -89,6 +89,10 @@ type DeliveryCarrier struct {
 	// names one has said which carrier it means. Nil where the carrier's numbers
 	// are plain digits that anything else could be.
 	numberShape *regexp.Regexp
+	// bareShape matches the digit lengths this carrier issues. Unlike
+	// numberShape it says nothing on its own -- plenty of numbers are twenty
+	// digits long -- so it is only read out of mail the carrier itself sent.
+	bareShape *regexp.Regexp
 	// trackURL builds the page a reader can follow the parcel on. Empty for a
 	// carrier whose tracking page needs more than the number.
 	trackURL func(number string) string
@@ -103,8 +107,9 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"dhl.de", "dhl.com", "deutschepost.de", "dpdhl.com"},
 		linkHosts:     []string{"nolp.dhl.de", "dhl.de", "dhl.com"},
 		linkParams:    []string{"piececode", "idc", "tracking-id", "trackingnumber"},
-		// 12, 14, 16 or 20 digits, all of which other things are too, so DHL is
-		// recognised by its link or its sender and not by the number alone.
+		// 12, 16 or 20 digits, all of which other things are too, so a bare one
+		// counts only in DHL's own mail.
+		bareShape: regexp.MustCompile(`\b(?:\d{20}|\d{16}|\d{12})\b`),
 		trackURL: func(number string) string {
 			return "https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=" + number
 		},
@@ -115,6 +120,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"dpd.de", "dpd.com", "dpdgroup.com"},
 		linkHosts:     []string{"tracking.dpd.de", "my.dpd.de", "dpd.com", "dpd.de"},
 		linkParams:    []string{"parcelno", "pknr", "query"},
+		bareShape:     regexp.MustCompile(`\b\d{14}\b`),
 		trackURL: func(number string) string {
 			return "https://tracking.dpd.de/status/de_DE/parcel/" + number
 		},
@@ -125,6 +131,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"gls-group.eu", "gls-group.com", "gls-pakete.de", "gls-germany.de"},
 		linkHosts:     []string{"gls-group.eu", "gls-group.com", "gls-pakete.de"},
 		linkParams:    []string{"match", "txtaction", "trackingnumber"},
+		bareShape:     regexp.MustCompile(`\b\d{11,12}\b`),
 		trackURL: func(number string) string {
 			return "https://gls-group.eu/DE/de/paketverfolgung?match=" + number
 		},
@@ -147,6 +154,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"fedex.com"},
 		linkHosts:     []string{"fedex.com"},
 		linkParams:    []string{"trknbr", "tracknumbers"},
+		bareShape:     regexp.MustCompile(`\b(?:\d{20}|\d{15}|\d{12})\b`),
 		trackURL: func(number string) string {
 			return "https://www.fedex.com/fedextrack/?trknbr=" + number
 		},
@@ -157,6 +165,7 @@ var deliveryCarriers = []DeliveryCarrier{
 		senderDomains: []string{"myhermes.de", "hermesworld.com", "hermes-europe.co.uk", "evri.com"},
 		linkHosts:     []string{"myhermes.de", "hermesworld.com", "tracking.hermesworld.com"},
 		linkParams:    []string{"trackid", "trackingid"},
+		bareShape:     regexp.MustCompile(`\b\d{14}\b`),
 		trackURL: func(number string) string {
 			return "https://www.myhermes.de/empfangen/sendungsverfolgung/sendungsinformation/#" + number
 		},
@@ -306,12 +315,32 @@ func ExtractDeliveryNotices(content CategoryContent, from string, sent time.Time
 			add(carrier.Key, match)
 		}
 	}
+	// A bare number in the shape the sender's own carrier issues. This is the
+	// one place an unlabelled number is taken, and the sender is what makes it
+	// safe: DHL writing twenty digits is writing a parcel number.
+	//
+	// It exists because the carriers put their number behind a click-tracking
+	// redirect and print it in the body under a heading -- "Sendungsstatus
+	// einsehen" -- that is not a label. Without this rule their own "arrives
+	// today" mail, which is the one the reader most wants on the list, is the
+	// one message that yields nothing.
+	senderCarrier := carrierForSender(from)
+	if senderCarrier != "" {
+		for _, carrier := range deliveryCarriers {
+			if carrier.Key != senderCarrier || carrier.bareShape == nil {
+				continue
+			}
+			for _, match := range carrier.bareShape.FindAllString(text, maxDeliveryNoticesPerMessage) {
+				add(carrier.Key, match)
+			}
+		}
+	}
 	// Then labelled numbers. Whose they are is not stated beside the number, so
 	// the message as a whole answers it: the carrier its links point at, the
 	// carrier that sent it, or a carrier it names in words.
 	labelled := labelledTrackingNumbers(text)
 	if len(labelled) > 0 {
-		labelCarrier := firstNonEmpty(linkCarrier, carrierForSender(from), carrierNamedIn(text))
+		labelCarrier := firstNonEmpty(linkCarrier, senderCarrier, carrierNamedIn(text))
 		for _, number := range labelled {
 			add(labelCarrier, number)
 		}
@@ -631,7 +660,7 @@ func containsString(values []string, needle string) bool {
 // carrier that prints its number in groups is missed here; it is still found
 // through its own tracking link, which is the same message's other half.
 var labelledTrackingRE = regexp.MustCompile(
-	`(?i:\b(?:sendungs(?:verfolgungs)?|paket|tracking|shipment|parcel|versand|track)[\s-]*(?:nummer|nr\.?|no\.?|number|id|code)\b)[^0-9A-Z]{0,15}([0-9A-Z][0-9A-Z-]{6,34})`)
+	`(?i:\b(?:sendungs(?:verfolgungs)?|paket|tracking|shipment|parcel|versand|track)[\s-]*(?:nummer|nr\.?|no\.?|number|id|code|status)\b)[^0-9A-Z]{0,15}([0-9A-Z][0-9A-Z-]{6,34})`)
 
 // labelledTrackingNumbers returns every number the text says is a tracking
 // number, in the order they appear.
