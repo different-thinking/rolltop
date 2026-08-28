@@ -10,6 +10,7 @@ import type {
   CalendarEventInput,
   CalendarSummary,
   Shipment,
+  Invoice,
   Contact,
   ContactAutocomplete,
   ConversationListPage,
@@ -915,6 +916,19 @@ export const api = {
     postJSON<{ shipment: Shipment }>(`/api/deliveries/${id}`, csrf, { manual_status: manualStatus }),
   expectedDeliveries: (day: string) =>
     getJSON<{ count: number; carrier_label: string }>(`/api/deliveries/expected?${new URLSearchParams({ day })}`),
+  // The day travels for the same reason it does above. An invoice list differs
+  // from a parcel list in what it does with the day, not in who knows it: a
+  // parcel stops being today's news tomorrow, an unpaid bill becomes overdue.
+  invoices: (day: string) =>
+    getJSON<{ invoices: Invoice[] }>(`/api/invoices?${new URLSearchParams({ day })}`),
+  dueInvoices: (day: string) =>
+    getJSON<{ count: number; chased: number; issuer: string }>(`/api/invoices/due?${new URLSearchParams({ day })}`),
+  // What the reader knows that the mail never said: a bill they have paid, a
+  // row that was never a bill, and the deadline that was only in a scan.
+  setInvoiceManualStatus: (csrf: string, id: number, manualStatus: "" | "paid" | "dismissed") =>
+    postJSON<{ invoice: Invoice }>(`/api/invoices/${id}`, csrf, { manual_status: manualStatus }),
+  setInvoiceDueDate: (csrf: string, id: number, day: string) =>
+    postJSON<{ invoice: Invoice }>(`/api/invoices/${id}`, csrf, { manual_due_date: day }),
   // The reservation key embeds a raw IMAP mailbox name, which may contain any
   // separator a URL scheme could pick, so it travels in the body.
   cancelWorker: (csrf: string, key: string) =>

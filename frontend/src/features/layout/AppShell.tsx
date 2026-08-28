@@ -18,6 +18,7 @@ import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSi
 import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
 import { useExpectedDeliveries, type ExpectedDeliveries } from "../deliveries/useExpectedDeliveries";
+import { useDueInvoices, type DueInvoices } from "../invoices/useDueInvoices";
 
 /**
  * AppShell renders everything that survives route changes after login: topbar,
@@ -747,6 +748,7 @@ function Topbar({
   // permanently visible icon that is usually empty is chrome; a chip that is
   // only there when something is coming is the notice it is meant to be.
   const expectedDeliveries = useExpectedDeliveries(mailGeneration);
+  const dueInvoices = useDueInvoices(mailGeneration);
   const autocomplete = useSearchAutocomplete({
     query,
     focused,
@@ -858,6 +860,17 @@ function Topbar({
             <span className="delivery-chip-label">{deliveryChipLabel(expectedDeliveries)}</span>
           </button>
         ) : null}
+        {dueInvoices.count > 0 ? (
+          <button
+            className={dueInvoices.chased > 0 ? "invoice-chip-button chased" : "invoice-chip-button"}
+            type="button"
+            title={invoiceChipTitle(dueInvoices)}
+            onClick={() => navigate("/invoices")}
+          >
+            <Icon name="receipt" weight="fill" />
+            <span className="invoice-chip-button-label">{invoiceChipLabel(dueInvoices)}</span>
+          </button>
+        ) : null}
         {securityUnlockAvailable ? (
           <button
             className={securityUnlocked ? "ghost security-lock-toggle active" : "ghost security-lock-toggle"}
@@ -942,6 +955,27 @@ function deliveryChipTitle(expected: ExpectedDeliveries): string {
     ? `Ein Paket${expected.carrierLabel ? ` von ${expected.carrierLabel}` : ""} wird heute erwartet`
     : `${expected.count.toLocaleString()} Pakete werden heute erwartet`;
   return `${what} - alle Sendungen ansehen`;
+}
+
+// invoiceChipLabel says the one thing that changes a reader's afternoon first.
+// Being chased outranks being due, because a dunning letter is a deadline that
+// has already passed and somebody has noticed.
+function invoiceChipLabel(due: DueInvoices): string {
+  if (due.chased > 0) return due.chased === 1 ? "1 Mahnung" : `${due.chased.toLocaleString()} Mahnungen`;
+  if (due.count === 1) return `Fällig: ${due.issuer || "1 Rechnung"}`;
+  return `${due.count.toLocaleString()} Rechnungen fällig`;
+}
+
+function invoiceChipTitle(due: DueInvoices): string {
+  // "Fällig" here means due today or already overdue: unlike a parcel, a bill
+  // whose day has passed has not stopped being today's business.
+  const what = due.count === 1
+    ? `Eine Rechnung${due.issuer ? ` von ${due.issuer}` : ""} ist fällig`
+    : `${due.count.toLocaleString()} Rechnungen sind fällig`;
+  const chased = due.chased > 0
+    ? `, davon ${due.chased.toLocaleString()} angemahnt`
+    : "";
+  return `${what}${chased} - alle Rechnungen ansehen`;
 }
 
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,
@@ -1331,6 +1365,17 @@ function Sidebar({
           <span className="folder-name">
             <Icon name="package" weight={currentPath === "/deliveries" ? "bold" : undefined} />
             Pakete
+          </span>
+        </a>
+        <div className="side-section">Rechnungen</div>
+        <a
+          href="/invoices"
+          className={`folder ${currentPath === "/invoices" ? "active" : ""}`}
+          onClick={(event) => open(event, "/invoices")}
+        >
+          <span className="folder-name">
+            <Icon name="receipt" weight={currentPath === "/invoices" ? "bold" : undefined} />
+            Rechnungen
           </span>
         </a>
         <div className="side-section">Address Book</div>

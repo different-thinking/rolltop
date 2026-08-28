@@ -33,6 +33,7 @@ import type { RuntimeMessageDetailsPlugin, RuntimePlugin } from "../../plugins/r
 import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type ThreadSecurityGossipKey, type ThreadSecurityOpenResult, type ThreadSecuritySignatureStatus } from "../../plugins/threadSecurity";
 import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip, ShipmentDetails } from "../deliveries/ShipmentChip";
+import { InvoiceChip, InvoiceDetails } from "../invoices/InvoiceChip";
 import { SnoozeControl } from "./SnoozeControl";
 
 type MessageLoadStatus = {
@@ -2189,6 +2190,7 @@ export function ThreadView({
                       <MessageSenderSecurityCaution indicators={item.security_indicators} />
                       <MessageCategoryPill category={item.message.category} categories={mailCategories} />
                       {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
+                      {item.message.invoice ? <InvoiceChip invoice={item.message.invoice} /> : null}
                       {annotationNodes}
                       <OneClickUnsubscribeInlineAction
                         item={item}
@@ -2345,6 +2347,7 @@ export function ThreadView({
                       boilerplate, and the number is what the reader opened it
                       for. */}
                   {item.message.shipment ? <ShipmentDetails shipment={item.message.shipment} navigate={navigate} /> : null}
+                  {item.message.invoice ? <InvoiceDetails invoice={item.message.invoice} navigate={navigate} /> : null}
                   {item.body_preview_only ? (
                     <div className="body-notice">
                       <Icon name="report" />

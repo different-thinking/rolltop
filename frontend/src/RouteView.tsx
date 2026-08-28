@@ -8,6 +8,7 @@ import { ThreadView } from "./features/mail/ThreadView";
 import { ComposePage } from "./features/compose/ComposeViews";
 import { ContactsView } from "./features/contacts/ContactsView";
 import { DeliveriesView } from "./features/deliveries/DeliveriesView";
+import { InvoicesView } from "./features/invoices/InvoicesView";
 import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { ActivityView } from "./features/activity/ActivityView";
@@ -119,6 +120,9 @@ export function RouteView({
     }
     if (location.path === "/deliveries") {
       return <DeliveriesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
+    }
+    if (location.path === "/invoices") {
+      return <InvoicesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
     }
     if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
       return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} mailCategories={mailCategories} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} replaceRoute={replaceRoute} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;
