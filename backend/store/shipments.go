@@ -358,3 +358,81 @@ func (s *Store) MarkMessagesDeliveryScanned(ctx context.Context, userID int64, i
 		WHERE user_id = ? AND id IN (`+strings.Join(placeholders, ", ")+`)`, args...)
 	return err
 }
+
+// MessageShipment is the parcel one message is about, as a message list shows
+// it. It is a summary rather than the shipment itself: a row has space for one
+// day and one carrier, and Count is what says the message named more.
+type MessageShipment struct {
+	ShipmentID     int64
+	Carrier        string
+	TrackingNumber string
+	ExpectedDate   string
+	Status         string
+	// Count is how many parcels this message named. A dispatch mail for a large
+	// order names one per parcel, and a row that showed only the first would be
+	// quietly wrong about what the message said.
+	Count int
+}
+
+// ShipmentsForMessages answers, for a batch of messages, which parcel each one
+// is about. It is one indexed query for a whole list rather than one per row.
+//
+// Where a message names several, the one shown is the one that matters first:
+// still coming before already delivered, and the nearest day before a later
+// one. That is the same order the list itself is read in.
+func (s *Store) ShipmentsForMessages(ctx context.Context, userID int64, messageIDs []int64) (map[int64]MessageShipment, error) {
+	out := map[int64]MessageShipment{}
+	if userID <= 0 || len(messageIDs) == 0 {
+		return out, nil
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]any, 0, len(messageIDs)+1)
+	args = append(args, userID)
+	placeholders := make([]string, 0, len(messageIDs))
+	seen := make(map[int64]bool, len(messageIDs))
+	for _, id := range messageIDs {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		args = append(args, id)
+		placeholders = append(placeholders, "?")
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	// Undated parcels sort last within their status: a day nobody stated cannot
+	// be nearer than one that was.
+	rows, err := db.QueryContext(ctx, `SELECT sm.message_id, s.id, s.carrier, s.tracking_number, s.expected_date, s.status
+		FROM shipment_messages sm
+		JOIN shipments s ON s.id = sm.shipment_id AND s.user_id = sm.user_id
+		WHERE sm.user_id = ? AND sm.message_id IN (`+strings.Join(placeholders, ", ")+`)
+		ORDER BY sm.message_id,
+			CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END,
+			(s.expected_date = '') ASC, s.expected_date ASC, s.id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID int64
+		var item MessageShipment
+		if err := rows.Scan(&messageID, &item.ShipmentID, &item.Carrier, &item.TrackingNumber,
+			&item.ExpectedDate, &item.Status); err != nil {
+			return nil, err
+		}
+		if existing, ok := out[messageID]; ok {
+			// The first row for a message already won the ordering above; the
+			// rest only raise the count.
+			existing.Count++
+			out[messageID] = existing
+			continue
+		}
+		item.Count = 1
+		out[messageID] = item
+	}
+	return out, rows.Err()
+}

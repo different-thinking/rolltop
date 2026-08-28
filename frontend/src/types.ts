@@ -127,6 +127,9 @@ export type Message = {
   category?: string;
   snippet: string;
   annotations?: MessageAnnotation[];
+  /** shipment is absent for the mail that is not about a parcel, which is
+   * nearly all of it. */
+  shipment?: MessageShipmentSummary;
 };
 
 /** MessageAnnotation is compact, non-sensitive metadata supplied by an enabled backend plugin. */
@@ -994,6 +997,20 @@ export type SMTPTestResult = {
   ok: boolean;
   error?: string;
   session?: SMTPLogSession;
+};
+
+/** MessageShipmentSummary is the parcel one message is about, as the message
+ * payload carries it. count says how many the message named; the other fields
+ * describe the first of them. */
+export type MessageShipmentSummary = {
+  id: number;
+  carrier: string;
+  carrier_label: string;
+  tracking_number: string;
+  tracking_url: string;
+  expected_date: string;
+  status: "announced" | "out_for_delivery" | "delivered";
+  count: number;
 };
 
 /** ShipmentMessage is one mail that named a parcel, as the parcel list links

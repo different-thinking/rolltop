@@ -144,6 +144,9 @@ type apiMessage struct {
 	Category    string                 `json:"category"`
 	Snippet     string                 `json:"snippet"`
 	Annotations []apiMessageAnnotation `json:"annotations,omitempty"`
+	// Shipment is the parcel this message is about, absent for the mail that is
+	// not about one -- which is nearly all of it.
+	Shipment *apiMessageShipment `json:"shipment,omitempty"`
 }
 
 type apiMessageAnnotation struct {

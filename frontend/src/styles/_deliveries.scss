@@ -276,3 +276,96 @@
     margin-left: auto;
   }
 }
+
+// The parcel marker on a message. It sits among the subject-line chips, so it
+// borrows their proportions rather than the parcel list's.
+.shipment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+
+  // Today is the one day the marker is worth colouring for.
+  &.due-today {
+    border-color: var(--accent-soft);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
+}
+
+.shipment-details {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+
+  dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 12px;
+    margin: 8px 0 0;
+    font-size: 13px;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    user-select: all;
+  }
+}
+
+.shipment-details-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.shipment-details-count {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shipment-details-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    font-size: 13px;
+  }
+}
+
+// A list row is tight, so past a certain width the marker keeps its icon and
+// drops its words, the way the category pill beside it does.
+@media (max-width: 900px) {
+  .message-row .shipment-chip-label {
+    display: none;
+  }
+}

@@ -303,6 +303,26 @@ site and in review.
   leaving one invoice among the notifications. The two evidence grades exist for
   the same reason -- broadcast mail will put "Rechnung" in a subject line, so it
   needs a document, not a word.
+- **A parcel is not a category, and a tracking number needs evidence.** Delivery
+  extraction (`mailparse.ExtractDeliveryNotices`) produces rows in `shipments`,
+  not an answer on the message, because one parcel is talked about by four
+  messages and one message can name a parcel per item of an order. It reads the
+  same `CategoryContent` classification does and runs in the same pass, so the
+  fetch path pays for one reduction and not two. A number is only taken when
+  something says what it is -- a carrier's own tracking link, a label beside it,
+  or a shape only one carrier issues -- because an order number, an invoice
+  number and a phone number are all digits; do not relax that to a bare number
+  match. The sender is a hint for *whose* number it is and never a gate on
+  whether to look: the earliest notice of a parcel is the shop's dispatch mail,
+  not the carrier's.
+- **A later message wins, an earlier one does not.** `shipments.reported_at`
+  holds the date of the message the stored day and status came from, and
+  `ReplaceMessageShipments` only overwrites from a message at least as recent.
+  The backfill reads newest-first by design, so without that rule last week's
+  "on its way" would undo this morning's "delivered". `store.DeliveryVersion` is
+  the generation bump for changed rules, on the `CategoryVersion` model; the
+  backfill only ever reaches what blob retention still holds, which is why
+  extraction has to happen at fetch time.
 - **Changing what a category means is a `store.CategoryVersion` bump, not a
   column reset.** The backfill re-reads mail an older generation filed, a batch
   at a time, while the rows keep the category they already have; emptying

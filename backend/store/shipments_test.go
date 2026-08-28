@@ -208,3 +208,86 @@ func TestListShipmentsRejectsAMalformedDay(t *testing.T) {
 		t.Fatal("want an error for a day that is not YYYY-MM-DD")
 	}
 }
+
+// The message list asks for a whole page at once, and a message that named
+// several parcels still has to render as one row.
+func TestShipmentsForMessagesSummarizesPerMessage(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-rows@example.test")
+	date := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	many := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Zwei Pakete", date)
+	none := shipmentTestMessage(t, ctx, db, user, account, mailbox, 2, "Newsletter", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, many.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "dhl", TrackingNumber: "00340434212345678901", ExpectedDate: "2026-09-05", Status: mailparse.DeliveryAnnounced},
+		{Carrier: "dhl", TrackingNumber: "00340434212345678902", ExpectedDate: "2026-09-03", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplaceMessageShipments(ctx, user.ID, none.ID, date.Unix(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := db.ShipmentsForMessages(ctx, user.ID, []int64{many.ID, none.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := found[none.ID]; ok {
+		t.Error("a message that named no parcel came back with one")
+	}
+	summary, ok := found[many.ID]
+	if !ok {
+		t.Fatal("the message that named two parcels came back with none")
+	}
+	if summary.Count != 2 {
+		t.Errorf("count = %d, want 2", summary.Count)
+	}
+	// The nearest day is the one the row shows.
+	if summary.ExpectedDate != "2026-09-03" {
+		t.Errorf("expected date = %q, want the nearer of the two", summary.ExpectedDate)
+	}
+}
+
+// A parcel still coming outranks one that has arrived, whatever their days say.
+func TestShipmentsForMessagesPrefersAnOpenParcel(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-open@example.test")
+	date := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Sammelmail", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "gls", TrackingNumber: "11111111111", ExpectedDate: "2026-09-01", Status: mailparse.DeliveryDelivered},
+		{Carrier: "gls", TrackingNumber: "22222222222", ExpectedDate: "2026-09-09", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found, err := db.ShipmentsForMessages(ctx, user.ID, []int64{message.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found[message.ID].TrackingNumber != "22222222222" {
+		t.Errorf("row shows %+v, want the parcel that has not arrived", found[message.ID])
+	}
+}
+
+func TestShipmentsForMessagesIsUserScoped(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "parcel-scope@example.test")
+	other := createPendingMoveTestUser(t, ctx, db, "parcel-scope-other@example.test")
+	date := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Versand", date)
+	if err := db.ReplaceMessageShipments(ctx, user.ID, message.ID, date.Unix(), []mailparse.DeliveryNotice{
+		{Carrier: "dpd", TrackingNumber: "12345678901234", ExpectedDate: "2026-09-03", Status: mailparse.DeliveryAnnounced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found, err := db.ShipmentsForMessages(ctx, other.ID, []int64{message.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Errorf("another reader's message id returned %+v", found)
+	}
+	shipments, err := db.ListShipments(ctx, other.ID, "2026-09-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipments) != 0 {
+		t.Errorf("another reader's parcels are listed: %+v", shipments)
+	}
+}
