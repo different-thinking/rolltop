@@ -133,6 +133,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		HasAutocryptHeader: parsed.HasAutocryptHeader,
 		ImportPending:      true,
 		DeliveryScanned:    !parseFailed,
+		InvoiceScanned:     !parseFailed,
 	})
 	if err != nil {
 		_, cleanupErr := s.deleteUnreferencedBlob(ctx, userID, blobRec.ID, blobPath)
@@ -161,6 +162,19 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	if len(parsed.Deliveries) > 0 {
 		generationRecoveryPhase(ctx, "sqlite-message-shipments", "")
 		if err := s.Store.ReplaceMessageShipments(ctx, userID, msg.ID, date.Unix(), parsed.Deliveries); err != nil {
+			return store.MessageRecord{}, parsed, nil, err
+		}
+	}
+	// A bill is recorded from the same parse, and here the retention argument is
+	// sharper than it is for a parcel. Reading an invoice means reading the
+	// attachment it arrived as, and the decoded attachments exist only while the
+	// message is being parsed -- once retention has pruned the raw copy there is
+	// nothing left to read at all. Only a message the parse decided is about
+	// money owed pays for a write; the rest were stamped as read by
+	// CreateMessage and cost nothing here.
+	if parsed.Invoice != nil {
+		generationRecoveryPhase(ctx, "sqlite-message-invoices", "")
+		if err := s.Store.ReplaceMessageInvoice(ctx, userID, msg.ID, date.Unix(), parsed.Invoice); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
 		}
 	}

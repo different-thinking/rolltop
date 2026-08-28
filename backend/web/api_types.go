@@ -147,6 +147,8 @@ type apiMessage struct {
 	// Shipment is the parcel this message is about, absent for the mail that is
 	// not about one -- which is nearly all of it.
 	Shipment *apiMessageShipment `json:"shipment,omitempty"`
+	// Invoice is the bill this message is about, on the same terms.
+	Invoice *apiMessageInvoice `json:"invoice,omitempty"`
 }
 
 type apiMessageAnnotation struct {
