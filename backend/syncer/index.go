@@ -149,6 +149,15 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 			return store.MessageRecord{}, parsed, nil, err
 		}
 	}
+	// Parcels are recorded from the same parse, for the same reason the category
+	// is: blob retention throws the raw message away after a fortnight, so a
+	// message not read for a tracking number while it is open is a message most
+	// of whose parcels can never be recovered. A message that names none is
+	// stamped as read all the same, so the backfill does not keep selecting it.
+	generationRecoveryPhase(ctx, "sqlite-message-shipments", "")
+	if err := s.Store.ReplaceMessageShipments(ctx, userID, msg.ID, date.Unix(), parsed.Deliveries); err != nil {
+		return store.MessageRecord{}, parsed, nil, err
+	}
 	generationRecoveryPhase(ctx, "sqlite-create-location", "")
 	if err := s.Store.CreateLocation(ctx, userID, msg.ID, mailbox.ID, item.UID); err != nil {
 		return store.MessageRecord{}, parsed, nil, err

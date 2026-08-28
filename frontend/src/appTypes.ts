@@ -95,6 +95,8 @@ export type AppShellProps = {
   mailCategories: import("./types").MailCategorySummary[];
   /** Messages still waiting to be read for their category headers. */
   mailCategoriesPending: number;
+  /** Bumps when a sync stores messages, which is when a parcel can change. */
+  mailGeneration: number;
   serverStartedAt: string;
   serverUptimeSeconds: number;
   buildVersion: string;

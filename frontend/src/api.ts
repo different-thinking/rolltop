@@ -9,6 +9,7 @@ import type {
   CalendarEvent,
   CalendarEventInput,
   CalendarSummary,
+  Shipment,
   Contact,
   ContactAutocomplete,
   ConversationListPage,
@@ -901,6 +902,11 @@ export const api = {
   cancelSyncRun: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`/api/sync-runs/${id}/cancel`, csrf),
   deleteSyncRun: (csrf: string, id: number) => deleteJSON<{ ok: boolean }>(`/api/sync-runs/${id}`, csrf),
   activity: () => getJSON<Activity>("/api/activity"),
+  // The day travels with the request because a parcel list is answered in days
+  // and the server has no timezone for a reader; the browser's own day is the
+  // only one that puts "arrives today" on the right row.
+  deliveries: (day: string) =>
+    getJSON<{ shipments: Shipment[] }>(`/api/deliveries?${new URLSearchParams({ day })}`),
   // The reservation key embeds a raw IMAP mailbox name, which may contain any
   // separator a URL scheme could pick, so it travels in the body.
   cancelWorker: (csrf: string, key: string) =>

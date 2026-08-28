@@ -996,6 +996,34 @@ export type SMTPTestResult = {
   session?: SMTPLogSession;
 };
 
+/** ShipmentMessage is one mail that named a parcel, as the parcel list links
+ * back to it. */
+export type ShipmentMessage = {
+  id: number;
+  mailbox_id: number;
+  subject: string;
+  from: string;
+  date: string;
+};
+
+/** Shipment is one parcel the mail announced, with every message that mentioned
+ * it. carrier is empty for a number a message labelled without saying whose it
+ * was; carrier_label is what to show either way. */
+export type Shipment = {
+  id: number;
+  carrier: string;
+  carrier_label: string;
+  tracking_number: string;
+  /** tracking_url is empty for a carrier whose page needs more than the number. */
+  tracking_url: string;
+  /** expected_date is "YYYY-MM-DD", or empty for a parcel nobody has dated. */
+  expected_date: string;
+  window_start: string;
+  window_end: string;
+  status: "announced" | "out_for_delivery" | "delivered";
+  messages: ShipmentMessage[];
+};
+
 /** CalendarSummary is one subscribed Google calendar. */
 export type CalendarSummary = {
   id: number;

@@ -951,6 +951,7 @@ export default function App() {
         enabledPlugins={bootstrap.enabled_plugins || []}
         mailCategories={bootstrap.mail_categories || []}
         mailCategoriesPending={bootstrap.mail_categories_pending || 0}
+        mailGeneration={bootstrap.mail_generation || 0}
         serverStartedAt={bootstrap.server_started_at || ""}
         serverUptimeSeconds={bootstrap.server_uptime_seconds || 0}
         buildVersion={bootstrap.build_version || ""}
