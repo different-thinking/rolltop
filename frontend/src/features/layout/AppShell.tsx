@@ -842,18 +842,22 @@ function Topbar({
         />
         {focused ? <SearchAutocomplete items={autocomplete.items} activeIndex={autocomplete.activeIndex} onChoose={autocomplete.choose} /> : null}
       </form>
-      {expectedDeliveries.count > 0 ? (
-        <button
-          className="delivery-chip"
-          type="button"
-          title={deliveryChipTitle(expectedDeliveries)}
-          onClick={() => navigate("/deliveries")}
-        >
-          <Icon name="package" weight="fill" />
-          <span className="delivery-chip-label">{deliveryChipLabel(expectedDeliveries)}</span>
-        </button>
-      ) : null}
+      {/* The chip belongs in the actions column and not beside the search:
+          the topbar is a five-column grid on a desktop, the spare column
+          between the two is minmax(0, 1fr) and squeezes anything put in it to
+          nothing, and this column is the max-content one. */}
       <nav className="top-actions" aria-label="Account">
+        {expectedDeliveries.count > 0 ? (
+          <button
+            className="delivery-chip"
+            type="button"
+            title={deliveryChipTitle(expectedDeliveries)}
+            onClick={() => navigate("/deliveries")}
+          >
+            <Icon name="package" weight="fill" />
+            <span className="delivery-chip-label">{deliveryChipLabel(expectedDeliveries)}</span>
+          </button>
+        ) : null}
         {securityUnlockAvailable ? (
           <button
             className={securityUnlocked ? "ghost security-lock-toggle active" : "ghost security-lock-toggle"}
@@ -929,12 +933,15 @@ function Topbar({
 // "DHL" is more use at a glance than "1 Paket": it is the thing the reader is
 // waiting for, and it is what the doorbell will say.
 function deliveryChipLabel(expected: ExpectedDeliveries): string {
-  if (expected.count === 1) return expected.carrierLabel ? `${expected.carrierLabel} kommt heute` : "Paket kommt heute";
-  return `${expected.count.toLocaleString()} Pakete kommen heute`;
+  if (expected.count === 1) return `Heute: ${expected.carrierLabel || "1 Paket"}`;
+  return `Heute: ${expected.count.toLocaleString()} Pakete`;
 }
 
 function deliveryChipTitle(expected: ExpectedDeliveries): string {
-  return `${deliveryChipLabel(expected)} - alle Sendungen ansehen`;
+  const what = expected.count === 1
+    ? `Ein Paket${expected.carrierLabel ? ` von ${expected.carrierLabel}` : ""} wird heute erwartet`
+    : `${expected.count.toLocaleString()} Pakete werden heute erwartet`;
+  return `${what} - alle Sendungen ansehen`;
 }
 
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,

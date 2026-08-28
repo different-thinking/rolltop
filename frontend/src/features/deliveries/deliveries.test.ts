@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Shipment } from "../../types";
 import { dayLabel, groupShipments, shipmentsExpectedOn } from "./DeliveriesView";
+import { compactDay, shipmentChipText } from "./ShipmentChip";
 
 const today = "2026-09-03";
 
@@ -83,5 +84,40 @@ describe("dayLabel", () => {
 
   it("says so when nothing was announced", () => {
     expect(dayLabel("", today)).toBe("Kein Termin genannt");
+  });
+});
+
+describe("compactDay", () => {
+  it("keeps the near days as the adverbs they are", () => {
+    expect(compactDay(today, today)).toBe("heute");
+    expect(compactDay("2026-09-04", today)).toBe("morgen");
+  });
+
+  // A weekday is a noun in German, so it is capitalised where "heute" is not.
+  it("names a weekday inside the coming week", () => {
+    expect(compactDay("2026-09-07", today)).toMatch(/^Mo\.? 07\.09\.$/);
+  });
+
+  it("gives only a date past the coming week, so the chip stays short", () => {
+    expect(compactDay("2026-10-01", today)).toBe("01.10.");
+  });
+});
+
+describe("shipmentChipText", () => {
+  const base = {
+    id: 1, carrier: "dhl", carrier_label: "DHL", tracking_number: "1", tracking_url: "",
+    expected_date: today, status: "announced" as const, count: 1
+  };
+
+  it("leads with the day, which is what a reader scans for", () => {
+    expect(shipmentChipText(base, today)).toBe("Paket: heute");
+  });
+
+  it("counts several parcels in one message", () => {
+    expect(shipmentChipText({ ...base, count: 3 }, today)).toBe("3 Pakete: heute");
+  });
+
+  it("falls back to the status when no day was announced", () => {
+    expect(shipmentChipText({ ...base, expected_date: "" }, today)).toBe("Paket angekündigt");
   });
 });

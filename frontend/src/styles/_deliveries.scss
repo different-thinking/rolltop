@@ -8,7 +8,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  // The topbar is a crowded flex row and the search beside it is happy to take
+  // every pixel. Without all three of these the chip is squeezed to its icon
+  // and its label wraps to three lines, which overflows the bar: it must keep
+  // its content width, refuse to shrink, and never break its line.
   flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-height: 34px;
   margin-right: 6px;
   padding: 6px 12px;
   border: 1px solid var(--accent-soft);

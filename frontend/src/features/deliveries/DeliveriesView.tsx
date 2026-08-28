@@ -130,9 +130,7 @@ export function DeliveriesView({
       <div className="content-head">
         <div>
           <h1>Pakete</h1>
-          <span className="label-pill">
-            {openCount.toLocaleString()} {openCount === 1 ? "unterwegs" : "unterwegs"}
-          </span>
+          <span className="label-pill">{openCount.toLocaleString()} unterwegs</span>
         </div>
       </div>
 

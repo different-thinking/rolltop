@@ -17,13 +17,32 @@ const statusLabels: Record<MessageShipmentSummary["status"], string> = {
   delivered: "zugestellt"
 };
 
+/** compactDay is the day as a row has room for it. The parcel list spells a day
+ * out because it is the page about days; a chip beside a subject line has to
+ * stay short, so anything past the coming week is just its date. */
+export function compactDay(day: string, today: string): string {
+  const date = new Date(`${day}T00:00:00`);
+  const now = new Date(`${today}T00:00:00`);
+  if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return day;
+  const distance = Math.round((date.getTime() - now.getTime()) / 86400000);
+  // Adverbs, so lower case is the correct German here -- unlike the weekday
+  // below, which is a noun and is capitalised.
+  if (distance === 0) return "heute";
+  if (distance === 1) return "morgen";
+  const written = date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+  if (distance > 1 && distance < 7) {
+    return `${date.toLocaleDateString("de-DE", { weekday: "short" })} ${written}`;
+  }
+  return written;
+}
+
 /** shipmentChipText is what the marker says: the day when there is one, because
  * that is the fact a reader is scanning for, and the status when there is not. */
 export function shipmentChipText(shipment: MessageShipmentSummary, today: string): string {
   const parcels = shipment.count > 1 ? `${shipment.count} Pakete` : "Paket";
   if (shipment.status === "delivered") return `${parcels} zugestellt`;
   if (shipment.expected_date === "") return `${parcels} ${statusLabels[shipment.status]}`;
-  return `${parcels}: ${dayLabel(shipment.expected_date, today).toLowerCase()}`;
+  return `${parcels}: ${compactDay(shipment.expected_date, today)}`;
 }
 
 /**
