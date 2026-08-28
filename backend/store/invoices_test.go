@@ -336,3 +336,69 @@ func TestInvoiceScannedMessagesSkipTheBackfill(t *testing.T) {
 		t.Errorf("want an already-read message skipped, got %d", len(pending))
 	}
 }
+
+// An undated open bill is aged by the open horizon, not by the much shorter one
+// that retires settled bills. Giving it the settled cutoff quietly took undated
+// bills off the list after a month.
+func TestUndatedOpenInvoiceSurvivesPastThePaidHistory(t *testing.T) {
+	f := newInvoiceFixture(t)
+	message := f.message(t, 1)
+	undated := openInvoice("4711")
+	undated.DueDate = ""
+	f.record(t, message, undated)
+
+	// The message is 60 days before the day being asked about: well past the
+	// 30-day settled history, well inside the 180-day open horizon.
+	day := f.base.AddDate(0, 0, 60).Format("2006-01-02")
+	rows := f.list(t, day)
+	if len(rows) != 1 {
+		t.Fatalf("want the undated bill still listed after two months, got %d rows", len(rows))
+	}
+}
+
+// The chip and the list have to agree. A badge that opens an empty page is
+// worse than either answer on its own.
+func TestInvoicesDueOnAgreesWithTheListAboutTheHorizon(t *testing.T) {
+	f := newInvoiceFixture(t)
+	ctx := context.Background()
+	ancient := openInvoice("OLD")
+	ancient.DueDate = "2023-01-05"
+	f.record(t, f.message(t, 1), ancient)
+
+	// A year and a half after that deadline: past the open horizon.
+	day := "2024-07-01"
+	rows := f.list(t, day)
+	due, err := f.db.InvoicesDueOn(ctx, f.user.ID, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("want the ancient bill off the list, got %d rows", len(rows))
+	}
+	if due.Count != 0 {
+		t.Errorf("count = %d, want the chip to hide what the list hides", due.Count)
+	}
+}
+
+// A chased bill ignores the horizon in both places, because somebody is still
+// writing about it.
+func TestChasedInvoiceIgnoresTheHorizonEverywhere(t *testing.T) {
+	f := newInvoiceFixture(t)
+	ctx := context.Background()
+	ancient := openInvoice("OLD")
+	ancient.DueDate = "2023-01-05"
+	ancient.DunningLevel = mailparse.InvoiceDunningNotice
+	f.record(t, f.message(t, 1), ancient)
+
+	day := "2024-07-01"
+	if rows := f.list(t, day); len(rows) != 1 {
+		t.Errorf("want a chased bill listed however old, got %d rows", len(rows))
+	}
+	due, err := f.db.InvoicesDueOn(ctx, f.user.ID, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due.Count != 1 || due.Chased != 1 {
+		t.Errorf("count/chased = %d/%d, want 1/1", due.Count, due.Chased)
+	}
+}

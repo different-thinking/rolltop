@@ -60,6 +60,20 @@ Zahlungseingang feststellen"), die kein Kleingedrucktes verwendet. Spiegelbildli
 wird „bereits bezahlt" ignoriert, wenn ein „falls" oder „sollten" davorsteht —
 das ist die Entlastungsklausel am Fuß jedes Mahnschreibens.
 
+**3a. Gelesen wird über Zeilenumbrüche hinweg.** `pdftotext` bricht die Zeilen
+dort um, wo es das Layout tat — „Der Betrag wird am 15.09.2026 / von Ihrem Konto
+abgebucht" steht also regelmäßig auf zwei Zeilen. RE2s `.` überquert keinen
+Zeilenumbruch, weshalb die Lastschrift-Erkennung das `s`-Flag trägt. Ohne das
+las genau der Fall, für den das Feature gebaut ist, als unbezahlte Rechnung.
+
+**3b. Das Jahr wird gemessen, nicht geraten.** Eine Frist ohne Jahreszahl
+(„zahlbar bis 15.01.") muss das Jahr bekommen, das dem Brief am nächsten liegt.
+Das erste Jahr zu nehmen, das ins Zeitfenster *passt*, reicht nur, solange das
+Fenster schmal ist; das Rechnungsfenster reicht ein Jahr zurück, damit eine
+Mahnung eine alte Frist wiederholen kann — und dann passt bei einem Brief vom
+20. Dezember auch der 15. Januar desselben Jahres, elf Monate Überfälligkeit,
+die es nie gab.
+
 **4. Ein abgeschnittener Scan darf nie Alarm auslösen.** Der Backfill liest
 gespeicherte Post mit einem Byte-Budget. Bricht er ab, kann genau die Seite
 gefehlt haben, auf der steht, dass abgebucht wurde. Also darf ein unvollständiger
@@ -95,7 +109,9 @@ gemeinsam.
   der Platte liegt — bei Voreinstellung die letzten vierzehn Tage.
 - **Der Horizont.** Offene Rechnungen älter als 180 Tage fallen aus der Liste,
   damit ein Erstsync nicht zwei Jahre alter Post als offene Posten präsentiert.
-  Gemahntes ist davon ausgenommen: da schreibt noch jemand.
+  Gemahntes ist davon ausgenommen: da schreibt noch jemand. Der Header-Chip
+  rechnet mit demselben Horizont wie die Liste — ein Zähler, der eine leere
+  Seite öffnet, wäre schlechter als jede der beiden Antworten für sich.
 
 ---
 

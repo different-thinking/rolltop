@@ -190,6 +190,14 @@ func findDateNear(window string, sentDay time.Time, bounds dateBounds) (string, 
 // which year they are in. A sender writing "04.01." on the 29th of December
 // means the January nine days away, not the one eleven months back, so the year
 // is chosen as the one that puts the date nearest the message.
+//
+// "Nearest" has to be applied by measuring rather than by trying the candidates
+// in a hopeful order. Taking the first year that merely *fits* the bounds is
+// right only while the window is narrow enough that one candidate fits; with
+// the invoice window, which reaches a year back so a dunning letter can repeat
+// an old deadline, "zahlbar bis 15.01." written on the 20th of December fits in
+// the sending year as well as in the next, and the sending year is eleven
+// months of overdue that never happened.
 func dateWithOptionalYear(day int, month time.Month, yearText string, sentDay time.Time, bounds dateBounds) (string, bool) {
 	if yearText != "" {
 		year := atoi(yearText)
@@ -198,12 +206,31 @@ func dateWithOptionalYear(day int, month time.Month, yearText string, sentDay ti
 		}
 		return plausibleDate(year, month, day, sentDay, bounds)
 	}
+	best, nearest, found := "", 0, false
 	for _, year := range []int{sentDay.Year(), sentDay.Year() + 1, sentDay.Year() - 1} {
-		if date, ok := plausibleDate(year, month, day, sentDay, bounds); ok {
-			return date, true
+		date, ok := plausibleDate(year, month, day, sentDay, bounds)
+		if !ok {
+			continue
+		}
+		distance := daysBetween(sentDay, year, month, day)
+		if distance < 0 {
+			distance = -distance
+		}
+		// Ties keep the earlier candidate, which is the sending year: a date
+		// equidistant in both directions is the one the sender is writing in.
+		if !found || distance < nearest {
+			best, nearest, found = date, distance, true
 		}
 	}
-	return "", false
+	return best, found
+}
+
+// daysBetween is how far a candidate day is from the message, in whole days and
+// signed. It rebuilds the date rather than reading back the string
+// plausibleDate returned, which no longer says which year it belongs to.
+func daysBetween(sentDay time.Time, year int, month time.Month, day int) int {
+	date := time.Date(year, month, day, 0, 0, 0, 0, sentDay.Location())
+	return int(date.Sub(sentDay).Hours() / 24)
 }
 
 // plausibleDate rejects what the calendar does not hold and what is too far

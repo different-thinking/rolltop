@@ -283,6 +283,12 @@ func (s *Store) ListInvoices(ctx context.Context, userID int64, today string) ([
 		return nil, err
 	}
 	horizon := day.AddDate(0, 0, -invoiceOpenHorizonDays).Format(plainDateLayout)
+	// The undated arm ages by the *open* horizon and not by the settled one.
+	// They are two different questions -- how long a bill nobody dated is still
+	// worth chasing, and how long a settled one is worth showing -- and giving
+	// the first the second's cutoff quietly retired undated open bills after a
+	// month.
+	openSince := day.AddDate(0, 0, -invoiceOpenHorizonDays).Unix()
 	paidSince := day.AddDate(0, 0, -invoicePaidHistoryDays).Unix()
 	// A dismissed invoice is gone from every read: the reader said it was never
 	// one, and a list that kept showing it would be asking them again.
@@ -308,11 +314,18 @@ func (s *Store) ListInvoices(ctx context.Context, userID int64, today string) ([
 				))
 				OR ((status = 'paid' OR manual_status = 'paid') AND updated_at >= ?)
 			)
+			-- The evidence test belongs in the query and not only in the loop
+			-- below, because the LIMIT is applied here. A bill whose every
+			-- message has been deleted is dropped either way, but filtering it
+			-- afterwards lets it occupy one of the two hundred rows the page is
+			-- allowed and push a real one off the end.
+			AND EXISTS (SELECT 1 FROM invoice_messages im
+				WHERE im.user_id = invoices.user_id AND im.invoice_id = invoices.id)
 		ORDER BY dunning_level DESC,
 			(COALESCE(NULLIF(manual_due_date, ''), NULLIF(due_date, '')) IS NULL) ASC,
 			COALESCE(NULLIF(manual_due_date, ''), NULLIF(due_date, '')) ASC,
 			id ASC
-		LIMIT ?`, userID, horizon, paidSince, paidSince, invoiceListLimit)
+		LIMIT ?`, userID, horizon, openSince, paidSince, invoiceListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -415,24 +428,31 @@ const maxCountedDueInvoices = 50
 // at all, because a dunning letter with no readable deadline is still a dunning
 // letter.
 func (s *Store) InvoicesDueOn(ctx context.Context, userID int64, today string) (DueInvoices, error) {
-	if _, err := parsePlainDate(today); err != nil {
+	day, err := parsePlainDate(today)
+	if err != nil {
 		return DueInvoices{}, err
 	}
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return DueInvoices{}, err
 	}
+	// The chip counts exactly what the list shows, horizon included. Without it
+	// a bill whose deadline passed longer ago than the horizon would be counted
+	// here and hidden there: a badge in the header that opens an empty page,
+	// which is worse than either answer on its own. Chased bills ignore the
+	// horizon in both places for the same reason -- somebody is still writing.
+	horizon := day.AddDate(0, 0, -invoiceOpenHorizonDays).Format(plainDateLayout)
 	rows, err := db.QueryContext(ctx, `SELECT i.issuer, i.dunning_level
 		FROM invoices i
 		WHERE i.user_id = ? AND i.status = 'open' AND i.manual_status = ''
 			AND (
 				i.dunning_level > 0
 				OR (COALESCE(NULLIF(i.manual_due_date, ''), NULLIF(i.due_date, '')) <= ?
-					AND COALESCE(NULLIF(i.manual_due_date, ''), NULLIF(i.due_date, '')) IS NOT NULL)
+					AND COALESCE(NULLIF(i.manual_due_date, ''), NULLIF(i.due_date, '')) >= ?)
 			)
 			AND EXISTS (SELECT 1 FROM invoice_messages im WHERE im.user_id = i.user_id AND im.invoice_id = i.id)
 		ORDER BY i.id
-		LIMIT ?`, userID, today, maxCountedDueInvoices)
+		LIMIT ?`, userID, today, horizon, maxCountedDueInvoices)
 	if err != nil {
 		return DueInvoices{}, err
 	}

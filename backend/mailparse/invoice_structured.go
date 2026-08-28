@@ -184,6 +184,14 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 
 	out := structuredInvoice{}
 	path := make([]string, 0, 16)
+	// depth counts every element, where path only holds the ones inside the cap.
+	// The two have to be tracked apart: popping on an end tag whose start tag was
+	// never pushed unwinds the path past where it should be, and from there on
+	// every element is reported under the wrong parent -- which is how a line
+	// item's <ID> becomes the invoice number. A document deep enough to hit the
+	// cap is not one this reads correctly either way, but it must not be read
+	// *wrongly*.
+	depth := 0
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -192,7 +200,8 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 		switch element := token.(type) {
 		case xml.StartElement:
 			name := strings.ToLower(element.Name.Local)
-			if len(path) < maxStructuredInvoiceDepth {
+			depth++
+			if depth <= maxStructuredInvoiceDepth {
 				path = append(path, name)
 			}
 			if isStructuredInvoiceRoot(name) {
@@ -205,13 +214,18 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 			}
 		case xml.CharData:
 			value := strings.TrimSpace(string(element))
-			if value == "" || len(path) == 0 {
+			// Text below the cap is skipped rather than attributed to whatever
+			// the truncated path happens to end in.
+			if value == "" || len(path) == 0 || depth > maxStructuredInvoiceDepth {
 				continue
 			}
 			applyStructuredField(&out, path, value)
 		case xml.EndElement:
-			if len(path) > 0 {
+			if depth <= maxStructuredInvoiceDepth && len(path) > 0 {
 				path = path[:len(path)-1]
+			}
+			if depth > 0 {
+				depth--
 			}
 		}
 	}

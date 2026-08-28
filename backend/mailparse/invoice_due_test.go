@@ -424,3 +424,66 @@ func TestInvoiceNoticeReaderScanReadsAttachment(t *testing.T) {
 		t.Errorf("settlement = %q, want transfer", got.Settlement)
 	}
 }
+
+// pdftotext wraps a PDF's lines wherever the page layout did, so the sentence
+// announcing a direct debit routinely straddles a newline. Reading it only on
+// one line was a reminder for money the biller collects itself.
+func TestExtractInvoiceNoticeReadsADebitNoticeAcrossLines(t *testing.T) {
+	content := CategoryContent{Subject: "Ihre Rechnung 6001", Text: "Ihre Rechnung im Anhang."}
+	wrapped := []InvoiceDocument{{
+		Filename:    "Rechnung_6001.pdf",
+		ContentType: "application/pdf",
+		Text:        "Rechnungsnummer 6001\nGesamtbetrag 19,99 EUR\nDer Betrag wird am 15.09.2026\nvon Ihrem Konto abgebucht.",
+	}}
+	oneLine := []InvoiceDocument{{
+		Filename:    "Rechnung_6001.pdf",
+		ContentType: "application/pdf",
+		Text:        "Rechnungsnummer 6001 Gesamtbetrag 19,99 EUR Der Betrag wird am 15.09.2026 von Ihrem Konto abgebucht.",
+	}}
+	for name, docs := range map[string][]InvoiceDocument{"wrapped": wrapped, "one line": oneLine} {
+		notice := mustNotice(t, ExtractInvoiceNotice(content, docs, "billing@shop.example.de", invoiceSentAt(t)))
+		if notice.Settlement != SettlementDirectDebit {
+			t.Errorf("%s: settlement = %q, want direct_debit", name, notice.Settlement)
+		}
+		if notice.Status != InvoicePaid {
+			t.Errorf("%s: status = %q, want paid", name, notice.Status)
+		}
+	}
+}
+
+// A deadline written without a year, in a message sent in December, means the
+// January weeks ahead -- not the one eleven months back, which the invoice
+// window is wide enough to accept and which reads as a year of being overdue.
+func TestExtractInvoiceNoticeResolvesAYearlessDeadlineAcrossNewYear(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("zone data unavailable: %v", err)
+	}
+	content := CategoryContent{
+		Subject: "Ihre Rechnung 12345",
+		Text:    "Zahlbar bis 15.01. auf unser Konto. Bankverbindung: DE02120300000000202051.",
+	}
+	sent := time.Date(2026, time.December, 20, 9, 0, 0, 0, berlin)
+	notice := mustNotice(t, ExtractInvoiceNotice(content, nil, "billing@firma.example.de", sent))
+	if notice.DueDate != "2027-01-15" {
+		t.Errorf("due date = %q, want 2027-01-15", notice.DueDate)
+	}
+}
+
+// The mirror image: a deadline in early January refers back to December, and
+// must not jump a year forward.
+func TestExtractInvoiceNoticeResolvesAYearlessDeadlineBackwards(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("zone data unavailable: %v", err)
+	}
+	content := CategoryContent{
+		Subject: "Zahlungserinnerung Rechnung 900",
+		Text:    "Zahlbar war der Betrag bis 28.12. Bankverbindung: DE02120300000000202051.",
+	}
+	sent := time.Date(2027, time.January, 8, 9, 0, 0, 0, berlin)
+	notice := mustNotice(t, ExtractInvoiceNotice(content, nil, "billing@firma.example.de", sent))
+	if notice.DueDate != "2026-12-28" {
+		t.Errorf("due date = %q, want 2026-12-28", notice.DueDate)
+	}
+}

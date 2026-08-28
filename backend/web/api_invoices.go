@@ -132,27 +132,35 @@ func (s *Server) apiInvoiceByID(w http.ResponseWriter, r *http.Request, rest str
 		writeAPIError(w, http.StatusBadRequest, "Say either what the invoice's status is or when it is due.")
 		return
 	}
+	// Both fields are checked before either is written. A request carrying a
+	// good status and a malformed day used to store the status and then answer
+	// 400, which tells the browser nothing happened while something did -- and
+	// the browser, believing its own request failed, leaves the row showing the
+	// old status until the next refresh.
+	if in.ManualStatus != nil && !store.ValidInvoiceManualStatus(*in.ManualStatus) {
+		writeAPIError(w, http.StatusBadRequest, "An invoice is either paid, dismissed, or left to the mail to say.")
+		return
+	}
+	dueDate := ""
+	if in.ManualDueDate != nil {
+		dueDate = strings.TrimSpace(*in.ManualDueDate)
+		if dueDate != "" {
+			if _, parseErr := time.Parse("2006-01-02", dueDate); parseErr != nil {
+				writeAPIError(w, http.StatusBadRequest, "A day has to be written YYYY-MM-DD.")
+				return
+			}
+		}
+	}
 	updated := store.Invoice{}
 	var err error
 	if in.ManualStatus != nil {
-		if !store.ValidInvoiceManualStatus(*in.ManualStatus) {
-			writeAPIError(w, http.StatusBadRequest, "An invoice is either paid, dismissed, or left to the mail to say.")
-			return
-		}
 		updated, err = s.store.SetInvoiceManualStatus(r.Context(), cu.User.ID, invoiceID, *in.ManualStatus)
 		if !s.writeInvoiceError(w, r, err) {
 			return
 		}
 	}
 	if in.ManualDueDate != nil {
-		day := strings.TrimSpace(*in.ManualDueDate)
-		if day != "" {
-			if _, parseErr := time.Parse("2006-01-02", day); parseErr != nil {
-				writeAPIError(w, http.StatusBadRequest, "A day has to be written YYYY-MM-DD.")
-				return
-			}
-		}
-		updated, err = s.store.SetInvoiceDueDate(r.Context(), cu.User.ID, invoiceID, day)
+		updated, err = s.store.SetInvoiceDueDate(r.Context(), cu.User.ID, invoiceID, dueDate)
 		if !s.writeInvoiceError(w, r, err) {
 			return
 		}

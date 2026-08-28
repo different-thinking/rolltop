@@ -666,7 +666,14 @@ var (
 // did and what stopped it matching the commonest form of all: "wird am
 // 15.09.2026 von Ihrem Konto abgebucht" has two full stops inside the date. The
 // length bound is what keeps the match inside one statement instead.
-var unanchoredDebitRE = regexp.MustCompile(`(?i)(?:wird|werden).{0,60}?(?:abgebucht|eingezogen)|buchen\s+wir.{0,60}?\bab\b|ziehen\s+wir.{0,60}?\bein\b|per\s+sepa-?lastschrift|will\s+be\s+(?:automatically\s+)?(?:charged|debited)|automatically\s+charged`)
+//
+// The "s" flag is there for the same reason and matters just as much. Half of
+// what this reads is pdftotext's output, which wraps the page's lines wherever
+// the layout did, so the filler routinely contains a newline -- and RE2's "."
+// does not cross one without it. Without the flag "Der Betrag wird am
+// 15.09.2026\nvon Ihrem Konto abgebucht" reads as an invoice nobody has paid,
+// which is exactly the false reminder this whole file is arranged to prevent.
+var unanchoredDebitRE = regexp.MustCompile(`(?is)(?:wird|werden).{0,60}?(?:abgebucht|eingezogen)|buchen\s+wir.{0,60}?\bab\b|ziehen\s+wir.{0,60}?\bein\b|per\s+sepa-?lastschrift|will\s+be\s+(?:automatically\s+)?(?:charged|debited)|automatically\s+charged`)
 
 // invoiceSettlement works out who moves the money.
 //

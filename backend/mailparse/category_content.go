@@ -345,17 +345,28 @@ func (s *categoryScan) addFile(filename, mediaType string) {
 // A part too large for the bound is skipped rather than truncated: half a PDF
 // is not a smaller PDF, and handing a truncated one to an extractor produces
 // either nothing or, worse, a page of text without the total on it.
+//
+// Every way out of here that skips a document marks the scan as incomplete, and
+// that is not bookkeeping -- it is the whole safety rule. droppedFile is what
+// makes scanMessageContent report the scan as partial, and a partial scan is
+// forbidden from recording an unpaid invoice (syncer.invoiceFromScan). A
+// document skipped silently would leave the scan calling itself complete while
+// the one page saying the bill was already collected went unread, which is the
+// false reminder this feature must not produce.
 func (s *categoryScan) addDocument(filename, mediaType string, header textproto.MIMEHeader, body io.Reader) {
 	if len(s.docs) >= maxInvoiceDocuments {
+		s.droppedFile = true
 		return
 	}
 	// One byte past the bound distinguishes "exactly the limit" from "the limit
 	// and more to come".
 	data, err := io.ReadAll(io.LimitReader(decodeTransfer(header, body), maxInvoiceDocumentBytes+1))
 	if err != nil && !isTolerableEOF(err) && len(data) == 0 {
+		s.droppedFile = true
 		return
 	}
 	if len(data) == 0 || len(data) > maxInvoiceDocumentBytes {
+		s.droppedFile = true
 		return
 	}
 	file := Attachment{Filename: filename, ContentType: mediaType, Data: data}
