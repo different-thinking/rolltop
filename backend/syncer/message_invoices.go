@@ -78,19 +78,6 @@ func (s *Service) ScanPendingInvoicesForUser(ctx context.Context, userID int64, 
 // invoiceInStoredMessage reads one candidate's stored message. The second
 // return is false when there was nothing to read, which is a message to stamp
 // rather than one to record an empty answer for.
-//
-// A scan that stopped at its budget is treated differently here than in the
-// parcel pass, and the difference is the whole point of this feature. A parcel
-// is an answer that can only be missing, never wrong, so a truncated scan's
-// findings are kept. A bill can be wrong in a way that costs the reader
-// something: the message the scan did not reach may be the very PDF saying the
-// money was already taken by direct debit, and recording an open invoice on
-// that evidence puts a reminder in the header for money nobody owes.
-//
-// So a truncated scan may report a settled bill -- which raises nothing and can
-// only close a row -- and never an open one. What it drops is an invoice in a
-// message too large to read to the end, which the fetch path had in hand
-// anyway; what it avoids is the one failure this feature must not have.
 func (s *Service) invoiceInStoredMessage(userID int64, candidate store.InvoiceCandidate) (*mailparse.InvoiceNotice, bool) {
 	if s.Blobs == nil || candidate.BlobPath == "" {
 		return nil, false
@@ -104,8 +91,28 @@ func (s *Service) invoiceInStoredMessage(userID int64, candidate store.InvoiceCa
 	if err != nil {
 		return nil, false
 	}
-	if notice != nil && !complete && notice.Status != mailparse.InvoicePaid {
-		return nil, true
+	return invoiceFromScan(notice, complete), true
+}
+
+// invoiceFromScan decides what a scan's answer is worth once it is known
+// whether the scan reached the end of the message.
+//
+// This is where the invoice pass parts company with the parcel one, and the
+// difference is the whole point of the feature. A parcel is an answer that can
+// only be missing, never wrong, so a truncated scan's findings are kept. A bill
+// can be wrong in a way that costs the reader something: the part the scan did
+// not reach may be the very PDF saying the money was already taken by direct
+// debit, and recording an open invoice on that evidence puts a reminder in the
+// header for money nobody owes.
+//
+// So a truncated scan may report a settled bill -- which raises nothing and can
+// only close a row that is already there -- and never an open one. What that
+// drops is an invoice in a message too large to read to the end, which the
+// fetch path had the whole of in hand anyway; what it avoids is the one failure
+// this feature must not have.
+func invoiceFromScan(notice *mailparse.InvoiceNotice, complete bool) *mailparse.InvoiceNotice {
+	if notice == nil || complete || notice.Status == mailparse.InvoicePaid {
+		return notice
 	}
-	return notice, true
+	return nil
 }

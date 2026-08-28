@@ -1,6 +1,8 @@
-# Rechnungs-Fälligkeiten: was sich vom Paket-Feature übertragen lässt
+# Rechnungs-Fälligkeiten
 
-Stand: 2026-08-28. Untersuchung, kein Umsetzungsprotokoll.
+Stand: 2026-08-28. Umgesetzt; dieses Dokument beschreibt, was gebaut wurde und
+warum es so entschieden ist. Die Untersuchung, aus der es hervorging, steht
+weiter unten unverändert — sie erklärt den Bauplan, dem der Code folgt.
 
 Die Frage: Pakete werden aus der Post mitgelesen und als eigene Übersicht mit
 Erinnerung ("kommt heute") geführt. Lässt sich derselbe Bau für Rechnungen
@@ -16,6 +18,89 @@ sind wirklich neu — die Bezahlt-Erkennung und das Lesen des PDF-Anhangs — un
 das zweite ist billiger als es aussieht, weil die Infrastruktur dafür schon im
 Haus ist: `Attachment.SearchableText()` jagt PDF-Anhänge für die Suche bereits
 durch `pdftotext` (poppler-utils sind im Image).
+
+## Was tatsächlich gebaut wurde
+
+| Datei | Rolle |
+| --- | --- |
+| `backend/mailparse/dates.go` | Die Datums-Maschinerie, aus `delivery.go` herausgezogen und jetzt geteilt. Pakete und Rechnungen lesen dieselben Schreibweisen; nur die Ankerwörter und die Fensterbreite gehören dem jeweiligen Feature. Das Verhalten der Paket-Extraktion ist dabei unverändert geblieben. |
+| `backend/mailparse/invoice_due.go` | Der Extraktor: Fälligkeit, Betrag, Nummer, Zahlungsweg, Mahnstufe, Status. |
+| `backend/mailparse/invoice_structured.go` | XRechnung und ZUGFeRD/Factur-X, gelesen über die lokalen Elementnamen statt über zwei modellierte Schemata. |
+| `backend/mailparse/pdf_embedded.go` | Das eingebettete XML aus einem hybriden PDF bergen — ohne PDF-Parser, durch begrenztes Scannen der Streams. |
+| `backend/store/invoices.go` | Eine Zeile pro Rechnung, die Mails daran, der Upsert und die Leseabfragen. |
+| `backend/syncer/message_invoices.go` | Der Backfill über gespeicherte Post. |
+| `backend/web/api_invoices.go` | `/api/invoices`, `/api/invoices/due`, die Korrekturen. |
+| `frontend/src/features/invoices/` | Die Ansicht, der Header-Chip, die Pille an der Mailzeile. |
+
+### Die vier Entscheidungen, die das Verhalten bestimmen
+
+**1. Bezahlt schlägt zu überweisen, Mahnung schlägt beides.** Eine Erinnerung
+für Geld, das niemand schuldet, steht auf jeder Seite, die der Leser öffnet, und
+lässt sich nur von Hand wegräumen; eine verpasste Rechnung ist eine Zeile in der
+Liste, die er trotzdem findet. Die Reihenfolge in `invoiceStatus` folgt genau
+dieser Asymmetrie. Die eine Ausnahme ist die Mahnung: wer schreibt, dass das Geld
+nie ankam, hat die Frage entschieden — egal, was auf der ursprünglichen Rechnung
+über den Zahlungsweg stand.
+
+**2. Zahlungsarten zählen nur neben einem Anker.** Jeder Shop-Footer listet
+PayPal, Kreditkarte und Lastschrift als das, was er akzeptiert. Ein Wort allein
+sagt also nichts; erst „Zahlungsart:", „bezahlt mit", „paid via" davor macht es
+zur Aussage über *diese* Rechnung. Ohne diese Regel hätte ein einziger Footer
+jede echte Erinnerung im Postfach verstummen lassen. Innerhalb des Fensters
+gewinnt die Methode, die dem Anker am nächsten steht — nicht eine feste
+Rangfolge, sonst liest „Zahlungsart: PayPal. Wir akzeptieren außerdem …
+Lastschrift" als Lastschrift.
+
+**3. Mahnstufen kommen aus dem Betreff, nicht aus dem Body.** Auf der Rückseite
+jeder zweiten Rechnung steht „bei Zahlungsverzug werden Mahngebühren fällig".
+Aus dem Body gelesen wäre damit jede Rechnung eine Mahnung. Eine Mahnung sagt im
+Betreff, was sie ist — das ist der Zweck, sie zu verschicken. Aus dem Body werden
+nur ein paar unmissverständliche Sätze gelesen („konnten wir bis heute keinen
+Zahlungseingang feststellen"), die kein Kleingedrucktes verwendet. Spiegelbildlich
+wird „bereits bezahlt" ignoriert, wenn ein „falls" oder „sollten" davorsteht —
+das ist die Entlastungsklausel am Fuß jedes Mahnschreibens.
+
+**4. Ein abgeschnittener Scan darf nie Alarm auslösen.** Der Backfill liest
+gespeicherte Post mit einem Byte-Budget. Bricht er ab, kann genau die Seite
+gefehlt haben, auf der steht, dass abgebucht wurde. Also darf ein unvollständiger
+Durchlauf eine Rechnung als *erledigt* melden — das schließt höchstens eine Zeile
+— aber nie als *offen*. Was dabei verloren geht, hatte der Fetch-Pfad ohnehin
+vollständig in der Hand.
+
+### Identität: warum `(issuer, reference)`
+
+Eine Sendungsnummer hat weltweit genau ein Carrier vergeben; „2026-001" vergibt
+jeder zweite Absender im Postfach jeden Januar. Der Schlüssel ist deshalb die
+Absender-Domäne plus eine Referenz — und zwar die registrierbare Domäne, damit
+`billing.firma.de` und `mail.firma.de` derselbe Aussteller sind. Die Referenz ist
+die Rechnungsnummer, wo eine stand; sonst der Betrag; sonst, nur bei Mahnungen,
+der Tag der Mail. Die letzte Stufe ist bewusst grob: lieber zwei Zeilen, die
+beide erinnern, als eine verschluckte Mahnung.
+
+### Was es kostet
+
+Der Backfill ist der einzige Durchlauf im Haus, der Anhangs-Bytes öffnet. Bezahlt
+wird das durch die Auswahl: gelesen wird nur, was die Kategorie schon als
+Papierkram abgelegt hat, in Stapeln zu 50 statt 200. Auf dem Fetch-Pfad kostet
+das PDF nichts extra — `Attachment.SearchableText()` ist jetzt memoisiert, sodass
+`pdftotext` je Anhang einmal läuft, für den Suchindex und den Rechnungsleser
+gemeinsam.
+
+### Grenzen, die bleiben
+
+- **Kein OCR.** Eine eingescannte Rechnung ohne Textebene liefert keine Frist.
+  Sie erscheint ohne Datum in der offenen Gruppe und löst keinen Alarm aus; die
+  Frist lässt sich in der Zeile von Hand nachtragen.
+- **Blob-Retention.** Der Backfill erreicht nur, was noch als Rohnachricht auf
+  der Platte liegt — bei Voreinstellung die letzten vierzehn Tage.
+- **Der Horizont.** Offene Rechnungen älter als 180 Tage fallen aus der Liste,
+  damit ein Erstsync nicht zwei Jahre alter Post als offene Posten präsentiert.
+  Gemahntes ist davon ausgenommen: da schreibt noch jemand.
+
+---
+
+Alles Folgende ist die ursprüngliche Untersuchung.
+
 
 ## Der Bauplan, der sich überträgt
 
