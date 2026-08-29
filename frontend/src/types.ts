@@ -1067,8 +1067,8 @@ export type MessageInvoiceSummary = {
   currency: string;
   status: InvoiceStatus;
   settlement: InvoiceSettlement;
-  /** dunning_level is 0 for an ordinary invoice, 1 for a Zahlungserinnerung,
-   * 2 for a Mahnung and 3 for a last warning. */
+  /** dunning_level is 0 for an ordinary invoice, 1 for a payment reminder,
+   * 2 for an overdue notice and 3 for a last warning. */
   dunning_level: number;
 };
 

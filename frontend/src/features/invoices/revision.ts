@@ -6,7 +6,7 @@
  * -- and they read the same rows. The list already refreshes on the mail
  * generation, which is what a sync bumps; a correction the reader makes is the
  * other way those rows change, and nothing else tells the chip about it. So
- * ticking off a bill would otherwise leave "Heute fällig" standing in the
+ * ticking off a bill would otherwise leave "Due: today" standing in the
  * header until the next sync or reload.
  *
  * This is the parcel list's revision counter with a different name rather than a

@@ -6,7 +6,7 @@
  * -- and they read the same rows. The list already refreshes on the mail
  * generation, which is what a sync bumps; a correction the reader makes is the
  * other way those rows change, and nothing was telling the chip about it. So
- * marking a parcel arrived left "Heute: DHL" standing in the header until the
+ * marking a parcel arrived left "Today: DHL" standing in the header until the
  * next sync or reload.
  *
  * This is deliberately a counter and not the parcels themselves. What the chip

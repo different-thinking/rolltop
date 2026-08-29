@@ -944,39 +944,39 @@ function Topbar({
 }
 
 // deliveryChipLabel names one parcel by its carrier and several by their count.
-// "DHL" is more use at a glance than "1 Paket": it is the thing the reader is
+// "DHL" is more use at a glance than "1 parcel": it is the thing the reader is
 // waiting for, and it is what the doorbell will say.
 function deliveryChipLabel(expected: ExpectedDeliveries): string {
-  if (expected.count === 1) return `Heute: ${expected.carrierLabel || "1 Paket"}`;
-  return `Heute: ${expected.count.toLocaleString()} Pakete`;
+  if (expected.count === 1) return `Today: ${expected.carrierLabel || "1 parcel"}`;
+  return `Today: ${expected.count.toLocaleString()} parcels`;
 }
 
 function deliveryChipTitle(expected: ExpectedDeliveries): string {
   const what = expected.count === 1
-    ? `Ein Paket${expected.carrierLabel ? ` von ${expected.carrierLabel}` : ""} wird heute erwartet`
-    : `${expected.count.toLocaleString()} Pakete werden heute erwartet`;
-  return `${what} - alle Sendungen ansehen`;
+    ? `A parcel${expected.carrierLabel ? ` from ${expected.carrierLabel}` : ""} is expected today`
+    : `${expected.count.toLocaleString()} parcels are expected today`;
+  return `${what} - see every shipment`;
 }
 
 // invoiceChipLabel says the one thing that changes a reader's afternoon first.
-// Being chased outranks being due, because a dunning letter is a deadline that
+// Being chased outranks being due, because an overdue notice is a deadline that
 // has already passed and somebody has noticed.
 function invoiceChipLabel(due: DueInvoices): string {
-  if (due.chased > 0) return due.chased === 1 ? "1 Mahnung" : `${due.chased.toLocaleString()} Mahnungen`;
-  if (due.count === 1) return `Fällig: ${due.issuer || "1 Rechnung"}`;
-  return `${due.count.toLocaleString()} Rechnungen fällig`;
+  if (due.chased > 0) return due.chased === 1 ? "1 overdue notice" : `${due.chased.toLocaleString()} overdue notices`;
+  if (due.count === 1) return `Due: ${due.issuer || "1 invoice"}`;
+  return `${due.count.toLocaleString()} invoices due`;
 }
 
 function invoiceChipTitle(due: DueInvoices): string {
-  // "Fällig" here means due today or already overdue: unlike a parcel, a bill
+  // "Due" here means due today or already overdue: unlike a parcel, a bill
   // whose day has passed has not stopped being today's business.
   const what = due.count === 1
-    ? `Eine Rechnung${due.issuer ? ` von ${due.issuer}` : ""} ist fällig`
-    : `${due.count.toLocaleString()} Rechnungen sind fällig`;
+    ? `An invoice${due.issuer ? ` from ${due.issuer}` : ""} is due`
+    : `${due.count.toLocaleString()} invoices are due`;
   const chased = due.chased > 0
-    ? `, davon ${due.chased.toLocaleString()} angemahnt`
+    ? `, ${due.chased.toLocaleString()} of them chased`
     : "";
-  return `${what}${chased} - alle Rechnungen ansehen`;
+  return `${what}${chased} - see every invoice`;
 }
 
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,
@@ -1403,8 +1403,8 @@ function Sidebar({
 const organizerLinks: { route: OrganizerRoute; label: string; icon: string; gap?: boolean }[] = [
   { route: "calendar", label: "Calendar", icon: "calendar" },
   { route: "contacts", label: "Contacts", icon: "group" },
-  { route: "deliveries", label: "Pakete", icon: "package", gap: true },
-  { route: "invoices", label: "Rechnungen", icon: "receipt" }
+  { route: "deliveries", label: "Parcels", icon: "package", gap: true },
+  { route: "invoices", label: "Invoices", icon: "receipt" }
 ];
 
 /**

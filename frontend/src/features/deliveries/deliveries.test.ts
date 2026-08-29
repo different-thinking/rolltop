@@ -73,34 +73,33 @@ describe("groupShipments", () => {
 
 describe("dayLabel", () => {
   it("says the days around today in words", () => {
-    expect(dayLabel(today, today)).toBe("Heute");
-    expect(dayLabel("2026-09-04", today)).toBe("Morgen");
-    expect(dayLabel("2026-09-02", today)).toBe("Gestern");
+    expect(dayLabel(today, today)).toBe("Today");
+    expect(dayLabel("2026-09-04", today)).toBe("Tomorrow");
+    expect(dayLabel("2026-09-02", today)).toBe("Yesterday");
   });
 
   it("names a weekday inside the coming week and a date beyond it", () => {
-    expect(dayLabel("2026-09-07", today)).toContain("Montag");
-    expect(dayLabel("2026-10-01", today)).toBe("01.10.2026");
+    expect(dayLabel("2026-09-07", today)).toContain("Monday");
+    expect(dayLabel("2026-10-01", today)).toBe("Oct 1, 2026");
   });
 
   it("says so when nothing was announced", () => {
-    expect(dayLabel("", today)).toBe("Kein Termin genannt");
+    expect(dayLabel("", today)).toBe("No day announced");
   });
 });
 
 describe("compactDay", () => {
   it("keeps the near days as the adverbs they are", () => {
-    expect(compactDay(today, today)).toBe("heute");
-    expect(compactDay("2026-09-04", today)).toBe("morgen");
+    expect(compactDay(today, today)).toBe("today");
+    expect(compactDay("2026-09-04", today)).toBe("tomorrow");
   });
 
-  // A weekday is a noun in German, so it is capitalised where "heute" is not.
   it("names a weekday inside the coming week", () => {
-    expect(compactDay("2026-09-07", today)).toMatch(/^Mo\.? 07\.09\.$/);
+    expect(compactDay("2026-09-07", today)).toBe("Mon Sep 7");
   });
 
   it("gives only a date past the coming week, so the chip stays short", () => {
-    expect(compactDay("2026-10-01", today)).toBe("01.10.");
+    expect(compactDay("2026-10-01", today)).toBe("Oct 1");
   });
 });
 
@@ -111,15 +110,15 @@ describe("shipmentChipText", () => {
   };
 
   it("leads with the day, which is what a reader scans for", () => {
-    expect(shipmentChipText(base, today)).toBe("Paket: heute");
+    expect(shipmentChipText(base, today)).toBe("Parcel: today");
   });
 
   it("counts several parcels in one message", () => {
-    expect(shipmentChipText({ ...base, count: 3 }, today)).toBe("3 Pakete: heute");
+    expect(shipmentChipText({ ...base, count: 3 }, today)).toBe("3 parcels: today");
   });
 
   it("falls back to the status when no day was announced", () => {
-    expect(shipmentChipText({ ...base, expected_date: "" }, today)).toBe("Paket angekündigt");
+    expect(shipmentChipText({ ...base, expected_date: "" }, today)).toBe("Parcel announced");
   });
 });
 

@@ -231,7 +231,7 @@ func TestDeliveryTrackingURL(t *testing.T) {
 	if got := DeliveryCarrierLabel("gls"); got != "GLS" {
 		t.Errorf("label = %q", got)
 	}
-	if got := DeliveryCarrierLabel(""); got != "Paket" {
+	if got := DeliveryCarrierLabel(""); got != "Parcel" {
 		t.Errorf("label for an unclaimed number = %q", got)
 	}
 }
