@@ -1345,7 +1345,7 @@ function Sidebar({
             </div>
           );
         })}
-        <div className="side-section">Calendar</div>
+        <div className="side-section">Organizer</div>
         <a
           href="/calendar"
           className={`folder ${currentPath === "/calendar" || currentPath.startsWith("/calendar/") ? "active" : ""}`}
@@ -1356,7 +1356,6 @@ function Sidebar({
             Calendar
           </span>
         </a>
-        <div className="side-section">Pakete</div>
         <a
           href="/deliveries"
           className={`folder ${currentPath === "/deliveries" ? "active" : ""}`}
@@ -1367,7 +1366,6 @@ function Sidebar({
             Pakete
           </span>
         </a>
-        <div className="side-section">Rechnungen</div>
         <a
           href="/invoices"
           className={`folder ${currentPath === "/invoices" ? "active" : ""}`}
@@ -1378,7 +1376,6 @@ function Sidebar({
             Rechnungen
           </span>
         </a>
-        <div className="side-section">Address Book</div>
         <a
           href="/contacts"
           className={`folder ${currentPath === "/contacts" ? "active" : ""}`}
