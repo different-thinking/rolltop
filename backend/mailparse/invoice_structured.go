@@ -36,6 +36,11 @@ const (
 	// Both schemas are about ten deep; the bound is what stops a hand-built
 	// document from turning the path stack into a memory cost.
 	maxStructuredInvoiceDepth = 40
+	// maxStructuredFieldBytes bounds one element's accumulated text. Every field
+	// read here is a number, a date or a currency code; an element longer than
+	// this is not one of them, and collecting it whole would let a hand-built
+	// document spend memory through a reader that is otherwise all bounds.
+	maxStructuredFieldBytes = 4096
 )
 
 // structuredInvoice is what one e-invoice XML states, in this package's own
@@ -192,6 +197,14 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 	// cap is not one this reads correctly either way, but it must not be read
 	// *wrongly*.
 	depth := 0
+	// An element's text is collected and read once, when its end tag arrives,
+	// rather than as each chunk of character data turns up. The decoder is
+	// entitled to split one element's text across several CharData tokens --
+	// it does so at an entity, so "Rechnung &amp; Co" arrives in three pieces --
+	// and every field here is written first-one-wins. Acting per token would
+	// therefore store "Rechnung" and silently drop the rest, which for an
+	// invoice number is a reference that matches nothing.
+	var text strings.Builder
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -204,6 +217,10 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 			if depth <= maxStructuredInvoiceDepth {
 				path = append(path, name)
 			}
+			// Whatever stood before a child element belongs to no field: these
+			// documents put values in leaves, and the mixed content that would
+			// make this wrong does not occur in either schema.
+			text.Reset()
 			if isStructuredInvoiceRoot(name) {
 				out.Found = true
 			}
@@ -213,17 +230,25 @@ func parseStructuredInvoice(data []byte) (structuredInvoice, bool) {
 				out.Currency = attributeValue(element, "currencyid")
 			}
 		case xml.CharData:
-			value := strings.TrimSpace(string(element))
 			// Text below the cap is skipped rather than attributed to whatever
 			// the truncated path happens to end in.
-			if value == "" || len(path) == 0 || depth > maxStructuredInvoiceDepth {
+			if len(path) == 0 || depth > maxStructuredInvoiceDepth {
 				continue
 			}
-			applyStructuredField(&out, path, value)
+			// The builder is bounded for the same reason everything else here
+			// is: this is an attachment from a stranger, and one element is
+			// entitled to be as long as the document.
+			if text.Len() < maxStructuredFieldBytes {
+				text.Write(element)
+			}
 		case xml.EndElement:
 			if depth <= maxStructuredInvoiceDepth && len(path) > 0 {
+				if value := strings.TrimSpace(text.String()); value != "" {
+					applyStructuredField(&out, path, value)
+				}
 				path = path[:len(path)-1]
 			}
+			text.Reset()
 			if depth > 0 {
 				depth--
 			}

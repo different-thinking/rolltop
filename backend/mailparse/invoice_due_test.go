@@ -487,3 +487,23 @@ func TestExtractInvoiceNoticeResolvesAYearlessDeadlineBackwards(t *testing.T) {
 		t.Errorf("due date = %q, want 2026-12-28", notice.DueDate)
 	}
 }
+
+// Days are counted in whole calendar days, not in elapsed hours. A fortnight
+// spanning a summer-time change is 239 or 241 hours, and reading that as a day
+// count puts a deadline one day inside a bound outside it.
+func TestInvoiceDeadlineSurvivesASummerTimeChange(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("zone data unavailable: %v", err)
+	}
+	// The clocks go forward on 29 March 2026, between these two days.
+	sent := time.Date(2026, time.April, 5, 9, 0, 0, 0, berlin)
+	if got := daysBetween(startOfDay(sent), 2026, time.March, 26); got != -10 {
+		t.Errorf("daysBetween = %d, want -10 whole calendar days", got)
+	}
+	// And forward across the autumn change, when a day is 25 hours long.
+	autumn := time.Date(2026, time.October, 20, 9, 0, 0, 0, berlin)
+	if got := daysBetween(startOfDay(autumn), 2026, time.October, 30); got != 10 {
+		t.Errorf("daysBetween = %d, want 10", got)
+	}
+}

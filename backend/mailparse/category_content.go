@@ -361,7 +361,13 @@ func (s *categoryScan) addDocument(filename, mediaType string, header textproto.
 	// One byte past the bound distinguishes "exactly the limit" from "the limit
 	// and more to come".
 	data, err := io.ReadAll(io.LimitReader(decodeTransfer(header, body), maxInvoiceDocumentBytes+1))
-	if err != nil && !isTolerableEOF(err) && len(data) == 0 {
+	// Whatever was read before a real error is discarded rather than kept. Part
+	// of a PDF is not a smaller PDF: an extractor hands back nothing useful for
+	// one, and the page that says the bill was already collected is as likely to
+	// be in the half that did not arrive as in the half that did. The bytes
+	// already in hand are exactly what makes that tempting to keep, which is why
+	// the length is deliberately not part of this test.
+	if err != nil && !isTolerableEOF(err) {
 		s.droppedFile = true
 		return
 	}

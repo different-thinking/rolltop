@@ -127,3 +127,83 @@ func TestParseStructuredInvoiceSurvivesDeepNesting(t *testing.T) {
 		t.Errorf("payment means = %q, want 58", parsed.PaymentMeans)
 	}
 }
+
+// The decoder hands one element's text back in several CharData tokens when a
+// CDATA section or a comment interrupts it -- an entity does not, the decoder
+// joins those itself. Reading each token as it came stored the first and
+// dropped the rest, which for an invoice number is a reference matching
+// nothing.
+func TestParseStructuredInvoiceJoinsSplitCharData(t *testing.T) {
+	const ubl = `<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">` +
+		`<ID>RE-<![CDATA[2026]]>-777</ID><DueDate>2026-<!-- generated -->09-30</DueDate>` +
+		`<PaymentMeans><PaymentMeansCode>58</PaymentMeansCode></PaymentMeans>` +
+		`</Invoice>`
+	parsed, ok := parseStructuredInvoice([]byte(ubl))
+	if !ok {
+		t.Fatal("want the document to parse")
+	}
+	if parsed.Number != "RE-2026-777" {
+		t.Errorf("number = %q, want RE-2026-777 -- the whole element, not its first fragment", parsed.Number)
+	}
+	if parsed.DueDate != "2026-09-30" {
+		t.Errorf("due date = %q, want 2026-09-30", parsed.DueDate)
+	}
+}
+
+// Character data before a child element belongs to no field, and must not be
+// mistaken for the parent's value.
+func TestParseStructuredInvoiceIgnoresTextAroundChildren(t *testing.T) {
+	const ubl = `<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">` +
+		"\n  <ID>RE-1</ID>\n  <LegalMonetaryTotal>\n    <PayableAmount currencyID=\"EUR\">10.00</PayableAmount>\n  </LegalMonetaryTotal>\n" +
+		`</Invoice>`
+	parsed, ok := parseStructuredInvoice([]byte(ubl))
+	if !ok {
+		t.Fatal("want the document to parse")
+	}
+	if parsed.Number != "RE-1" {
+		t.Errorf("number = %q, want RE-1", parsed.Number)
+	}
+	if parsed.Amount != "10.00" {
+		t.Errorf("amount = %q, want 10.00", parsed.Amount)
+	}
+}
+
+// A part whose encoding breaks partway leaves bytes in hand and an error beside
+// them. Keeping those bytes and calling the scan complete is the failure this
+// feature must not have: the page saying the bill was already collected is as
+// likely to be in the half that did not decode as in the half that did.
+func TestScanInvoiceContentReportsAPartiallyDecodedAttachment(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: Buchhaltung <billing@firma.example.de>",
+		"Subject: Ihre Rechnung 4711",
+		"Date: Thu, 03 Sep 2026 09:12:00 +0200",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="b1"`,
+		"",
+		"--b1",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"Zahlbar bis 17.09.2026. IBAN DE02120300000000202051.",
+		"--b1",
+		`Content-Type: application/pdf; name="Rechnung.pdf"`,
+		`Content-Disposition: attachment; filename="Rechnung.pdf"`,
+		"Content-Transfer-Encoding: base64",
+		"",
+		// Valid base64, then a line that cannot be decoded.
+		"JVBERi0xLjcKJUVPRgo=",
+		"!!!! not base64 !!!!",
+		"--b1--",
+		"",
+	}, "\r\n")
+
+	_, _, docs, complete, err := scanInvoiceContent(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("want a part that failed to decode dropped, got %d documents", len(docs))
+	}
+	if complete {
+		t.Error("want a failed decode to mark the scan incomplete")
+	}
+}

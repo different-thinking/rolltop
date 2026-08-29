@@ -212,10 +212,7 @@ func dateWithOptionalYear(day int, month time.Month, yearText string, sentDay ti
 		if !ok {
 			continue
 		}
-		distance := daysBetween(sentDay, year, month, day)
-		if distance < 0 {
-			distance = -distance
-		}
+		distance := abs(daysBetween(sentDay, year, month, day))
 		// Ties keep the earlier candidate, which is the sending year: a date
 		// equidistant in both directions is the one the sender is writing in.
 		if !found || distance < nearest {
@@ -228,9 +225,17 @@ func dateWithOptionalYear(day int, month time.Month, yearText string, sentDay ti
 // daysBetween is how far a candidate day is from the message, in whole days and
 // signed. It rebuilds the date rather than reading back the string
 // plausibleDate returned, which no longer says which year it belongs to.
+//
+// Both days are rebuilt in UTC, and that is not tidiness. What is wanted is a
+// count of calendar days, and subtracting two instants in a zone that keeps
+// summer time does not give one: a fortnight spanning a transition is 239 or
+// 241 hours, and the truncating division then reads it as nine days rather than
+// ten. UTC has no transitions, so the difference between two midnights in it is
+// always a whole multiple of a day.
 func daysBetween(sentDay time.Time, year int, month time.Month, day int) int {
-	date := time.Date(year, month, day, 0, 0, 0, 0, sentDay.Location())
-	return int(date.Sub(sentDay).Hours() / 24)
+	from := time.Date(sentDay.Year(), sentDay.Month(), sentDay.Day(), 0, 0, 0, 0, time.UTC)
+	to := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return int(to.Sub(from).Hours() / 24)
 }
 
 // plausibleDate rejects what the calendar does not hold and what is too far
@@ -245,7 +250,10 @@ func plausibleDate(year int, month time.Month, day int, sentDay time.Time, bound
 	if date.Year() != year || date.Month() != month || date.Day() != day {
 		return "", false
 	}
-	distance := int(date.Sub(sentDay).Hours() / 24)
+	// The same calendar-day count the year choice uses, and for the same reason
+	// it has to be one: measuring this in the sender's own zone puts a date one
+	// day inside the bound outside it whenever summer time changed in between.
+	distance := daysBetween(sentDay, year, month, day)
 	if distance < bounds.past || distance > bounds.future {
 		return "", false
 	}
@@ -298,6 +306,13 @@ func pad2(value int) string {
 		return "0" + strconv.Itoa(value)
 	}
 	return strconv.Itoa(value)
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func atoi(value string) int {
