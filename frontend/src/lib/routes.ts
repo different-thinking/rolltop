@@ -138,9 +138,12 @@ export function organizerRoute(path: string, route: OrganizerRoute): boolean {
   return path === claim.url || (claim.nested && path.startsWith(`${claim.url}/`));
 }
 
+/** The names above, read once: mailRouteView asks this on every render. */
+const organizerRouteNames = Object.keys(organizerRoutes) as OrganizerRoute[];
+
 /** anyOrganizerRoute reports whether a path is inside any of them. */
 function anyOrganizerRoute(path: string): boolean {
-  return (Object.keys(organizerRoutes) as OrganizerRoute[]).some((route) => organizerRoute(path, route));
+  return organizerRouteNames.some((route) => organizerRoute(path, route));
 }
 
 /**
