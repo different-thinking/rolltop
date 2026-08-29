@@ -127,6 +127,8 @@ export type Message = {
   category?: string;
   snippet: string;
   annotations?: MessageAnnotation[];
+  /** invoice is absent for the mail that is not about a bill. */
+  invoice?: MessageInvoiceSummary;
   /** shipment is absent for the mail that is not about a parcel, which is
    * nearly all of it. */
   shipment?: MessageShipmentSummary;
@@ -1042,6 +1044,67 @@ export type Shipment = {
   status: "announced" | "out_for_delivery" | "delivered";
   manual_status: "" | "delivered" | "dismissed";
   messages: ShipmentMessage[];
+};
+
+/** InvoiceStatus is what a bill counts as. "open" is money the reader still has
+ * to send; "paid" covers everything with nothing left to do -- settled, taken
+ * by direct debit, charged to a card, or a credit note. */
+export type InvoiceStatus = "open" | "paid";
+
+/** InvoiceSettlement is who moves the money, which is a different question from
+ * whether it has moved. It is what tells an invoice the reader must act on from
+ * one that settles itself. */
+export type InvoiceSettlement = "" | "transfer" | "direct_debit" | "card" | "wallet";
+
+/** MessageInvoiceSummary is the bill one message is about, as the message
+ * payload carries it. */
+export type MessageInvoiceSummary = {
+  id: number;
+  issuer: string;
+  number: string;
+  due_date: string;
+  amount: string;
+  currency: string;
+  status: InvoiceStatus;
+  settlement: InvoiceSettlement;
+  /** dunning_level is 0 for an ordinary invoice, 1 for a Zahlungserinnerung,
+   * 2 for a Mahnung and 3 for a last warning. */
+  dunning_level: number;
+};
+
+/** InvoiceMessage is one mail that named a bill, as the invoice list links back
+ * to it. */
+export type InvoiceMessage = {
+  id: number;
+  mailbox_id: number;
+  subject: string;
+  from: string;
+  date: string;
+};
+
+/** Invoice is one bill the mail says is owed, with every message that mentioned
+ * it. */
+export type Invoice = {
+  id: number;
+  /** issuer is the sender's domain, which is what an invoice number is unique
+   * within -- unlike a tracking number, which is unique in the world. */
+  issuer: string;
+  /** number is empty for a bill whose document never printed one. */
+  number: string;
+  /** due_date is the day it counts as due, the reader's own entry included, or
+   * empty for a bill nobody dated. manual_due_date is that entry alone. */
+  due_date: string;
+  manual_due_date: string;
+  /** amount is normalized to "1234.56", or empty when no total was readable. */
+  amount: string;
+  currency: string;
+  /** status is what the bill counts as, the reader's own answer included.
+   * manual_status is that answer alone: "" when the mail is the only source. */
+  status: InvoiceStatus;
+  manual_status: "" | "paid" | "dismissed";
+  settlement: InvoiceSettlement;
+  dunning_level: number;
+  messages: InvoiceMessage[];
 };
 
 /** CalendarSummary is one subscribed Google calendar. */

@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -55,12 +56,41 @@ type Attachment struct {
 	ContentID   string
 	IsInline    bool
 	Data        []byte
+	// extracted memoizes SearchableText across the readers that want it. Two of
+	// them now do -- the search index and the invoice reader -- and for a PDF
+	// the answer costs a temporary file and an external process with a
+	// ten-second budget, which is not a thing to pay for twice per message.
+	//
+	// It is a pointer because the callers range over parsed.Files by value, so
+	// each of them holds a copy of the struct; a plain field would memoize into
+	// the copy and be thrown away with it.
+	extracted *extractedText
+}
+
+// extractedText is one attachment's text, computed at most once however many
+// copies of the Attachment ask for it.
+type extractedText struct {
+	once sync.Once
+	text string
 }
 
 // SearchableText extracts bounded text from attachments that are safe and useful
 // to index. Binary files return an empty string so attachment bodies are not kept
 // as separate blobs just for search.
+//
+// The answer is memoized where the parser prepared somewhere to keep it. An
+// Attachment built anywhere else -- a test, a plugin -- has nowhere to memoize
+// into and simply extracts each time, which is what it did before there was a
+// second reader.
 func (a Attachment) SearchableText() string {
+	if a.extracted == nil {
+		return a.searchableText()
+	}
+	a.extracted.once.Do(func() { a.extracted.text = a.searchableText() })
+	return a.extracted.text
+}
+
+func (a Attachment) searchableText() string {
 	mediaType, _, err := mime.ParseMediaType(a.ContentType)
 	if err != nil {
 		mediaType = strings.ToLower(strings.TrimSpace(a.ContentType))
@@ -133,6 +163,12 @@ type ParsedMessage struct {
 	// the raw message, and blob retention means most of a mailbox no longer has
 	// one to open.
 	Deliveries []DeliveryNotice
+	// Invoice is the bill the message is about, or nil for the overwhelming
+	// majority of mail that is about nothing of the sort. It is read here and
+	// not later for the same retention reason as the two above, and for one
+	// more that is its own: it is the only reading that opens attachment
+	// *bodies*, and the bodies exist only while the message is being parsed.
+	Invoice *InvoiceNotice
 }
 
 // Parse is the indexing/parser entrypoint. It decodes headers, walks MIME parts,
@@ -196,6 +232,62 @@ func (p *ParsedMessage) classify(sent time.Time) {
 	content := p.CategoryContent()
 	p.Category = applyInvoiceEvidence(p.Category, content)
 	p.Deliveries = ExtractDeliveryNotices(content, p.From, sent)
+	// The invoice reading is gated on the category, which the line above has
+	// just settled. That gate is what makes it affordable to read attachment
+	// bodies at all: paperwork is a small fraction of a mailbox, and every
+	// other message pays nothing here beyond the comparison.
+	if p.Category == CategoryInvoices {
+		p.Invoice = ExtractInvoiceNotice(content, p.InvoiceDocuments(), p.From, sent)
+	}
+}
+
+// InvoiceDocuments reduces the attachments to the ones a bill is actually
+// carried in, with their text pulled out. It is exported because the on-demand
+// path builds the same list from a message it re-parsed.
+//
+// The text comes from SearchableText, which is the point: the search index asks
+// the same attachments the same question, and the answer is memoized, so
+// reading an invoice out of a PDF costs a comparison on the fetch path rather
+// than a second run of pdftotext.
+func (p ParsedMessage) InvoiceDocuments() []InvoiceDocument {
+	docs := make([]InvoiceDocument, 0, maxInvoiceDocuments)
+	for _, file := range p.Files {
+		if len(docs) >= maxInvoiceDocuments {
+			break
+		}
+		if !invoiceDocumentCandidate(file.Filename, file.ContentType) {
+			continue
+		}
+		docs = append(docs, InvoiceDocument{
+			Filename:    file.Filename,
+			ContentType: file.ContentType,
+			Text:        file.SearchableText(),
+			Raw:         file.Data,
+		})
+	}
+	return docs
+}
+
+// invoiceDocumentCandidate reports whether an attachment is the kind of file an
+// invoice arrives as. It is the same list categorization grades filenames by,
+// read here to decide what is worth extracting text from rather than what a
+// message is: an image or an archive is neither, whatever it is named.
+func invoiceDocumentCandidate(filename, contentType string) bool {
+	name := strings.ToLower(strings.TrimSpace(filename))
+	mediaType := strings.ToLower(strings.TrimSpace(contentType))
+	if hasAnySuffix(name, invoiceDocumentExtensions) {
+		return true
+	}
+	switch {
+	case strings.Contains(mediaType, "pdf"),
+		strings.Contains(mediaType, "xml"),
+		strings.Contains(mediaType, "officedocument"),
+		strings.Contains(mediaType, "opendocument"),
+		strings.Contains(mediaType, "msword"):
+		return true
+	default:
+		return false
+	}
 }
 
 // ParseDisplayBody is the lighter display path used when a raw message is loaded
@@ -284,6 +376,7 @@ func parsePart(header textproto.MIMEHeader, body io.Reader, parsed *ParsedMessag
 			ContentID:   contentID,
 			IsInline:    isInlineMIMEFile(disposition, mediaType, contentID),
 			Data:        decoded,
+			extracted:   &extractedText{},
 		})
 		return nil
 	}

@@ -32,6 +32,7 @@ import type { RuntimePlugin } from "../../plugins/runtime";
 import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip } from "../deliveries/ShipmentChip";
+import { InvoiceChip } from "../invoices/InvoiceChip";
 import { SnoozeControl } from "./SnoozeControl";
 import { ArchiveBeforeControl, DeleteBeforeControl, EmptyTrashControl } from "./MailListActions";
 
@@ -3349,6 +3350,7 @@ function MessageList({
                 {securityIndicators}
                 {annotationNodes}
                 {msg.shipment ? <ShipmentChip shipment={msg.shipment} /> : null}
+                {msg.invoice ? <InvoiceChip invoice={msg.invoice} /> : null}
                 {attachmentNames.length > 0 ? (
                   <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
                     <Icon name="attach_file" />

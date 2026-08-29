@@ -76,6 +76,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiDeliveriesExpected(w, r)
 	case strings.HasPrefix(path, "deliveries/"):
 		s.apiDeliveryByID(w, r, strings.TrimPrefix(path, "deliveries/"))
+	case path == "invoices":
+		s.apiInvoices(w, r)
+	case path == "invoices/due":
+		s.apiInvoicesDue(w, r)
+	case strings.HasPrefix(path, "invoices/"):
+		s.apiInvoiceByID(w, r, strings.TrimPrefix(path, "invoices/"))
 	case path == "contacts":
 		s.apiContacts(w, r)
 	case strings.HasPrefix(path, "contacts/"):

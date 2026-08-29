@@ -83,6 +83,21 @@ const (
 	// carrier; without this the scan pays for every one of them on every message
 	// fetched. A carrier's own link is not the five hundredth in a message.
 	maxDeliveryLinkCandidates = 200
+	// maxInvoiceScanBytes is the invoice reader's own budget, and it is eight
+	// times the classification one because it is spending it on something else.
+	// Classification reads a stored message to learn a filename and stops; the
+	// invoice reader has to reach the bytes of the PDF, because the sentence
+	// that says a bill was already settled is routinely only in there.
+	//
+	// It is affordable because of what selects the messages it runs on: only
+	// mail the category has already called paperwork, which is a small fraction
+	// of a mailbox, in batches on a background worker.
+	maxInvoiceScanBytes = 8 * 1024 * 1024
+	// maxInvoiceDocumentBytes bounds one attachment the invoice reader decodes.
+	// An invoice PDF is a few hundred kilobytes; something larger than this is
+	// a scan of a bundle, whose text extraction would cost more than the answer
+	// is worth.
+	maxInvoiceDocumentBytes = 4 * 1024 * 1024
 )
 
 // urlRE matches an absolute http(s) URL. Markup is searched with it directly
@@ -180,16 +195,30 @@ func limitCategoryText(value string) string {
 // attachment that names the message, so its answer is allowed to fill an empty
 // category but never to replace one a whole message produced.
 func scanCategoryContent(r io.Reader) (mail.Header, CategoryContent, bool, error) {
-	counted := &countingReader{r: io.LimitReader(r, maxCategoryScanBytes)}
+	header, content, _, complete, err := scanMessageContent(r, maxCategoryScanBytes, false)
+	return header, content, complete, err
+}
+
+// scanInvoiceContent is the same walk with the attachments actually opened. It
+// is a separate entry point rather than a flag on the one above because the two
+// cost entirely different things, and nothing should reach for this one by
+// accident: it decodes document bodies and, for a PDF, runs an external text
+// extractor on each.
+func scanInvoiceContent(r io.Reader) (mail.Header, CategoryContent, []InvoiceDocument, bool, error) {
+	return scanMessageContent(r, maxInvoiceScanBytes, true)
+}
+
+func scanMessageContent(r io.Reader, budget int64, collectDocuments bool) (mail.Header, CategoryContent, []InvoiceDocument, bool, error) {
+	counted := &countingReader{r: io.LimitReader(r, budget)}
 	msg, err := mail.ReadMessage(counted)
 	if err != nil {
-		return nil, CategoryContent{}, false, err
+		return nil, CategoryContent{}, nil, false, err
 	}
 	subject, _ := wordDecoder().DecodeHeader(msg.Header.Get("Subject"))
-	scan := &categoryScan{subject: strings.TrimSpace(subject)}
+	scan := &categoryScan{subject: strings.TrimSpace(subject), collectDocuments: collectDocuments}
 	scan.walk(textproto.MIMEHeader(msg.Header), msg.Body, 0)
-	complete := counted.n < maxCategoryScanBytes && !scan.droppedFile
-	return msg.Header, scan.content(), complete, nil
+	complete := counted.n < budget && !scan.droppedFile
+	return msg.Header, scan.content(), scan.docs, complete, nil
 }
 
 // countingReader reports how much of the message the scan actually pulled, which
@@ -215,6 +244,10 @@ type categoryScan struct {
 	// scan keeps names for, which is the other way it can miss the one file
 	// that would have named the message.
 	droppedFile bool
+	// collectDocuments turns on decoding attachment bodies, which the ordinary
+	// scan deliberately never does. Only the invoice reader sets it.
+	collectDocuments bool
+	docs             []InvoiceDocument
 }
 
 func (s *categoryScan) content() CategoryContent {
@@ -253,10 +286,15 @@ func (s *categoryScan) walk(header textproto.MIMEHeader, body io.Reader, depth i
 		filename = params["name"]
 	}
 	if filename != "" || strings.EqualFold(disposition, "attachment") {
-		// The bytes are deliberately left unread. NextPart drains what is left
-		// of this part on its way to the next boundary, which is the cheapest
-		// skip MIME allows, and the scan budget bounds even that.
-		s.addFile(decodedHeader(filename), mediaType)
+		name := decodedHeader(filename)
+		s.addFile(name, mediaType)
+		// The bytes are deliberately left unread unless somebody asked for
+		// them. NextPart drains what is left of this part on its way to the
+		// next boundary, which is the cheapest skip MIME allows, and the scan
+		// budget bounds even that.
+		if s.collectDocuments && invoiceDocumentCandidate(name, mediaType) {
+			s.addDocument(name, mediaType, header, body)
+		}
 		return
 	}
 	switch lowerMediaType {
@@ -297,4 +335,51 @@ func (s *categoryScan) addFile(filename, mediaType string) {
 		return
 	}
 	s.files = append(s.files, CategoryFile{Filename: filename, ContentType: mediaType})
+}
+
+// addDocument decodes one attachment far enough to read a bill out of it. The
+// text goes through the same extractor the search index uses, so a PDF is read
+// by pdftotext here exactly as it is on the fetch path and the two paths cannot
+// reach different answers about the same file.
+//
+// A part too large for the bound is skipped rather than truncated: half a PDF
+// is not a smaller PDF, and handing a truncated one to an extractor produces
+// either nothing or, worse, a page of text without the total on it.
+//
+// Every way out of here that skips a document marks the scan as incomplete, and
+// that is not bookkeeping -- it is the whole safety rule. droppedFile is what
+// makes scanMessageContent report the scan as partial, and a partial scan is
+// forbidden from recording an unpaid invoice (syncer.invoiceFromScan). A
+// document skipped silently would leave the scan calling itself complete while
+// the one page saying the bill was already collected went unread, which is the
+// false reminder this feature must not produce.
+func (s *categoryScan) addDocument(filename, mediaType string, header textproto.MIMEHeader, body io.Reader) {
+	if len(s.docs) >= maxInvoiceDocuments {
+		s.droppedFile = true
+		return
+	}
+	// One byte past the bound distinguishes "exactly the limit" from "the limit
+	// and more to come".
+	data, err := io.ReadAll(io.LimitReader(decodeTransfer(header, body), maxInvoiceDocumentBytes+1))
+	// Whatever was read before a real error is discarded rather than kept. Part
+	// of a PDF is not a smaller PDF: an extractor hands back nothing useful for
+	// one, and the page that says the bill was already collected is as likely to
+	// be in the half that did not arrive as in the half that did. The bytes
+	// already in hand are exactly what makes that tempting to keep, which is why
+	// the length is deliberately not part of this test.
+	if err != nil && !isTolerableEOF(err) {
+		s.droppedFile = true
+		return
+	}
+	if len(data) == 0 || len(data) > maxInvoiceDocumentBytes {
+		s.droppedFile = true
+		return
+	}
+	file := Attachment{Filename: filename, ContentType: mediaType, Data: data}
+	s.docs = append(s.docs, InvoiceDocument{
+		Filename:    filename,
+		ContentType: mediaType,
+		Text:        file.SearchableText(),
+		Raw:         data,
+	})
 }

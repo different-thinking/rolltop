@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/mail"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -792,84 +791,10 @@ func deliveryStatus(text string) string {
 // around one of these words.
 var deliveryAnchorRE = regexp.MustCompile(`(?i)voraussichtlich\w*|zustell\w*|zugestellt|liefer\w*|geliefert|ankunft|eintreff\w*|erwartet|delivery|deliver\w*|arriv\w*|expected|estimated|scheduled`)
 
-var (
-	// germanDateRE is "04.09.2026", "4.9.26" and "04.09." -- the spelling every
-	// German carrier uses. The year is optional because the day and month alone
-	// are what a mail about next week says.
-	germanDateRE = regexp.MustCompile(`\b(\d{1,2})\.\s*(\d{1,2})\.(?:\s*(\d{4}|\d{2})\b)?`)
-	// isoDateRE is the machine spelling, which turns up in mail generated from
-	// an order system rather than written for a reader.
-	isoDateRE = regexp.MustCompile(`\b(\d{4})-(\d{1,2})-(\d{1,2})\b`)
-	// dayMonthNameRE is "4. September" and "4 September 2026".
-	dayMonthNameRE = regexp.MustCompile(`(?i)\b(\d{1,2})\.?\s*(` + monthNamePattern + `)\.?(?:\s*(\d{4})\b)?`)
-	// monthNameDayRE is the English order, "September 4" and "Sep 4, 2026".
-	monthNameDayRE = regexp.MustCompile(`(?i)\b(` + monthNamePattern + `)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4})\b)?`)
-	// relativeDayRE is what a mail sent on the morning of the delivery says.
-	relativeDayRE = regexp.MustCompile(`(?i)\b(heute|today|übermorgen|uebermorgen|morgen|tomorrow)\b`)
-	// weekdayRE is "am Donnerstag", which a carrier writes for anything inside
-	// the coming week.
-	weekdayRE = regexp.MustCompile(`(?i)\b(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b`)
-	// deliveryWindowRE is the two-hour slot the German carriers give on the day
-	// itself. Both spellings require a word that makes them a time of day, so an
-	// amount of money or a reference number cannot be read as one.
-	deliveryWindowRE = regexp.MustCompile(`(?i)zwischen\s+(\d{1,2})[:.](\d{2})\s*(?:und|bis|-|–)\s*(\d{1,2})[:.](\d{2})|\b(\d{1,2})[:.](\d{2})\s*(?:-|–|bis|und)\s*(\d{1,2})[:.](\d{2})\s*uhr`)
-)
-
-// monthNames maps every spelling of a month this extractor accepts, German and
-// English, long and abbreviated, to its number.
-var monthNames = map[string]time.Month{
-	"januar": time.January, "january": time.January, "jan": time.January,
-	"februar": time.February, "february": time.February, "feb": time.February,
-	"märz": time.March, "maerz": time.March, "march": time.March, "mar": time.March, "mrz": time.March,
-	"april": time.April, "apr": time.April,
-	"mai": time.May, "may": time.May,
-	"juni": time.June, "june": time.June, "jun": time.June,
-	"juli": time.July, "july": time.July, "jul": time.July,
-	"august": time.August, "aug": time.August,
-	"september": time.September, "sept": time.September, "sep": time.September,
-	"oktober": time.October, "october": time.October, "okt": time.October, "oct": time.October,
-	"november": time.November, "nov": time.November,
-	"dezember": time.December, "december": time.December, "dez": time.December, "dec": time.December,
-}
-
-// monthNamePattern is the alternation the two month-name expressions share.
-// Longest first, so "september" is not matched as "sep" with a stray "tember".
-var monthNamePattern = buildMonthNamePattern()
-
-func buildMonthNamePattern() string {
-	names := make([]string, 0, len(monthNames))
-	for name := range monthNames {
-		names = append(names, name)
-	}
-	sortByLengthDesc(names)
-	for i, name := range names {
-		names[i] = regexp.QuoteMeta(name)
-	}
-	return strings.Join(names, "|")
-}
-
-func sortByLengthDesc(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0; j-- {
-			if len(values[j]) > len(values[j-1]) || (len(values[j]) == len(values[j-1]) && values[j] < values[j-1]) {
-				values[j], values[j-1] = values[j-1], values[j]
-				continue
-			}
-			break
-		}
-	}
-}
-
-// weekdayNames maps both languages' weekday spellings to the day they name.
-var weekdayNames = map[string]time.Weekday{
-	"montag": time.Monday, "monday": time.Monday,
-	"dienstag": time.Tuesday, "tuesday": time.Tuesday,
-	"mittwoch": time.Wednesday, "wednesday": time.Wednesday,
-	"donnerstag": time.Thursday, "thursday": time.Thursday,
-	"freitag": time.Friday, "friday": time.Friday,
-	"samstag": time.Saturday, "sonnabend": time.Saturday, "saturday": time.Saturday,
-	"sonntag": time.Sunday, "sunday": time.Sunday,
-}
+// deliveryWindowRE is the two-hour slot the German carriers give on the day
+// itself. Both spellings require a word that makes them a time of day, so an
+// amount of money or a reference number cannot be read as one.
+var deliveryWindowRE = regexp.MustCompile(`(?i)zwischen\s+(\d{1,2})[:.](\d{2})\s*(?:und|bis|-|–)\s*(\d{1,2})[:.](\d{2})|\b(\d{1,2})[:.](\d{2})\s*(?:-|–|bis|und)\s*(\d{1,2})[:.](\d{2})\s*uhr`)
 
 const (
 	// deliveryDatePast and deliveryDateFuture bound how far from the message a
@@ -891,17 +816,19 @@ func deliveryDate(text string, sent time.Time, status string) (string, string, s
 		// the clock would date a week-old backfilled message to this week.
 		return "", "", ""
 	}
+	sentDay := startOfDay(sent)
+	bounds := deliveryDateBounds(status)
 	date := ""
 	for _, anchor := range deliveryAnchorRE.FindAllStringIndex(text, -1) {
 		// After the anchor first: "voraussichtliche Zustellung: Do., 04.09."
 		// is the order every carrier writes it in.
-		if found, ok := findDeliveryDate(windowAfter(text, anchor[1], deliveryDateProximity), sent, status); ok {
+		if found, ok := findDateNear(windowAfter(text, anchor[1], deliveryDateProximity), sentDay, bounds); ok {
 			date = found
 			break
 		}
 		// Then before it: "am 04.09. wird Ihr Paket zugestellt" puts the same
 		// date on the other side of the same word.
-		if found, ok := findDeliveryDate(windowBefore(text, anchor[0], deliveryDateProximity), sent, status); ok {
+		if found, ok := findDateNear(windowBefore(text, anchor[0], deliveryDateProximity), sentDay, bounds); ok {
 			date = found
 			break
 		}
@@ -913,145 +840,15 @@ func deliveryDate(text string, sent time.Time, status string) (string, string, s
 	return date, start, end
 }
 
-func windowAfter(text string, from, size int) string {
-	if from >= len(text) {
-		return ""
-	}
-	to := from + size
-	if to > len(text) {
-		to = len(text)
-	}
-	return text[from:to]
-}
-
-func windowBefore(text string, to, size int) string {
-	if to <= 0 {
-		return ""
-	}
-	from := to - size
-	if from < 0 {
-		from = 0
-	}
-	return text[from:to]
-}
-
-// findDeliveryDate tries every spelling on one window, in the order that puts
-// the least ambiguous first.
-func findDeliveryDate(window string, sent time.Time, status string) (string, bool) {
-	if window == "" {
-		return "", false
-	}
-	year, month, day := sent.Date()
-	sentDay := time.Date(year, month, day, 0, 0, 0, 0, sent.Location())
-
-	// Every spelling is tried, and every match of each is tried, until one
-	// yields a date that survives plausibleDate. A match is not an answer: a
-	// reference number reads as "12.34.56" and a price as "1.234,56", both of
-	// which the German date expression matches and the calendar then rejects.
-	// Stopping at the first *match* rather than the first *answer* -- which is
-	// what this used to do -- lost the real date standing beside it.
-	for _, match := range isoDateRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
-		if date, ok := plausibleDate(atoi(match[1]), time.Month(atoi(match[2])), atoi(match[3]), sentDay, status); ok {
-			return date, true
-		}
-	}
-	for _, match := range germanDateRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
-		if date, ok := dateWithOptionalYear(atoi(match[1]), time.Month(atoi(match[2])), match[3], sentDay, status); ok {
-			return date, true
-		}
-	}
-	for _, match := range dayMonthNameRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
-		month, ok := monthNames[strings.ToLower(match[2])]
-		if !ok {
-			continue
-		}
-		if date, ok := dateWithOptionalYear(atoi(match[1]), month, match[3], sentDay, status); ok {
-			return date, true
-		}
-	}
-	for _, match := range monthNameDayRE.FindAllStringSubmatch(window, maxDeliveryDateCandidates) {
-		month, ok := monthNames[strings.ToLower(match[1])]
-		if !ok {
-			continue
-		}
-		if date, ok := dateWithOptionalYear(atoi(match[2]), month, match[3], sentDay, status); ok {
-			return date, true
-		}
-	}
-	if match := relativeDayRE.FindStringSubmatch(window); match != nil {
-		switch strings.ToLower(match[1]) {
-		case "heute", "today":
-			return plainDate(sentDay), true
-		case "morgen", "tomorrow":
-			return plainDate(sentDay.AddDate(0, 0, 1)), true
-		case "übermorgen", "uebermorgen":
-			return plainDate(sentDay.AddDate(0, 0, 2)), true
-		}
-	}
-	if match := weekdayRE.FindStringSubmatch(window); match != nil {
-		if weekday, ok := weekdayNames[strings.ToLower(match[1])]; ok {
-			return plainDate(nextWeekday(sentDay, weekday)), true
-		}
-	}
-	return "", false
-}
-
-// maxDeliveryDateCandidates bounds how many matches of one spelling are checked
-// inside a window. The window is deliveryDateProximity bytes; past a handful of
-// candidates it is a table of numbers rather than a sentence about a delivery.
-const maxDeliveryDateCandidates = 4
-
-// dateWithOptionalYear settles a day and month that may or may not have said
-// which year they are in. A carrier writing "04.01." on the 29th of December
-// means the January nine days away, not the one eleven months back, so the year
-// is chosen as the one that puts the date nearest the message.
-func dateWithOptionalYear(day int, month time.Month, yearText string, sentDay time.Time, status string) (string, bool) {
-	if yearText != "" {
-		year := atoi(yearText)
-		if year < 100 {
-			year += 2000
-		}
-		return plausibleDate(year, month, day, sentDay, status)
-	}
-	for _, year := range []int{sentDay.Year(), sentDay.Year() + 1, sentDay.Year() - 1} {
-		if date, ok := plausibleDate(year, month, day, sentDay, status); ok {
-			return date, true
-		}
-	}
-	return "", false
-}
-
-// plausibleDate rejects what the calendar does not hold and what is too far
-// from the message to be its parcel. The round-trip through time.Date is what
-// catches "31.02.": normalization would silently make it the third of March.
-func plausibleDate(year int, month time.Month, day int, sentDay time.Time, status string) (string, bool) {
-	if year < 1970 || month < time.January || month > time.December || day < 1 || day > 31 {
-		return "", false
-	}
-	date := time.Date(year, month, day, 0, 0, 0, 0, sentDay.Location())
-	if date.Year() != year || date.Month() != month || date.Day() != day {
-		return "", false
-	}
-	distance := int(date.Sub(sentDay).Hours() / 24)
-	past := deliveryDatePast
+// deliveryDateBounds is how far from the message a parcel's day may stand. A
+// delivery report names a day that has already happened, and it is the same day
+// often enough that the ordinary past bound would do; the wider one covers a
+// report forwarded or filed late.
+func deliveryDateBounds(status string) dateBounds {
 	if status == DeliveryDelivered {
-		// A delivery report names a day that has already happened, and it is
-		// the same day often enough that the ordinary past bound would do; the
-		// wider one covers a report forwarded or filed late.
-		past = -365
+		return dateBounds{past: -365, future: deliveryDateFuture}
 	}
-	if distance < past || distance > deliveryDateFuture {
-		return "", false
-	}
-	return plainDate(date), true
-}
-
-// nextWeekday is the named day on or after the message's own day. "Donnerstag"
-// in a mail written on a Thursday is that Thursday, which is how a reader reads
-// it too.
-func nextWeekday(sentDay time.Time, weekday time.Weekday) time.Time {
-	shift := (int(weekday) - int(sentDay.Weekday()) + 7) % 7
-	return sentDay.AddDate(0, 0, shift)
+	return dateBounds{past: deliveryDatePast, future: deliveryDateFuture}
 }
 
 // deliveryWindow reads the slot inside the day, which only the morning-of mail
@@ -1080,26 +877,6 @@ func clockTime(hourText, minuteText string) (string, bool) {
 		return "", false
 	}
 	return pad2(hour) + ":" + pad2(minute), true
-}
-
-func pad2(value int) string {
-	if value < 10 {
-		return "0" + strconv.Itoa(value)
-	}
-	return strconv.Itoa(value)
-}
-
-// plainDate is the one spelling a delivery day is stored and compared in.
-func plainDate(date time.Time) string {
-	return date.Format("2006-01-02")
-}
-
-func atoi(value string) int {
-	n, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil {
-		return -1
-	}
-	return n
 }
 
 // DeliveryNoticesReaderScan reads a stored message for the parcels it names. It

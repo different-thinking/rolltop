@@ -113,6 +113,7 @@ type Runner struct {
 	indexAttachmentsForUser   func(context.Context, int64, int) (int, error)
 	classifyCategoriesForUser func(context.Context, int64, int) (int, error)
 	scanDeliveriesForUser     func(context.Context, int64, int) (int, error)
+	scanInvoicesForUser       func(context.Context, int64, int) (int, error)
 }
 
 // NewRunner builds a process-lifetime scheduler using a background context. The
@@ -896,6 +897,13 @@ func (r *Runner) scanPendingDeliveriesForUser(ctx context.Context, userID int64,
 		return r.scanDeliveriesForUser(ctx, userID, limit)
 	}
 	return r.Service.ScanPendingDeliveriesForUser(ctx, userID, limit)
+}
+
+func (r *Runner) scanPendingInvoicesForUser(ctx context.Context, userID int64, limit int) (int, error) {
+	if r.scanInvoicesForUser != nil {
+		return r.scanInvoicesForUser(ctx, userID, limit)
+	}
+	return r.Service.ScanPendingInvoicesForUser(ctx, userID, limit)
 }
 
 func (r *Runner) runMailboxes(userID int64, mailboxes []string) bool {
@@ -1735,6 +1743,30 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			categorizedAny = true
 		}
 		drainMore = drainMore || scanned == store.DeliveryBackfillLimit
+		// The invoice backfill rides the same turn again, and is last because
+		// it is the most expensive of the three: it opens attachment bodies and
+		// runs a text extractor over the PDFs. Running it behind the category
+		// pass is also what makes it cheap to select for -- it reads only what
+		// that pass has already filed as paperwork.
+		if ctx.Err() != nil {
+			return
+		}
+		billed, err := r.scanPendingInvoicesForUser(ctx, userID, store.InvoiceBackfillLimit)
+		if err != nil {
+			indexFailed = true
+			if ctx.Err() == nil {
+				log.Printf("invoice backfill user_id=%d: %v", userID, err)
+			}
+			return
+		}
+		if billed > 0 {
+			log.Printf("invoice backfill user_id=%d scanned=%d", userID, billed)
+			// The header badge and the invoice list are chrome, so a pass that
+			// found something has to reach the open tabs the same way a newly
+			// filed category does.
+			categorizedAny = true
+		}
+		drainMore = drainMore || billed == store.InvoiceBackfillLimit
 	}()
 	return true
 }

@@ -1,0 +1,484 @@
+// The invoice list, the header chip that points at it, and the marker on a
+// message.
+//
+// It borrows the parcel list's proportions deliberately -- the two pages answer
+// the same shape of question and a reader should not have to learn a second
+// layout -- but not its colour. A parcel is good news arriving; an invoice is
+// work waiting, and one being chased is work that is already late. So the
+// accent here is the warning colour, and it is spent only where something is
+// actually due: an invoice with a deadline next month looks like an ordinary
+// row, and only becomes loud when the day comes.
+
+.invoice-chip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  // Same three defences as the parcel chip beside it: the topbar is a crowded
+  // flex row and the search is happy to take every pixel, so the chip must keep
+  // its content width, refuse to shrink, and never break its line.
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-height: 34px;
+  margin-right: 6px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--warning);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 22%, var(--surface));
+  }
+
+  // Being chased is the one state worth shouting about, because it is a
+  // deadline that has already passed and somebody has noticed.
+  &.chased {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    color: var(--danger);
+
+    &:hover {
+      border-color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 22%, var(--surface));
+    }
+  }
+
+  .icon {
+    flex: 0 0 auto;
+  }
+}
+
+.invoices-pill-due {
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  color: var(--warning);
+}
+
+.invoices-idle {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+
+  > .icon {
+    flex: 0 0 auto;
+    color: var(--muted);
+  }
+
+  p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    max-width: 62ch;
+  }
+}
+
+.invoices-section {
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  // The chased group leads the page, and its heading says so without the rows
+  // under it having to repeat it.
+  &.section-chased h2 {
+    color: var(--danger);
+  }
+
+  &.section-overdue h2 {
+    color: var(--warning);
+  }
+}
+
+.invoices-section-count {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.invoices-section-hint {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.invoices-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.invoices-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+
+  // A settled bill is history: it stays readable and stops competing with the
+  // rows that are still about something the reader has to do.
+  &.status-paid {
+    background: var(--surface-subtle);
+
+    .invoices-issuer {
+      color: var(--muted);
+    }
+  }
+
+  // The left edge is the whole visual grammar of this list: a bar appears when
+  // a row needs doing and darkens when somebody is chasing it, so the page can
+  // be read down its margin without reading a word.
+  &.overdue {
+    border-left: 3px solid var(--warning);
+  }
+
+  &.chased {
+    border-left: 3px solid var(--danger);
+  }
+}
+
+.invoices-row-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.invoices-issuer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  // Wider than the carrier column beside it on the parcel page: a carrier is
+  // "DHL" and an issuer is a domain name.
+  min-width: 140px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.invoices-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.invoices-subject {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.invoices-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.invoices-due {
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+// The sum is the second thing a reader looks for after the deadline, so it is
+// set in the figure font rather than left to the body's proportional digits.
+.invoices-amount {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.invoices-dunning {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 600;
+
+  &.level-2,
+  &.level-3 {
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    color: var(--danger);
+  }
+}
+
+.invoices-settlement {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  font-size: 12px;
+}
+
+.invoices-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.invoices-paid {
+  white-space: nowrap;
+}
+
+.invoices-expand .icon {
+  transition: transform 120ms ease;
+}
+
+.invoices-expand.expanded .icon {
+  transform: rotate(180deg);
+}
+
+.invoices-row-details {
+  border-top: 1px solid var(--separator);
+  padding: 10px 12px;
+
+  dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    gap: 2px 12px;
+    margin: 0;
+    font-size: 13px;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    user-select: all;
+  }
+}
+
+.invoices-duedate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 13px;
+
+  > span {
+    color: var(--muted);
+  }
+
+  input {
+    max-width: 180px;
+  }
+}
+
+.invoices-correction {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.invoices-correction-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.invoices-dismiss {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+
+  &:hover {
+    color: var(--danger);
+  }
+}
+
+.invoices-history {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.invoices-history-title {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.invoices-history-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  color: var(--text-soft);
+  text-decoration: none;
+  font-size: 13px;
+
+  &:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+}
+
+.invoices-history-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invoices-history-date {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+// The invoice marker on a message. It sits among the subject-line chips, so it
+// borrows their proportions rather than the invoice list's.
+.invoice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+
+  // Due today or already past is the only state worth colouring for; a bill due
+  // in three weeks is not news on a message row.
+  &.due-now {
+    border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+    background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+    color: var(--warning);
+  }
+
+  &.chased {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    color: var(--danger);
+  }
+}
+
+.invoice-details {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+
+  dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 12px;
+    margin: 8px 0 0;
+    font-size: 13px;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    user-select: all;
+  }
+}
+
+.invoice-details-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.invoice-details-dunning {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.invoice-details-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    font-size: 13px;
+  }
+}
+
+// Narrow layouts: the chips keep their icon and drop their words, the way the
+// other header controls do, and an invoice row stacks instead of scrolling.
+@media (max-width: 900px) {
+  .invoice-chip-button-label {
+    display: none;
+  }
+
+  .invoice-chip-button {
+    padding: 6px 8px;
+  }
+
+  .message-row .invoice-chip-label {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .invoices-row-main {
+    flex-wrap: wrap;
+  }
+
+  .invoices-issuer {
+    min-width: 0;
+  }
+
+  .invoices-row-actions {
+    margin-left: auto;
+  }
+}
