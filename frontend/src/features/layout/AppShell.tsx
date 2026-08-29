@@ -1354,7 +1354,7 @@ function Sidebar({
             <a
               key={entry.route}
               href={url}
-              className={`folder ${active ? "active" : ""}`}
+              className={`folder ${entry.gap ? "folder-group-break" : ""} ${active ? "active" : ""}`}
               onClick={(event) => open(event, url)}
             >
               <span className="folder-name">
@@ -1392,12 +1392,19 @@ function Sidebar({
  * drawn. Each carries only its label and icon; which paths belong to it is the
  * router's answer, read through organizerRoute, so an entry cannot light up for
  * a path that would render the mail list instead.
+ *
+ * `gap` opens a blank line above an entry. The four sit under one heading
+ * because a heading per single entry only repeated the entry, but they are two
+ * different kinds of thing: the calendar and the address book are what this
+ * reader keeps, while parcels and invoices are what the mail brought in and
+ * still wants something done about. A gap says that much without spending a
+ * second heading on it.
  */
-const organizerLinks: { route: OrganizerRoute; label: string; icon: string }[] = [
+const organizerLinks: { route: OrganizerRoute; label: string; icon: string; gap?: boolean }[] = [
   { route: "calendar", label: "Calendar", icon: "calendar" },
-  { route: "deliveries", label: "Pakete", icon: "package" },
-  { route: "invoices", label: "Rechnungen", icon: "receipt" },
-  { route: "contacts", label: "Contacts", icon: "group" }
+  { route: "contacts", label: "Contacts", icon: "group" },
+  { route: "deliveries", label: "Pakete", icon: "package", gap: true },
+  { route: "invoices", label: "Rechnungen", icon: "receipt" }
 ];
 
 /**

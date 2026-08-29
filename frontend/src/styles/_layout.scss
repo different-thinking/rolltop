@@ -631,6 +631,12 @@ $mail-measure: 1100px;
   font-size: 13px;
 }
 
+// A group of sidebar links that belongs together, set off from the one above
+// it by a blank line rather than a heading of its own.
+.folder-group-break {
+  margin-top: 14px;
+}
+
 .side-section {
   margin-top: 18px;
   color: var(--muted);
