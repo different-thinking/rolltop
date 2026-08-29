@@ -12,7 +12,8 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { mailRoute, mailRouteView, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import type { OrganizerRoute } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
@@ -1346,43 +1347,23 @@ function Sidebar({
           );
         })}
         <div className="side-section">Organizer</div>
-        <a
-          href="/calendar"
-          className={`folder ${currentPath === "/calendar" || currentPath.startsWith("/calendar/") ? "active" : ""}`}
-          onClick={(event) => open(event, "/calendar")}
-        >
-          <span className="folder-name">
-            <Icon name="calendar" weight={currentPath.startsWith("/calendar") ? "bold" : undefined} />
-            Calendar
-          </span>
-        </a>
-        <a
-          href="/deliveries"
-          className={`folder ${currentPath === "/deliveries" ? "active" : ""}`}
-          onClick={(event) => open(event, "/deliveries")}
-        >
-          <span className="folder-name">
-            <Icon name="package" weight={currentPath === "/deliveries" ? "bold" : undefined} />
-            Pakete
-          </span>
-        </a>
-        <a
-          href="/invoices"
-          className={`folder ${currentPath === "/invoices" ? "active" : ""}`}
-          onClick={(event) => open(event, "/invoices")}
-        >
-          <span className="folder-name">
-            <Icon name="receipt" weight={currentPath === "/invoices" ? "bold" : undefined} />
-            Rechnungen
-          </span>
-        </a>
-        <a
-          href="/contacts"
-          className={`folder ${currentPath === "/contacts" ? "active" : ""}`}
-          onClick={(event) => open(event, "/contacts")}
-        >
-          <span className="folder-name"><Icon name="group" weight={currentPath === "/contacts" ? "bold" : undefined} />Contacts</span>
-        </a>
+        {organizerLinks.map((entry) => {
+          const active = organizerRoute(currentPath, entry.route);
+          const url = organizerURL(entry.route);
+          return (
+            <a
+              key={entry.route}
+              href={url}
+              className={`folder ${active ? "active" : ""}`}
+              onClick={(event) => open(event, url)}
+            >
+              <span className="folder-name">
+                <Icon name={entry.icon} weight={active ? "bold" : undefined} />
+                {entry.label}
+              </span>
+            </a>
+          );
+        })}
         {advertiseAndroidApp ? (
           <>
             <div className="side-section">Android app</div>
@@ -1405,6 +1386,19 @@ function Sidebar({
     </aside>
   );
 }
+
+/**
+ * organizerLinks are the sidebar's non-mail destinations, in the order they are
+ * drawn. Each carries only its label and icon; which paths belong to it is the
+ * router's answer, read through organizerRoute, so an entry cannot light up for
+ * a path that would render the mail list instead.
+ */
+const organizerLinks: { route: OrganizerRoute; label: string; icon: string }[] = [
+  { route: "calendar", label: "Calendar", icon: "calendar" },
+  { route: "deliveries", label: "Pakete", icon: "package" },
+  { route: "invoices", label: "Rechnungen", icon: "receipt" },
+  { route: "contacts", label: "Contacts", icon: "group" }
+];
 
 /**
  * NamedListEntry is one of the sidebar's whole-account lists. They are numbered

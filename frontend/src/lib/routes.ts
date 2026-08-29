@@ -107,6 +107,43 @@ export function mailURL(mailboxID: string | number | null, page = 1, view: MailV
 }
 
 /**
+ * organizerRoutes are the sidebar's destinations that are not mail: the
+ * calendar, the contacts book, and the parcel and invoice lists. Each one says
+ * here whether the paths below it belong to it as well, and RouteView, the
+ * reading measure and the sidebar highlight all read that one answer instead of
+ * each repeating the test. A view that later grows a detail route flips its
+ * `nested` here, and the entry linking to it lights up for that route without a
+ * second edit somewhere else - which is the failure this table exists to
+ * prevent, because a highlight that claims a path the router does not serve
+ * points at the mail list while insisting the reader is somewhere else.
+ */
+const organizerRoutes = {
+  calendar: { url: "/calendar", nested: true },
+  contacts: { url: "/contacts", nested: false },
+  deliveries: { url: "/deliveries", nested: false },
+  invoices: { url: "/invoices", nested: false }
+} as const;
+
+/** OrganizerRoute names one of those destinations. */
+export type OrganizerRoute = keyof typeof organizerRoutes;
+
+/** organizerURL is the link that opens one of them. */
+export function organizerURL(route: OrganizerRoute): string {
+  return organizerRoutes[route].url;
+}
+
+/** organizerRoute reports whether a path is inside one of them. */
+export function organizerRoute(path: string, route: OrganizerRoute): boolean {
+  const claim = organizerRoutes[route];
+  return path === claim.url || (claim.nested && path.startsWith(`${claim.url}/`));
+}
+
+/** anyOrganizerRoute reports whether a path is inside any of them. */
+function anyOrganizerRoute(path: string): boolean {
+  return (Object.keys(organizerRoutes) as OrganizerRoute[]).some((route) => organizerRoute(path, route));
+}
+
+/**
  * mailRouteView reports whether a path reaches mail to read - a conversation
  * list or a thread. It is the authority on that question rather than a summary
  * of one: RouteView tests it before considering any of its own special routes,
@@ -117,14 +154,12 @@ export function mailURL(mailboxID: string | number | null, page = 1, view: MailV
  * their prefix. RouteView claims `/settings/account`, not all of `/settings`,
  * and it claims the admin screens only for an admin - so a stale `/admin/users`
  * a reader can no longer open, and `/settings` on its own, both end on the mail
- * list, and a prefix test would leave those lists unmeasured.
+ * list, and a prefix test would leave those lists unmeasured. The organizer
+ * views are exactly as narrow as `organizerRoutes` says, for the same reason.
  */
 export function mailRouteView(path: string, isAdmin: boolean): boolean {
   const claimed = path === "/compose"
-    || path === "/calendar" || path.startsWith("/calendar/")
-    || path === "/contacts"
-    || path === "/deliveries"
-    || path === "/invoices"
+    || anyOrganizerRoute(path)
     || path === "/settings/account" || path.startsWith("/settings/account/")
     || ((path === "/admin/users" || path === "/admin/database") && isAdmin)
     || path === "/activity"

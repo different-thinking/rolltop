@@ -13,7 +13,7 @@ import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
-import { mailRouteView } from "./lib/routes";
+import { mailRouteView, organizerRoute } from "./lib/routes";
 import type { RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
@@ -112,16 +112,16 @@ export function RouteView({
     if (location.path === "/compose") {
       return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
     }
-    if (location.path === "/calendar" || location.path.startsWith("/calendar/")) {
+    if (organizerRoute(location.path, "calendar")) {
       return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
     }
-    if (location.path === "/contacts") {
+    if (organizerRoute(location.path, "contacts")) {
       return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
     }
-    if (location.path === "/deliveries") {
+    if (organizerRoute(location.path, "deliveries")) {
       return <DeliveriesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
     }
-    if (location.path === "/invoices") {
+    if (organizerRoute(location.path, "invoices")) {
       return <InvoicesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
     }
     if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
