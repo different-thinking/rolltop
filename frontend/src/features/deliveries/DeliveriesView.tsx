@@ -54,36 +54,38 @@ export function groupShipments(shipments: readonly Shipment[], today: string): G
   const undated = shipments.filter((item) => item.status !== "delivered" && item.expected_date === "");
   const delivered = shipments.filter((item) => item.status === "delivered");
   return [
-    { key: "today", title: "Kommt heute", hint: "Für heute angekündigt", items: today_ },
-    { key: "overdue", title: "Überfällig", hint: "Der angekündigte Tag ist vorbei, eine Zustellung wurde nicht gemeldet", items: overdue },
-    { key: "upcoming", title: "Unterwegs", hint: "Mit einem angekündigten Tag", items: upcoming },
-    { key: "undated", title: "Ohne Termin", hint: "Versandt, aber noch ohne angekündigten Tag", items: undated },
-    { key: "delivered", title: "Zugestellt", hint: "Die letzten zwei Wochen", items: delivered }
+    { key: "today", title: "Arriving today", hint: "Announced for today", items: today_ },
+    { key: "overdue", title: "Overdue", hint: "The announced day has passed and no delivery was reported", items: overdue },
+    { key: "upcoming", title: "On its way", hint: "With an announced day", items: upcoming },
+    { key: "undated", title: "No day yet", hint: "Sent, but with no announced day", items: undated },
+    { key: "delivered", title: "Delivered", hint: "The past two weeks", items: delivered }
   ].filter((group) => group.items.length > 0);
 }
 
-const weekdayNames = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
-
 /** dayLabel names a day the way a reader would say it: relative while that is
- * unambiguous, then by weekday inside the coming week, then by date. */
+ * unambiguous, then by weekday inside the coming week, then by date.
+ *
+ * The day is written in English rather than in the reader's date locale, the
+ * same choice dateGroupLabel makes and for the same reason: it is read as part
+ * of a sentence this view writes, not as a date field. */
 export function dayLabel(day: string, today: string): string {
-  if (day === "") return "Kein Termin genannt";
+  if (day === "") return "No day announced";
   const date = new Date(`${day}T00:00:00`);
   const now = new Date(`${today}T00:00:00`);
   if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return day;
   const distance = Math.round((date.getTime() - now.getTime()) / 86400000);
-  if (distance === 0) return "Heute";
-  if (distance === 1) return "Morgen";
-  if (distance === -1) return "Gestern";
-  const written = date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
-  if (distance > 1 && distance < 7) return `${weekdayNames[date.getDay()]}, ${written}`;
+  if (distance === 0) return "Today";
+  if (distance === 1) return "Tomorrow";
+  if (distance === -1) return "Yesterday";
+  const written = date.toLocaleDateString("en", { day: "numeric", month: "short", year: "numeric" });
+  if (distance > 1 && distance < 7) return `${date.toLocaleDateString("en", { weekday: "long" })}, ${written}`;
   return written;
 }
 
 const statusLabels: Record<Shipment["status"], string> = {
-  announced: "Angekündigt",
-  out_for_delivery: "In Zustellung",
-  delivered: "Zugestellt"
+  announced: "Announced",
+  out_for_delivery: "Out for delivery",
+  delivered: "Delivered"
 };
 
 export function DeliveriesView({
@@ -140,8 +142,8 @@ export function DeliveriesView({
       });
       // The header chip reads its own count and cannot see this list's state.
       notifyDeliveriesChanged();
-      if (manualStatus === "delivered") addToast("Als zugestellt vermerkt.");
-      if (manualStatus === "dismissed") addToast("Nicht mehr als Paket geführt.");
+      if (manualStatus === "delivered") addToast("Marked as delivered.");
+      if (manualStatus === "dismissed") addToast("No longer listed as a parcel.");
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
@@ -166,8 +168,8 @@ export function DeliveriesView({
     <>
       <div className="content-head">
         <div>
-          <h1>Pakete</h1>
-          <span className="label-pill">{openCount.toLocaleString()} unterwegs</span>
+          <h1>Parcels</h1>
+          <span className="label-pill">{openCount.toLocaleString()} on the way</span>
         </div>
       </div>
 
@@ -177,10 +179,11 @@ export function DeliveriesView({
         <section className="panel deliveries-idle">
           <Icon name="package" />
           <div>
-            <strong>Keine Pakete angekündigt.</strong>
+            <strong>No parcels announced.</strong>
             <p>
-              Rolltop liest Sendungsnummern und Liefertermine aus der Post mit — aus den Mails der
-              Paketdienste und aus Versandbestätigungen von Shops. Sobald etwas unterwegs ist, steht es hier.
+              Rolltop reads tracking numbers and delivery days out of the mail — from the carriers&#39;
+              own messages and from shops&#39; dispatch confirmations. As soon as something is on its
+              way, it stands here.
             </p>
           </div>
         </section>
@@ -238,7 +241,7 @@ function DeliveryRow({
   const latest = shipment.messages[0];
   const others = shipment.messages.slice(1);
   const window = shipment.window_start && shipment.window_end
-    ? `${shipment.window_start}–${shipment.window_end} Uhr`
+    ? `${shipment.window_start}–${shipment.window_end}`
     : "";
 
   function open(event: { preventDefault: () => void }, url: string) {
@@ -256,7 +259,7 @@ function DeliveryRow({
         <div className="deliveries-row-text">
           {latest ? (
             <a href={messageURL(latest.id)} className="deliveries-subject" onClick={(event) => open(event, messageURL(latest.id))}>
-              {latest.subject || "(kein Betreff)"}
+              {latest.subject || "(no subject)"}
             </a>
           ) : null}
           <div className="deliveries-meta">
@@ -274,11 +277,11 @@ function DeliveryRow({
               className="secondary deliveries-arrived"
               type="button"
               disabled={busy}
-              title="Dieses Paket ist angekommen"
+              title="This parcel has arrived"
               onClick={() => onCorrect("delivered")}
             >
               <Icon name="check" />
-              Angekommen
+              Arrived
             </button>
           ) : null}
           {shipment.tracking_url ? (
@@ -287,17 +290,17 @@ function DeliveryRow({
               href={shipment.tracking_url}
               target="_blank"
               rel="noreferrer noopener"
-              title={`Sendung ${shipment.tracking_number} bei ${shipment.carrier_label} verfolgen`}
+              title={`Track ${shipment.tracking_number} with ${shipment.carrier_label}`}
             >
               <Icon name="link" />
-              Verfolgen
+              Track
             </a>
           ) : null}
           <button
             className={expanded ? "ghost deliveries-expand expanded" : "ghost deliveries-expand"}
             type="button"
             aria-expanded={expanded}
-            title={expanded ? "Weniger anzeigen" : "Sendungsnummer und alle Mails anzeigen"}
+            title={expanded ? "Show less" : "Show the tracking number and every message"}
             onClick={onToggle}
           >
             <Icon name="expand_more" />
@@ -307,7 +310,7 @@ function DeliveryRow({
       {expanded ? (
         <div className="deliveries-row-details">
           <dl>
-            <dt>Sendungsnummer</dt>
+            <dt>Tracking number</dt>
             <dd><code>{shipment.tracking_number}</code></dd>
           </dl>
           <div className="deliveries-correction">
@@ -315,10 +318,10 @@ function DeliveryRow({
               <>
                 <span className="deliveries-correction-note">
                   <Icon name="check" />
-                  Von dir als zugestellt vermerkt.
+                  You marked this as delivered.
                 </span>
                 <button className="ghost" type="button" disabled={busy} onClick={() => onCorrect("")}>
-                  Rückgängig
+                  Undo
                 </button>
               </>
             ) : (
@@ -328,17 +331,17 @@ function DeliveryRow({
                 className="ghost deliveries-dismiss"
                 type="button"
                 disabled={busy}
-                title="Diese Nummer gehört zu keinem Paket - nicht mehr anzeigen"
+                title="This number belongs to no parcel - stop showing it"
                 onClick={() => onCorrect("dismissed")}
               >
                 <Icon name="close" />
-                Kein Paket
+                Not a parcel
               </button>
             )}
           </div>
           {others.length > 0 ? (
             <div className="deliveries-history">
-              <span className="deliveries-history-title">Weitere Mails zu dieser Sendung</span>
+              <span className="deliveries-history-title">More mail about this shipment</span>
               {others.map((message) => (
                 <a
                   key={message.id}
@@ -346,7 +349,7 @@ function DeliveryRow({
                   className="deliveries-history-row"
                   onClick={(event) => open(event, messageURL(message.id))}
                 >
-                  <span className="deliveries-history-subject">{message.subject || "(kein Betreff)"}</span>
+                  <span className="deliveries-history-subject">{message.subject || "(no subject)"}</span>
                   <span className="deliveries-history-date">{displayDateTime(message.date, datePrefs)}</span>
                 </a>
               ))}

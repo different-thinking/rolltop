@@ -77,24 +77,24 @@ describe("groupInvoices", () => {
 
 describe("dueLabel", () => {
   it("counts the days an overdue bill has been late", () => {
-    expect(dueLabel("2026-08-25", today)).toBe("Seit 9 Tagen überfällig");
-    expect(dueLabel("2026-09-02", today)).toBe("Seit gestern überfällig");
+    expect(dueLabel("2026-08-25", today)).toBe("Overdue by 9 days");
+    expect(dueLabel("2026-09-02", today)).toBe("Overdue since yesterday");
   });
 
   it("names the near days the way a reader would", () => {
-    expect(dueLabel(today, today)).toBe("Heute fällig");
-    expect(dueLabel("2026-09-04", today)).toBe("Morgen fällig");
+    expect(dueLabel(today, today)).toBe("Due today");
+    expect(dueLabel("2026-09-04", today)).toBe("Due tomorrow");
   });
 
   it("says so when nothing was readable", () => {
-    expect(dueLabel("", today)).toBe("Keine Frist genannt");
+    expect(dueLabel("", today)).toBe("No deadline given");
   });
 });
 
 describe("formatAmount", () => {
-  it("renders the stored normal form the way a German reader writes it", () => {
-    expect(formatAmount("1234.56", "EUR")).toContain("1.234,56");
-    expect(formatAmount("149.90", "EUR")).toContain("149,90");
+  it("renders the stored normal form as a written sum", () => {
+    expect(formatAmount("1234.56", "EUR")).toContain("1,234.56");
+    expect(formatAmount("149.90", "EUR")).toContain("149.90");
   });
 
   it("shows nothing when no total was readable", () => {
@@ -102,7 +102,7 @@ describe("formatAmount", () => {
   });
 
   it("survives a currency code the sender mistyped", () => {
-    expect(formatAmount("10.00", "EURO")).toContain("10,00");
+    expect(formatAmount("10.00", "EURO")).toContain("10.00");
   });
 });
 
@@ -112,7 +112,7 @@ describe("invoiceChipText", () => {
       { id: 1, issuer: "x.de", number: "1", due_date: "2026-08-01", amount: "", currency: "", status: "open", settlement: "", dunning_level: 2 },
       today
     );
-    expect(chip).toBe("Mahnung");
+    expect(chip).toBe("Overdue notice");
   });
 
   it("names the deadline otherwise", () => {
@@ -120,21 +120,25 @@ describe("invoiceChipText", () => {
       { id: 1, issuer: "x.de", number: "1", due_date: today, amount: "", currency: "", status: "open", settlement: "", dunning_level: 0 },
       today
     );
-    expect(chip).toBe("Fällig: heute");
+    expect(chip).toBe("Due: today");
   });
 });
 
 describe("compactDue", () => {
   it("counts overdue days rather than naming the weekday", () => {
-    expect(compactDue("2026-08-25", today)).toBe("9 Tage überfällig");
+    expect(compactDue("2026-08-25", today)).toBe("9 days overdue");
+  });
+
+  it("says one day in the singular", () => {
+    expect(compactDue("2026-09-02", today)).toBe("1 day overdue");
   });
 
   it("keeps the near days short", () => {
-    expect(compactDue(today, today)).toBe("heute");
-    expect(compactDue("2026-09-04", today)).toBe("morgen");
+    expect(compactDue(today, today)).toBe("today");
+    expect(compactDue("2026-09-04", today)).toBe("tomorrow");
   });
 
   it("says a bill with no readable deadline is simply open", () => {
-    expect(compactDue("", today)).toBe("offen");
+    expect(compactDue("", today)).toBe("open");
   });
 });

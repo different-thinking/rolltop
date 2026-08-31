@@ -12,7 +12,8 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { mailRoute, mailRouteView, mailURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import type { OrganizerRoute } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
 import { createPluginSet } from "../../plugins/registry";
@@ -943,39 +944,39 @@ function Topbar({
 }
 
 // deliveryChipLabel names one parcel by its carrier and several by their count.
-// "DHL" is more use at a glance than "1 Paket": it is the thing the reader is
+// "DHL" is more use at a glance than "1 parcel": it is the thing the reader is
 // waiting for, and it is what the doorbell will say.
 function deliveryChipLabel(expected: ExpectedDeliveries): string {
-  if (expected.count === 1) return `Heute: ${expected.carrierLabel || "1 Paket"}`;
-  return `Heute: ${expected.count.toLocaleString()} Pakete`;
+  if (expected.count === 1) return `Today: ${expected.carrierLabel || "1 parcel"}`;
+  return `Today: ${expected.count.toLocaleString()} parcels`;
 }
 
 function deliveryChipTitle(expected: ExpectedDeliveries): string {
   const what = expected.count === 1
-    ? `Ein Paket${expected.carrierLabel ? ` von ${expected.carrierLabel}` : ""} wird heute erwartet`
-    : `${expected.count.toLocaleString()} Pakete werden heute erwartet`;
-  return `${what} - alle Sendungen ansehen`;
+    ? `A parcel${expected.carrierLabel ? ` from ${expected.carrierLabel}` : ""} is expected today`
+    : `${expected.count.toLocaleString()} parcels are expected today`;
+  return `${what} - see every shipment`;
 }
 
 // invoiceChipLabel says the one thing that changes a reader's afternoon first.
-// Being chased outranks being due, because a dunning letter is a deadline that
+// Being chased outranks being due, because an overdue notice is a deadline that
 // has already passed and somebody has noticed.
 function invoiceChipLabel(due: DueInvoices): string {
-  if (due.chased > 0) return due.chased === 1 ? "1 Mahnung" : `${due.chased.toLocaleString()} Mahnungen`;
-  if (due.count === 1) return `Fällig: ${due.issuer || "1 Rechnung"}`;
-  return `${due.count.toLocaleString()} Rechnungen fällig`;
+  if (due.chased > 0) return due.chased === 1 ? "1 overdue notice" : `${due.chased.toLocaleString()} overdue notices`;
+  if (due.count === 1) return `Due: ${due.issuer || "1 invoice"}`;
+  return `${due.count.toLocaleString()} invoices due`;
 }
 
 function invoiceChipTitle(due: DueInvoices): string {
-  // "Fällig" here means due today or already overdue: unlike a parcel, a bill
+  // "Due" here means due today or already overdue: unlike a parcel, a bill
   // whose day has passed has not stopped being today's business.
   const what = due.count === 1
-    ? `Eine Rechnung${due.issuer ? ` von ${due.issuer}` : ""} ist fällig`
-    : `${due.count.toLocaleString()} Rechnungen sind fällig`;
+    ? `An invoice${due.issuer ? ` from ${due.issuer}` : ""} is due`
+    : `${due.count.toLocaleString()} invoices are due`;
   const chased = due.chased > 0
-    ? `, davon ${due.chased.toLocaleString()} angemahnt`
+    ? `, ${due.chased.toLocaleString()} of them chased`
     : "";
-  return `${what}${chased} - alle Rechnungen ansehen`;
+  return `${what}${chased} - see every invoice`;
 }
 
 // Sidebar turns flat mailbox summaries into a tree, supports folder navigation,
@@ -1345,47 +1346,24 @@ function Sidebar({
             </div>
           );
         })}
-        <div className="side-section">Calendar</div>
-        <a
-          href="/calendar"
-          className={`folder ${currentPath === "/calendar" || currentPath.startsWith("/calendar/") ? "active" : ""}`}
-          onClick={(event) => open(event, "/calendar")}
-        >
-          <span className="folder-name">
-            <Icon name="calendar" weight={currentPath.startsWith("/calendar") ? "bold" : undefined} />
-            Calendar
-          </span>
-        </a>
-        <div className="side-section">Pakete</div>
-        <a
-          href="/deliveries"
-          className={`folder ${currentPath === "/deliveries" ? "active" : ""}`}
-          onClick={(event) => open(event, "/deliveries")}
-        >
-          <span className="folder-name">
-            <Icon name="package" weight={currentPath === "/deliveries" ? "bold" : undefined} />
-            Pakete
-          </span>
-        </a>
-        <div className="side-section">Rechnungen</div>
-        <a
-          href="/invoices"
-          className={`folder ${currentPath === "/invoices" ? "active" : ""}`}
-          onClick={(event) => open(event, "/invoices")}
-        >
-          <span className="folder-name">
-            <Icon name="receipt" weight={currentPath === "/invoices" ? "bold" : undefined} />
-            Rechnungen
-          </span>
-        </a>
-        <div className="side-section">Address Book</div>
-        <a
-          href="/contacts"
-          className={`folder ${currentPath === "/contacts" ? "active" : ""}`}
-          onClick={(event) => open(event, "/contacts")}
-        >
-          <span className="folder-name"><Icon name="group" weight={currentPath === "/contacts" ? "bold" : undefined} />Contacts</span>
-        </a>
+        <div className="side-section">Organizer</div>
+        {organizerLinks.map((entry) => {
+          const active = organizerRoute(currentPath, entry.route);
+          const url = organizerURL(entry.route);
+          return (
+            <a
+              key={entry.route}
+              href={url}
+              className={`folder ${entry.gap ? "folder-group-break" : ""} ${active ? "active" : ""}`}
+              onClick={(event) => open(event, url)}
+            >
+              <span className="folder-name">
+                <Icon name={entry.icon} weight={active ? "bold" : undefined} />
+                {entry.label}
+              </span>
+            </a>
+          );
+        })}
         {advertiseAndroidApp ? (
           <>
             <div className="side-section">Android app</div>
@@ -1408,6 +1386,26 @@ function Sidebar({
     </aside>
   );
 }
+
+/**
+ * organizerLinks are the sidebar's non-mail destinations, in the order they are
+ * drawn. Each carries only its label and icon; which paths belong to it is the
+ * router's answer, read through organizerRoute, so an entry cannot light up for
+ * a path that would render the mail list instead.
+ *
+ * `gap` opens a blank line above an entry. The four sit under one heading
+ * because a heading per single entry only repeated the entry, but they are two
+ * different kinds of thing: the calendar and the address book are what this
+ * reader keeps, while parcels and invoices are what the mail brought in and
+ * still wants something done about. A gap says that much without spending a
+ * second heading on it.
+ */
+const organizerLinks: { route: OrganizerRoute; label: string; icon: string; gap?: boolean }[] = [
+  { route: "calendar", label: "Calendar", icon: "calendar" },
+  { route: "contacts", label: "Contacts", icon: "group" },
+  { route: "deliveries", label: "Parcels", icon: "package", gap: true },
+  { route: "invoices", label: "Invoices", icon: "receipt" }
+];
 
 /**
  * NamedListEntry is one of the sidebar's whole-account lists. They are numbered

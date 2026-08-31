@@ -191,7 +191,7 @@ func DeliveryCarrierLabel(key string) string {
 			return carrier.Label
 		}
 	}
-	return "Paket"
+	return "Parcel"
 }
 
 // DeliveryTrackingURL is the carrier's own page for one number, or empty when

@@ -12,7 +12,7 @@
  * difference between the two features. A parcel that did not arrive stops being
  * today's news; an invoice that was not paid becomes more pressing, and one
  * somebody is chasing is the most pressing thing on the page whatever its date
- * says. So "Gemahnt" is a group of its own and it comes first.
+ * says. So "Chased" is a group of its own and it comes first.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -59,74 +59,73 @@ export function groupInvoices(invoices: readonly Invoice[], today: string): Invo
   const undated = rest.filter((item) => item.due_date === "");
   const paid = invoices.filter((item) => !invoiceIsOpen(item));
   return [
-    { key: "chased", title: "Gemahnt", hint: "Es wurde bereits angemahnt oder erinnert", items: chased },
-    { key: "overdue", title: "Überfällig", hint: "Die Frist ist verstrichen", items: overdue },
-    { key: "today", title: "Heute fällig", hint: "Heute ist der letzte Tag", items: dueToday },
-    { key: "upcoming", title: "Offen", hint: "Mit einer Frist in der Zukunft", items: upcoming },
-    { key: "undated", title: "Ohne Frist", hint: "Keine Frist erkannt -- du kannst sie selbst eintragen", items: undated },
-    { key: "paid", title: "Erledigt", hint: "Bezahlt, abgebucht oder gutgeschrieben", items: paid }
+    { key: "chased", title: "Chased", hint: "A reminder or an overdue notice has already arrived", items: chased },
+    { key: "overdue", title: "Overdue", hint: "The deadline has passed", items: overdue },
+    { key: "today", title: "Due today", hint: "Today is the last day", items: dueToday },
+    { key: "upcoming", title: "Open", hint: "With a deadline still ahead", items: upcoming },
+    { key: "undated", title: "No deadline", hint: "No deadline was read -- you can enter one yourself", items: undated },
+    { key: "paid", title: "Settled", hint: "Paid, debited or credited", items: paid }
   ].filter((group) => group.items.length > 0);
 }
 
-const weekdayNames = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
-
 /** dueLabel names a deadline the way a reader would say it. It differs from the
  * parcel list's in that days in the past are counted rather than merely named:
- * "seit 9 Tagen" is what a reader needs to know about an overdue bill, where
- * "Dienstag" would leave them doing the arithmetic. */
+ * "9 days overdue" is what a reader needs to know about a late bill, where
+ * "Tuesday" would leave them doing the arithmetic. */
 export function dueLabel(day: string, today: string): string {
-  if (day === "") return "Keine Frist genannt";
+  if (day === "") return "No deadline given";
   const date = new Date(`${day}T00:00:00`);
   const now = new Date(`${today}T00:00:00`);
   if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return day;
   const distance = Math.round((date.getTime() - now.getTime()) / 86400000);
-  if (distance === 0) return "Heute fällig";
-  if (distance === 1) return "Morgen fällig";
-  if (distance === -1) return "Seit gestern überfällig";
-  if (distance < -1) return `Seit ${-distance} Tagen überfällig`;
-  const written = date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
-  if (distance < 7) return `${weekdayNames[date.getDay()]}, ${written}`;
-  return `Fällig am ${written}`;
+  if (distance === 0) return "Due today";
+  if (distance === 1) return "Due tomorrow";
+  if (distance === -1) return "Overdue since yesterday";
+  if (distance < -1) return `Overdue by ${-distance} days`;
+  const written = date.toLocaleDateString("en", { day: "numeric", month: "short", year: "numeric" });
+  if (distance < 7) return `${date.toLocaleDateString("en", { weekday: "long" })}, ${written}`;
+  return `Due on ${written}`;
 }
 
-/** formatAmount renders the stored "1234.56" the way a German reader writes it.
- * The amount is stored normalized so two spellings of one sum compare equal;
- * this is the other end of that. */
+/** formatAmount renders the stored "1234.56" as a sum with its currency. The
+ * amount is stored normalized so two spellings of one sum compare equal; this
+ * is the other end of that. It is written the way the rest of this view writes,
+ * rather than in the reader's date locale, so a row reads as one sentence. */
 export function formatAmount(amount: string, currency: string): string {
   if (amount === "") return "";
   const value = Number(amount);
   if (!Number.isFinite(value)) return amount;
   try {
-    return value.toLocaleString("de-DE", {
+    return value.toLocaleString("en", {
       style: currency ? "currency" : "decimal",
       currency: currency || undefined,
       minimumFractionDigits: 2
     });
   } catch {
     // An unknown currency code is a sender's typo, not a reason to show nothing.
-    return `${value.toLocaleString("de-DE", { minimumFractionDigits: 2 })} ${currency}`.trim();
+    return `${value.toLocaleString("en", { minimumFractionDigits: 2 })} ${currency}`.trim();
   }
 }
 
-/** dunningLabels name the four grades. The scale is what a reader needs to tell
- * apart rather than what German dunning practice distinguishes. */
+/** dunningLabels name the three grades. The scale is what a reader needs to
+ * tell apart rather than what any one country's dunning practice distinguishes. */
 export const dunningLabels: Record<number, string> = {
-  1: "Zahlungserinnerung",
-  2: "Mahnung",
-  3: "Letzte Mahnung"
+  1: "Payment reminder",
+  2: "Overdue notice",
+  3: "Final notice"
 };
 
 export function dunningLabel(level: number): string {
-  return dunningLabels[level] || "Gemahnt";
+  return dunningLabels[level] || "Chased";
 }
 
 /** settlementLabels say why a bill counts as settled, which is the difference
  * between "you paid this" and "you never had to". */
 const settlementLabels: Record<string, string> = {
-  transfer: "Überweisung",
-  direct_debit: "Lastschrift",
-  card: "Karte",
-  wallet: "Bezahldienst"
+  transfer: "Bank transfer",
+  direct_debit: "Direct debit",
+  card: "Card",
+  wallet: "Payment service"
 };
 
 export function InvoicesView({
@@ -202,9 +201,9 @@ export function InvoicesView({
     await withBusyRow(invoice.id, async () => {
       const result = await api.setInvoiceManualStatus(csrf, invoice.id, manualStatus);
       applyResult(invoice.id, result.invoice, manualStatus === "dismissed");
-      if (manualStatus === "paid") addToast("Als bezahlt vermerkt.");
-      if (manualStatus === "dismissed") addToast("Nicht mehr als Rechnung geführt.");
-      if (manualStatus === "") addToast("Vermerk zurückgenommen.");
+      if (manualStatus === "paid") addToast("Marked as paid.");
+      if (manualStatus === "dismissed") addToast("No longer listed as an invoice.");
+      if (manualStatus === "") addToast("Mark taken back.");
     });
   }
 
@@ -212,7 +211,7 @@ export function InvoicesView({
     await withBusyRow(invoice.id, async () => {
       const result = await api.setInvoiceDueDate(csrf, invoice.id, day);
       applyResult(invoice.id, result.invoice, false);
-      addToast(day ? "Frist eingetragen." : "Frist entfernt.");
+      addToast(day ? "Deadline saved." : "Deadline removed.");
     });
   }
 
@@ -229,10 +228,10 @@ export function InvoicesView({
     <>
       <div className="content-head">
         <div>
-          <h1>Rechnungen</h1>
-          <span className="label-pill">{open.length.toLocaleString()} offen</span>
+          <h1>Invoices</h1>
+          <span className="label-pill">{open.length.toLocaleString()} open</span>
           {dueNow > 0 ? (
-            <span className="label-pill invoices-pill-due">{dueNow.toLocaleString()} fällig</span>
+            <span className="label-pill invoices-pill-due">{dueNow.toLocaleString()} due</span>
           ) : null}
         </div>
       </div>
@@ -243,11 +242,11 @@ export function InvoicesView({
         <section className="panel invoices-idle">
           <Icon name="receipt" />
           <div>
-            <strong>Keine offenen Rechnungen.</strong>
+            <strong>No open invoices.</strong>
             <p>
-              Rolltop liest Fälligkeiten aus der Post mit — aus der Mail selbst und aus dem PDF im
-              Anhang. Was per Lastschrift, Karte oder Bezahldienst schon beglichen ist, landet hier
-              nicht als Erinnerung. Zahlungserinnerungen und Mahnungen stehen ganz oben.
+              Rolltop reads deadlines out of the mail — from the message itself and from the PDF
+              attached to it. Anything already settled by direct debit, card or a payment service
+              does not turn up here as a reminder. Reminders and overdue notices stand at the top.
             </p>
           </div>
         </section>
@@ -319,25 +318,25 @@ function InvoiceRow({
   return (
     <div className={`invoices-row status-${invoice.status}${overdue ? " overdue" : ""}${invoice.dunning_level > 0 ? " chased" : ""}`}>
       <div className="invoices-row-main">
-        <span className="invoices-issuer" title={`Rechnung von ${invoice.issuer}`}>
+        <span className="invoices-issuer" title={`Invoice from ${invoice.issuer}`}>
           <Icon name="receipt" weight={open ? "fill" : "regular"} />
           {invoice.issuer}
         </span>
         <div className="invoices-row-text">
           {latest ? (
             <a href={messageURL(latest.id)} className="invoices-subject" onClick={(event) => openMessage(event, messageURL(latest.id))}>
-              {latest.subject || "(kein Betreff)"}
+              {latest.subject || "(no subject)"}
             </a>
           ) : null}
           <div className="invoices-meta">
-            <span className="invoices-due">{open ? dueLabel(invoice.due_date, today) : "Erledigt"}</span>
+            <span className="invoices-due">{open ? dueLabel(invoice.due_date, today) : "Settled"}</span>
             {amount ? <span className="invoices-amount">{amount}</span> : null}
             {invoice.dunning_level > 0 ? (
               <span className={`invoices-dunning level-${invoice.dunning_level}`}>{dunningLabel(invoice.dunning_level)}</span>
             ) : null}
-            {/* Why it counts as settled is worth saying: "bezahlt" and "wird
-                abgebucht" are different facts, and only one of them means the
-                reader did something. */}
+            {/* Why it counts as settled is worth saying: "you paid this" and
+                "this is debited automatically" are different facts, and only
+                one of them means the reader did something. */}
             {!open && invoice.settlement && settlementLabels[invoice.settlement] ? (
               <span className="invoices-settlement">{settlementLabels[invoice.settlement]}</span>
             ) : null}
@@ -349,18 +348,18 @@ function InvoiceRow({
               className="secondary invoices-paid"
               type="button"
               disabled={busy}
-              title="Diese Rechnung ist bezahlt"
+              title="This invoice is paid"
               onClick={() => onCorrect("paid")}
             >
               <Icon name="check" />
-              Bezahlt
+              Paid
             </button>
           ) : null}
           <button
             className={expanded ? "ghost invoices-expand expanded" : "ghost invoices-expand"}
             type="button"
             aria-expanded={expanded}
-            title={expanded ? "Weniger anzeigen" : "Rechnungsnummer, Frist und alle Mails anzeigen"}
+            title={expanded ? "Show less" : "Show the invoice number, deadline and every message"}
             onClick={onToggle}
           >
             <Icon name="expand_more" />
@@ -372,11 +371,11 @@ function InvoiceRow({
           <dl>
             {invoice.number ? (
               <>
-                <dt>Rechnungsnummer</dt>
+                <dt>Invoice number</dt>
                 <dd><code>{invoice.number}</code></dd>
               </>
             ) : null}
-            <dt>Absender</dt>
+            <dt>From</dt>
             <dd>{invoice.issuer}</dd>
           </dl>
           {/* An invoice whose terms were only in a scanned page arrives with no
@@ -384,7 +383,7 @@ function InvoiceRow({
               This is the counterpart to ticking off a parcel the carrier never
               reported. */}
           <label className="invoices-duedate">
-            <span>Frist</span>
+            <span>Deadline</span>
             <input
               type="date"
               value={invoice.manual_due_date || invoice.due_date || ""}
@@ -393,7 +392,7 @@ function InvoiceRow({
             />
             {invoice.manual_due_date ? (
               <button className="ghost" type="button" disabled={busy} onClick={() => onDueDate("")}>
-                Zurücksetzen
+                Reset
               </button>
             ) : null}
           </label>
@@ -402,10 +401,10 @@ function InvoiceRow({
               <>
                 <span className="invoices-correction-note">
                   <Icon name="check" />
-                  Von dir als bezahlt vermerkt.
+                  You marked this as paid.
                 </span>
                 <button className="ghost" type="button" disabled={busy} onClick={() => onCorrect("")}>
-                  Rückgängig
+                  Undo
                 </button>
               </>
             ) : (
@@ -415,17 +414,17 @@ function InvoiceRow({
                 className="ghost invoices-dismiss"
                 type="button"
                 disabled={busy}
-                title="Das ist keine Rechnung - nicht mehr anzeigen"
+                title="This is not an invoice - stop showing it"
                 onClick={() => onCorrect("dismissed")}
               >
                 <Icon name="close" />
-                Keine Rechnung
+                Not an invoice
               </button>
             )}
           </div>
           {others.length > 0 ? (
             <div className="invoices-history">
-              <span className="invoices-history-title">Weitere Mails zu dieser Rechnung</span>
+              <span className="invoices-history-title">More mail about this invoice</span>
               {others.map((message) => (
                 <a
                   key={message.id}
@@ -433,7 +432,7 @@ function InvoiceRow({
                   className="invoices-history-row"
                   onClick={(event) => openMessage(event, messageURL(message.id))}
                 >
-                  <span className="invoices-history-subject">{message.subject || "(kein Betreff)"}</span>
+                  <span className="invoices-history-subject">{message.subject || "(no subject)"}</span>
                   <span className="invoices-history-date">{displayDateTime(message.date, datePrefs)}</span>
                 </a>
               ))}

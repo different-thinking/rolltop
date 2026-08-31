@@ -17,17 +17,18 @@ import { dueLabel, dunningLabel, formatAmount } from "./InvoicesView";
  * has to stay short, so an overdue bill becomes a day count and everything past
  * the coming week is just its date. */
 export function compactDue(day: string, today: string): string {
-  if (day === "") return "offen";
+  if (day === "") return "open";
   const date = new Date(`${day}T00:00:00`);
   const now = new Date(`${today}T00:00:00`);
   if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return day;
   const distance = Math.round((date.getTime() - now.getTime()) / 86400000);
-  // Adverbs, so lower case is the correct German here.
-  if (distance === 0) return "heute";
-  if (distance === 1) return "morgen";
-  if (distance < 0) return `${-distance} Tage überfällig`;
-  const written = date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-  if (distance < 7) return `${date.toLocaleDateString("de-DE", { weekday: "short" })} ${written}`;
+  // Adverbs rather than dates, and lower case: they are read as part of the
+  // chip's sentence, not as a field.
+  if (distance === 0) return "today";
+  if (distance === 1) return "tomorrow";
+  if (distance < 0) return `${-distance} day${distance === -1 ? "" : "s"} overdue`;
+  const written = date.toLocaleDateString("en", { day: "numeric", month: "short" });
+  if (distance < 7) return `${date.toLocaleDateString("en", { weekday: "short" })} ${written}`;
   return written;
 }
 
@@ -35,7 +36,7 @@ export function compactDue(day: string, today: string): string {
  * naming a date, because that is the fact that outranks the date. */
 export function invoiceChipText(invoice: MessageInvoiceSummary, today: string): string {
   if (invoice.dunning_level > 0) return dunningLabel(invoice.dunning_level);
-  return `Fällig: ${compactDue(invoice.due_date, today)}`;
+  return `Due: ${compactDue(invoice.due_date, today)}`;
 }
 
 /**
@@ -51,7 +52,7 @@ export function InvoiceChip({ invoice }: { invoice: MessageInvoiceSummary }) {
   return (
     <span
       className={`invoice-chip ${pressing ? "due-now" : ""} ${invoice.dunning_level > 0 ? "chased" : ""}`}
-      title={`Rechnung${invoice.number ? ` ${invoice.number}` : ""} von ${invoice.issuer}${amount ? `, ${amount}` : ""}`}
+      title={`Invoice${invoice.number ? ` ${invoice.number}` : ""} from ${invoice.issuer}${amount ? `, ${amount}` : ""}`}
     >
       <Icon name="receipt" weight={pressing ? "fill" : "regular"} />
       <span className="invoice-chip-label">{invoiceChipText(invoice, today)}</span>
@@ -84,18 +85,18 @@ export function InvoiceDetails({
       <dl>
         {invoice.number ? (
           <>
-            <dt>Rechnungsnummer</dt>
+            <dt>Invoice number</dt>
             <dd><code>{invoice.number}</code></dd>
           </>
         ) : null}
         {amount ? (
           <>
-            <dt>Betrag</dt>
+            <dt>Amount</dt>
             <dd>{amount}</dd>
           </>
         ) : null}
-        <dt>{invoice.status === "open" ? "Fällig" : "Status"}</dt>
-        <dd>{invoice.status === "open" ? dueLabel(invoice.due_date, today) : "Erledigt"}</dd>
+        <dt>{invoice.status === "open" ? "Due" : "Status"}</dt>
+        <dd>{invoice.status === "open" ? dueLabel(invoice.due_date, today) : "Settled"}</dd>
       </dl>
       <div className="invoice-details-actions">
         <a
@@ -107,7 +108,7 @@ export function InvoiceDetails({
           }}
         >
           <Icon name="receipt" />
-          Alle Rechnungen
+          All invoices
         </a>
       </div>
     </div>

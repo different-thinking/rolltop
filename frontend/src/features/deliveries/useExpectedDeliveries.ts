@@ -17,7 +17,7 @@ export type ExpectedDeliveries = {
   /** Parcels due today that have not been reported delivered. */
   count: number;
   /** The single parcel's carrier, when there is exactly one. It is what lets
-   * the chip say "DHL" rather than "1 Paket", which is more use at a glance. */
+   * the chip say "DHL" rather than "1 parcel", which is more use at a glance. */
   carrierLabel: string;
 };
 

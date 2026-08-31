@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { allMailRoute, mailRoute } from "./routes";
+import { allMailRoute, mailRoute, mailRouteView, organizerRoute, organizerURL } from "./routes";
 
 describe("allMailRoute", () => {
   it("names the unnarrowed list, on its first page and its later ones", () => {
@@ -23,5 +23,32 @@ describe("allMailRoute", () => {
   it("names All Mail for a folder route whose id is unusable", () => {
     expect(mailRoute("/mailbox/0").mailboxID).toBeNull();
     expect(allMailRoute(mailRoute("/mailbox/0"))).toBe(true);
+  });
+});
+
+describe("organizerRoute", () => {
+  it("names each sidebar destination by the path that opens it", () => {
+    expect(organizerRoute("/calendar", "calendar")).toBe(true);
+    expect(organizerRoute("/contacts", "contacts")).toBe(true);
+    expect(organizerRoute("/deliveries", "deliveries")).toBe(true);
+    expect(organizerRoute("/invoices", "invoices")).toBe(true);
+    expect(organizerURL("invoices")).toBe("/invoices");
+  });
+
+  it("does not answer for a neighbour's path", () => {
+    expect(organizerRoute("/contacts", "calendar")).toBe(false);
+    expect(organizerRoute("/mail/invoices", "invoices")).toBe(false);
+  });
+
+  // The calendar owns the days and events below it; the three lists do not
+  // serve anything below theirs, so a path there renders the mail list and the
+  // sidebar has to agree rather than highlight a view nobody is looking at.
+  it("takes the paths below a destination only where the router serves them", () => {
+    expect(organizerRoute("/calendar/2026-08-29", "calendar")).toBe(true);
+    expect(organizerRoute("/deliveries/7", "deliveries")).toBe(false);
+    expect(organizerRoute("/invoices/7", "invoices")).toBe(false);
+    expect(organizerRoute("/contacts/7", "contacts")).toBe(false);
+    expect(mailRouteView("/calendar/2026-08-29", false)).toBe(false);
+    expect(mailRouteView("/deliveries/7", false)).toBe(true);
   });
 });

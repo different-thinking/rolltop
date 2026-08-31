@@ -12,9 +12,9 @@ import { Icon } from "../../components/Icon";
 import { dayLabel, localDay } from "./DeliveriesView";
 
 const statusLabels: Record<MessageShipmentSummary["status"], string> = {
-  announced: "angekündigt",
-  out_for_delivery: "in Zustellung",
-  delivered: "zugestellt"
+  announced: "announced",
+  out_for_delivery: "out for delivery",
+  delivered: "delivered"
 };
 
 /** compactDay is the day as a row has room for it. The parcel list spells a day
@@ -25,13 +25,13 @@ export function compactDay(day: string, today: string): string {
   const now = new Date(`${today}T00:00:00`);
   if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return day;
   const distance = Math.round((date.getTime() - now.getTime()) / 86400000);
-  // Adverbs, so lower case is the correct German here -- unlike the weekday
-  // below, which is a noun and is capitalised.
-  if (distance === 0) return "heute";
-  if (distance === 1) return "morgen";
-  const written = date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+  // Adverbs rather than dates, and lower case: they are read as part of the
+  // chip's sentence, not as a field.
+  if (distance === 0) return "today";
+  if (distance === 1) return "tomorrow";
+  const written = date.toLocaleDateString("en", { day: "numeric", month: "short" });
   if (distance > 1 && distance < 7) {
-    return `${date.toLocaleDateString("de-DE", { weekday: "short" })} ${written}`;
+    return `${date.toLocaleDateString("en", { weekday: "short" })} ${written}`;
   }
   return written;
 }
@@ -39,8 +39,8 @@ export function compactDay(day: string, today: string): string {
 /** shipmentChipText is what the marker says: the day when there is one, because
  * that is the fact a reader is scanning for, and the status when there is not. */
 export function shipmentChipText(shipment: MessageShipmentSummary, today: string): string {
-  const parcels = shipment.count > 1 ? `${shipment.count} Pakete` : "Paket";
-  if (shipment.status === "delivered") return `${parcels} zugestellt`;
+  const parcels = shipment.count > 1 ? `${shipment.count} parcels` : "Parcel";
+  if (shipment.status === "delivered") return `${parcels} delivered`;
   if (shipment.expected_date === "") return `${parcels} ${statusLabels[shipment.status]}`;
   return `${parcels}: ${compactDay(shipment.expected_date, today)}`;
 }
@@ -57,7 +57,7 @@ export function ShipmentChip({ shipment }: { shipment: MessageShipmentSummary })
   return (
     <span
       className={`shipment-chip ${dueToday ? "due-today" : ""}`}
-      title={`Sendung ${shipment.tracking_number} (${shipment.carrier_label}), ${statusLabels[shipment.status]}`}
+      title={`Shipment ${shipment.tracking_number} (${shipment.carrier_label}), ${statusLabels[shipment.status]}`}
     >
       <Icon name="package" weight={dueToday ? "fill" : "regular"} />
       <span className="shipment-chip-label">{shipmentChipText(shipment, today)}</span>
@@ -83,19 +83,19 @@ export function ShipmentDetails({
       <span className="shipment-details-head">
         <Icon name="package" weight="fill" />
         {shipment.carrier_label}
-        {shipment.count > 1 ? <span className="shipment-details-count">{shipment.count} Pakete</span> : null}
+        {shipment.count > 1 ? <span className="shipment-details-count">{shipment.count} parcels</span> : null}
       </span>
       <dl>
-        <dt>Sendungsnummer</dt>
+        <dt>Tracking number</dt>
         <dd><code>{shipment.tracking_number}</code></dd>
-        <dt>{shipment.status === "delivered" ? "Zugestellt" : "Erwartet"}</dt>
+        <dt>{shipment.status === "delivered" ? "Delivered" : "Expected"}</dt>
         <dd>{shipment.expected_date === "" ? statusLabels[shipment.status] : dayLabel(shipment.expected_date, today)}</dd>
       </dl>
       <div className="shipment-details-actions">
         {shipment.tracking_url ? (
           <a className="secondary" href={shipment.tracking_url} target="_blank" rel="noreferrer noopener">
             <Icon name="link" />
-            Bei {shipment.carrier_label} verfolgen
+            Track with {shipment.carrier_label}
           </a>
         ) : null}
         <a
@@ -107,7 +107,7 @@ export function ShipmentDetails({
           }}
         >
           <Icon name="package" />
-          Alle Pakete
+          All parcels
         </a>
       </div>
     </div>
