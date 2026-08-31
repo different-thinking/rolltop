@@ -349,7 +349,7 @@ function DeliveryRow({
                   className="deliveries-history-row"
                   onClick={(event) => open(event, messageURL(message.id))}
                 >
-                  <span className="deliveries-history-subject">{message.subject || "(kein Betreff)"}</span>
+                  <span className="deliveries-history-subject">{message.subject || "(no subject)"}</span>
                   <span className="deliveries-history-date">{displayDateTime(message.date, datePrefs)}</span>
                 </a>
               ))}

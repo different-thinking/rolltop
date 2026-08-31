@@ -26,7 +26,7 @@ export function compactDue(day: string, today: string): string {
   // chip's sentence, not as a field.
   if (distance === 0) return "today";
   if (distance === 1) return "tomorrow";
-  if (distance < 0) return `${-distance} days overdue`;
+  if (distance < 0) return `${-distance} day${distance === -1 ? "" : "s"} overdue`;
   const written = date.toLocaleDateString("en", { day: "numeric", month: "short" });
   if (distance < 7) return `${date.toLocaleDateString("en", { weekday: "short" })} ${written}`;
   return written;

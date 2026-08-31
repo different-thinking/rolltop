@@ -129,6 +129,10 @@ describe("compactDue", () => {
     expect(compactDue("2026-08-25", today)).toBe("9 days overdue");
   });
 
+  it("says one day in the singular", () => {
+    expect(compactDue("2026-09-02", today)).toBe("1 day overdue");
+  });
+
   it("keeps the near days short", () => {
     expect(compactDue(today, today)).toBe("today");
     expect(compactDue("2026-09-04", today)).toBe("tomorrow");
