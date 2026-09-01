@@ -12,7 +12,7 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation, type PluginAppRoute } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
@@ -44,6 +44,7 @@ export function AppShell({
   accountNotice,
   databaseUnavailable,
   enabledPlugins,
+  pluginAppLinks,
   mailCategories,
   mailCategoriesPending,
   mailGeneration,
@@ -468,6 +469,7 @@ export function AppShell({
           buildCommit={buildCommit}
           mailCategories={mailCategories}
           mailCategoriesPending={mailCategoriesPending}
+          pluginAppLinks={pluginAppLinks}
           currentPath={location.path}
           navigate={navigate}
           openCompose={openCompose}
@@ -480,7 +482,7 @@ export function AppShell({
           touchRevealedAccounts={touchRevealedAccounts}
           onClose={closeMobileSidebar}
         />
-        <main className={`content ${mailRouteView(location.path, Boolean(user.is_admin)) ? "measured" : ""}`}>
+        <main className={`content ${mailRouteView(location.path, Boolean(user.is_admin), pluginAppLinks) ? "measured" : ""}`}>
           {databaseUnavailable ? <DatabaseUnavailableBanner isAdmin={Boolean(user.is_admin)} navigate={navigate} /> : null}
           {accountNeedsPassword ? <AccountCredentialBanner notice={accountNotice} navigate={navigate} /> : null}
           {children}
@@ -997,6 +999,7 @@ function Sidebar({
   buildCommit,
   mailCategories,
   mailCategoriesPending,
+  pluginAppLinks,
   currentPath,
   navigate,
   openCompose,
@@ -1024,6 +1027,7 @@ function Sidebar({
   buildCommit: string;
   mailCategories: MailCategorySummary[];
   mailCategoriesPending: number;
+  pluginAppLinks: readonly PluginAppLink[];
   currentPath: string;
   navigate: (url: string) => void;
   openCompose: (query?: string) => void;
@@ -1364,6 +1368,22 @@ function Sidebar({
             </a>
           );
         })}
+        {pluginAppLinks.filter((entry) => entry.label).map((entry) => {
+          const active = entry.path === currentPath || (entry.nested === true && currentPath.startsWith(`${entry.path}/`));
+          return (
+            <a
+              key={entry.path}
+              href={entry.path}
+              className={`folder ${active ? "active" : ""}`}
+              onClick={(event) => open(event, entry.path)}
+            >
+              <span className="folder-name">
+                <Icon name={entry.icon || "folder"} weight={active ? "bold" : undefined} />
+                {entry.label}
+              </span>
+            </a>
+          );
+        })}
         {advertiseAndroidApp ? (
           <>
             <div className="side-section">Android app</div>
@@ -1386,6 +1406,14 @@ function Sidebar({
     </aside>
   );
 }
+
+/**
+ * PluginAppLink is one plugin-owned page as the shell needs it: the path the
+ * router claims, plus the label and icon the sidebar draws it with. A link
+ * whose module has not loaded yet has no label, and an entry with no label is
+ * not drawn -- a nameless row in the sidebar says less than no row at all.
+ */
+export type PluginAppLink = PluginAppRoute & { label?: string; icon?: string };
 
 /**
  * organizerLinks are the sidebar's non-mail destinations, in the order they are

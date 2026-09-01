@@ -13,8 +13,8 @@ import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
-import { mailRouteView, organizerRoute } from "./lib/routes";
-import type { RuntimePlugins } from "./plugins/runtime";
+import { mailRouteView, organizerRoute, pluginAppRoute, type PluginAppRoute } from "./lib/routes";
+import { matchAppRoute, type RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
 /**
@@ -44,6 +44,7 @@ export function RouteView({
   refreshChrome,
   runtimePlugins,
   reloadRuntimePlugins,
+  pluginAppRoutes,
   securityUnlock,
   openSecurityUnlock,
   addToast
@@ -69,6 +70,7 @@ export function RouteView({
   refreshChrome: () => Promise<Bootstrap | null>;
   runtimePlugins: RuntimePlugins;
   reloadRuntimePlugins: () => Promise<void>;
+  pluginAppRoutes: readonly PluginAppRoute[];
   securityUnlock: SecurityUnlockState;
   openSecurityUnlock: (identityID?: number, onUnlocked?: (state: SecurityUnlockState) => void, recipientKeyIDs?: string[], fallbackEmail?: string) => void;
   addToast: AddToast;
@@ -108,7 +110,20 @@ export function RouteView({
   // shell asks that same function which views take the reading measure; deciding
   // the branch by it rather than beside it is what keeps a route from being mail
   // to one of them and not to the other.
-  if (!mailRouteView(location.path, Boolean(user.is_admin))) {
+  if (!mailRouteView(location.path, Boolean(user.is_admin), pluginAppRoutes)) {
+    // A plugin page is tried before the core's own branches, but only after
+    // mailRouteView has agreed the path is not mail -- which for a plugin path
+    // it does from the manifest, before the module that draws it has loaded.
+    // Until it has, the page is blank rather than the mail list: the reader
+    // asked for this URL, and showing them a different view for a moment is
+    // worse than showing them nothing for one.
+    const pluginRoute = matchAppRoute(runtimePlugins, location.path);
+    if (pluginRoute) {
+      return <>{pluginRoute.render({ csrf, user, mailboxes, location, navigate, addToast })}</>;
+    }
+    if (runtimePlugins.status === "loading" && pluginAppRoute(location.path, pluginAppRoutes)) {
+      return <div className="settings-state settings-loading compact" role="status" aria-live="polite" aria-busy="true" />;
+    }
     if (location.path === "/compose") {
       return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
     }

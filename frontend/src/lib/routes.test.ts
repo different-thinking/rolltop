@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { allMailRoute, mailRoute, mailRouteView, organizerRoute, organizerURL } from "./routes";
+import { allMailRoute, mailRoute, mailRouteView, organizerRoute, organizerURL, pluginAppRoute } from "./routes";
 
 describe("allMailRoute", () => {
   it("names the unnarrowed list, on its first page and its later ones", () => {
@@ -50,5 +50,41 @@ describe("organizerRoute", () => {
     expect(organizerRoute("/contacts/7", "contacts")).toBe(false);
     expect(mailRouteView("/calendar/2026-08-29", false)).toBe(false);
     expect(mailRouteView("/deliveries/7", false)).toBe(true);
+  });
+});
+
+describe("pluginAppRoute", () => {
+  const routes = [{ path: "/files", nested: true }, { path: "/flat" }];
+
+  it("claims a declared page and, when it is nested, the paths below it", () => {
+    expect(pluginAppRoute("/files", routes)).toBe(true);
+    expect(pluginAppRoute("/files/2026/05", routes)).toBe(true);
+    expect(pluginAppRoute("/flat", routes)).toBe(true);
+  });
+
+  it("claims nothing else, including a neighbour that starts the same way", () => {
+    expect(pluginAppRoute("/flat/child", routes)).toBe(false);
+    expect(pluginAppRoute("/filesx", routes)).toBe(false);
+    expect(pluginAppRoute("/mail", routes)).toBe(false);
+    expect(pluginAppRoute("/files", [])).toBe(false);
+    expect(pluginAppRoute("/files")).toBe(false);
+  });
+});
+
+describe("mailRouteView with plugin pages", () => {
+  // The router has to answer this before the plugin module has loaded, from
+  // the paths the server declared -- otherwise a deep link paints the mail
+  // list first and replaces it a moment later.
+  it("stops calling a plugin page mail once the install declares one", () => {
+    expect(mailRouteView("/files", false)).toBe(true);
+    expect(mailRouteView("/files", false, [{ path: "/files", nested: true }])).toBe(false);
+    expect(mailRouteView("/files/2026", false, [{ path: "/files", nested: true }])).toBe(false);
+  });
+
+  it("leaves everything else alone", () => {
+    const routes = [{ path: "/files", nested: true }];
+    expect(mailRouteView("/mail/relevant", false, routes)).toBe(true);
+    expect(mailRouteView("/mailbox/12", false, routes)).toBe(true);
+    expect(mailRouteView("/deliveries", false, routes)).toBe(false);
   });
 });

@@ -12,6 +12,7 @@
     "build:plugins": "node scripts/build-plugins.mjs",
     "build:pgp-css": "mkdir -p plugins/client_side_pgp/frontend_dist/styles && sass plugins/client_side_pgp/frontend/styles/pgp.scss plugins/client_side_pgp/frontend_dist/styles/pgp.css --style=compressed",
     "build:mail-filters-css": "mkdir -p plugins/mail_filters/frontend_dist && sass plugins/mail_filters/frontend/styles.css plugins/mail_filters/frontend_dist/styles.css --style=compressed",
+    "build:webdav-archive-css": "mkdir -p plugins/webdav_archive/frontend_dist && sass plugins/webdav_archive/frontend/styles.css plugins/webdav_archive/frontend_dist/styles.css --style=compressed",
     "build:remote-imap-sync-css": "mkdir -p plugins/remote_imap_sync/frontend_dist && sass plugins/remote_imap_sync/frontend/styles.css plugins/remote_imap_sync/frontend_dist/styles.css --style=compressed",
     "build:experimental-spam-filter-css": "mkdir -p plugins/experimental_spam_filter/frontend_dist && sass plugins/experimental_spam_filter/frontend/styles.css plugins/experimental_spam_filter/frontend_dist/styles.css --style=compressed",
     "build:vite": "vite build",

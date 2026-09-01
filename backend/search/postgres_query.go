@@ -170,6 +170,12 @@ func pgSearchSpec(userID int64, parsed parsedQuery, opts SearchOptions, limit, o
 	spec.CCPattern = pattern(parsed.CC)
 	spec.SubjectPattern = pattern(parsed.Subject)
 	spec.FilenamePattern = pattern(parsed.Filename)
+	// A MIME type anchors at the start rather than matching anywhere, which is
+	// what makes `audio/` a family and not a substring: without the anchor it
+	// would also select `application/x-audio-playlist`.
+	if value := strings.Trim(strings.TrimSpace(parsed.MIMEType), `"`); value != "" {
+		spec.MIMETypePattern = escapeLikePattern(value) + "%"
+	}
 	if !parsed.After.IsZero() {
 		spec.AfterUnix = parsed.After.UTC().Unix()
 	}

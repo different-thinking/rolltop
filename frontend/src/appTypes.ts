@@ -91,6 +91,8 @@ export type AppShellProps = {
   accountNotice: string;
   databaseUnavailable: boolean;
   enabledPlugins: string[];
+  /** Top-level pages enabled plugins own, for the router and the sidebar. */
+  pluginAppLinks: readonly import("./features/layout/AppShell").PluginAppLink[];
   /** Sidebar category entries with the counts their lists hold. */
   mailCategories: import("./types").MailCategorySummary[];
   /** Messages still waiting to be read for their category headers. */

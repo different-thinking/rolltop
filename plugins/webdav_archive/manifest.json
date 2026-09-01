@@ -1,0 +1,23 @@
+{
+  "id": "webdav_archive",
+  "name": "WebDAV archive",
+  "description": "Files attachments from a watched mail folder onto a WebDAV server, with a queue that survives an unreachable server, and browses what landed there.",
+  "version": "1.0.0",
+  "enabled_by_default": false,
+  "auto_start": true,
+  "experimental": true,
+  "backend": {
+    "kind": "go-plugin",
+    "binary": "backend/webdav_archive.so"
+  },
+  "frontend": {
+    "module": "frontend_dist/index.js",
+    "css": "frontend_dist/styles.css",
+    "app_routes": [
+      {
+        "path": "/files",
+        "nested": true
+      }
+    ]
+  }
+}

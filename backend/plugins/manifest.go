@@ -45,6 +45,24 @@ type BackendBundle struct {
 type FrontendBundle struct {
 	Module string `json:"module"`
 	CSS    string `json:"css,omitempty"`
+	// AppRoutes are the top-level app URLs this plugin's module renders, as
+	// opposed to the settings pages every frontend plugin could already own.
+	//
+	// They are declared here as well as in the module because the server has
+	// to answer for them before any JavaScript runs: a deep link to a plugin
+	// page is a request this process serves the app shell for, and a path the
+	// SPA route table has never heard of is a 404 whatever the module would
+	// have rendered. What the route looks like -- its label, its icon, what it
+	// draws -- stays in the module, which is the only thing that can know.
+	AppRoutes []AppRoute `json:"app_routes,omitempty"`
+}
+
+// AppRoute is one top-level URL a frontend plugin claims. Nested says whether
+// the paths below it belong to it too, which is the same question the core's
+// own organizer routes answer for themselves.
+type AppRoute struct {
+	Path   string `json:"path"`
+	Nested bool   `json:"nested,omitempty"`
 }
 
 // ThemeBundle describes one CSS-plus-assets theme supplied by a plugin.
@@ -165,6 +183,11 @@ func validateManifest(manifest Manifest) error {
 		if manifest.Frontend.CSS != "" && !safeRelativeAssetPath(manifest.Frontend.CSS) {
 			return fmt.Errorf("invalid frontend css path")
 		}
+		for _, route := range manifest.Frontend.AppRoutes {
+			if !ValidAppRoutePath(route.Path) {
+				return fmt.Errorf("invalid frontend app route %q", route.Path)
+			}
+		}
 	}
 	if manifest.Backend != nil && manifest.Backend.Binary != "" && !safeRelativeAssetPath(manifest.Backend.Binary) {
 		return fmt.Errorf("invalid backend binary path")
@@ -190,6 +213,43 @@ func manifestBackendKind(manifest Manifest) string {
 
 func validManifestID(value string) bool {
 	return manifestIDRE.MatchString(strings.TrimSpace(value))
+}
+
+// appRoutePathRE is what a plugin may claim: one or more lowercase path
+// segments under the site root. It deliberately refuses everything that would
+// let a plugin claim a path it has no business serving -- a query, a wildcard,
+// a traversal, or the root itself.
+var appRoutePathRE = regexp.MustCompile(`^(/[a-z0-9][a-z0-9-]*)+$`)
+
+// ValidAppRoutePath reports whether a plugin may claim one top-level path. It
+// also refuses the prefixes the core already owns, so an installed plugin
+// cannot shadow the mail list or the settings tree.
+//
+// It is exported because the web package's route table is the thing the
+// reserved list below has to stay in step with, and the test that checks that
+// lives there -- this package must not depend on the web package to say so.
+func ValidAppRoutePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if !appRoutePathRE.MatchString(value) {
+		return false
+	}
+	for _, reserved := range reservedAppRoutePrefixes {
+		if value == reserved || strings.HasPrefix(value, reserved+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// reservedAppRoutePrefixes are the app's own routes, plus the two subtrees the
+// server serves for plugins themselves. They are listed rather than derived
+// because the SPA route table lives in the web package, which this one must not
+// depend on; the test beside it is what keeps the two in step.
+var reservedAppRoutePrefixes = []string{
+	"/mail", "/mailbox", "/messages", "/search", "/compose", "/snoozes",
+	"/contacts", "/calendar", "/deliveries", "/invoices", "/activity",
+	"/sync-runs", "/settings", "/admin", "/login", "/setup", "/reset-password",
+	"/api", "/plugins", "/attachments", "/blobs", "/assets",
 }
 
 func safeRelativeAssetPath(value string) bool {

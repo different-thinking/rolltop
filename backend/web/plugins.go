@@ -88,6 +88,9 @@ func (s *Server) frontendPlugins(ctx context.Context) []apiFrontendPlugin {
 		if strings.TrimSpace(manifest.Frontend.CSS) != "" {
 			plugin.CSSURL = pluginAssetPublicURL(manifest, manifest.Frontend.CSS)
 		}
+		for _, route := range manifest.Frontend.AppRoutes {
+			plugin.AppRoutes = append(plugin.AppRoutes, apiPluginAppRoute{Path: route.Path, Nested: route.Nested})
+		}
 		out = append(out, plugin)
 	}
 	return out

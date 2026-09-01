@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"rolltop/backend/plugins"
 	"rolltop/backend/theme"
 )
 
@@ -44,7 +45,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if r.URL.Path != "/" && !isAppRoute(r.URL.Path) {
+	if r.URL.Path != "/" && !isAppRoute(r.URL.Path) && !s.pluginAppRoute(r.Context(), r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
@@ -383,4 +384,38 @@ func isPublicAuthRoute(p string) bool {
 func isAppRoute(p string) bool {
 	_, ok := matchSPARoute(p)
 	return ok
+}
+
+// pluginAppRoute reports whether an enabled plugin claims this path as one of
+// its own top-level pages. It is asked only after the static table has said no,
+// so a plugin cannot shadow a core route even if its manifest names one -- and
+// the manifest validator refuses those anyway.
+//
+// The answer follows whether the plugin is switched on: turning a plugin off
+// takes its pages with it rather than leaving deep links serving a shell whose
+// module is no longer loaded.
+func (s *Server) pluginAppRoute(ctx context.Context, p string) bool {
+	if s == nil {
+		return false
+	}
+	pluginID, ok := pluginClaimingAppRoute(s.pluginManifests, p)
+	return ok && s.pluginEnabled(ctx, pluginID)
+}
+
+// pluginClaimingAppRoute answers which plugin declares a path, without asking
+// whether it is switched on. Separated from the method above so the matching --
+// exact paths, nested subtrees, and neither claiming a neighbour that merely
+// starts with the same letters -- can be tested without a database behind it.
+func pluginClaimingAppRoute(manifests []plugins.Manifest, p string) (string, bool) {
+	for _, manifest := range manifests {
+		if manifest.Frontend == nil {
+			continue
+		}
+		for _, route := range manifest.Frontend.AppRoutes {
+			if p == route.Path || (route.Nested && strings.HasPrefix(p, route.Path+"/")) {
+				return manifest.ID, true
+			}
+		}
+	}
+	return "", false
 }

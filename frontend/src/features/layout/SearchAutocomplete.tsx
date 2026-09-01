@@ -35,7 +35,22 @@ const operatorSuggestions = [
   { value: "is:", label: "is:", detail: "read, unread, starred" },
   { value: "has:", label: "has:", detail: "attachment" },
   { value: "subject:", label: "subject:", detail: "subject text" },
-  { value: "filename:", label: "filename:", detail: "attachment name" }
+  { value: "filename:", label: "filename:", detail: "attachment name" },
+  { value: "mimetype:", label: "mimetype:", detail: "attachment type" }
+];
+
+/**
+ * mimeTypeValues are the families worth completing rather than every type
+ * IANA registers. The operator matches on a prefix, so the trailing slash is
+ * part of the suggestion: `mimetype:audio/` is the whole family, and anyone
+ * after one exact type types the rest.
+ */
+const mimeTypeValues = [
+  ["audio/", "any recording"],
+  ["video/", "any video"],
+  ["image/", "any picture"],
+  ["application/pdf", "PDF"],
+  ["text/", "any plain text"]
 ];
 
 const stateValues = ["read", "unread", "starred", "notstarred"];
@@ -230,6 +245,16 @@ function buildSearchAutocompleteItems(
           token: active.token,
           label: `is:${state}`,
           detail: "message state",
+          kind: "state" as const
+        }));
+    case "mimetype":
+      return mimeTypeValues
+        .filter(([value]) => value.startsWith(valueLower))
+        .map(([value, detail]) => ({
+          value: `mimetype:${value}`,
+          token: active.token,
+          label: `mimetype:${value}`,
+          detail,
           kind: "state" as const
         }));
     case "has":

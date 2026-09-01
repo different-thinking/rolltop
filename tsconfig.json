@@ -30,6 +30,7 @@
     "plugins/one_click_unsubscribe/frontend",
     "plugins/remote_image_blocklist/frontend",
     "plugins/remote_imap_sync/frontend",
-    "plugins/trusted_image_sources/frontend"
+    "plugins/trusted_image_sources/frontend",
+    "plugins/webdav_archive/frontend"
   ]
 }

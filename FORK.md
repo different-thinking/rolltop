@@ -374,6 +374,53 @@ daraus mitbringt, teils zeitgleich und unabhängig vom Original entstanden:
   gesetzte Variablen wird der Job übersprungen, damit ein Fork eine grüne
   Pipeline bekommt.
 
+### 11. Anhänge ins WebDAV
+
+Ein Postfach ist ein schlechter Ort, um eine Datei aufzuheben. Der Anlass war
+eine Sprachnotiz, die vom Telefon an die eigene Adresse geht: sie soll nicht als
+Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
+
+- **Ein neues Plugin `webdav_archive`.** Es beobachtet einen Ordner und kopiert
+  die Anhänge, die dort landen, auf einen WebDAV-Server — Nextcloud, eine
+  dav-Freigabe, alles, was das Protokoll spricht. Der WebDAV-Client ist
+  handgeschrieben (`PUT`, `MKCOL`, `PROPFIND`, `GET`, `DELETE` über `net/http`),
+  weil fünf Verben keine Abhängigkeit wert sind, die gepflegt werden muss.
+- **Sortiert wird weiter mit Filtern.** Eine `mail_filters`-Regel verschiebt die
+  Post in den Ordner, das Plugin nimmt sie dort auf. Keine der beiden Hälften
+  weiß von der anderen.
+- **Eine Warteschlange, die einen abgeschalteten Server übersteht.** Der Hook im
+  Sync macht nur das Billige: eine indizierte Abfrage und eine Zeile. Alles, was
+  fehlschlagen kann — die Rohnachricht holen, den Anhang herausparsen, der
+  Upload selbst — läuft im Worker. Eine Leiter von einer Minute auf eine Stunde,
+  zehn Versuche, danach steht die Zeile mit ihrem letzten Fehler sichtbar da.
+  Verloren geht nichts.
+- **Nichts überschreibt etwas anderes.** Gleiche Bytes werden über ihren
+  SHA-256 als Dublette erkannt und nicht zweimal hochgeladen; verschiedene Bytes
+  mit gleichem Namen — `recording.m4a` schickt jedes Telefon so — bekommen ein
+  Suffix aus dem eigenen Hash.
+- **`mimetype:` als Suchoperator**, in beiden Suchbackends. `mimetype:audio/`
+  nimmt jede Aufnahme, `mimetype:audio/mpeg` nur ein Format. Damit ist „Post mit
+  einer Aufnahme darin" endlich eine Filterbedingung und nicht nur ein
+  Freitextzufall über das Indexfeld `attachment_types`.
+- **`/files` als eigene Ansicht.** Sie zeigt den Server, nicht die
+  Warteschlange: was dort tatsächlich liegt, auch das, was etwas anderes
+  hingelegt hat. Aufnahmen spielen an Ort und Stelle.
+- **Plugins dürfen jetzt eigene Top-Level-Seiten haben.** Vorher konnte ein
+  Plugin nur Einstellungsseiten besitzen. Der Pfad steht im Manifest, damit der
+  Server die Shell für einen Deep-Link ausliefert und der Router die Seite schon
+  beim ersten Paint von der Mailliste unterscheidet; was sie zeichnet, steht im
+  Modul. Kernpfade sind gesperrt, und ein Test hält die Sperrliste an der
+  SPA-Routentabelle fest.
+- **Der Dial-Guard ist bewusst durchlässiger als der für Bilder aus fremder
+  Post.** Die Adresse tippt der Kontoinhaber selbst ein, und der Server steht
+  meistens im selben privaten Netz — RFC1918 zu blockieren würde genau den
+  gedachten Fall blockieren. Gesperrt bleibt, was nie ein WebDAV-Server ist und
+  wofür sich ein SSRF lohnt: Link-Local, allen voran `169.254.169.254`.
+  Redirects werden gar nicht verfolgt. `ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`
+  schaltet auf den strengen Guard um.
+
+Ausführlich in [`plugins/webdav_archive/README.md`](plugins/webdav_archive/README.md).
+
 ---
 
 ## Wo das Original weiter ist

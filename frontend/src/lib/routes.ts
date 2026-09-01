@@ -147,6 +147,23 @@ function anyOrganizerRoute(path: string): boolean {
 }
 
 /**
+ * PluginAppRoute is one top-level page an enabled plugin claims, as the router
+ * needs to know it: a path and whether the paths below it belong to it too.
+ *
+ * These arrive from the server's bootstrap payload rather than from the plugin
+ * modules, and that is the point -- the router has to answer "is this mail?"
+ * on the very first paint, which is before any plugin module has loaded. A
+ * deep link to a plugin page would otherwise paint the mail list first and
+ * replace it a moment later.
+ */
+export type PluginAppRoute = { path: string; nested?: boolean };
+
+/** pluginAppRoute reports whether a path belongs to one of them. */
+export function pluginAppRoute(path: string, routes: readonly PluginAppRoute[] = []): boolean {
+  return routes.some((route) => path === route.path || (route.nested === true && path.startsWith(`${route.path}/`)));
+}
+
+/**
  * mailRouteView reports whether a path reaches mail to read - a conversation
  * list or a thread. It is the authority on that question rather than a summary
  * of one: RouteView tests it before considering any of its own special routes,
@@ -159,10 +176,14 @@ function anyOrganizerRoute(path: string): boolean {
  * a reader can no longer open, and `/settings` on its own, both end on the mail
  * list, and a prefix test would leave those lists unmeasured. The organizer
  * views are exactly as narrow as `organizerRoutes` says, for the same reason.
+ *
+ * Plugin pages are passed in rather than listed here, because which of them
+ * exist is a property of this installation rather than of this build.
  */
-export function mailRouteView(path: string, isAdmin: boolean): boolean {
+export function mailRouteView(path: string, isAdmin: boolean, pluginRoutes: readonly PluginAppRoute[] = []): boolean {
   const claimed = path === "/compose"
     || anyOrganizerRoute(path)
+    || pluginAppRoute(path, pluginRoutes)
     || path === "/settings/account" || path.startsWith("/settings/account/")
     || ((path === "/admin/users" || path === "/admin/database") && isAdmin)
     || path === "/activity"

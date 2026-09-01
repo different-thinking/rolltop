@@ -26,6 +26,7 @@ Die Unterschiede zum Original in Kürze:
 | **Pakete** | Sendungsnummern und Liefertermine werden aus der Post mitgelesen -- aus den Mails von DHL, DPD, GLS, UPS, FedEx, Hermes und Amazon ebenso wie aus Versandbestätigungen von Shops. Eine eigene Übersicht unter `/deliveries` gruppiert nach *kommt heute*, überfällig, unterwegs und zugestellt; die Mails zu einer Sendung hängen an ihr. Dazu eine Markierung an der Mail selbst und ein Hinweis neben der Suche an Tagen, an denen etwas erwartet wird. Was der Postbote nie gemeldet hat, lässt sich von Hand abhaken -- und eine Nummer, die keine Sendung war, wegräumen. |
 | **Rechnungen** | Fälligkeiten werden aus der Post mitgelesen — aus der Mail, aus dem PDF im Anhang und aus der strukturierten E-Rechnung darin (XRechnung, ZUGFeRD, Factur-X). Eine eigene Übersicht unter `/invoices` gruppiert nach gemahnt, überfällig, heute fällig, offen und erledigt; ein Hinweis neben der Suche zählt, was fällig ist. Erinnert wird nur, was noch zu überweisen ist: was per Lastschrift, Karte oder Bezahldienst schon beglichen ist, zählt als erledigt. Zahlungserinnerungen und Mahnungen legen auch dann eine Zeile an, wenn die Rechnung selbst nie als Mail kam, und stehen ganz oben. Eine Frist, die nur im Scan stand, lässt sich von Hand nachtragen. |
 | **Regeln** | `mail_filters` weitgehend neu: Editor mit benannten Feldern, Aktionen für gelesen/weiterleiten/verschieben, Ziele relativ zum Konto der Nachricht, Weiterleitung wahlweise nur für neue Post, und ein Audit über 30 Tage, das auch zeigt, worauf die Filter noch warten. |
+| **Anhänge** | Ein neues Plugin `webdav_archive` kopiert Anhänge aus einem beobachteten Ordner auf einen WebDAV-Server — gedacht für Sprachnotizen, die man sich selbst schickt. Eine Warteschlange mit Backoff übersteht einen abgeschalteten Server, gleiche Bytes werden über ihren Hash als Dublette erkannt, und `/files` zeigt, was dort tatsächlich liegt. Dazu `mimetype:` als Suchoperator und Top-Level-Seiten für Plugins. |
 | **Suche** | Zweites Backend auf PostgreSQL (`tsvector`) neben Bleve, umschaltbar über `ROLLTOP_SEARCH_BACKEND`, mit Fuzzy-Treffern bei Tippfehlern über `pg_trgm`, Ranking auf Relevanz und Sortierung nach Datum in beide Richtungen. |
 | **IMAP-Sync** | Verbindungen pro Durchlauf wiederverwendet, jeder Durchgang zeit- **und** speicherbegrenzt, Fetch-Batches nach den vom Server gemeldeten Größen geplant, ein Ordner voll Post mit einem Befehl verschoben. Ein paar sehr große Mails bestimmen nicht mehr, wie viel Speicher der Prozess braucht. |
 | **Bedienung** | Gmail-Optik für die Listen, Zeilenaktionen beim Überfahren, Befehlsleiste im Konversationskopf, `Send & archive`, Kategorie-Pille auf der Kopfzeile und in jeder All-Mail-Zeile, `Ältere archivieren`, `Papierkorb leeren`, System-Theme mit Dunkelmodus für HTML-Post. |
@@ -853,6 +854,7 @@ Search supports Gmail-style operators:
 
 - `has:attachment`
 - `filename:pdf` or `filename:"report.csv"`
+- `mimetype:audio/` for every recording, or `mimetype:audio/mpeg` for one format
 - `is:read`
 - `is:unread`
 

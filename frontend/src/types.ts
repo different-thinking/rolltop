@@ -398,6 +398,17 @@ export type FrontendPluginDefinition = {
   version?: string;
   module_url: string;
   css_url?: string;
+  /**
+   * app_routes are the top-level pages this plugin claims, declared in its
+   * manifest so the router knows them before the module has finished loading.
+   * What each page draws comes from the module itself.
+   */
+  app_routes?: PluginAppRouteDefinition[];
+};
+
+export type PluginAppRouteDefinition = {
+  path: string;
+  nested?: boolean;
 };
 
 /** ContactEmail is one editable email row on a contact. */

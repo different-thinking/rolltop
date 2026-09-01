@@ -39,6 +39,7 @@ const cssScripts = {
   client_side_pgp: "build:pgp-css",
   experimental_spam_filter: "build:experimental-spam-filter-css",
   mail_filters: "build:mail-filters-css",
+  webdav_archive: "build:webdav-archive-css",
   matrix_theme: "build:themes",
   remote_imap_sync: "build:remote-imap-sync-css"
 };

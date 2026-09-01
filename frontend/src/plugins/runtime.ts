@@ -36,6 +36,93 @@ export type AccountSettingsRuntimePlugin = RuntimePlugin & {
   accountSettingsRoutes?: readonly AccountSettingsRoute[];
 };
 
+/**
+ * AppRouteContext is what a plugin's own top-level page gets. It is
+ * deliberately the same small set of shared state the core's non-mail views
+ * take -- a plugin page is a sibling of /deliveries, not a second application
+ * with its own access to everything App holds.
+ */
+export type AppRouteContext = {
+  csrf: string;
+  user: User;
+  mailboxes: Mailbox[];
+  location: LocationState;
+  navigate: Navigate;
+  addToast: AddToast;
+};
+
+/**
+ * AppRoute is one top-level page a plugin renders, at a URL of its own rather
+ * than under the settings tree.
+ *
+ * The path is declared twice on purpose, and the two declarations answer
+ * different questions. The manifest's copy is what the server serves the app
+ * shell for, so a deep link works before any JavaScript has run, and it is what
+ * the router reads on the first paint. This copy is what actually draws the
+ * page. A route whose path is not in the manifest never reaches the browser as
+ * a navigable URL, which is the failure mode to expect if the two drift.
+ */
+export type AppRoute = {
+  path: string;
+  /** nested claims the paths below this one, for a page that grows a detail view. */
+  nested?: boolean;
+  /** label and icon are what the sidebar draws; a route with no label is not linked. */
+  label?: string;
+  icon?: string;
+  render: (context: AppRouteContext) => ReactNode;
+};
+
+export type AppRouteRuntimePlugin = RuntimePlugin & {
+  appRoutes?: readonly AppRoute[];
+};
+
+/** appRoutes returns every plugin-owned top-level page, in plugin order. */
+export function appRoutes(plugins: RuntimePlugins | readonly RuntimePlugin[]): AppRoute[] {
+  const list: readonly RuntimePlugin[] = Array.isArray(plugins) ? plugins : (plugins as RuntimePlugins).all;
+  return (list as readonly AppRouteRuntimePlugin[]).flatMap((plugin) => {
+    const routes = Array.isArray(plugin.appRoutes) ? plugin.appRoutes : [];
+    return routes.flatMap((route) => {
+      const normalized = normalizeAppRoute(route);
+      return normalized ? [normalized] : [];
+    });
+  });
+}
+
+/**
+ * matchAppRoute finds the plugin page serving a path. A nested route claims its
+ * descendants, which is the same rule the core's organizer routes follow.
+ */
+export function matchAppRoute(
+  plugins: RuntimePlugins | readonly RuntimePlugin[],
+  path: string
+): AppRoute | null {
+  const candidate = normalizedRoutePath(path);
+  return appRoutes(plugins).find((route) =>
+    candidate === route.path || (route.nested === true && candidate.startsWith(`${route.path}/`))
+  ) || null;
+}
+
+function normalizeAppRoute(value: unknown): AppRoute | null {
+  if (!value || typeof value !== "object") return null;
+  const route = value as Partial<AppRoute>;
+  if (typeof route.path !== "string" || !route.path.trim() || typeof route.render !== "function") return null;
+  const path = normalizedRoutePath(route.path);
+  if (path === "/") return null;
+  return {
+    path,
+    nested: route.nested === true,
+    label: cleanSettingsText(route.label),
+    icon: cleanSettingsText(route.icon, "folder"),
+    render: route.render
+  };
+}
+
+function normalizedRoutePath(value: string): string {
+  const path = value.trim().split(/[?#]/, 1)[0] || "/";
+  if (path === "/") return path;
+  return `/${path.replace(/^\/+|\/+$/g, "")}`;
+}
+
 /** RuntimeMessageDetailsContext is the stable, read-only input for plugin rows
  * rendered inside a message's expanded header details. */
 export type RuntimeMessageDetailsContext = {

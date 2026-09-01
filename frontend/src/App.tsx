@@ -1,7 +1,7 @@
 // File overview: Root React coordinator for bootstrap, session routing, global chrome state,
 // toast lifecycle, server-sent events, browser-history navigation, and the compose overlay.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { notifyChromeEvent } from "./chromeEvents";
 import type { Bootstrap, ChromeEvent, FrontendPluginDefinition, SyncRun, ThemeDefinition } from "./types";
@@ -21,7 +21,7 @@ import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, u
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
 import { embeddedBootstrap } from "./lib/startup";
-import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
+import { appRoutes, emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
 import { defaultSwipePreferences } from "./lib/swipeActions";
 
@@ -244,6 +244,17 @@ export default function App() {
   const runtimePluginsReadyToLoad = bootstrap !== null;
   const runtimePluginDefinitionsRef = useRef<readonly FrontendPluginDefinition[]>(runtimePluginDefinitions);
   runtimePluginDefinitionsRef.current = runtimePluginDefinitions;
+  // The paths come from the manifests the server sent, so the router knows them
+  // on the first paint; the labels and icons come from the modules, which
+  // arrive later. Merging them here rather than in the shell keeps both the
+  // router and the sidebar reading one list that grows from claim to link.
+  const pluginAppLinks = useMemo(() => {
+    const drawn = new Map(appRoutes(runtimePlugins).map((route) => [route.path, route]));
+    return runtimePluginDefinitions.flatMap((definition) => (definition.app_routes || []).map((route) => {
+      const loaded = drawn.get(route.path);
+      return { path: route.path, nested: route.nested === true, label: loaded?.label, icon: loaded?.icon };
+    }));
+  }, [runtimePluginDefinitionsSignature, runtimePlugins]);
   const runtimePluginLoadGenerationRef = useRef(0);
   const bootstrappedFromHTMLRef = useRef(bootstrap !== null);
   const bootstrapGenerationRef = useRef(0);
@@ -949,6 +960,7 @@ export default function App() {
         accountNotice={bootstrap.account_notice || ""}
         databaseUnavailable={Boolean(bootstrap.database_unavailable)}
         enabledPlugins={bootstrap.enabled_plugins || []}
+        pluginAppLinks={pluginAppLinks}
         mailCategories={bootstrap.mail_categories || []}
         mailCategoriesPending={bootstrap.mail_categories_pending || 0}
         mailGeneration={bootstrap.mail_generation || 0}
@@ -994,6 +1006,7 @@ export default function App() {
           refreshChrome={refreshBootstrap}
           runtimePlugins={runtimePlugins}
           reloadRuntimePlugins={reloadRuntimePlugins}
+          pluginAppRoutes={pluginAppLinks}
           securityUnlock={securityUnlock}
           openSecurityUnlock={openSecurityUnlock}
           addToast={addToast}

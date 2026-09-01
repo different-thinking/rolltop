@@ -1233,6 +1233,19 @@ resolved, 4,548 with the pattern. Note that the built bundle contains no literal
 "phosphor" once minified, so grepping for the name proves nothing; the module
 count in the build output is the signal.
 
+**A plugin's top-level page is declared in two places, and both are load-bearing.**
+`frontend.app_routes` in the manifest is what the *server* serves the app shell
+for — without it, a deep link to the page 404s before any JavaScript runs — and
+it is what `RouteView` reads on the first paint to tell the page from the mail
+list, since the plugin module has not loaded yet at that point. The module's own
+`appRoutes` export is what draws it, and carries the sidebar label and icon. A
+route in the module but not the manifest is a page nothing can navigate to; a
+route in the manifest but not the module is a blank page. `ValidAppRoutePath` in
+`backend/plugins/manifest.go` refuses paths the core already owns, and
+`TestReservedAppRoutePrefixesCoverEverySPARoute` in the web package is what keeps
+its reserved list in step with `spaRoutes` — the two lists cannot be merged
+because `backend/plugins` must not depend on `backend/web`.
+
 **`attachment_preview` has no `frontend` block in its manifest, on purpose.**
 Its UI is part of the application bundle: `ThreadView` imports
 `AttachmentPreviewSlot` directly, and the slot gates itself on

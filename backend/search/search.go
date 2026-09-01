@@ -1923,6 +1923,19 @@ func buildQuery(userID int64, queryText string, opts SearchOptions) blevequery.Q
 		q.SetField("attachment_names")
 		parts = append(parts, q)
 	}
+	if parsed.MIMEType != "" {
+		// A phrase rather than a prefix, because `attachment_types` is an
+		// analyzed text field: `audio/mpeg` is indexed as the two tokens
+		// `audio` and `mpeg`, so a prefix query for the literal string
+		// `audio/` matches nothing at all. Analyzing the operand the same way
+		// the field was analyzed is what makes both forms work -- `audio/`
+		// becomes the one-token phrase `audio`, which every audio type
+		// carries, and `audio/mpeg` becomes a two-token phrase that only that
+		// type carries.
+		q := bleve.NewMatchPhraseQuery(strings.TrimSuffix(parsed.MIMEType, "/"))
+		q.SetField("attachment_types")
+		parts = append(parts, q)
+	}
 	if parsed.Subject != "" {
 		q := bleve.NewMatchPhraseQuery(parsed.Subject)
 		q.SetField("subject")
@@ -2604,7 +2617,7 @@ func queryNeedles(parsed parsedQuery) []queryNeedle {
 			addNeedle(joined)
 		}
 	}
-	for _, value := range []string{parsed.Text, parsed.Filename, parsed.From, parsed.To, parsed.CC, parsed.Subject} {
+	for _, value := range []string{parsed.Text, parsed.Filename, parsed.MIMEType, parsed.From, parsed.To, parsed.CC, parsed.Subject} {
 		add(value)
 	}
 	return needles
@@ -2933,12 +2946,18 @@ type parsedQuery struct {
 	IsSigned      *bool
 	Language      string
 	Filename      string
-	From          string
-	To            string
-	CC            string
-	Subject       string
-	After         time.Time
-	Before        time.Time
+	// MIMEType filters on an attachment's declared Content-Type. It is matched
+	// as a prefix, so `mimetype:audio/` takes every audio format and
+	// `mimetype:audio/mpeg` takes only that one -- which is what makes it
+	// usable as a filter condition ("everything with a recording in it")
+	// rather than only as a way to find one exact format.
+	MIMEType string
+	From     string
+	To       string
+	CC       string
+	Subject  string
+	After    time.Time
+	Before   time.Time
 }
 
 type negatedTextTerm struct {
@@ -2946,7 +2965,7 @@ type negatedTextTerm struct {
 	Quoted bool
 }
 
-var operatorRE = regexp.MustCompile(`(?i)(^|\s)(-?)(has:attachment|is:read|is:unread|is:starred|is:notstarred|is:encrypted|is:unencrypted|is:signed|is:unsigned|lang:("[^"]+"|\S+)|filename:("[^"]+"|\S+)|from:("[^"]+"|\S+)|to:("[^"]+"|\S+)|cc:("[^"]+"|\S+)|subject:("[^"]+"|\S+)|after:("[^"]+"|\S+)|before:("[^"]+"|\S+)|older_than:("[^"]+"|\S+)|newer_than:("[^"]+"|\S+)|year:("[^"]+"|\S+))`)
+var operatorRE = regexp.MustCompile(`(?i)(^|\s)(-?)(has:attachment|is:read|is:unread|is:starred|is:notstarred|is:encrypted|is:unencrypted|is:signed|is:unsigned|lang:("[^"]+"|\S+)|filename:("[^"]+"|\S+)|mimetype:("[^"]+"|\S+)|from:("[^"]+"|\S+)|to:("[^"]+"|\S+)|cc:("[^"]+"|\S+)|subject:("[^"]+"|\S+)|after:("[^"]+"|\S+)|before:("[^"]+"|\S+)|older_than:("[^"]+"|\S+)|newer_than:("[^"]+"|\S+)|year:("[^"]+"|\S+))`)
 
 // parseQuery extracts supported operators while preserving the remaining free text.
 // The parser is intentionally small and predictable rather than a full Gmail clone.
@@ -3000,6 +3019,11 @@ func parseQuery(queryText string) parsedQuery {
 			out.Language = normalizeLanguageCode(strings.Trim(operatorValue(token), `"`))
 		case strings.HasPrefix(lower, "filename:"):
 			out.Filename = strings.Trim(operatorValue(token), `"`)
+		case strings.HasPrefix(lower, "mimetype:"):
+			// Lowercased on the way in: a MIME type is case-insensitive, and
+			// both backends below compare it against stored values that were
+			// written however the sending client spelled them.
+			out.MIMEType = strings.ToLower(strings.Trim(operatorValue(token), `"`))
 		case strings.HasPrefix(lower, "from:"):
 			out.From = strings.Trim(operatorValue(token), `"`)
 		case strings.HasPrefix(lower, "to:"):

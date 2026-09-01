@@ -440,4 +440,14 @@ type apiFrontendPlugin struct {
 	Version   string `json:"version,omitempty"`
 	ModuleURL string `json:"module_url"`
 	CSSURL    string `json:"css_url,omitempty"`
+	// AppRoutes are the top-level paths this plugin's module renders. The
+	// browser needs them before the module has loaded, so the router can tell a
+	// plugin page from the mail list on the very first paint rather than
+	// flashing the wrong view.
+	AppRoutes []apiPluginAppRoute `json:"app_routes,omitempty"`
+}
+
+type apiPluginAppRoute struct {
+	Path   string `json:"path"`
+	Nested bool   `json:"nested,omitempty"`
 }

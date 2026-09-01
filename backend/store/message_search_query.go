@@ -111,6 +111,9 @@ type MessageSearchQuery struct {
 	CCPattern       string
 	SubjectPattern  string
 	FilenamePattern string
+	// MIMETypePattern is anchored at the start rather than wrapped in
+	// wildcards, so it selects a MIME type family the way the operator reads.
+	MIMETypePattern string
 	// AfterUnix is inclusive, BeforeUnix exclusive, both 0 when open — the
 	// same interval the Bleve date range used.
 	AfterUnix  int64
@@ -254,6 +257,11 @@ func messageSearchFilters(q MessageSearchQuery, fuzzy bool) ([]string, []any, er
 		conditions = append(conditions, `EXISTS (SELECT 1 FROM attachments a
 			WHERE a.user_id = ms.user_id AND a.message_id = ms.message_id AND a.filename`+collateDefault+` ILIKE ?)`)
 		args = append(args, q.FilenamePattern)
+	}
+	if q.MIMETypePattern != "" {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM attachments a
+			WHERE a.user_id = ms.user_id AND a.message_id = ms.message_id AND a.content_type`+collateDefault+` ILIKE ?)`)
+		args = append(args, q.MIMETypePattern)
 	}
 	if q.AfterUnix > 0 {
 		conditions = append(conditions, "m.date_unix >= ?")
