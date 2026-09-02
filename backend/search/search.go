@@ -963,6 +963,35 @@ func (s *Service) lockWriter(ctx context.Context, writer *writerLock, details bl
 // indexForUser resolves the correct Bleve handle. In per-user mode it lazily opens
 // and caches one index per tenant, with a double-check to avoid duplicate handles
 // during concurrent searches or sync writes.
+// mimeTypeQuery answers `mimetype:` against `attachment_types`.
+//
+// It is a disjunction of two readings of the same field, and which one applies
+// is decided per document rather than per install. A document carrying the
+// anchor marker was indexed with the synthetic tokens, so the exact term query
+// answers it and `mimetype:audio/` cannot reach `application/x-audio-playlist`.
+// A document without the marker predates them, and is answered by the old
+// analyzed phrase -- less precise, but it is what that document can support,
+// and it is what the operator did for every document before this existed. Mail
+// therefore never stops matching because it has not been reindexed.
+func mimeTypeQuery(value string) blevequery.Query {
+	phrase := bleve.NewMatchPhraseQuery(strings.TrimSuffix(value, "/"))
+	phrase.SetField("attachment_types")
+	token := mimeAnchorQueryToken(value)
+	if token == "" {
+		return phrase
+	}
+	anchored := bleve.NewTermQuery(token)
+	anchored.SetField("attachment_types")
+
+	marker := bleve.NewTermQuery(mimeAnchorMarker)
+	marker.SetField("attachment_types")
+	legacy := bleve.NewBooleanQuery()
+	legacy.AddMust(phrase)
+	legacy.AddMustNot(marker)
+
+	return bleve.NewDisjunctionQuery(anchored, legacy)
+}
+
 func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 	if !s.perUser {
 		s.mu.Lock()
@@ -1302,7 +1331,7 @@ func buildMessageDocument(msg store.MessageRecord, attachments []AttachmentDoc) 
 	messageID := boundedIndexText(msg.MessageIDHeader, maxIndexedHeaderBytes)
 	bodyForIndex = boundedIndexText(bodyForIndex, maxIndexedBodyBytes)
 	attachmentNames := boundedIndexJoin(names, maxIndexedNamesBytes)
-	attachmentTypes := boundedIndexJoin(contentTypes, maxIndexedNamesBytes)
+	attachmentTypes := boundedIndexJoin(mimeTypeIndexValues(contentTypes), maxIndexedNamesBytes)
 	attachmentText := boundedIndexJoin(texts, maxIndexedAttachmentsBytes)
 	compoundBody := store.MessageBodyPreview(bodyForIndex, maxCompoundFieldBytes/4)
 	compoundAttachments := store.MessageBodyPreview(attachmentText, maxCompoundFieldBytes/4)
@@ -1924,17 +1953,7 @@ func buildQuery(userID int64, queryText string, opts SearchOptions) blevequery.Q
 		parts = append(parts, q)
 	}
 	if parsed.MIMEType != "" {
-		// A phrase rather than a prefix, because `attachment_types` is an
-		// analyzed text field: `audio/mpeg` is indexed as the two tokens
-		// `audio` and `mpeg`, so a prefix query for the literal string
-		// `audio/` matches nothing at all. Analyzing the operand the same way
-		// the field was analyzed is what makes both forms work -- `audio/`
-		// becomes the one-token phrase `audio`, which every audio type
-		// carries, and `audio/mpeg` becomes a two-token phrase that only that
-		// type carries.
-		q := bleve.NewMatchPhraseQuery(strings.TrimSuffix(parsed.MIMEType, "/"))
-		q.SetField("attachment_types")
-		parts = append(parts, q)
+		parts = append(parts, mimeTypeQuery(parsed.MIMEType))
 	}
 	if parsed.Subject != "" {
 		q := bleve.NewMatchPhraseQuery(parsed.Subject)

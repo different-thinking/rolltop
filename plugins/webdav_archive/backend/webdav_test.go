@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -62,22 +65,121 @@ func TestResolveConfinesEveryPathToTheConfiguredBase(t *testing.T) {
 	}
 }
 
-func TestResolveEscapesEachSegmentSeparately(t *testing.T) {
+// The assertions here are on String(), not on Path. Path is the *decoded*
+// path, so a check against it passes just as happily when the escaping is
+// applied twice -- which is exactly the bug this guards: pre-escaped text in
+// Path alone leaves as `%2520` and the file lands under a name with a literal
+// percent in it.
+func TestResolveEscapesEachSegmentExactlyOnce(t *testing.T) {
 	client, err := newWebDAVClient("https://cloud.example.org/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := client.resolve("2026/05/memo #1 & 2.m4a")
+	for _, tc := range []struct{ raw, want string }{
+		{"2026/05/voice memo.m4a", "https://cloud.example.org/dav/2026/05/voice%20memo.m4a"},
+		{"2026/05/Sprachmemo Ü.m4a", "https://cloud.example.org/dav/2026/05/Sprachmemo%20%C3%9C.m4a"},
+		{"a/b#1.m4a", "https://cloud.example.org/dav/a/b%231.m4a"},
+		{"a/b?x.m4a", "https://cloud.example.org/dav/a/b%3Fx.m4a"},
+		{"2026/05/", "https://cloud.example.org/dav/2026/05/"},
+	} {
+		resolved, err := client.resolve(tc.raw)
+		if err != nil {
+			t.Fatalf("resolve(%q): %v", tc.raw, err)
+		}
+		if got := resolved.String(); got != tc.want {
+			t.Errorf("resolve(%q).String() = %q, want %q", tc.raw, got, tc.want)
+		}
+		// Path stays the decoded form, which is what makes the double escape
+		// detectable at all.
+		if strings.Contains(resolved.Path, "%") {
+			t.Errorf("resolve(%q).Path = %q, want the decoded path", tc.raw, resolved.Path)
+		}
+	}
+}
+
+// The end the bug actually broke: a file with a space in its name has to be
+// written, listed and read back under the same name.
+func TestASpacedNameSurvivesPutListAndGet(t *testing.T) {
+	const name = "voice memo.m4a"
+	stored := map[string][]byte{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The server sees the wire form and decodes it exactly once, the way
+		// any real WebDAV server does.
+		decoded, err := url.PathUnescape(r.URL.EscapedPath())
+		if err != nil {
+			t.Errorf("server could not decode %q: %v", r.URL.EscapedPath(), err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			stored[decoded] = body
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodGet:
+			body, ok := stored[decoded]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/mp4")
+			_, _ = w.Write(body)
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = fmt.Fprintf(w, `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/dav/%s</d:href>
+    <d:propstat><d:status>HTTP/1.1 200 OK</d:status>
+      <d:prop><d:resourcetype/><d:getcontentlength>5</d:getcontentlength></d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>`, url.PathEscape(name))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The slashes stay separators; the space, hash and ampersand do not.
-	if resolved.Path != "/dav/2026/05/memo%20%231%20&%202.m4a" && !strings.HasPrefix(resolved.Path, "/dav/2026/05/") {
-		t.Fatalf("path = %q", resolved.Path)
+	ctx := context.Background()
+	if err := client.Put(ctx, name, []byte("bytes"), "audio/mp4"); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(resolved.String(), "#") {
-		t.Fatalf("a hash in a filename became a fragment: %q", resolved.String())
+	if _, ok := stored["/dav/"+name]; !ok {
+		t.Fatalf("stored under %v, want the plain name /dav/%s", keysOf(stored), name)
 	}
+
+	entries, err := client.List(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != name {
+		t.Fatalf("listing = %+v, want one entry named %q", entries, name)
+	}
+
+	// The path the browser is handed back by the listing has to be one the
+	// download route can fetch again.
+	body, _, _, err := client.Get(ctx, entries[0].Path)
+	if err != nil {
+		t.Fatalf("get %q: %v", entries[0].Path, err)
+	}
+	defer body.Close()
+	got, _ := io.ReadAll(body)
+	if string(got) != "bytes" {
+		t.Fatalf("round-tripped body = %q", got)
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	return out
 }
 
 const listingBody = `<?xml version="1.0"?>

@@ -182,11 +182,79 @@ func contentDisposition(inline bool, filename, contentType string) string {
 	if name == "." || name == "/" || name == "" {
 		name = "download"
 	}
-	return fmt.Sprintf("%s; filename=%q", disposition, name)
+	return disposition + "; " + dispositionFilename(name)
+}
+
+// dispositionFilename spells one filename the way RFC 6266 asks.
+//
+// The plain `filename=` parameter is ISO-8859-1, so writing UTF-8 bytes into it
+// -- which is what a `%q` of the name does -- reaches the browser as mojibake
+// for every name this archive is actually full of: a `Sprachmemo Ü.m4a` saves
+// as `SprachmemoÃ.m4a`. The extended `filename*` parameter carries the real
+// name, and the plain one stays as an ASCII-only fallback for anything that
+// does not read the extended form.
+func dispositionFilename(name string) string {
+	ascii := asciiFallbackName(name)
+	if ascii == name {
+		return fmt.Sprintf("filename=%q", ascii)
+	}
+	return fmt.Sprintf("filename=%q; filename*=UTF-8''%s", ascii, rfc5987Escape(name))
+}
+
+// asciiFallbackName reduces a name to what the plain parameter may carry:
+// printable ASCII, with the quote and backslash that would end the quoted
+// string replaced rather than escaped.
+func asciiFallbackName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('_')
+		case r < 0x20 || r > 0x7e:
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "download"
+	}
+	return out
+}
+
+// rfc5987Escape percent-encodes a name for the `filename*` parameter. The
+// unreserved set is the one RFC 5987 names as attr-char; everything else,
+// including the space that url.QueryEscape would turn into a plus, is escaped
+// byte by byte.
+func rfc5987Escape(name string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b.WriteByte(c)
+		case strings.IndexByte("!#$&+-.^_`|~", c) >= 0:
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&0x0f])
+		}
+	}
+	return b.String()
 }
 
 func renderableInline(contentType string) bool {
 	value := normalizeContentType(contentType)
+	// SVG is an image by MIME type and a document by behaviour: it can carry
+	// script, and these bytes come from a server this Rolltop does not control.
+	// The response's own CSP would stop the script running, but a file that has
+	// no reason to render in place is not the thing to lean on it for.
+	if value == "image/svg+xml" || value == "image/svg" {
+		return false
+	}
 	return strings.HasPrefix(value, "audio/") || strings.HasPrefix(value, "video/") ||
 		strings.HasPrefix(value, "image/")
 }

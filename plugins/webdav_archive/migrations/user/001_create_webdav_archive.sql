@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS plugin_webdav_archive_uploads (
   target_id INTEGER NOT NULL,
   message_id INTEGER NOT NULL,
   attachment_id INTEGER NOT NULL DEFAULT 0,
+  attachment_index INTEGER NOT NULL DEFAULT 0,
   filename TEXT NOT NULL DEFAULT '',
   content_type TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL DEFAULT 0,

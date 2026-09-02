@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -93,31 +94,35 @@ func (t target) matchesContentType(contentType string) bool {
 }
 
 type upload struct {
-	ID            int64
-	UserID        int64
-	TargetID      int64
-	MessageID     int64
-	AttachmentID  int64
-	Filename      string
-	ContentType   string
-	Size          int64
-	RemotePath    string
-	ContentHash   string
-	Status        string
-	Attempts      int
-	NextAttemptAt time.Time
-	LastError     string
-	Subject       string
-	FromAddr      string
-	MessageDate   time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	CompletedAt   time.Time
+	ID           int64
+	UserID       int64
+	TargetID     int64
+	MessageID    int64
+	AttachmentID int64
+	// AttachmentIndex is the part's position in the message's attachment list
+	// as it stood when the row was written. It is what pairs a queue row back
+	// to a MIME part when the metadata no longer distinguishes the parts.
+	AttachmentIndex int
+	Filename        string
+	ContentType     string
+	Size            int64
+	RemotePath      string
+	ContentHash     string
+	Status          string
+	Attempts        int
+	NextAttemptAt   time.Time
+	LastError       string
+	Subject         string
+	FromAddr        string
+	MessageDate     time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	CompletedAt     time.Time
 }
 
-const uploadColumns = `id, user_id, target_id, message_id, attachment_id, filename, content_type,
-	size, remote_path, content_hash, status, attempts, next_attempt_at, last_error,
-	subject, from_addr, message_date, created_at, updated_at, completed_at`
+const uploadColumns = `id, user_id, target_id, message_id, attachment_id, attachment_index,
+	filename, content_type, size, remote_path, content_hash, status, attempts, next_attempt_at,
+	last_error, subject, from_addr, message_date, created_at, updated_at, completed_at`
 
 type rowScanner interface {
 	Scan(...any) error
@@ -288,6 +293,7 @@ func scanUpload(row rowScanner) (upload, error) {
 	var out upload
 	var next, date, created, updated, completed int64
 	err := row.Scan(&out.ID, &out.UserID, &out.TargetID, &out.MessageID, &out.AttachmentID,
+		&out.AttachmentIndex,
 		&out.Filename, &out.ContentType, &out.Size, &out.RemotePath, &out.ContentHash,
 		&out.Status, &out.Attempts, &next, &out.LastError, &out.Subject, &out.FromAddr,
 		&date, &created, &updated, &completed)
@@ -307,13 +313,13 @@ func enqueueUpload(ctx context.Context, db *sql.DB, item upload) (bool, error) {
 	now := time.Now().UTC().Unix()
 	var id int64
 	err := db.QueryRowContext(ctx, `INSERT INTO plugin_webdav_archive_uploads
-		(user_id, target_id, message_id, attachment_id, filename, content_type, size,
-		 status, next_attempt_at, subject, from_addr, message_date, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(user_id, target_id, message_id, attachment_id, attachment_index, filename, content_type,
+		 size, status, next_attempt_at, subject, from_addr, message_date, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (user_id, target_id, message_id, attachment_id) DO NOTHING
 		RETURNING id`,
-		item.UserID, item.TargetID, item.MessageID, item.AttachmentID, item.Filename,
-		item.ContentType, item.Size, statusQueued, now, item.Subject, item.FromAddr,
+		item.UserID, item.TargetID, item.MessageID, item.AttachmentID, item.AttachmentIndex,
+		item.Filename, item.ContentType, item.Size, statusQueued, now, item.Subject, item.FromAddr,
 		unixSeconds(item.MessageDate), now, now).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -536,11 +542,16 @@ func retryDelay(attempts int) time.Duration {
 // truncateError bounds what is stored from a failure. A server answering with
 // a long body has already been reduced to its status line by the client, but a
 // dial error carrying a resolver's output can still be long.
+//
+// Cut by characters, not bytes: a byte slice through a message carrying a
+// non-ASCII host or filename splits a character in half, and the invalid UTF-8
+// is refused by the `text` column this is on its way into -- turning a failure
+// worth reporting into a second failure that loses the first one's reason.
 func truncateError(value string) string {
 	value = strings.TrimSpace(value)
 	const limit = 500
-	if len(value) <= limit {
+	if utf8.RuneCountInString(value) <= limit {
 		return value
 	}
-	return value[:limit] + "..."
+	return truncateRunes(value, limit) + "..."
 }

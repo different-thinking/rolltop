@@ -49,6 +49,14 @@ The host capability that fetches raw bytes (`plugins.RawMessageFetchHost`) is
 implemented by the web server, which is also the host a plugin's `Start` is
 handed — so the worker has it and the sync hook does not need it.
 
+Pairing a queue row back to a MIME part follows the store's own rule
+(`store.ReplaceAttachmentsForMessage`): filename plus size plus content type,
+then filename plus size, then content type plus size, then the part's recorded
+position — type-checked, so a message that reparsed into a different shape
+fails visibly instead of filing the wrong attachment. There is deliberately no
+filename-only pass: a phone names every recording `recording.m4a`, and matching
+on the name alone would pair two different recordings to the same part.
+
 ## Names on the server
 
 `path_template` decides where a file lands. Placeholders: `{yyyy}` `{mm}`
@@ -83,10 +91,18 @@ multicast, unspecified, and the IANA special-purpose ranges no WebDAV server is
 ever on. Redirects are not followed at all, because a redirect target is a host
 the guard was never asked about.
 
-An operator running a multi-tenant install who does not want one account holder
-able to address the private network at all sets
-`ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`, which promotes the guard to the stricter
-one.
+The cost of that decision, stated plainly: by default an account holder can
+point a target at RFC1918, at a ULA, and at loopback — including services bound
+to `127.0.0.1` on the Rolltop host itself, which are often the ones with no
+authentication. Browse and download return what the target answers, so a
+configured target is an authenticated GET proxy into whatever it can reach. Only
+the account holder's own targets are readable, and only by them, so this is a
+signed-in user reaching the private network rather than an anonymous one.
+
+On an install where the accounts are not all trusted, set
+`ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`. That promotes the guard to the stricter
+one: loopback, RFC1918, ULA, shared address space and site-local all become
+undialable, leaving only public addresses.
 
 ## Tables
 

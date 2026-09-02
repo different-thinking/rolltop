@@ -12,6 +12,8 @@ package search
 import (
 	"context"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,9 +42,6 @@ func TestParseQueryLowercasesAndUnquotesTheMIMEType(t *testing.T) {
 	}
 }
 
-// The Bleve field is analyzed, so `audio/` has to reach it as the token every
-// audio type carries rather than as the literal string, which would match
-// nothing at all.
 func TestBleveMIMETypeOperatorSelectsAFamilyAndAnExactType(t *testing.T) {
 	ctx := context.Background()
 	svc, err := Open(filepath.Join(t.TempDir(), "bleve"))
@@ -169,6 +168,135 @@ func TestPostgresMIMETypeOperatorIsAnchoredAtTheStart(t *testing.T) {
 	}
 	if ids := hitIDs(hits); len(ids) != 0 {
 		t.Fatalf("mimetype:audio/ = %v, want nothing: the only attachment merely has audio in its name", ids)
+	}
+}
+
+// The bug this guards: `attachment_types` is analyzed, so `audio/mpeg` is
+// indexed as the tokens `audio` and `mpeg` -- and a family query that can only
+// ask for `audio` also reaches `application/x-audio-playlist`. Both backends
+// have to refuse it, or `mimetype:` means one thing on Bleve and another on
+// PostgreSQL.
+func TestBleveMIMETypeOperatorIsAnchoredAtTheStart(t *testing.T) {
+	ctx := context.Background()
+	svc, err := Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	now := time.Now()
+	if err := svc.IndexMessage(ctx, store.MessageRecord{ID: 1, UserID: 1, Subject: "Memo", BodyText: "recorded", Date: now, HasAttachments: true},
+		[]AttachmentDoc{{Filename: "list.xspf", ContentType: "application/x-audio-playlist"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.IndexMessage(ctx, store.MessageRecord{ID: 2, UserID: 1, Subject: "Memo", BodyText: "recorded", Date: now, HasAttachments: true},
+		[]AttachmentDoc{{Filename: "voice.m4a", ContentType: "audio/mp4"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := svc.Search(ctx, 1, "memo mimetype:audio/", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("mimetype:audio/ = %v, want only the real recording: a playlist merely has the word in its subtype", ids)
+	}
+}
+
+// Documents indexed before the anchored tokens existed carry no marker, and
+// have to keep matching. Precision improves when they are reindexed; nothing
+// stops working in the meantime, which is what makes this shippable without a
+// forced index rebuild.
+func TestBleveMIMETypeOperatorStillMatchesDocumentsWithoutAnchors(t *testing.T) {
+	ctx := context.Background()
+	svc, err := Open(filepath.Join(t.TempDir(), "bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	// Indexed the way an older build wrote the field: the content types alone.
+	legacy := buildMessageDocument(
+		store.MessageRecord{ID: 1, UserID: 1, Subject: "Memo", BodyText: "recorded", Date: time.Now(), HasAttachments: true},
+		[]AttachmentDoc{{Filename: "voice.m4a", ContentType: "audio/mp4"}})
+	legacy["attachment_types"] = "audio/mp4"
+	index, err := svc.indexForUser(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Index("1", legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := svc.Search(ctx, 1, "memo mimetype:audio/", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("mimetype:audio/ = %v, want the document indexed before anchoring to still match", ids)
+	}
+}
+
+func TestMIMEAnchorTokensAreUnambiguous(t *testing.T) {
+	// The family and the exact type are separate tokens, and the separator is
+	// the one character the analyzer keeps inside a word.
+	tokens := mimeAnchorTokens(`audio/mpeg; codecs="mp3"`)
+	if len(tokens) != 2 || tokens[0] != "zmt_audio" || tokens[1] != "zmt_audio_mpeg" {
+		t.Fatalf("tokens = %v", tokens)
+	}
+	// A subtype that is punctuation-heavy still reduces the same way on both
+	// sides, which is the only thing that has to hold.
+	if got := mimeAnchorQueryToken("image/svg+xml"); got != "zmt_image_svgxml" {
+		t.Fatalf("query token = %q", got)
+	}
+	if got := mimeAnchorTokens("image/svg+xml"); len(got) != 2 || got[1] != "zmt_image_svgxml" {
+		t.Fatalf("index tokens = %v, want the query token among them", got)
+	}
+	// A family query, spelled either way, asks for the family token.
+	for _, value := range []string{"audio/", "audio", "AUDIO/"} {
+		if got := mimeAnchorQueryToken(value); got != "zmt_audio" {
+			t.Errorf("mimeAnchorQueryToken(%q) = %q", value, got)
+		}
+	}
+	// `x-audio-playlist` must not reduce to anything an audio query asks for.
+	if got := mimeAnchorTokens("application/x-audio-playlist"); got[0] == "zmt_audio" || got[1] == "zmt_audio" {
+		t.Fatalf("tokens = %v, want nothing an audio family query would reach", got)
+	}
+}
+
+// The bounding that keeps a pending batch proportional to its document count
+// collapses a message's attachments into one entry holding the joined content
+// types. The anchored tokens have to come out the same either way, or a bounded
+// document stops indexing like the unbounded one it stands in for -- which is
+// the invariant TestBoundIndexDocumentProjectsIdentically exists to hold.
+func TestMIMEIndexValuesReadACollapsedAttachmentList(t *testing.T) {
+	separate := mimeTypeIndexValues([]string{"audio/mp4", "application/pdf"})
+	collapsed := mimeTypeIndexValues([]string{"audio/mp4 application/pdf"})
+	// The content-type half differs in grouping and joins to the same string;
+	// the anchored tokens after it have to be identical.
+	if strings.Join(separate[2:], " ") != strings.Join(collapsed[1:], " ") {
+		t.Fatalf("separate = %v, collapsed = %v", separate, collapsed)
+	}
+	if !slices.Contains(collapsed, "zmt_audio") || !slices.Contains(collapsed, "zmt_application_pdf") {
+		t.Fatalf("collapsed = %v, want a token per type in the joined entry", collapsed)
+	}
+}
+
+// The marker is written last so that a document which kept it kept every
+// anchored token before it. A truncation can cost precision; it must never cost
+// a match.
+func TestMIMEIndexValuesPutTheMarkerLast(t *testing.T) {
+	values := mimeTypeIndexValues([]string{"audio/mp4", "application/pdf"})
+	if values[len(values)-1] != mimeAnchorMarker {
+		t.Fatalf("values = %v, want the marker last", values)
+	}
+	if values[0] != "audio/mp4" || values[1] != "application/pdf" {
+		t.Fatalf("values = %v, want the content types first", values)
+	}
+	// A message with no attachments carries no marker, so it reads as a
+	// document from before anchoring rather than as one with nothing to offer.
+	if got := mimeTypeIndexValues(nil); len(got) != 0 {
+		t.Fatalf("values for no attachments = %v", got)
 	}
 }
 

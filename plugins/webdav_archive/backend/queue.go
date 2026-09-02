@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/mailparse"
@@ -67,7 +68,7 @@ func (p *webdavArchiveBackend) ImportStoredMessage(ctx context.Context, host plu
 	}
 	queued := 0
 	for _, item := range targets {
-		for _, attachment := range attachments {
+		for index, attachment := range attachments {
 			if attachment.IsInline && !item.IncludeInline {
 				continue
 			}
@@ -75,16 +76,21 @@ func (p *webdavArchiveBackend) ImportStoredMessage(ctx context.Context, host plu
 				continue
 			}
 			added, err := enqueueUpload(ctx, db, upload{
-				UserID:       msg.UserID,
-				TargetID:     item.ID,
-				MessageID:    msg.MessageID,
-				AttachmentID: attachment.ID,
-				Filename:     attachment.Filename,
-				ContentType:  attachment.ContentType,
-				Size:         attachment.Size,
-				Subject:      msg.Subject,
-				FromAddr:     msg.From,
-				MessageDate:  msg.Date,
+				UserID:    msg.UserID,
+				TargetID:  item.ID,
+				MessageID: msg.MessageID,
+				// The row id names the part, and its position backs that up:
+				// the store writes attachment rows in parse order, so the index
+				// here is the part's place in the message and is what pairs the
+				// row back to a MIME part when the metadata cannot.
+				AttachmentID:    attachment.ID,
+				AttachmentIndex: index,
+				Filename:        attachment.Filename,
+				ContentType:     attachment.ContentType,
+				Size:            attachment.Size,
+				Subject:         msg.Subject,
+				FromAddr:        msg.From,
+				MessageDate:     msg.Date,
 			})
 			if err != nil {
 				return err
@@ -286,7 +292,16 @@ func (w *worker) runUpload(db *sql.DB, item upload, clients map[int64]*webdavCli
 	if err := completeUpload(w.ctx, db, item, statusDone, remotePath, hash); err != nil {
 		return err
 	}
-	return recordTargetResult(w.ctx, db, item.UserID, item.TargetID, true, "")
+	// The upload is done and the row says so. What is left is a counter on the
+	// target, and its failure is not this upload's failure: returning it would
+	// send the caller to failUpload, which would rewind a row that is already
+	// `done` back to `failed` -- and the retry would then upload nothing and
+	// count the same file twice. Logged and dropped instead.
+	if err := recordTargetResult(w.ctx, db, item.UserID, item.TargetID, true, ""); err != nil {
+		log.Printf("webdav archive could not record a target's success user_id=%d target_id=%d error_type=%T",
+			item.UserID, item.TargetID, err)
+	}
+	return nil
 }
 
 // attachmentBytes reads one attachment's content back out of the message it
@@ -316,26 +331,52 @@ func (w *worker) attachmentBytes(item upload) ([]byte, string, error) {
 }
 
 // matchAttachment finds the MIME part a queue row names. The row was written
-// from database metadata and the parts come from a fresh parse, so they are
-// matched on what both carry: filename, size and content type, in that order of
-// confidence.
+// from database metadata and the parts come from a fresh parse, so they have to
+// be paired on what both carry.
+//
+// The tiers are the store's, deliberately: store.ReplaceAttachmentsForMessage
+// pairs rows to parts the same way, and it documents why a filename-only pass
+// is not among them -- matching by name alone reaches across positions and can
+// pair two same-named parts of different sizes, handing one part's identity the
+// other's bytes. A phone that names every recording `recording.m4a` is exactly
+// the case that produces two such parts, so this archive is the last place that
+// should guess by name.
+//
+// What is left when the metadata cannot tell the parts apart is the part's
+// position, which is what the row recorded. It is taken only when the part
+// found there is the same kind of thing the row describes: a position that now
+// holds a different content type means the message was parsed into something
+// this row no longer describes, and uploading that would file the wrong file
+// under the right name.
 func matchAttachment(item upload, files []mailparse.Attachment) (mailparse.Attachment, bool) {
 	name := strings.TrimSpace(item.Filename)
 	wanted := normalizeContentType(item.ContentType)
+	// Filename, size and content type together: an exact metadata match.
 	for _, file := range files {
 		if name != "" && strings.EqualFold(strings.TrimSpace(file.Filename), name) &&
-			(item.Size <= 0 || int64(len(file.Data)) == item.Size) {
+			int64(len(file.Data)) == item.Size && normalizeContentType(file.ContentType) == wanted {
 			return file, true
 		}
 	}
+	// Filename and size: size is the strong discriminator, so this still pins
+	// the bytes even when a better parse decoded the content type differently.
 	for _, file := range files {
-		if name != "" && strings.EqualFold(strings.TrimSpace(file.Filename), name) {
+		if name != "" && strings.EqualFold(strings.TrimSpace(file.Filename), name) &&
+			int64(len(file.Data)) == item.Size {
 			return file, true
 		}
 	}
+	// Content type and size, which is what reaches a part carrying no filename.
 	for _, file := range files {
 		if wanted != "" && normalizeContentType(file.ContentType) == wanted &&
 			item.Size > 0 && int64(len(file.Data)) == item.Size {
+			return file, true
+		}
+	}
+	// Position, type-checked.
+	if index := item.AttachmentIndex; index >= 0 && index < len(files) {
+		file := files[index]
+		if wanted == "" || normalizeContentType(file.ContentType) == wanted {
 			return file, true
 		}
 	}
@@ -465,11 +506,33 @@ func safeSegment(value string) string {
 		out = strings.ReplaceAll(out, "..", ".")
 	}
 	out = strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "."))
-	const limit = 120
-	if len(out) > limit {
-		out = strings.TrimSpace(out[:limit])
+	return strings.TrimSpace(truncateRunes(out, maxSegmentRunes))
+}
+
+// maxSegmentRunes bounds one path segment. It is counted in characters rather
+// than bytes because the byte budget behind it -- 255 on most filesystems --
+// is what a segment has to fit, and 120 characters is inside it even at four
+// bytes each.
+const maxSegmentRunes = 120
+
+// truncateRunes cuts a string to a character count without splitting a
+// character in half. A byte slice would: `out[:120]` through a subject line
+// written in German or Japanese lands mid-rune, and the invalid UTF-8 that
+// results is written into a Postgres `text` column before the upload is even
+// attempted -- which the server refuses, so the row retries its way to
+// abandoned and the attachment is never filed.
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(value) <= limit {
+		return value
 	}
-	return out
+	count := 0
+	for index := range value {
+		if count == limit {
+			return value[:index]
+		}
+		count++
+	}
+	return value
 }
 
 // senderAddress reduces a From header to the address inside it, which is what

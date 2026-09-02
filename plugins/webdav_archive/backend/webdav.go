@@ -131,22 +131,41 @@ func parseWebDAVBaseURL(raw string) (*url.URL, error) {
 // resolve turns a store-relative path into an absolute URL under the base. The
 // path is cleaned and confined: a target configured with a subdirectory cannot
 // be walked out of with `..`.
+//
+// Both halves of url.URL's path are set, and that is the whole subtlety here.
+// `Path` is the decoded path and `RawPath` its encoding; `String()` emits
+// `RawPath` when it is a valid encoding of `Path`, and otherwise escapes
+// `Path` itself. Writing pre-escaped text into `Path` alone therefore escapes
+// it a second time on the way out -- `voice memo.m4a` leaves as
+// `voice%2520memo.m4a`, and the file lands on the server under a name with a
+// literal percent in it that nothing can then fetch back.
 func (c *webdavClient) resolve(relative string) (*url.URL, error) {
 	clean := cleanRemotePath(relative)
 	out := *c.baseURL
 	// Each segment is escaped on its own so a slash in the input stays a
 	// separator and a space or a `#` in a filename does not become one.
 	segments := strings.Split(clean, "/")
+	decoded := make([]string, 0, len(segments))
 	escaped := make([]string, 0, len(segments))
 	for _, segment := range segments {
 		if segment == "" {
 			continue
 		}
+		decoded = append(decoded, segment)
 		escaped = append(escaped, url.PathEscape(segment))
 	}
-	out.Path = c.baseURL.Path + strings.Join(escaped, "/")
-	if strings.HasSuffix(clean, "/") && !strings.HasSuffix(out.Path, "/") {
-		out.Path += "/"
+	trailing := ""
+	if strings.HasSuffix(clean, "/") && len(decoded) > 0 {
+		trailing = "/"
+	}
+	out.Path = c.baseURL.Path + strings.Join(decoded, "/") + trailing
+	out.RawPath = c.baseURL.EscapedPath() + strings.Join(escaped, "/") + trailing
+	// A RawPath that does not decode back to Path is ignored by EscapedPath,
+	// which then escapes Path itself -- correct, just less precise than the
+	// per-segment escaping above. Clearing it says so rather than leaving a
+	// field behind that no longer describes Path.
+	if out.EscapedPath() != out.RawPath {
+		out.RawPath = ""
 	}
 	return &out, nil
 }
@@ -488,10 +507,21 @@ func (l *limitedReadCloser) Close() error               { return l.closer.Close(
 // metadata endpoint that hands out instance credentials. Multicast,
 // unspecified, and the IANA special-purpose ranges go with it.
 //
-// An operator running a multi-tenant install who does not want one account
-// holder able to address the private network at all sets
-// ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0, which promotes this to the stricter
-// guard.
+// Be clear about what that leaves reachable, because it is the whole cost of
+// the decision: by default an account holder can point a target at RFC1918, at
+// a ULA, and at loopback -- including services bound to 127.0.0.1 on this very
+// host, which are often the ones with no authentication because they assumed
+// nobody outside the machine could reach them. The browse and download routes
+// return what the target answers, so a configured target is an authenticated
+// GET proxy into whatever it can reach. Only the account holder's own targets
+// are readable, and only by them, so this is a signed-in user reaching the
+// private network rather than an anonymous one -- but on an install where the
+// accounts are not all trusted, that is still a capability worth withholding.
+//
+// An operator in that position sets ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0,
+// which promotes this to the stricter guard: loopback, RFC1918, ULA, shared
+// address space and site-local all become undialable, leaving only public
+// addresses.
 func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {

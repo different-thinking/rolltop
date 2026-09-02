@@ -117,12 +117,6 @@ func TestMatchAttachmentPrefersNameAndSizeTogether(t *testing.T) {
 		t.Fatalf("matched %d bytes, want the part whose size the row records", len(file.Data))
 	}
 
-	// With no size recorded, the name alone is enough.
-	byName, ok := matchAttachment(upload{Filename: "memo.m4a"}, files)
-	if !ok || byName.Filename != "memo.m4a" {
-		t.Fatal("a row with no size failed to match by name")
-	}
-
 	// A part with no filename at all is still reachable by type and size.
 	unnamed := []mailparse.Attachment{{ContentType: "audio/mpeg", Data: []byte("xyz")}}
 	byType, ok := matchAttachment(upload{ContentType: `audio/mpeg; name="x"`, Size: 3}, unnamed)
@@ -130,8 +124,51 @@ func TestMatchAttachmentPrefersNameAndSizeTogether(t *testing.T) {
 		t.Fatal("an unnamed part was not matched by type and size")
 	}
 
-	if _, ok := matchAttachment(upload{Filename: "gone.m4a", Size: 99}, files); ok {
+	if _, ok := matchAttachment(upload{Filename: "gone.m4a", Size: 99, AttachmentIndex: 9}, files); ok {
 		t.Fatal("a part that is not in the message was matched anyway")
+	}
+}
+
+// A phone names every recording the same, so two same-named parts of different
+// sizes is the ordinary case rather than a corner one. Matching by name alone
+// would pair both rows to the same part -- the store removed that pass for the
+// same reason, and the second file would then be marked a duplicate and never
+// filed at all.
+func TestMatchAttachmentNeverPairsBySizelessName(t *testing.T) {
+	files := []mailparse.Attachment{
+		{Filename: "recording.m4a", ContentType: "audio/mp4", Data: []byte("first")},
+		{Filename: "recording.m4a", ContentType: "audio/mp4", Data: []byte("second-and-longer")},
+	}
+	first, ok := matchAttachment(upload{Filename: "recording.m4a", ContentType: "audio/mp4",
+		Size: int64(len(files[0].Data)), AttachmentIndex: 0}, files)
+	if !ok || string(first.Data) != "first" {
+		t.Fatalf("first row matched %q", first.Data)
+	}
+	second, ok := matchAttachment(upload{Filename: "recording.m4a", ContentType: "audio/mp4",
+		Size: int64(len(files[1].Data)), AttachmentIndex: 1}, files)
+	if !ok || string(second.Data) != "second-and-longer" {
+		t.Fatalf("second row matched %q, want its own part rather than the first", second.Data)
+	}
+
+	// A row whose recorded size no longer describes any part falls to its
+	// position rather than to whichever part happens to share its name.
+	stale := upload{Filename: "recording.m4a", ContentType: "audio/mp4", Size: 999, AttachmentIndex: 1}
+	byPosition, ok := matchAttachment(stale, files)
+	if !ok || string(byPosition.Data) != "second-and-longer" {
+		t.Fatalf("stale row matched %q, want the part in its own position", byPosition.Data)
+	}
+}
+
+// Position is only trusted when what is there is the same kind of thing. A
+// message reparsed into a different shape must fail loudly rather than file the
+// wrong attachment under the right name.
+func TestMatchAttachmentRefusesAPositionHoldingAnotherKind(t *testing.T) {
+	files := []mailparse.Attachment{
+		{Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("pdf")},
+	}
+	item := upload{Filename: "memo.m4a", ContentType: "audio/mp4", Size: 42, AttachmentIndex: 0}
+	if file, ok := matchAttachment(item, files); ok {
+		t.Fatalf("matched %q for an audio row, want no match at all", file.ContentType)
 	}
 }
 
