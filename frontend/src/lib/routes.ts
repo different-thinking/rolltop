@@ -138,6 +138,49 @@ export function organizerRoute(path: string, route: OrganizerRoute): boolean {
   return path === claim.url || (claim.nested && path.startsWith(`${claim.url}/`));
 }
 
+/**
+ * ContactsIntent is what a link into the address book asks it to show: one
+ * saved contact, or the editor open on a new one with the name and address a
+ * message header already knew.
+ */
+export type ContactsIntent = {
+  /** contactID selects a saved contact. Zero selects nothing in particular. */
+  contactID: number;
+  /** newContact opens the editor on an unsaved contact. */
+  newContact: boolean;
+  name: string;
+  email: string;
+};
+
+/**
+ * contactsURL links into the address book. With a contactID it opens that
+ * contact; without one it opens the editor on a new contact carrying the name
+ * and address given, which is how the address card's "Add contact" hands over
+ * what the message header knew.
+ */
+export function contactsURL(options: { contactID?: number; email?: string; name?: string }): string {
+  const params = new URLSearchParams();
+  if (options.contactID) {
+    params.set("contact", String(options.contactID));
+  } else {
+    params.set("new", "1");
+    if (options.name?.trim()) params.set("name", options.name.trim());
+    if (options.email?.trim()) params.set("email", options.email.trim());
+  }
+  return `${organizerURL("contacts")}?${params.toString()}`;
+}
+
+/** contactsIntent reads the address book's own query string back. */
+export function contactsIntent(search: string): ContactsIntent {
+  const params = new URLSearchParams(search);
+  return {
+    contactID: positiveInt(params.get("contact"), 0),
+    newContact: params.get("new") === "1",
+    name: (params.get("name") || "").trim(),
+    email: (params.get("email") || "").trim()
+  };
+}
+
 /** The names above, read once: mailRouteView asks this on every render. */
 const organizerRouteNames = Object.keys(organizerRoutes) as OrganizerRoute[];
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { allMailRoute, mailRoute, mailRouteView, organizerRoute, organizerURL } from "./routes";
+import { allMailRoute, contactsIntent, contactsURL, mailRoute, mailRouteView, organizerRoute, organizerURL } from "./routes";
 
 describe("allMailRoute", () => {
   it("names the unnarrowed list, on its first page and its later ones", () => {
@@ -50,5 +50,26 @@ describe("organizerRoute", () => {
     expect(organizerRoute("/contacts/7", "contacts")).toBe(false);
     expect(mailRouteView("/calendar/2026-08-29", false)).toBe(false);
     expect(mailRouteView("/deliveries/7", false)).toBe(true);
+  });
+});
+
+describe("contactsURL", () => {
+  it("opens a saved contact by id", () => {
+    const url = contactsURL({ contactID: 12, email: "Ann@example.test" });
+    expect(url).toBe("/contacts?contact=12");
+    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({ contactID: 12, newContact: false, name: "", email: "" });
+  });
+
+  it("opens the editor on a new contact carrying the header's name and address", () => {
+    const url = contactsURL({ name: "Ann Lee", email: "ann@example.test" });
+    expect(url).toBe("/contacts?new=1&name=Ann+Lee&email=ann%40example.test");
+    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({ contactID: 0, newContact: true, name: "Ann Lee", email: "ann@example.test" });
+  });
+
+  it("reads a plain visit as no intent and a nonsense contact id as none", () => {
+    expect(contactsIntent("")).toEqual({ contactID: 0, newContact: false, name: "", email: "" });
+    expect(contactsIntent("?contact=abc").contactID).toBe(0);
+    expect(contactsIntent("?contact=0x10").contactID).toBe(0);
+    expect(organizerRoute("/contacts", "contacts")).toBe(true);
   });
 });

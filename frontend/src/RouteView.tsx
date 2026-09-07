@@ -116,7 +116,7 @@ export function RouteView({
       return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "contacts")) {
-      return <ContactsView csrf={csrf} contactPlugins={runtimePlugins.all} addToast={addToast} />;
+      return <ContactsView csrf={csrf} location={location} contactPlugins={runtimePlugins.all} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "deliveries")) {
       return <DeliveriesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
