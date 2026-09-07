@@ -25,6 +25,7 @@ import {
   ChartBar,
   ChatsCircle,
   Clock,
+  Copy,
   CreditCard,
   DotsThreeVertical,
   DownloadSimple,
@@ -75,6 +76,7 @@ import {
   Trash,
   Tray,
   User,
+  UserPlus,
   Users,
   X
 } from "@phosphor-icons/react";
@@ -101,6 +103,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   chevron_right: CaretRight,
   check: Check,
   clock: Clock,
+  copy: Copy,
   close: X,
   credit_card: CreditCard,
   delete: Trash,
@@ -140,6 +143,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   more_vert: DotsThreeVertical,
   newspaper: Newspaper,
   person: User,
+  person_add: UserPlus,
   notifications: Bell,
   ranking: Ranking,
   receipt: Receipt,

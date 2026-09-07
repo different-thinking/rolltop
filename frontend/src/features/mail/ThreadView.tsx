@@ -26,6 +26,8 @@ import { RemoteImageNotice } from "../../plugins/remoteImageBlocklist/RemoteImag
 import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
 import { displayInitial } from "../../lib/senderIdentity";
+import { parseAddressList } from "../../lib/addresses";
+import { AddressLink, type AddressCardActions } from "./AddressCard";
 import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
 import { messageQuickActionNodes } from "../../plugins/runtime";
@@ -218,14 +220,14 @@ function messageDetailsNodes(plugins: readonly RuntimePlugin[], item: ThreadMess
 // MessageDetailsToggle keeps the Gmail-style compact recipient line but exposes
 // full message headers without leaving the conversation view.
 function MessageDetailsToggle({
-  summary,
+  recipients,
   details,
   indicators,
   pluginRows,
   highlightQuery,
   highlightTerms
 }: {
-  summary: string;
+  recipients: ReactNode;
   details: HeaderDetail[];
   indicators?: MessageSecurityIndicators;
   pluginRows: ReactNode[];
@@ -235,18 +237,12 @@ function MessageDetailsToggle({
   const visibleDetails = details.filter((detail) => detail.value.trim() !== "");
   const authenticationResults = reportedAuthenticationResults(indicators);
   if (visibleDetails.length === 0 && authenticationResults.length === 0 && pluginRows.length === 0) {
-    return (
-      <div className="thread-recipients">
-        <HighlightedText text={summary} query={highlightQuery} terms={highlightTerms} />
-      </div>
-    );
+    return <div className="thread-recipients">{recipients}</div>;
   }
   return (
     <details className="thread-recipients message-details" onClick={(event) => event.stopPropagation()}>
       <summary>
-        <span>
-          <HighlightedText text={summary} query={highlightQuery} terms={highlightTerms} />
-        </span>
+        <span>{recipients}</span>
         <Icon name="expand_more" />
       </summary>
       <dl>
@@ -262,6 +258,50 @@ function MessageDetailsToggle({
         {pluginRows}
       </dl>
     </details>
+  );
+}
+
+// RecipientLine is the compact "to A, cc B" line under the sender, spelled the
+// same way the server's recipientLine spells it, with every address a link to
+// its card. It reads the raw To and Cc lines rather than the server's joined
+// string so that the addresses can be told apart from the words between them.
+function RecipientLine({
+  item,
+  actions,
+  highlightQuery,
+  highlightTerms
+}: {
+  item: ThreadMessage;
+  actions: AddressCardActions;
+  highlightQuery: string;
+  highlightTerms: string[];
+}) {
+  const to = parseAddressList(item.message.to_addr);
+  const cc = parseAddressList(item.message.cc_addr);
+  if (to.length === 0 && cc.length === 0) {
+    return <HighlightedText text={item.recipient_line} query={highlightQuery} terms={highlightTerms} />;
+  }
+  const groups = [
+    { label: "to", addresses: to },
+    { label: "cc", addresses: cc }
+  ].filter((group) => group.addresses.length > 0);
+  return (
+    <>
+      {groups.map((group, groupIndex) => (
+        <Fragment key={group.label}>
+          {groupIndex > 0 ? ", " : ""}
+          {group.label}{" "}
+          {group.addresses.map((address, index) => (
+            <Fragment key={`${address.email}:${address.name}:${index}`}>
+              {index > 0 ? ", " : ""}
+              <AddressLink address={address} actions={actions}>
+                <HighlightedText text={address.name || address.email} query={highlightQuery} terms={highlightTerms} />
+              </AddressLink>
+            </Fragment>
+          ))}
+        </Fragment>
+      ))}
+    </>
   );
 }
 
@@ -914,6 +954,7 @@ export function ThreadView({
   const [fromIdentities, setFromIdentities] = useState<ComposeIdentity[]>([]);
   const [showImages, setShowImages] = useState(() => new URLSearchParams(location.search).get("images") === "1");
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const addressCardActions = useMemo<AddressCardActions>(() => ({ openCompose, navigate, addToast }), [openCompose, navigate, addToast]);
   const [inlineReply, setInlineReply] = useState<ComposeForm | null>(null);
   const [pendingReply, setPendingReply] = useState<number>(0);
   const [unsubscribingID, setUnsubscribingID] = useState<number | null>(null);
@@ -2181,12 +2222,14 @@ export function ThreadView({
                   <SenderVisualOrAvatar src={senderVisual} initial={item.sender_initial} />
                   <div className="thread-person">
                     <div className="thread-from">
-                      <span>
-                        <HighlightedText text={item.sender_name || item.sender_email || "Unknown sender"} query={highlightQuery} terms={highlightTerms} />
-                      </span>
-                      <span className="thread-email">
-                        <HighlightedText text={item.sender_email} query={highlightQuery} terms={highlightTerms} />
-                      </span>
+                      <AddressLink address={{ name: item.sender_name, email: item.sender_email }} actions={addressCardActions} className="thread-sender">
+                        <span>
+                          <HighlightedText text={item.sender_name || item.sender_email || "Unknown sender"} query={highlightQuery} terms={highlightTerms} />
+                        </span>
+                        <span className="thread-email">
+                          <HighlightedText text={item.sender_email} query={highlightQuery} terms={highlightTerms} />
+                        </span>
+                      </AddressLink>
                       <MessageSenderSecurityCaution indicators={item.security_indicators} />
                       <MessageCategoryPill category={item.message.category} categories={mailCategories} />
                       {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
@@ -2213,7 +2256,7 @@ export function ThreadView({
                       {pgpSignatureVisible ? <PGPSignaturePill encrypted={item.message.is_encrypted} state={pgpBody} /> : null}
                     </div>
                     <MessageDetailsToggle
-                      summary={item.recipient_line}
+                      recipients={<RecipientLine item={item} actions={addressCardActions} highlightQuery={highlightQuery} highlightTerms={highlightTerms} />}
                       details={item.header_details || []}
                       indicators={item.security_indicators}
                       pluginRows={messageDetailsNodes(messageSecurityPlugins, item, datePrefs)}

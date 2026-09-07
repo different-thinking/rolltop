@@ -138,6 +138,56 @@ export function organizerRoute(path: string, route: OrganizerRoute): boolean {
   return path === claim.url || (claim.nested && path.startsWith(`${claim.url}/`));
 }
 
+/**
+ * ContactsIntent is what a link into the address book asks it to show: one
+ * saved contact, or the editor open on a new one with the name and address a
+ * message header already knew.
+ */
+export type ContactsIntent = {
+  /** contactID selects a saved contact. Zero selects nothing in particular. */
+  contactID: number;
+  /** query pre-fills the search box, so the selected contact is in the list
+   * even when the address book is longer than one page. */
+  query: string;
+  /** newContact opens the editor on an unsaved contact. */
+  newContact: boolean;
+  name: string;
+  email: string;
+};
+
+/**
+ * contactsURL links into the address book. With a contactID it opens that
+ * contact; without one it opens the editor on a new contact carrying the name
+ * and address given, which is how the address card's "Add contact" hands over
+ * what the message header knew.
+ */
+export function contactsURL(options: { contactID?: number; email?: string; name?: string }): string {
+  const params = new URLSearchParams();
+  const email = (options.email || "").trim();
+  if (options.contactID) {
+    params.set("contact", String(options.contactID));
+    if (email) params.set("q", email);
+  } else {
+    params.set("new", "1");
+    if (options.name?.trim()) params.set("name", options.name.trim());
+    if (email) params.set("email", email);
+  }
+  return `${organizerURL("contacts")}?${params.toString()}`;
+}
+
+/** contactsIntent reads the address book's own query string back. */
+export function contactsIntent(search: string): ContactsIntent {
+  const params = new URLSearchParams(search);
+  const contactID = Number(params.get("contact") || 0);
+  return {
+    contactID: Number.isFinite(contactID) && contactID > 0 ? Math.floor(contactID) : 0,
+    query: (params.get("q") || "").trim(),
+    newContact: params.get("new") === "1",
+    name: (params.get("name") || "").trim(),
+    email: (params.get("email") || "").trim()
+  };
+}
+
 /** The names above, read once: mailRouteView asks this on every render. */
 const organizerRouteNames = Object.keys(organizerRoutes) as OrganizerRoute[];
 

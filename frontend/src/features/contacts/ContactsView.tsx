@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { ApiError, api } from "../../api";
 import type { Contact, ContactAddress, ContactEmail, ContactPhone, ContactURL } from "../../types";
-import type { Toast } from "../../appTypes";
+import type { LocationState, Toast } from "../../appTypes";
+import { contactsIntent } from "../../lib/routes";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import type { RuntimePlugin } from "../../plugins/runtime";
@@ -21,19 +22,25 @@ const SOURCE_LOCAL = "local";
 /** ContactsView manages the user address book and Me contacts used by compose/reply identity logic. */
 export function ContactsView({
   csrf,
+  location,
   contactPlugins,
   addToast
 }: {
   csrf: string;
+  /** location carries what a link into the address book asked for: a contact
+   * to open, or a new one to start with a name and address already filled in.
+   * It is read once, on mount; the route remounts the view when it changes. */
+  location: LocationState;
   contactPlugins: readonly RuntimePlugin[];
   addToast: (message: string, kind?: Toast["kind"]) => number;
 }) {
+  const [intent] = useState(() => contactsIntent(location.search));
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(intent.query);
   const [googleAccounts, setGoogleAccounts] = useState<GoogleConnection[]>([]);
   const [source, setSource] = useState<string>(SOURCE_ALL);
-  const [selectedID, setSelectedID] = useState<number | "new" | null>(null);
-  const [draft, setDraft] = useState<Contact>(() => blankContact());
+  const [selectedID, setSelectedID] = useState<number | "new" | null>(intent.contactID ? intent.contactID : intent.newContact ? "new" : null);
+  const [draft, setDraft] = useState<Contact>(() => (intent.newContact ? prefilledContact(intent.name, intent.email) : blankContact()));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const importRef = useRef<HTMLInputElement | null>(null);
@@ -514,6 +521,15 @@ function blankContact(): Contact {
     pgp_keys: [],
     icon_url: ""
   };
+}
+
+// prefilledContact is the unsaved contact a message header hands over: the
+// name it showed and the address it came from, as the primary email.
+function prefilledContact(name: string, email: string): Contact {
+  const contact = blankContact();
+  contact.display_name = name.trim();
+  if (email.trim()) contact.emails = [{ label: "Email", email: email.trim(), is_primary: true }];
+  return contact;
 }
 
 function cloneContact(contact: Contact): Contact {
