@@ -26,7 +26,7 @@ import { RemoteImageNotice } from "../../plugins/remoteImageBlocklist/RemoteImag
 import { createPluginSet } from "../../plugins/registry";
 import { senderVisualURL } from "../../plugins/senderVisuals";
 import { displayInitial } from "../../lib/senderIdentity";
-import { parseAddressList } from "../../lib/addresses";
+import { parseAddressList, type MailAddress } from "../../lib/addresses";
 import { AddressLink, type AddressCardActions } from "./AddressCard";
 import { stickyChromeStyle, useStickyChromeHeight } from "../../lib/stickyChrome";
 import { TrustImageSourceAction } from "../../plugins/trustedImageSources/TrustImageSourceAction";
@@ -276,31 +276,27 @@ function RecipientLine({
   highlightQuery: string;
   highlightTerms: string[];
 }) {
-  const to = parseAddressList(item.message.to_addr);
-  const cc = parseAddressList(item.message.cc_addr);
+  // The thread re-renders as a whole on every state change, so the parse is
+  // kept rather than redone per render for every message in the thread.
+  const to = useMemo(() => parseAddressList(item.message.to_addr), [item.message.to_addr]);
+  const cc = useMemo(() => parseAddressList(item.message.cc_addr), [item.message.cc_addr]);
   if (to.length === 0 && cc.length === 0) {
     return <HighlightedText text={item.recipient_line} query={highlightQuery} terms={highlightTerms} />;
   }
-  const groups = [
-    { label: "to", addresses: to },
-    { label: "cc", addresses: cc }
-  ].filter((group) => group.addresses.length > 0);
+  const links = (addresses: MailAddress[]) =>
+    addresses.map((address, index) => (
+      <Fragment key={index}>
+        {index > 0 ? ", " : ""}
+        <AddressLink address={address} actions={actions}>
+          <HighlightedText text={address.name || address.email} query={highlightQuery} terms={highlightTerms} />
+        </AddressLink>
+      </Fragment>
+    ));
   return (
     <>
-      {groups.map((group, groupIndex) => (
-        <Fragment key={group.label}>
-          {groupIndex > 0 ? ", " : ""}
-          {group.label}{" "}
-          {group.addresses.map((address, index) => (
-            <Fragment key={`${address.email}:${address.name}:${index}`}>
-              {index > 0 ? ", " : ""}
-              <AddressLink address={address} actions={actions}>
-                <HighlightedText text={address.name || address.email} query={highlightQuery} terms={highlightTerms} />
-              </AddressLink>
-            </Fragment>
-          ))}
-        </Fragment>
-      ))}
+      {to.length > 0 ? <>to {links(to)}</> : null}
+      {to.length > 0 && cc.length > 0 ? ", " : ""}
+      {cc.length > 0 ? <>cc {links(cc)}</> : null}
     </>
   );
 }
@@ -2222,7 +2218,7 @@ export function ThreadView({
                   <SenderVisualOrAvatar src={senderVisual} initial={item.sender_initial} />
                   <div className="thread-person">
                     <div className="thread-from">
-                      <AddressLink address={{ name: item.sender_name, email: item.sender_email }} actions={addressCardActions} className="thread-sender">
+                      <AddressLink address={{ name: item.sender_name, email: item.sender_email }} actions={addressCardActions} active={isExpanded} className="thread-sender">
                         <span>
                           <HighlightedText text={item.sender_name || item.sender_email || "Unknown sender"} query={highlightQuery} terms={highlightTerms} />
                         </span>

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Contact } from "../../types";
 
 const contactsMock = vi.fn();
-vi.mock("../../api", () => ({ api: { contacts: (...args: unknown[]) => contactsMock(...args) } }));
+vi.mock("../../api", () => ({ api: { contactByEmail: (...args: unknown[]) => contactsMock(...args) } }));
 
 import { AddressLink } from "./AddressCard";
 
@@ -46,11 +46,11 @@ let root: Root;
 const actions = { openCompose: vi.fn(), navigate: vi.fn(), addToast: vi.fn() };
 const rowClick = vi.fn();
 
-async function mount(name: string, email: string) {
+async function mount(name: string, email: string, active = true) {
   await act(async () => {
     root.render(
       <div onClick={rowClick}>
-        <AddressLink address={{ name, email }} actions={actions}>
+        <AddressLink address={{ name, email }} actions={actions} active={active}>
           {name || email}
         </AddressLink>
       </div>
@@ -125,7 +125,7 @@ describe("AddressLink", () => {
     await act(async () => {
       cardButton("Open contact").click();
     });
-    expect(actions.navigate).toHaveBeenCalledWith("/contacts?contact=7&q=ann%40example.test");
+    expect(actions.navigate).toHaveBeenCalledWith("/contacts?contact=7");
     expect(card()).toBeNull();
   });
 
@@ -174,9 +174,30 @@ describe("AddressLink", () => {
     expect(card()).toBeNull();
   });
 
-  it("renders plain text when the entry has no address", async () => {
+  it("does not save a nameless sender under its own address", async () => {
+    contactsMock.mockResolvedValue({ contacts: [] });
+    await mount("bob@example.test", "bob@example.test");
+    await open();
+    await act(async () => {
+      cardButton("New message").click();
+    });
+    expect(actions.openCompose).toHaveBeenCalledWith("to=bob%40example.test");
+    await open();
+    await act(async () => {
+      cardButton("Add contact").click();
+    });
+    expect(actions.navigate).toHaveBeenCalledWith("/contacts?new=1&email=bob%40example.test");
+  });
+
+  it("renders plain text when the entry has no address or the link is inactive", async () => {
     await mount("undisclosed-recipients:", "");
     expect(link()).toBeNull();
     expect(container.textContent).toContain("undisclosed-recipients:");
+    await mount("Ann", "ann@example.test", false);
+    expect(link()).toBeNull();
+    await act(async () => {
+      (container.querySelector("span") as HTMLElement).click();
+    });
+    expect(rowClick).toHaveBeenCalled();
   });
 });

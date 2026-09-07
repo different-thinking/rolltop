@@ -54,33 +54,22 @@ describe("organizerRoute", () => {
 });
 
 describe("contactsURL", () => {
-  it("opens a saved contact with its address in the search box", () => {
+  it("opens a saved contact by id", () => {
     const url = contactsURL({ contactID: 12, email: "Ann@example.test" });
-    expect(url).toBe("/contacts?contact=12&q=Ann%40example.test");
-    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({
-      contactID: 12,
-      query: "Ann@example.test",
-      newContact: false,
-      name: "",
-      email: ""
-    });
+    expect(url).toBe("/contacts?contact=12");
+    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({ contactID: 12, newContact: false, name: "", email: "" });
   });
 
   it("opens the editor on a new contact carrying the header's name and address", () => {
     const url = contactsURL({ name: "Ann Lee", email: "ann@example.test" });
     expect(url).toBe("/contacts?new=1&name=Ann+Lee&email=ann%40example.test");
-    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({
-      contactID: 0,
-      query: "",
-      newContact: true,
-      name: "Ann Lee",
-      email: "ann@example.test"
-    });
+    expect(contactsIntent(new URL(url, "http://x").search)).toEqual({ contactID: 0, newContact: true, name: "Ann Lee", email: "ann@example.test" });
   });
 
-  it("reads a plain visit as no intent and ignores a nonsense contact id", () => {
-    expect(contactsIntent("")).toEqual({ contactID: 0, query: "", newContact: false, name: "", email: "" });
+  it("reads a plain visit as no intent and a nonsense contact id as none", () => {
+    expect(contactsIntent("")).toEqual({ contactID: 0, newContact: false, name: "", email: "" });
     expect(contactsIntent("?contact=abc").contactID).toBe(0);
+    expect(contactsIntent("?contact=0x10").contactID).toBe(0);
     expect(organizerRoute("/contacts", "contacts")).toBe(true);
   });
 });

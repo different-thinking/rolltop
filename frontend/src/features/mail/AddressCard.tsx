@@ -10,7 +10,7 @@
 // single line of it.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../../api";
 import type { AddToast, Navigate } from "../../appTypes";
@@ -36,19 +36,20 @@ const CARD_GAP = 6;
  * AddressLink is the clickable name or address in a header line. It stops the
  * click where it lands: the header row around it collapses the message, and
  * the recipient line's summary toggles the full headers, and neither is what
- * a reader picking an address asked for.
+ * a reader picking an address asked for. With `active` false it is the plain
+ * text it replaced, so a collapsed message still expands from its sender.
  */
 export function AddressLink({
   address,
   actions,
+  active = true,
   className = "",
-  title,
   children
 }: {
   address: MailAddress;
   actions: AddressCardActions;
+  active?: boolean;
   className?: string;
-  title?: string;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -60,18 +61,12 @@ export function AddressLink({
     setOpen((current) => !current);
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    // Enter and Space activate the button on their own; they must not reach
-    // the header row, which would read them as "collapse this message".
-    if (event.key === "Enter" || event.key === " ") event.stopPropagation();
-  }
-
   const close = useCallback((restoreFocus: boolean) => {
     setOpen(false);
     if (restoreFocus) anchorRef.current?.focus();
   }, []);
 
-  if (!address.email) return <span className={className}>{children}</span>;
+  if (!active || !address.email) return <span className={className}>{children}</span>;
 
   return (
     <>
@@ -79,11 +74,10 @@ export function AddressLink({
         ref={anchorRef}
         type="button"
         className={`address-link ${className}`.trim()}
-        title={title ?? address.email}
+        title={address.email}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={toggle}
-        onKeyDown={onKeyDown}
       >
         {children}
       </button>
@@ -113,16 +107,13 @@ function AddressCard({
 }) {
   const cardRef = useRef<HTMLDivElement | null>(null);
   const [lookup, setLookup] = useState<ContactLookup>({ status: "loading" });
-  const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden" });
 
   useEffect(() => {
     let cancelled = false;
     void api
-      .contacts(address.email)
+      .contactByEmail(address.email)
       .then((data) => {
-        if (cancelled) return;
-        const contact = (data.contacts || []).find((candidate) => candidate.emails.some((row) => sameEmail(row.email, address.email))) || null;
-        setLookup({ status: "done", contact });
+        if (!cancelled) setLookup({ status: "done", contact: data.contacts?.[0] || null });
       })
       .catch(() => {
         // The card is still useful without the address book: the address and
@@ -134,6 +125,9 @@ function AddressCard({
     };
   }, [address.email]);
 
+  // Placement is written straight to the element: it runs on every scroll
+  // tick while the card is open, and a render per tick would move four CSS
+  // values by re-rendering the whole card.
   const place = useCallback(() => {
     const anchor = anchorRef.current;
     const card = cardRef.current;
@@ -146,7 +140,9 @@ function AddressCard({
     const fitsBelow = below + height <= window.innerHeight - CARD_MARGIN;
     const above = rect.top - CARD_GAP - height;
     const top = fitsBelow || above < CARD_MARGIN ? Math.min(below, Math.max(CARD_MARGIN, window.innerHeight - height - CARD_MARGIN)) : above;
-    setStyle({ top, left, width, visibility: "visible" });
+    card.style.top = `${top}px`;
+    card.style.left = `${left}px`;
+    card.style.width = `${width}px`;
   }, [anchorRef]);
 
   useLayoutEffect(() => {
@@ -164,7 +160,7 @@ function AddressCard({
       if (cardRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
       onClose(false);
     }
-    function onKeyDown(event: globalThis.KeyboardEvent) {
+    function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.stopPropagation();
         onClose(true);
@@ -183,7 +179,10 @@ function AddressCard({
   }, [anchorRef, onClose, place]);
 
   const contact = lookup.status === "done" ? lookup.contact : null;
-  const name = contact?.display_name || address.name || "";
+  // A sender with no display name reaches the header with the address in the
+  // name's place; that is not a name to save a contact under.
+  const headerName = sameEmail(address.name, address.email) ? "" : address.name;
+  const name = contact?.display_name || headerName;
   const heading = name || address.email;
   const roleLine = contact ? [contact.job_title, contact.organization].filter((part) => part.trim() !== "").join(" · ") : "";
   const otherEmails = contact ? contact.emails.filter((row) => row.email.trim() !== "" && !sameEmail(row.email, address.email)) : [];
@@ -197,12 +196,12 @@ function AddressCard({
 
   function compose() {
     onClose(false);
-    actions.openCompose(`to=${encodeURIComponent(formatAddress({ name: contact?.display_name || address.name, email: address.email }))}`);
+    actions.openCompose(`to=${encodeURIComponent(formatAddress({ name, email: address.email }))}`);
   }
 
   function openContact() {
     onClose(false);
-    actions.navigate(contact ? contactsURL({ contactID: contact.id, email: address.email }) : contactsURL({ name: address.name, email: address.email }));
+    actions.navigate(contactsURL({ contactID: contact?.id, name: headerName, email: address.email }));
   }
 
   return createPortal(
@@ -212,7 +211,6 @@ function AddressCard({
       role="dialog"
       aria-label={`Details for ${heading}`}
       tabIndex={-1}
-      style={style}
       onClick={(event) => event.stopPropagation()}
     >
       <div className="address-card-head">

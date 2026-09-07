@@ -1080,10 +1080,13 @@
   }
 }
 
-// The sender's name and address stay side by side inside the one link, and the
-// address gives way first when the line is short.
+// The sender's name and address sit side by side inside the one link and wrap
+// as they did when they were two items of the line above: a long name pushes
+// the address whole onto the next line rather than squeezing it to an ellipsis,
+// because the address is what a wary reader checks.
 .thread-sender {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 4px;
   min-width: 0;

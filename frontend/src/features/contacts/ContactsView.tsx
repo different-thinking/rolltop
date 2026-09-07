@@ -29,14 +29,14 @@ export function ContactsView({
   csrf: string;
   /** location carries what a link into the address book asked for: a contact
    * to open, or a new one to start with a name and address already filled in.
-   * It is read once, on mount; the route remounts the view when it changes. */
+   * A visit that asks for nothing leaves the view as it is. */
   location: LocationState;
   contactPlugins: readonly RuntimePlugin[];
   addToast: (message: string, kind?: Toast["kind"]) => number;
 }) {
   const [intent] = useState(() => contactsIntent(location.search));
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [query, setQuery] = useState(intent.query);
+  const [query, setQuery] = useState("");
   const [googleAccounts, setGoogleAccounts] = useState<GoogleConnection[]>([]);
   const [source, setSource] = useState<string>(SOURCE_ALL);
   const [selectedID, setSelectedID] = useState<number | "new" | null>(intent.contactID ? intent.contactID : intent.newContact ? "new" : null);
@@ -44,6 +44,12 @@ export function ContactsView({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const importRef = useRef<HTMLInputElement | null>(null);
+  // The contact a link asked for is fetched on its own when the listing does
+  // not carry it - the list is one page of the address book, and a contact
+  // past that page is still the one the reader clicked. Cleared once looked
+  // for, so a later search that filters the selection out behaves as before.
+  const wantedContactRef = useRef(intent.contactID);
+  const appliedSearchRef = useRef(location.search);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,8 +68,16 @@ export function ContactsView({
         }
       } else if (selectedID !== "new") {
         const selected = nextContacts.find((contact) => contact.id === selectedID);
-        if (selected) setDraft(cloneContact(selected));
-        else {
+        if (selected) {
+          setDraft(cloneContact(selected));
+          return;
+        }
+        const wanted = wantedContactRef.current === selectedID ? await linkedContact(selectedID) : null;
+        wantedContactRef.current = 0;
+        if (wanted) {
+          setContacts([wanted, ...nextContacts]);
+          setDraft(cloneContact(wanted));
+        } else {
           setSelectedID("new");
           setDraft(blankContact());
         }
@@ -73,9 +87,37 @@ export function ContactsView({
     }
   }, [query, source, selectedID]);
 
+  // linkedContact fetches the contact a link named. An address that was a
+  // contact a moment ago can have been deleted or merged since, and landing
+  // on an empty editor with no word about it would read as a bug.
+  async function linkedContact(id: number): Promise<Contact | null> {
+    try {
+      return (await api.contact(id)).contact;
+    } catch (err) {
+      addToast(err instanceof ApiError && err.status === 404 ? "That contact is no longer in the address book." : messageFromError(err), "error");
+      return null;
+    }
+  }
+
   useEffect(() => {
     void load().catch((err) => addToast(messageFromError(err), "error"));
   }, [addToast, load]);
+
+  // A later link into the address book, while it is already open, applies the
+  // same intent the first one did on mount. A plain visit asks for nothing and
+  // changes nothing, so an unsaved contact survives a click on the sidebar.
+  useEffect(() => {
+    if (appliedSearchRef.current === location.search) return;
+    appliedSearchRef.current = location.search;
+    const next = contactsIntent(location.search);
+    if (next.contactID) {
+      wantedContactRef.current = next.contactID;
+      setSelectedID(next.contactID);
+    } else if (next.newContact) {
+      setSelectedID("new");
+      setDraft(prefilledContact(next.name, next.email));
+    }
+  }, [location.search]);
 
   // Only accounts that granted contact access can hold a contact. Offering the
   // others would produce a save that fails at Google every time.

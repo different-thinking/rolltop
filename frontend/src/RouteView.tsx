@@ -116,10 +116,7 @@ export function RouteView({
       return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "contacts")) {
-      // Keyed on the query so a second link into the address book, with a
-      // different contact or a different prefill, starts the view over rather
-      // than leaving it on what the first link asked for.
-      return <ContactsView key={location.search} csrf={csrf} location={location} contactPlugins={runtimePlugins.all} addToast={addToast} />;
+      return <ContactsView csrf={csrf} location={location} contactPlugins={runtimePlugins.all} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "deliveries")) {
       return <DeliveriesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;

@@ -8,6 +8,7 @@ import { api } from "../../api";
 import type { LocationState, Toast } from "../../appTypes";
 import type { ContactAutocomplete, ComposeAttachmentUpload, ComposeExistingAttachment, ComposeForm, ComposeIdentity } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
+import { formatAddress, splitAddressList } from "../../lib/addresses";
 import { messageFromError } from "../../lib/errors";
 import { isSendChord } from "../../lib/keyboard";
 import { textToHTML } from "../../lib/html";
@@ -1732,26 +1733,7 @@ function RecipientInput({
 }
 
 function parseRecipientList(value: string): RecipientToken[] {
-  return splitRecipientValues(value).map(parseRecipient).filter((recipient) => recipient.raw !== "");
-}
-
-function splitRecipientValues(value: string): string[] {
-  const values: string[] = [];
-  let start = 0;
-  let quoted = false;
-  let angleDepth = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index];
-    if (char === '"' && value[index - 1] !== "\\") quoted = !quoted;
-    else if (!quoted && char === "<") angleDepth += 1;
-    else if (!quoted && char === ">") angleDepth = Math.max(0, angleDepth - 1);
-    else if (!quoted && angleDepth === 0 && (char === "," || char === ";")) {
-      values.push(value.slice(start, index).trim());
-      start = index + 1;
-    }
-  }
-  values.push(value.slice(start).trim());
-  return values.filter(Boolean);
+  return splitAddressList(value).map(parseRecipient).filter((recipient) => recipient.raw !== "");
 }
 
 function parseRecipient(rawValue: string): RecipientToken {
@@ -1811,9 +1793,7 @@ function mergeRecipientSuggestions(
 }
 
 function formatNativeRecipient(name: string, email: string): string {
-  const trimmedName = name.trim();
-  if (!trimmedName || trimmedName.toLowerCase() === email.toLowerCase()) return email;
-  return `"${trimmedName.replaceAll('"', "'")}" <${email}>`;
+  return formatAddress({ name, email });
 }
 
 function delay(ms: number): Promise<void> {
