@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/httpfile"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
@@ -182,7 +183,7 @@ func (s *Server) handleAttachmentPreview(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", path.Base(att.Filename)))
+	w.Header().Set("Content-Disposition", httpfile.Disposition(true, att.Filename, "preview"))
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if kind == "image" {

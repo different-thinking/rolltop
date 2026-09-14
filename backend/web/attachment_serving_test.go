@@ -6,6 +6,7 @@ package web
 import (
 	"context"
 	"encoding/base64"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -292,5 +293,110 @@ func TestInlineCIDRepairIsAttemptedOncePerMessage(t *testing.T) {
 	}
 	if !server.claimInlineRepairAttempt(other.ID, message.ID) {
 		t.Fatal("another tenant was refused an attempt of its own")
+	}
+}
+
+// A German or Japanese attachment name is the ordinary case for this reader's
+// mail, and the plain `filename` parameter is ISO-8859-1 -- so a name written
+// into it as UTF-8 saves as mojibake. The real name has to travel in
+// `filename*`, which is what a browser reads first.
+func TestAttachmentDownloadNamesANonASCIIFileCorrectly(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	blobs := blob.New(t.TempDir())
+
+	user, err := db.CreateUser(ctx, "umlaut@example.test", "Umlaut", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.CreateMailAccount(ctx, store.MailAccount{
+		UserID: user.ID, Email: user.Email, Host: "imap.example.test", Port: 993,
+		Username: user.Email, EncryptedPassword: "secret", UseTLS: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const filename = "Sprachmemo Ü.m4a"
+	recording := []byte("recorded bytes")
+	raw := []byte(strings.Join([]string{
+		"From: sender@example.test",
+		"To: " + user.Email,
+		"Subject: recording",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"attached",
+		"--mix",
+		"Content-Type: audio/mp4",
+		`Content-Disposition: attachment; filename*=UTF-8''Sprachmemo%20%C3%9C.m4a`,
+		"Content-Transfer-Encoding: base64",
+		"",
+		base64.StdEncoding.EncodeToString(recording),
+		"--mix--",
+	}, "\r\n"))
+	saved, err := blobs.SaveRawMessage(user.ID, account.ID, mailbox.Name, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobRec, err := db.CreateBlob(ctx, store.BlobRecord{
+		UserID: user.ID, Kind: "message", Path: saved.Path, SHA256: saved.SHA256, Size: saved.Size,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := db.CreateMessage(ctx, store.CreateMessage{
+		UserID: user.ID, AccountID: account.ID, MailboxID: mailbox.ID, BlobID: blobRec.ID,
+		UID: 1, Date: time.Now(), InternalDate: time.Now(), Subject: "recording",
+		Size: saved.Size, BlobPath: saved.Path, HasAttachments: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment, err := db.CreateAttachment(ctx, store.Attachment{
+		UserID: user.ID, MessageID: message.ID, BlobID: blobRec.ID,
+		Filename: filename, ContentType: "audio/mp4", Size: int64(len(recording)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{store: db, blobs: blobs}
+	req := httptest.NewRequest(http.MethodGet, "/attachments/"+strconv.FormatInt(attachment.ID, 10)+"/download", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userContextKey, currentUser{User: user}))
+	rec := httptest.NewRecorder()
+	server.handleAttachment(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(recording) {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+
+	header := rec.Header().Get("Content-Disposition")
+	disposition, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		t.Fatalf("ParseMediaType(%q): %v", header, err)
+	}
+	if disposition != "attachment" {
+		t.Fatalf("disposition = %q, want attachment: a recording is not a document to render", disposition)
+	}
+	// ParseMediaType prefers filename* and decodes it, which is the reading a
+	// browser does when it decides what to call the saved file.
+	if params["filename"] != filename {
+		t.Fatalf("filename = %q, want %q", params["filename"], filename)
+	}
+	if !strings.Contains(header, "filename*=UTF-8''") {
+		t.Fatalf("header = %q, want the extended parameter that carries the real name", header)
 	}
 }

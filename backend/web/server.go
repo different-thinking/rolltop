@@ -14,7 +14,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +27,7 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/googlecalendar"
 	"rolltop/backend/googlepeople"
+	"rolltop/backend/httpfile"
 	"rolltop/backend/logging"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
@@ -809,16 +809,19 @@ func attachmentUnavailable(w http.ResponseWriter, userID, attachmentID int64, re
 	http.Error(w, "attachment not found", http.StatusNotFound)
 }
 
+// attachmentContentDisposition decides whether an attachment may render in
+// place and names it. Only images render: everything else is a document from
+// mail this Rolltop did not write, and a document that renders on this origin
+// is a document that can act as it.
+//
+// The name goes through httpfile, which spells the header for every route that
+// serves a file. It is not a formatting detail: the plain `filename` parameter
+// is ISO-8859-1, so a `%q` of a UTF-8 name -- which is what this used to do --
+// reaches the browser as mojibake for every attachment whose name is not
+// ASCII.
 func attachmentContentDisposition(inline bool, filename, contentType string) string {
-	disposition := "attachment"
-	if inline && strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/") {
-		disposition = "inline"
-	}
-	name := path.Base(strings.TrimSpace(filename))
-	if name == "." || name == "/" || name == "" {
-		name = "attachment"
-	}
-	return fmt.Sprintf("%s; filename=%q", disposition, name)
+	renderInPlace := inline && strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/")
+	return httpfile.Disposition(renderInPlace, filename, "attachment")
 }
 
 // handleBlob serves a raw blob record for the signed-in user. Message blobs can be
@@ -870,7 +873,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "message/rfc822")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(blobRec.Path)))
+		w.Header().Set("Content-Disposition", httpfile.Disposition(false, blobRec.Path, "message.eml"))
 		_, _ = w.Write(raw)
 		return
 	}
@@ -880,7 +883,9 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(blobRec.Path)))
+	// A blob path carries the attachment's own filename in its last segment, so
+	// it is a name a reader recognises -- and one that is not always ASCII.
+	w.Header().Set("Content-Disposition", httpfile.Disposition(false, blobRec.Path, "blob"))
 	_, _ = io.Copy(w, file)
 }
 

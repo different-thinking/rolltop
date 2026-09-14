@@ -429,6 +429,16 @@ Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
   Redirects werden gar nicht verfolgt. `ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`
   schaltet auf den strengen Guard um.
 
+- **Anhangsnamen im Download repariert.** Nicht nebenbei, sondern weil es
+  derselbe Fehler war, den das Plugin frisch eingebaut hatte: Der
+  `filename`-Parameter in `Content-Disposition` ist nach RFC 6266
+  ISO-8859-1, und rohes UTF-8 darin kommt im Browser als Mojibake an —
+  `Sprachmemo Ü.m4a` wurde als `SprachmemoÃ.m4a` gespeichert. Betroffen waren
+  drei Stellen im Kern: Anhänge, Blobs und die Anhangsvorschau. Den Header
+  buchstabiert jetzt ein gemeinsames Paket `backend/httpfile`, das Kern und
+  Plugin beide benutzen — eine Implementierung statt zweier, die auseinander
+  laufen können.
+
 Ausführlich in [`plugins/webdav_archive/README.md`](plugins/webdav_archive/README.md).
 
 ---
