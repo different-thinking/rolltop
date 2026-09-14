@@ -381,10 +381,20 @@ eine Sprachnotiz, die vom Telefon an die eigene Adresse geht: sie soll nicht als
 Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
 
 - **Ein neues Plugin `webdav_archive`.** Es beobachtet einen Ordner und kopiert
-  die Anhänge, die dort landen, auf einen WebDAV-Server — Nextcloud, eine
-  dav-Freigabe, alles, was das Protokoll spricht. Der WebDAV-Client ist
-  handgeschrieben (`PUT`, `MKCOL`, `PROPFIND`, `GET`, `DELETE` über `net/http`),
-  weil fünf Verben keine Abhängigkeit wert sind, die gepflegt werden muss.
+  die Anhänge, die dort landen, auf einen Speicher, den man selbst betreibt. Der
+  WebDAV-Client ist handgeschrieben (`PUT`, `MKCOL`, `PROPFIND`, `GET`, `DELETE`
+  über `net/http`), weil fünf Verben keine Abhängigkeit wert sind, die gepflegt
+  werden muss.
+- **Drei Protokolle, erkannt am Schema der Adresse:** `https://` für WebDAV,
+  `sftp://` für SSH, `smb://` für eine Windows-Freigabe. Kein zweites Feld, das
+  der Adresse widersprechen kann. Dahinter steht ein Interface: Warteschlange,
+  Worker und Dateiansicht wissen nicht, welches Protokoll gerade spricht.
+- **Für ALL-INKL.COM wichtig:** Das dortige Netzlaufwerk ist *kein* WebDAV — der
+  Support sagt es selbst, und die Anleitungen geben eine SMB-Adresse aus. Der
+  Speicher dahinter ist derselbe wie der des Webspace, also kommt man mit
+  `sftp://` an dieselben Dateien, über Port 22 statt 445. Das ist der Weg, der
+  von einem gehosteten Container aus auch wirklich rausgeht; SMB steht daneben,
+  falls 445 offen ist.
 - **Sortiert wird weiter mit Filtern.** Eine `mail_filters`-Regel verschiebt die
   Post in den Ordner, das Plugin nimmt sie dort auf. Keine der beiden Hälften
   weiß von der anderen.

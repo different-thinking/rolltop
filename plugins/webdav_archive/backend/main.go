@@ -103,16 +103,18 @@ func (p *webdavArchiveBackend) wake() {
 }
 
 type targetInput struct {
-	Name           string `json:"name"`
-	Enabled        *bool  `json:"enabled"`
-	BaseURL        string `json:"base_url"`
-	Username       string `json:"username"`
-	Password       string `json:"password"`
-	ClearPassword  bool   `json:"clear_password"`
-	WatchMailboxID int64  `json:"watch_mailbox_id"`
-	ContentTypes   string `json:"content_types"`
-	PathTemplate   string `json:"path_template"`
-	IncludeInline  *bool  `json:"include_inline"`
+	Name            string `json:"name"`
+	Enabled         *bool  `json:"enabled"`
+	BaseURL         string `json:"base_url"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	ClearPassword   bool   `json:"clear_password"`
+	PrivateKey      string `json:"private_key"`
+	ClearPrivateKey bool   `json:"clear_private_key"`
+	WatchMailboxID  int64  `json:"watch_mailbox_id"`
+	ContentTypes    string `json:"content_types"`
+	PathTemplate    string `json:"path_template"`
+	IncludeInline   *bool  `json:"include_inline"`
 }
 
 type enabledInput struct {
@@ -120,12 +122,17 @@ type enabledInput struct {
 }
 
 type targetView struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Enabled        bool   `json:"enabled"`
-	BaseURL        string `json:"base_url"`
-	Username       string `json:"username"`
-	HasPassword    bool   `json:"has_password"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Enabled       bool   `json:"enabled"`
+	BaseURL       string `json:"base_url"`
+	Username      string `json:"username"`
+	HasPassword   bool   `json:"has_password"`
+	HasPrivateKey bool   `json:"has_private_key"`
+	// Transport is derived from the address rather than stored beside it, so
+	// the two cannot disagree. The settings page reads it to label the target
+	// and to show the fields that transport actually needs.
+	Transport      string `json:"transport"`
 	WatchMailboxID int64  `json:"watch_mailbox_id"`
 	ContentTypes   string `json:"content_types"`
 	PathTemplate   string `json:"path_template"`
@@ -169,6 +176,8 @@ func presentTarget(item target) targetView {
 		BaseURL:        item.BaseURL,
 		Username:       item.Username,
 		HasPassword:    strings.TrimSpace(item.EncryptedPassword) != "",
+		HasPrivateKey:  strings.TrimSpace(item.EncryptedPrivateKey) != "",
+		Transport:      targetTransport(item),
 		WatchMailboxID: item.WatchMailboxID,
 		ContentTypes:   item.ContentTypes,
 		PathTemplate:   item.PathTemplate,
@@ -177,6 +186,18 @@ func presentTarget(item target) targetView {
 		LastSuccessAt:  unixSeconds(item.LastSuccessAt),
 		UploadedTotal:  item.UploadedTotal,
 	}
+}
+
+// targetTransport names the protocol a stored address speaks. An address that
+// no longer parses -- one stored by an older build, or edited by hand in the
+// database -- is reported as unknown rather than guessed at, so the settings
+// page can say so instead of drawing the wrong fields.
+func targetTransport(item target) string {
+	address, err := parseTargetAddress(item.BaseURL)
+	if err != nil {
+		return "unknown"
+	}
+	return address.Transport
 }
 
 func presentUpload(item upload) uploadView {
@@ -345,8 +366,7 @@ func prepareTarget(ctx context.Context, host plugins.APIHost, db *sql.DB, userID
 			return target{}, errors.New("target not found")
 		}
 	}
-	baseURL := strings.TrimSpace(in.BaseURL)
-	parsed, err := parseWebDAVBaseURL(baseURL)
+	address, err := parseTargetAddress(in.BaseURL)
 	if err != nil {
 		return target{}, err
 	}
@@ -375,14 +395,14 @@ func prepareTarget(ctx context.Context, host plugins.APIHost, db *sql.DB, userID
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		name = parsed.Host
+		name = address.Host
 	}
 	item := target{
 		ID:             targetID,
 		UserID:         userID,
 		Name:           name,
 		Enabled:        enabled,
-		BaseURL:        parsed.String(),
+		BaseURL:        address.URL.String(),
 		Username:       strings.TrimSpace(in.Username),
 		WatchMailboxID: in.WatchMailboxID,
 		ContentTypes:   contentTypes,
@@ -395,11 +415,39 @@ func prepareTarget(ctx context.Context, host plugins.APIHost, db *sql.DB, userID
 	case strings.TrimSpace(in.Password) != "":
 		encrypted, err := mmcrypto.EncryptString(host.MasterKey(), in.Password)
 		if err != nil {
-			return target{}, errors.New("the WebDAV password could not be stored")
+			return target{}, errors.New("the password could not be stored")
 		}
 		item.EncryptedPassword = encrypted
 	default:
 		item.EncryptedPassword = existing.EncryptedPassword
+	}
+	switch {
+	case in.ClearPrivateKey:
+		item.EncryptedPrivateKey = ""
+	case strings.TrimSpace(in.PrivateKey) != "":
+		encrypted, err := mmcrypto.EncryptString(host.MasterKey(), in.PrivateKey)
+		if err != nil {
+			return target{}, errors.New("the private key could not be stored")
+		}
+		item.EncryptedPrivateKey = encrypted
+	default:
+		item.EncryptedPrivateKey = existing.EncryptedPrivateKey
+	}
+	// Everything a transport needs beyond the address is checked here rather
+	// than at the first upload, so a target that cannot work says so while the
+	// reader is still looking at the form.
+	switch address.Transport {
+	case transportSFTP:
+		if item.Username == "" {
+			return target{}, errors.New("an sftp:// target needs a user name")
+		}
+		if item.EncryptedPassword == "" && item.EncryptedPrivateKey == "" {
+			return target{}, errors.New("an sftp:// target needs a password or a private key")
+		}
+	case transportSMB:
+		if item.Username == "" {
+			return target{}, errors.New("an smb:// target needs a user name")
+		}
 	}
 	return item, nil
 }
@@ -408,14 +456,22 @@ func (p *webdavArchiveBackend) apiTestTarget(host plugins.APIHost, db *sql.DB, u
 	if !host.VerifyCSRF(w, r) {
 		return
 	}
-	client, _, err := targetClient(r.Context(), host, db, userID, targetID)
-	if err != nil {
-		writeScopedError(host, w, err, "target not found")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := client.CheckAccess(ctx); err != nil {
+	// A destination that cannot be opened at all is the same answer to the
+	// reader as one that opens and then refuses: both are "this is not working
+	// yet", and both belong in the panel rather than in a 500.
+	store, _, err := openTargetStore(ctx, host, db, userID, targetID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			host.WriteAPIError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		host.WriteJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer store.Close()
+	if err := store.CheckAccess(ctx); err != nil {
 		host.WriteJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -465,26 +521,48 @@ func (p *webdavArchiveBackend) apiRetryUpload(host plugins.APIHost, db *sql.DB, 
 	host.WriteJSON(w, map[string]any{"ok": true})
 }
 
-// targetClient builds a client for one of the caller's own targets. Both the
-// target lookup and the decrypt happen here rather than at each call site, so
-// no route can reach a target belonging to another user.
-func targetClient(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID, targetID int64) (*webdavClient, target, error) {
+// openTargetStore opens one of the caller's own targets, whichever protocol it
+// speaks. Both the target lookup and the decrypt happen here rather than at
+// each call site, so no route can reach a target belonging to another user.
+//
+// The caller closes the store: SFTP and SMB hold a live connection.
+func openTargetStore(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID, targetID int64) (remoteStore, target, error) {
 	configured, err := getTarget(ctx, db, userID, targetID)
 	if err != nil {
 		return nil, target{}, err
 	}
-	password := ""
-	if strings.TrimSpace(configured.EncryptedPassword) != "" {
-		password, err = mmcrypto.DecryptString(host.MasterKey(), configured.EncryptedPassword)
-		if err != nil {
-			return nil, target{}, errors.New("the stored WebDAV password could not be read")
-		}
-	}
-	client, err := newWebDAVClient(configured.BaseURL, configured.Username, password)
+	password, privateKey, err := targetCredentials(host, configured)
 	if err != nil {
 		return nil, target{}, err
 	}
-	return client, configured, nil
+	store, err := openRemoteStore(ctx, configured, password, privateKey)
+	if err != nil {
+		return nil, target{}, err
+	}
+	return store, configured, nil
+}
+
+// targetCredentials decrypts what a target stored. It is one function because
+// both secrets are read in the same two places -- the API and the worker -- and
+// a second copy of "which key, which field" is a copy that can drift.
+func targetCredentials(host plugins.BackendHost, configured target) (string, string, error) {
+	password := ""
+	if strings.TrimSpace(configured.EncryptedPassword) != "" {
+		decrypted, err := mmcrypto.DecryptString(host.MasterKey(), configured.EncryptedPassword)
+		if err != nil {
+			return "", "", errors.New("the stored password could not be read")
+		}
+		password = decrypted
+	}
+	privateKey := ""
+	if strings.TrimSpace(configured.EncryptedPrivateKey) != "" {
+		decrypted, err := mmcrypto.DecryptString(host.MasterKey(), configured.EncryptedPrivateKey)
+		if err != nil {
+			return "", "", errors.New("the stored private key could not be read")
+		}
+		privateKey = decrypted
+	}
+	return password, privateKey, nil
 }
 
 func listMailboxOptions(ctx context.Context, st *store.Store, userID int64) ([]mailboxOption, error) {

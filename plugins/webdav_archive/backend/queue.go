@@ -25,7 +25,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	mmcrypto "rolltop/backend/crypto"
 	"rolltop/backend/mailparse"
 	"rolltop/backend/plugins"
 	"rolltop/backend/store"
@@ -212,15 +211,23 @@ func (w *worker) runUser(userID int64) {
 		log.Printf("webdav archive could not claim uploads user_id=%d error_type=%T", userID, err)
 		return
 	}
-	// One client per target rather than per upload: a batch is usually several
-	// recordings from the same folder going to the same server.
-	clients := map[int64]*webdavClient{}
+	// One open destination per target rather than per upload: a batch is
+	// usually several recordings from the same folder going to the same
+	// server, and for SFTP and SMB that is one handshake instead of twenty.
+	stores := map[int64]remoteStore{}
 	targets := map[int64]target{}
+	// SFTP and SMB hold a live connection, so the batch closes what it opened
+	// rather than leaving it to the garbage collector.
+	defer func() {
+		for _, store := range stores {
+			_ = store.Close()
+		}
+	}()
 	for _, item := range items {
 		if w.ctx.Err() != nil {
 			return
 		}
-		if err := w.runUpload(db, item, clients, targets); err != nil {
+		if err := w.runUpload(db, item, stores, targets); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -233,25 +240,22 @@ func (w *worker) runUser(userID int64) {
 	}
 }
 
-func (w *worker) runUpload(db *sql.DB, item upload, clients map[int64]*webdavClient, targets map[int64]target) error {
-	client, ok := clients[item.TargetID]
+func (w *worker) runUpload(db *sql.DB, item upload, stores map[int64]remoteStore, targets map[int64]target) error {
+	store, ok := stores[item.TargetID]
 	if !ok {
 		configured, err := getTarget(w.ctx, db, item.UserID, item.TargetID)
 		if err != nil {
 			return fmt.Errorf("the target this upload belongs to is gone: %w", err)
 		}
-		password := ""
-		if strings.TrimSpace(configured.EncryptedPassword) != "" {
-			password, err = mmcrypto.DecryptString(w.host.MasterKey(), configured.EncryptedPassword)
-			if err != nil {
-				return fmt.Errorf("the stored WebDAV password could not be read: %w", err)
-			}
-		}
-		client, err = newWebDAVClient(configured.BaseURL, configured.Username, password)
+		password, privateKey, err := targetCredentials(w.host, configured)
 		if err != nil {
 			return err
 		}
-		clients[item.TargetID] = client
+		store, err = openRemoteStore(w.ctx, configured, password, privateKey)
+		if err != nil {
+			return err
+		}
+		stores[item.TargetID] = store
 		targets[item.TargetID] = configured
 	}
 	configured := targets[item.TargetID]
@@ -275,7 +279,7 @@ func (w *worker) runUpload(db *sql.DB, item upload, clients map[int64]*webdavCli
 	if existing != "" {
 		return completeUpload(w.ctx, db, item, statusDuplicate, existing, hash)
 	}
-	remotePath, err := w.freeRemotePath(client, configured, item, hash)
+	remotePath, err := w.freeRemotePath(store, configured, item, hash)
 	if err != nil {
 		return err
 	}
@@ -286,7 +290,7 @@ func (w *worker) runUpload(db *sql.DB, item upload, clients map[int64]*webdavCli
 	if err := reserveUploadPath(w.ctx, db, item, remotePath, hash); err != nil {
 		return err
 	}
-	if err := client.Put(w.ctx, remotePath, data, item.ContentType); err != nil {
+	if err := store.Put(w.ctx, remotePath, data, item.ContentType); err != nil {
 		return err
 	}
 	if err := completeUpload(w.ctx, db, item, statusDone, remotePath, hash); err != nil {
@@ -400,14 +404,14 @@ func normalizeContentType(value string) string {
 // A file already there whose bytes are these bytes is not a collision: the
 // previous attempt uploaded it and failed before it could say so, and writing
 // it again is the same file.
-func (w *worker) freeRemotePath(client *webdavClient, configured target, item upload, hash string) (string, error) {
+func (w *worker) freeRemotePath(store remoteStore, configured target, item upload, hash string) (string, error) {
 	// A path this row already claimed is where it belongs, whatever is there
 	// now: a retry writes over its own earlier attempt rather than beside it.
 	if reserved := strings.TrimSpace(item.RemotePath); reserved != "" && item.ContentHash == hash {
 		return reserved, nil
 	}
 	base := renderRemotePath(configured.PathTemplate, item)
-	exists, err := client.Exists(w.ctx, base)
+	exists, err := store.Exists(w.ctx, base)
 	if err != nil {
 		return "", err
 	}

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS plugin_webdav_archive_targets (
   base_url TEXT NOT NULL,
   username TEXT NOT NULL DEFAULT '',
   encrypted_password TEXT NOT NULL DEFAULT '',
+  encrypted_private_key TEXT NOT NULL DEFAULT '',
   watch_mailbox_id INTEGER NOT NULL DEFAULT 0,
   content_types TEXT NOT NULL DEFAULT 'audio/',
   path_template TEXT NOT NULL DEFAULT '{yyyy}/{mm}/{filename}',

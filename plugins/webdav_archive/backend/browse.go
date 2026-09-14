@@ -36,14 +36,15 @@ type browseView struct {
 }
 
 func (p *webdavArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
-	client, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
+	store, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
 	if !ok {
 		return
 	}
+	defer store.Close()
 	targetID, _ := strconv.ParseInt(r.URL.Query().Get("target"), 10, 64)
 	ctx, cancel := context.WithTimeout(r.Context(), browseTimeout)
 	defer cancel()
-	entries, err := client.List(ctx, requested)
+	entries, err := store.List(ctx, requested)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			host.WriteAPIError(w, http.StatusNotFound, "that folder is not on the WebDAV server")
@@ -65,15 +66,16 @@ func (p *webdavArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userI
 }
 
 func (p *webdavArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
-	client, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
+	store, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
 	if !ok {
 		return
 	}
+	defer store.Close()
 	if requested == "" || strings.HasSuffix(requested, "/") {
 		host.WriteAPIError(w, http.StatusBadRequest, "a file path is required")
 		return
 	}
-	body, contentType, size, err := client.Get(r.Context(), requested)
+	body, contentType, size, err := store.Get(r.Context(), requested)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the WebDAV server")
@@ -84,6 +86,12 @@ func (p *webdavArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, use
 	}
 	defer body.Close()
 	inline := r.URL.Query().Get("inline") == "1"
+	if strings.TrimSpace(contentType) == "" {
+		// SFTP and SMB store bytes and a name, not a type. Naming the file by
+		// its extension is what lets a recording play in place instead of
+		// downloading as an opaque blob.
+		contentType = guessContentType(requested)
+	}
 	if strings.TrimSpace(contentType) == "" {
 		contentType = "application/octet-stream"
 	}
@@ -112,17 +120,18 @@ func (p *webdavArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, u
 	if !host.VerifyCSRF(w, r) {
 		return
 	}
-	client, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
+	store, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
 	if !ok {
 		return
 	}
+	defer store.Close()
 	if requested == "" {
 		host.WriteAPIError(w, http.StatusBadRequest, "a path is required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), browseTimeout)
 	defer cancel()
-	if err := client.Delete(ctx, requested); err != nil {
+	if err := store.Delete(ctx, requested); err != nil {
 		if errors.Is(err, errNotFound) {
 			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the WebDAV server")
 			return
@@ -137,22 +146,29 @@ func (p *webdavArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, u
 // target, checks it belongs to this user, and reduces the requested path to a
 // relative one. It answers the error itself and reports whether the caller
 // should continue.
-func (p *webdavArchiveBackend) resolveBrowseRequest(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) (*webdavClient, target, string, bool) {
+func (p *webdavArchiveBackend) resolveBrowseRequest(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) (remoteStore, target, string, bool) {
 	query := r.URL.Query()
 	targetID, err := strconv.ParseInt(strings.TrimSpace(query.Get("target")), 10, 64)
 	if err != nil || targetID <= 0 {
 		host.WriteAPIError(w, http.StatusBadRequest, "a WebDAV target is required")
 		return nil, target{}, "", false
 	}
-	client, configured, err := targetClient(r.Context(), host, db, userID, targetID)
+	store, configured, err := openTargetStore(r.Context(), host, db, userID, targetID)
 	if err != nil {
-		writeScopedError(host, w, err, "target not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			host.WriteAPIError(w, http.StatusNotFound, "target not found")
+			return nil, target{}, "", false
+		}
+		// Opening is where SFTP and SMB do their connecting, so a destination
+		// that is unreachable or refusing the credentials fails here rather
+		// than on the first read. It is a configuration answer either way.
+		host.WriteAPIError(w, http.StatusBadGateway, err.Error())
 		return nil, target{}, "", false
 	}
 	// cleanRemotePath is what confines the request to the configured base: it
 	// resolves `..` away rather than rejecting it, so no combination of
 	// segments addresses anything above the target's own root.
-	return client, configured, cleanRemotePath(query.Get("path")), true
+	return store, configured, cleanRemotePath(query.Get("path")), true
 }
 
 // parentPath is the folder one level up, or "" at the root of the target.

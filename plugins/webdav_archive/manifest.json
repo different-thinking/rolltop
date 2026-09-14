@@ -1,7 +1,7 @@
 {
   "id": "webdav_archive",
-  "name": "WebDAV archive",
-  "description": "Files attachments from a watched mail folder onto a WebDAV server, with a queue that survives an unreachable server, and browses what landed there.",
+  "name": "File archive",
+  "description": "Files attachments from a watched mail folder onto storage you run -- WebDAV, SFTP or SMB -- with a queue that survives an unreachable server, and browses what landed there.",
   "version": "1.0.0",
   "enabled_by_default": false,
   "auto_start": true,

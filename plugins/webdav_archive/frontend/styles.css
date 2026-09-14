@@ -228,3 +228,25 @@
     grid-column: 2 / -1;
   }
 }
+
+.webdav-form textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  resize: vertical;
+}
+
+.webdav-note {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.webdav-note code {
+  background: var(--surface-subtle);
+  border-radius: 4px;
+  padding: 0 4px;
+}

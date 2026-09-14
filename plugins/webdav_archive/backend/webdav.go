@@ -58,6 +58,13 @@ type webdavClient struct {
 	http     *http.Client
 }
 
+var _ remoteStore = (*webdavClient)(nil)
+
+// Close satisfies remoteStore. WebDAV is a sequence of independent requests
+// over a shared http.Client, so there is no session to end -- the idle
+// connections the transport keeps are its own to close when it is collected.
+func (c *webdavClient) Close() error { return nil }
+
 // resourceEntry is one row of a PROPFIND listing, reduced to what a file
 // browser draws.
 type resourceEntry struct {
@@ -69,13 +76,12 @@ type resourceEntry struct {
 	ModifiedAt  int64  `json:"modified_at"`
 }
 
-func newWebDAVClient(baseURL, username, password string) (*webdavClient, error) {
-	parsed, err := parseWebDAVBaseURL(baseURL)
-	if err != nil {
-		return nil, err
+func newWebDAVClient(address targetAddress, username, password string) (*webdavClient, error) {
+	if address.URL == nil {
+		return nil, errors.New("the WebDAV address was not parsed")
 	}
 	return &webdavClient{
-		baseURL:  parsed,
+		baseURL:  address.URL,
 		username: username,
 		password: password,
 		http: &http.Client{
@@ -95,37 +101,6 @@ func newWebDAVClient(baseURL, username, password string) (*webdavClient, error) 
 			},
 		},
 	}, nil
-}
-
-// parseWebDAVBaseURL validates the URL a target is configured with. It is the
-// one place a base URL is judged, so the settings form and the worker cannot
-// disagree about what is acceptable.
-func parseWebDAVBaseURL(raw string) (*url.URL, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, errors.New("a WebDAV address is required")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("the WebDAV address could not be read: %w", err)
-	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return nil, errors.New("the WebDAV address must start with https:// or http://")
-	}
-	if parsed.Hostname() == "" {
-		return nil, errors.New("the WebDAV address has no host")
-	}
-	if parsed.User != nil {
-		return nil, errors.New("put the user name in its own field, not in the address")
-	}
-	// The base is a collection, so it ends in a slash. Resolving a relative
-	// path against a base without one drops its last segment.
-	if !strings.HasSuffix(parsed.Path, "/") {
-		parsed.Path += "/"
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed, nil
 }
 
 // resolve turns a store-relative path into an absolute URL under the base. The

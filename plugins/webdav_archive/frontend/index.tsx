@@ -1,4 +1,4 @@
-// File overview: The plugin's two pages -- the settings page where a WebDAV
+// File overview: The plugin's two pages -- the settings page where a storage
 // target is configured and its queue watched, and the file browser at /files.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -20,6 +20,8 @@ type Target = {
   base_url: string;
   username: string;
   has_password: boolean;
+  has_private_key: boolean;
+  transport: string;
   watch_mailbox_id: number;
   content_types: string;
   path_template: string;
@@ -90,6 +92,7 @@ const emptyForm = {
   base_url: "",
   username: "",
   password: "",
+  private_key: "",
   watch_mailbox_id: 0,
   content_types: "audio/",
   path_template: "{yyyy}/{mm}/{filename}",
@@ -97,9 +100,34 @@ const emptyForm = {
   enabled: true
 };
 
+/**
+ * transportLabels name the protocol a target speaks. It is read off the
+ * address rather than chosen separately, so there is no second setting that can
+ * disagree with the address that is actually stored.
+ */
+const transportLabels: Record<string, string> = {
+  webdav: "WebDAV",
+  sftp: "SFTP",
+  smb: "SMB",
+  unknown: "Address not understood"
+};
+
+/** transportOf reads the scheme the way the server does, for a form that has
+ * not been saved yet and therefore has no transport of its own. */
+function transportOf(address: string): string {
+  const scheme = address.trim().toLowerCase().split("://", 1)[0];
+  if (address.includes("://")) {
+    if (scheme === "https" || scheme === "http") return "webdav";
+    if (scheme === "sftp" || scheme === "ssh") return "sftp";
+    if (scheme === "smb" || scheme === "cifs") return "smb";
+    return "unknown";
+  }
+  return "";
+}
+
 type FormState = typeof emptyForm;
 
-function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
+function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
   const [targets, setTargets] = useState<Target[] | null>(null);
   const [mailboxes, setMailboxes] = useState<MailboxOption[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -146,6 +174,7 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
         base_url: form.base_url,
         username: form.username,
         password: form.password,
+        private_key: form.private_key,
         watch_mailbox_id: Number(form.watch_mailbox_id) || 0,
         content_types: form.content_types,
         path_template: form.path_template,
@@ -167,8 +196,8 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
     setBusy(true);
     try {
       const result = await sendJSON<{ ok: boolean; error?: string }>(`${apiBase}/targets/${target.id}/test`, csrf, {}, "POST");
-      if (result.ok) addToast("The WebDAV server answered.");
-      else addToast(result.error || "The WebDAV server did not answer.", "error");
+      if (result.ok) addToast("The server answered.");
+      else addToast(result.error || "The server did not answer.", "error");
       await load();
     } catch (err) {
       addToast(messageFromError(err), "error");
@@ -220,12 +249,16 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
 
   const pending = (counts.queued || 0) + (counts.failed || 0) + (counts.uploading || 0);
 
-  if (targets === null && !error) return <SettingsLoading label="Loading WebDAV targets..." />;
+  // The saved transport is the server's answer; an unsaved form has only the
+  // address the reader is still typing.
+  const formTransport = form ? (transportOf(form.base_url) || (form.id > 0 ? "webdav" : "")) : "";
+
+  if (targets === null && !error) return <SettingsLoading label="Loading targets..." />;
 
   return (
     <SettingsPage
-      title="WebDAV archive"
-      description="Attachments from a watched folder are copied onto a WebDAV server. What cannot be delivered stays queued until the server answers."
+      title="File archive"
+      description="Attachments from a watched folder are copied onto storage you run — over WebDAV, SFTP or SMB. What cannot be delivered stays queued until the server answers."
       backPath="/settings/account"
       navigate={navigate}
       actions={
@@ -249,15 +282,33 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
             <input value={form.name} placeholder="Nextcloud" onChange={(e) => setForm({ ...form, name: e.target.value })} />
           </label>
           <label>
-            <span>WebDAV address</span>
+            <span>Address</span>
             <input
               required
               value={form.base_url}
               placeholder="https://cloud.example.org/remote.php/dav/files/me/Recordings/"
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
             />
-            <small>The folder everything is filed under. Rolltop never writes above it.</small>
+            <small>
+              The folder everything is filed under; Rolltop never writes above it. The scheme picks
+              the protocol:{" "}
+              <code>https://</code> for WebDAV, <code>sftp://host/folder</code> for SSH,{" "}
+              <code>smb://host/share/folder</code> for a Windows share.
+              {formTransport === "unknown" ? (
+                <>
+                  {" "}<strong>This address names a protocol this plugin cannot speak.</strong>
+                </>
+              ) : null}
+            </small>
           </label>
+
+          {formTransport === "smb" ? (
+            <div className="webdav-note">
+              SMB needs port 445 open outbound from this server, which many hosters block. If a test
+              times out, the same files are usually reachable over <code>sftp://</code> — at
+              ALL-INKL.COM the network drive and the webspace are the same storage.
+            </div>
+          ) : null}
           <label>
             <span>User name</span>
             <input value={form.username} autoComplete="off" onChange={(e) => setForm({ ...form, username: e.target.value })} />
@@ -271,8 +322,30 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
               placeholder={form.id > 0 ? "Unchanged" : ""}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
             />
-            <small>Stored encrypted. Leave empty to keep the one already saved. An app password is safer than the account password.</small>
+            <small>
+              Stored encrypted. Leave empty to keep the one already saved.
+              {formTransport === "sftp"
+                ? " With a private key below, this is its passphrase if it has one."
+                : " An app password is safer than the account password."}
+            </small>
           </label>
+
+          {formTransport === "sftp" ? (
+            <label>
+              <span>Private key</span>
+              <textarea
+                rows={4}
+                value={form.private_key}
+                spellCheck={false}
+                placeholder={form.id > 0 ? "Unchanged" : "-----BEGIN OPENSSH PRIVATE KEY-----"}
+                onChange={(e) => setForm({ ...form, private_key: e.target.value })}
+              />
+              <small>
+                Optional, and the better credential for something that runs unattended. Stored
+                encrypted. Leave empty to keep the one already saved.
+              </small>
+            </label>
+          ) : null}
           <label>
             <span>Watched folder</span>
             <select
@@ -322,8 +395,8 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
       {targets && targets.length === 0 && !form ? (
         <SettingsEmpty
           icon="folder"
-          title="No WebDAV target yet"
-          description="Add the server the attachments should be filed onto, then point a mail filter at the folder you want watched."
+          title="No target yet"
+          description="Add the storage the attachments should be filed onto, then point a mail filter at the folder you want watched."
           action={<button type="button" onClick={() => setForm({ ...emptyForm })}><Icon name="add" />Add target</button>}
         />
       ) : null}
@@ -351,6 +424,7 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
                   base_url: target.base_url,
                   username: target.username,
                   password: "",
+                  private_key: "",
                   watch_mailbox_id: target.watch_mailbox_id,
                   content_types: target.content_types,
                   path_template: target.path_template,
@@ -366,6 +440,8 @@ function WebDAVArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
             </div>
           </div>
           <dl className="webdav-target-facts">
+            <div><dt>Protocol</dt><dd>{transportLabels[target.transport] || target.transport}</dd></div>
+            <div><dt>Sign-in</dt><dd>{target.has_private_key ? "Key" : target.has_password ? "Password" : "None"}</dd></div>
             <div><dt>Watching</dt><dd>{mailboxLabel(mailboxes, target.watch_mailbox_id)}</dd></div>
             <div><dt>Types</dt><dd>{target.content_types}</dd></div>
             <div><dt>Filed</dt><dd>{target.uploaded_total.toLocaleString()}</dd></div>
@@ -429,8 +505,8 @@ type FilesContext = {
 };
 
 /**
- * FilesView browses what the archive filed. It is a view of the WebDAV server
- * rather than of the queue: what is here is what is actually on the server,
+ * FilesView browses what the archive filed. It is a view of the storage itself
+ * rather than of the queue: what is here is what is actually there,
  * including anything put there by something other than Rolltop.
  *
  * The current folder lives in the URL after /files, so a folder can be linked
@@ -486,7 +562,7 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
   }, [navigate]);
 
   const remove = useCallback(async (entry: ResourceEntry) => {
-    if (!window.confirm(`Delete ${entry.name} from the WebDAV server? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete ${entry.name} from the server? This cannot be undone.`)) return;
     try {
       await sendJSON(`${apiBase}/file?target=${targetID}&path=${encodeURIComponent(entry.path)}`, csrf, null, "DELETE");
       addToast(`${entry.name} deleted.`);
@@ -518,7 +594,7 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
         <section className="panel webdav-idle">
           <Icon name="folder" />
           <div>
-            <strong>No WebDAV target configured.</strong>
+            <strong>No storage target configured.</strong>
             <p>Add one in settings, and the attachments filed onto it appear here.</p>
             <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/webdav")}>
               <Icon name="settings" />Open settings
@@ -639,7 +715,7 @@ function playable(contentType: string, name: string): boolean {
   return value.startsWith("audio/") || /\.(mp3|m4a|ogg|opus|wav|aac|flac)$/i.test(name);
 }
 
-/** unixLabel renders a WebDAV timestamp with the app's own date formatter,
+/** unixLabel renders a remote timestamp with the app's own date formatter,
  * which takes the string form a date is carried in everywhere else. */
 function unixLabel(seconds: number): string {
   if (!seconds || seconds <= 0) return "";
@@ -697,12 +773,12 @@ export default {
   accountSettingsRoutes: [
     {
       path: "/settings/account/plugins/webdav",
-      title: "WebDAV archive",
-      label: "WebDAV archive",
-      description: "File attachments from a watched folder onto a WebDAV server, and browse what landed there.",
+      title: "File archive",
+      label: "File archive",
+      description: "File attachments from a watched folder onto storage you run — WebDAV, SFTP or SMB — and browse what landed there.",
       icon: "folder",
       section: "plugins",
-      render: (context: SettingsContext) => <WebDAVArchiveSettings {...context} />
+      render: (context: SettingsContext) => <FileArchiveSettings {...context} />
     }
   ],
   appRoutes: [
@@ -718,8 +794,8 @@ export default {
     <section className="panel account-list-panel">
       <div className="panel-headline">
         <div>
-          <h2>WebDAV archive</h2>
-          <div className="muted">Attachments from a watched folder, filed onto a server you run.</div>
+          <h2>File archive</h2>
+          <div className="muted">Attachments from a watched folder, filed onto storage you run.</div>
         </div>
         <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/webdav")}>
           <Icon name="folder" />Manage

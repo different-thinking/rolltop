@@ -478,7 +478,7 @@ func TestAReservedPathIsReusedByTheRetry(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -35,8 +35,8 @@ const (
 const maxAttempts = 10
 
 const targetColumns = `id, user_id, name, enabled, base_url, username, encrypted_password,
-	watch_mailbox_id, content_types, path_template, include_inline, last_error,
-	last_success_at, uploaded_total, created_at, updated_at`
+	encrypted_private_key, watch_mailbox_id, content_types, path_template, include_inline,
+	last_error, last_success_at, uploaded_total, created_at, updated_at`
 
 type target struct {
 	ID                int64
@@ -46,15 +46,19 @@ type target struct {
 	BaseURL           string
 	Username          string
 	EncryptedPassword string
-	WatchMailboxID    int64
-	ContentTypes      string
-	PathTemplate      string
-	IncludeInline     bool
-	LastError         string
-	LastSuccessAt     time.Time
-	UploadedTotal     int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// EncryptedPrivateKey is an SSH private key for an SFTP target. It is the
+	// better credential for something that runs unattended, and it is what the
+	// hoster's own public-key instructions set up.
+	EncryptedPrivateKey string
+	WatchMailboxID      int64
+	ContentTypes        string
+	PathTemplate        string
+	IncludeInline       bool
+	LastError           string
+	LastSuccessAt       time.Time
+	UploadedTotal       int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // contentTypePrefixes reads the target's filter into the list the hook matches
@@ -154,8 +158,8 @@ func scanTarget(row rowScanner) (target, error) {
 	var enabled, inline int
 	var success, created, updated int64
 	err := row.Scan(&out.ID, &out.UserID, &out.Name, &enabled, &out.BaseURL, &out.Username,
-		&out.EncryptedPassword, &out.WatchMailboxID, &out.ContentTypes, &out.PathTemplate,
-		&inline, &out.LastError, &success, &out.UploadedTotal, &created, &updated)
+		&out.EncryptedPassword, &out.EncryptedPrivateKey, &out.WatchMailboxID, &out.ContentTypes,
+		&out.PathTemplate, &inline, &out.LastError, &success, &out.UploadedTotal, &created, &updated)
 	out.Enabled = enabled != 0
 	out.IncludeInline = inline != 0
 	out.LastSuccessAt = unixTime(success)
@@ -222,12 +226,12 @@ func persistTarget(ctx context.Context, db *sql.DB, item target) (target, error)
 	if item.ID > 0 {
 		res, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_targets
 			SET name = ?, enabled = ?, base_url = ?, username = ?, encrypted_password = ?,
-				watch_mailbox_id = ?, content_types = ?, path_template = ?, include_inline = ?,
-				updated_at = ?
+				encrypted_private_key = ?, watch_mailbox_id = ?, content_types = ?,
+				path_template = ?, include_inline = ?, updated_at = ?
 			WHERE user_id = ? AND id = ?`,
 			item.Name, boolInt(item.Enabled), item.BaseURL, item.Username, item.EncryptedPassword,
-			item.WatchMailboxID, item.ContentTypes, item.PathTemplate, boolInt(item.IncludeInline),
-			now, item.UserID, item.ID)
+			item.EncryptedPrivateKey, item.WatchMailboxID, item.ContentTypes, item.PathTemplate,
+			boolInt(item.IncludeInline), now, item.UserID, item.ID)
 		if err != nil {
 			return target{}, err
 		}
@@ -238,12 +242,12 @@ func persistTarget(ctx context.Context, db *sql.DB, item target) (target, error)
 	}
 	var id int64
 	err := db.QueryRowContext(ctx, `INSERT INTO plugin_webdav_archive_targets
-		(user_id, name, enabled, base_url, username, encrypted_password, watch_mailbox_id,
-		 content_types, path_template, include_inline, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		(user_id, name, enabled, base_url, username, encrypted_password, encrypted_private_key,
+		 watch_mailbox_id, content_types, path_template, include_inline, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		item.UserID, item.Name, boolInt(item.Enabled), item.BaseURL, item.Username,
-		item.EncryptedPassword, item.WatchMailboxID, item.ContentTypes, item.PathTemplate,
-		boolInt(item.IncludeInline), now, now).Scan(&id)
+		item.EncryptedPassword, item.EncryptedPrivateKey, item.WatchMailboxID, item.ContentTypes,
+		item.PathTemplate, boolInt(item.IncludeInline), now, now).Scan(&id)
 	if err != nil {
 		return target{}, err
 	}

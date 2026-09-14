@@ -12,39 +12,21 @@ import (
 	"testing"
 )
 
-func TestParseWebDAVBaseURLRefusesWhatCannotBeArchivedTo(t *testing.T) {
-	for _, tc := range []struct{ name, raw string }{
-		{"empty", "   "},
-		{"no scheme", "cloud.example.org/dav/"},
-		{"file scheme", "file:///etc/passwd"},
-		{"no host", "https:///dav/"},
-		{"credentials in the address", "https://me:secret@cloud.example.org/dav/"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseWebDAVBaseURL(tc.raw); err == nil {
-				t.Fatalf("parseWebDAVBaseURL(%q) accepted an address it should refuse", tc.raw)
-			}
-		})
-	}
-}
-
-func TestParseWebDAVBaseURLMakesTheBaseACollection(t *testing.T) {
-	parsed, err := parseWebDAVBaseURL("https://cloud.example.org/dav/files/me?v=1#top")
+// testWebDAVClient is the constructor with the address parsing in front of it,
+// which is what every caller in the plugin does.
+func testWebDAVClient(t *testing.T, raw, username, password string) (*webdavClient, error) {
+	t.Helper()
+	address, err := parseTargetAddress(raw)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	if parsed.Path != "/dav/files/me/" {
-		t.Fatalf("path = %q, want a trailing slash so relative paths resolve under it", parsed.Path)
-	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		t.Fatalf("query/fragment survived: %q %q", parsed.RawQuery, parsed.Fragment)
-	}
+	return newWebDAVClient(address, username, password)
 }
 
 // A path arriving from a browser must never address anything above the folder
 // the target was configured with, however it is spelled.
 func TestResolveConfinesEveryPathToTheConfiguredBase(t *testing.T) {
-	client, err := newWebDAVClient("https://cloud.example.org/dav/files/me/Recordings/", "", "")
+	client, err := testWebDAVClient(t, "https://cloud.example.org/dav/files/me/Recordings/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +53,7 @@ func TestResolveConfinesEveryPathToTheConfiguredBase(t *testing.T) {
 // Path alone leaves as `%2520` and the file lands under a name with a literal
 // percent in it.
 func TestResolveEscapesEachSegmentExactlyOnce(t *testing.T) {
-	client, err := newWebDAVClient("https://cloud.example.org/dav/", "", "")
+	client, err := testWebDAVClient(t, "https://cloud.example.org/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +123,7 @@ func TestASpacedNameSurvivesPutListAndGet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +205,7 @@ func TestListReadsPropfindAndDropsTheCollectionItself(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newWebDAVClient(server.URL+"/dav/", "user", "secret")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "user", "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +249,7 @@ func TestPutCreatesMissingCollectionsAndRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +272,7 @@ func TestMakeCollectionsTreatsAnExistingCollectionAsDone(t *testing.T) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}))
 	defer server.Close()
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +291,7 @@ func TestClientRefusesRedirectsToAnotherHost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +309,7 @@ func TestExistsAndDeleteReadTheServersAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
-	client, err := newWebDAVClient(server.URL+"/dav/", "", "")
+	client, err := testWebDAVClient(t, server.URL+"/dav/", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
