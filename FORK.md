@@ -374,27 +374,29 @@ daraus mitbringt, teils zeitgleich und unabhängig vom Original entstanden:
   gesetzte Variablen wird der Job übersprungen, damit ein Fork eine grüne
   Pipeline bekommt.
 
-### 11. Anhänge ins WebDAV
+### 11. Anhänge auf den eigenen Speicher
 
 Ein Postfach ist ein schlechter Ort, um eine Datei aufzuheben. Der Anlass war
 eine Sprachnotiz, die vom Telefon an die eigene Adresse geht: sie soll nicht als
 Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
 
-- **Ein neues Plugin `webdav_archive`.** Es beobachtet einen Ordner und kopiert
-  die Anhänge, die dort landen, auf einen Speicher, den man selbst betreibt. Der
-  WebDAV-Client ist handgeschrieben (`PUT`, `MKCOL`, `PROPFIND`, `GET`, `DELETE`
-  über `net/http`), weil fünf Verben keine Abhängigkeit wert sind, die gepflegt
-  werden muss.
-- **Drei Protokolle, erkannt am Schema der Adresse:** `https://` für WebDAV,
-  `sftp://` für SSH, `smb://` für eine Windows-Freigabe. Kein zweites Feld, das
-  der Adresse widersprechen kann. Dahinter steht ein Interface: Warteschlange,
-  Worker und Dateiansicht wissen nicht, welches Protokoll gerade spricht.
+- **Ein neues Plugin `file_archive`.** Es beobachtet einen Ordner und kopiert
+  die Anhänge, die dort landen, auf einen Speicher, den man selbst betreibt.
+- **Drei Protokolle, erkannt am Schema der Adresse:** `sftp://` für SSH,
+  `smb://` für eine Windows-Freigabe, `https://` für WebDAV. Kein zweites Feld,
+  das der Adresse widersprechen kann. Dahinter steht ein Interface:
+  Warteschlange, Worker und Dateiansicht wissen nicht, welches Protokoll gerade
+  spricht. Der WebDAV-Client ist handgeschrieben (`PUT`, `MKCOL`, `PROPFIND`,
+  `GET`, `DELETE` über `net/http`), weil fünf Verben keine Abhängigkeit wert
+  sind, die gepflegt werden muss; SFTP und SMB stehen auf `pkg/sftp` und
+  `go-smb2`.
 - **Für ALL-INKL.COM wichtig:** Das dortige Netzlaufwerk ist *kein* WebDAV — der
   Support sagt es selbst, und die Anleitungen geben eine SMB-Adresse aus. Der
   Speicher dahinter ist derselbe wie der des Webspace, also kommt man mit
-  `sftp://` an dieselben Dateien, über Port 22 statt 445. Das ist der Weg, der
-  von einem gehosteten Container aus auch wirklich rausgeht; SMB steht daneben,
-  falls 445 offen ist.
+  `sftp://` an dieselben Dateien, über Port 22 statt 445. **`sftp://` ist dort
+  der empfohlene Weg**, weil er von einem gehosteten Container aus auch
+  wirklich rausgeht; `smb://` steht daneben, falls 445 offen ist. WebDAV ist
+  der Fall für eine selbst betriebene Nextcloud, nicht für diesen Hoster.
 - **Sortiert wird weiter mit Filtern.** Eine `mail_filters`-Regel verschiebt die
   Post in den Ordner, das Plugin nimmt sie dort auf. Keine der beiden Hälften
   weiß von der anderen.
@@ -424,10 +426,12 @@ Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
 - **Der Dial-Guard ist bewusst durchlässiger als der für Bilder aus fremder
   Post.** Die Adresse tippt der Kontoinhaber selbst ein, und der Server steht
   meistens im selben privaten Netz — RFC1918 zu blockieren würde genau den
-  gedachten Fall blockieren. Gesperrt bleibt, was nie ein WebDAV-Server ist und
+  gedachten Fall blockieren. Gesperrt bleibt, was nie ein Speicherserver ist und
   wofür sich ein SSRF lohnt: Link-Local, allen voran `169.254.169.254`.
-  Redirects werden gar nicht verfolgt. `ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`
-  schaltet auf den strengen Guard um.
+  Redirects werden gar nicht verfolgt. Er gilt für alle drei Transporte, nicht
+  nur für den HTTP-Client, für den er geschrieben wurde;
+  `ROLLTOP_FILE_ARCHIVE_ALLOW_PRIVATE_HOSTS=0` schaltet auf den strengen Guard
+  um.
 
 - **Anhangsnamen im Download repariert.** Nicht nebenbei, sondern weil es
   derselbe Fehler war, den das Plugin frisch eingebaut hatte: Der
@@ -439,7 +443,7 @@ Anhang in einem Ordner liegenbleiben, sondern als Datei auf der eigenen Cloud.
   Plugin beide benutzen — eine Implementierung statt zweier, die auseinander
   laufen können.
 
-Ausführlich in [`plugins/webdav_archive/README.md`](plugins/webdav_archive/README.md).
+Ausführlich in [`plugins/file_archive/README.md`](plugins/file_archive/README.md).
 
 ---
 

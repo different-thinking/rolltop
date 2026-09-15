@@ -255,7 +255,7 @@ func TestSFTPStoreRefusesWrongCredentials(t *testing.T) {
 // The dial guard is one decision for all three transports, not just the HTTP
 // one it was written for.
 func TestSFTPStoreObeysTheDialGuard(t *testing.T) {
-	t.Setenv("ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS", "0")
+	t.Setenv("ROLLTOP_FILE_ARCHIVE_ALLOW_PRIVATE_HOSTS", "0")
 	addr, root := startTestSFTPServer(t, "archivist", "hunter2")
 	address, err := parseTargetAddress("sftp://" + addr + "/" + root)
 	if err != nil {

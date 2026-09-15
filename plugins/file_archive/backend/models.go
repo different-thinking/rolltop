@@ -1,4 +1,4 @@
-// File overview: The plugin's two tables -- configured WebDAV targets and the
+// File overview: The plugin's two tables -- configured targets and the
 // upload queue -- and the SQL that reads and writes them.
 
 package main
@@ -173,11 +173,11 @@ func getTarget(ctx context.Context, db *sql.DB, userID, targetID int64) (target,
 		return target{}, sql.ErrNoRows
 	}
 	return scanTarget(db.QueryRowContext(ctx, `SELECT `+targetColumns+`
-		FROM plugin_webdav_archive_targets WHERE user_id = ? AND id = ?`, userID, targetID))
+		FROM plugin_file_archive_targets WHERE user_id = ? AND id = ?`, userID, targetID))
 }
 
 func listTargets(ctx context.Context, db *sql.DB, userID int64, enabledOnly bool) ([]target, error) {
-	query := `SELECT ` + targetColumns + ` FROM plugin_webdav_archive_targets WHERE user_id = ?`
+	query := `SELECT ` + targetColumns + ` FROM plugin_file_archive_targets WHERE user_id = ?`
 	if enabledOnly {
 		query += ` AND enabled = 1`
 	}
@@ -203,7 +203,7 @@ func listTargets(ctx context.Context, db *sql.DB, userID int64, enabledOnly bool
 // which means every folder.
 func listTargetsWatching(ctx context.Context, db *sql.DB, userID, mailboxID int64) ([]target, error) {
 	rows, err := db.QueryContext(ctx, `SELECT `+targetColumns+`
-		FROM plugin_webdav_archive_targets
+		FROM plugin_file_archive_targets
 		WHERE user_id = ? AND enabled = 1 AND (watch_mailbox_id = ? OR watch_mailbox_id = 0)
 		ORDER BY id`, userID, mailboxID)
 	if err != nil {
@@ -224,7 +224,7 @@ func listTargetsWatching(ctx context.Context, db *sql.DB, userID, mailboxID int6
 func persistTarget(ctx context.Context, db *sql.DB, item target) (target, error) {
 	now := time.Now().UTC().Unix()
 	if item.ID > 0 {
-		res, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_targets
+		res, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_targets
 			SET name = ?, enabled = ?, base_url = ?, username = ?, encrypted_password = ?,
 				encrypted_private_key = ?, watch_mailbox_id = ?, content_types = ?,
 				path_template = ?, include_inline = ?, updated_at = ?
@@ -241,7 +241,7 @@ func persistTarget(ctx context.Context, db *sql.DB, item target) (target, error)
 		return getTarget(ctx, db, item.UserID, item.ID)
 	}
 	var id int64
-	err := db.QueryRowContext(ctx, `INSERT INTO plugin_webdav_archive_targets
+	err := db.QueryRowContext(ctx, `INSERT INTO plugin_file_archive_targets
 		(user_id, name, enabled, base_url, username, encrypted_password, encrypted_private_key,
 		 watch_mailbox_id, content_types, path_template, include_inline, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
@@ -255,7 +255,7 @@ func persistTarget(ctx context.Context, db *sql.DB, item target) (target, error)
 }
 
 func setTargetEnabled(ctx context.Context, db *sql.DB, userID, targetID int64, enabled bool) error {
-	res, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_targets
+	res, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_targets
 		SET enabled = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
 		boolInt(enabled), time.Now().UTC().Unix(), userID, targetID)
 	if err != nil {
@@ -268,7 +268,7 @@ func setTargetEnabled(ctx context.Context, db *sql.DB, userID, targetID int64, e
 }
 
 func deleteTarget(ctx context.Context, db *sql.DB, userID, targetID int64) error {
-	res, err := db.ExecContext(ctx, `DELETE FROM plugin_webdav_archive_targets
+	res, err := db.ExecContext(ctx, `DELETE FROM plugin_file_archive_targets
 		WHERE user_id = ? AND id = ?`, userID, targetID)
 	if err != nil {
 		return err
@@ -282,12 +282,12 @@ func deleteTarget(ctx context.Context, db *sql.DB, userID, targetID int64) error
 func recordTargetResult(ctx context.Context, db *sql.DB, userID, targetID int64, uploaded bool, failure string) error {
 	now := time.Now().UTC().Unix()
 	if uploaded {
-		_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_targets
+		_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_targets
 			SET uploaded_total = uploaded_total + 1, last_success_at = ?, last_error = '', updated_at = ?
 			WHERE user_id = ? AND id = ?`, now, now, userID, targetID)
 		return err
 	}
-	_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_targets
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_targets
 		SET last_error = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
 		truncateError(failure), now, userID, targetID)
 	return err
@@ -316,7 +316,7 @@ func scanUpload(row rowScanner) (upload, error) {
 func enqueueUpload(ctx context.Context, db *sql.DB, item upload) (bool, error) {
 	now := time.Now().UTC().Unix()
 	var id int64
-	err := db.QueryRowContext(ctx, `INSERT INTO plugin_webdav_archive_uploads
+	err := db.QueryRowContext(ctx, `INSERT INTO plugin_file_archive_uploads
 		(user_id, target_id, message_id, attachment_id, attachment_index, filename, content_type,
 		 size, status, next_attempt_at, subject, from_addr, message_date, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -341,9 +341,9 @@ func claimDueUploads(ctx context.Context, db *sql.DB, userID int64, now time.Tim
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := db.QueryContext(ctx, `UPDATE plugin_webdav_archive_uploads SET status = ?, updated_at = ?
+	rows, err := db.QueryContext(ctx, `UPDATE plugin_file_archive_uploads SET status = ?, updated_at = ?
 		WHERE id IN (
-			SELECT id FROM plugin_webdav_archive_uploads
+			SELECT id FROM plugin_file_archive_uploads
 			WHERE user_id = ? AND status IN (?, ?) AND next_attempt_at <= ?
 			ORDER BY next_attempt_at, id
 			LIMIT ?
@@ -370,7 +370,7 @@ func claimDueUploads(ctx context.Context, db *sql.DB, userID int64, now time.Tim
 // the queue. Without it a shutdown during an upload would leave the row saying
 // `uploading` forever, and nothing would ever pick it up again.
 func releaseInterruptedUploads(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_uploads
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
 		SET status = ?, updated_at = ? WHERE status = ?`,
 		statusQueued, time.Now().UTC().Unix(), statusUploading)
 	return err
@@ -383,7 +383,7 @@ func releaseInterruptedUploads(ctx context.Context, db *sql.DB) error {
 // the same recording on the server. With the path on the row, the retry writes
 // over its own earlier attempt.
 func reserveUploadPath(ctx context.Context, db *sql.DB, item upload, remotePath, hash string) error {
-	_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_uploads
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
 		SET remote_path = ?, content_hash = ?, size = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`,
 		remotePath, hash, item.Size, time.Now().UTC().Unix(), item.UserID, item.ID)
@@ -392,7 +392,7 @@ func reserveUploadPath(ctx context.Context, db *sql.DB, item upload, remotePath,
 
 func completeUpload(ctx context.Context, db *sql.DB, item upload, status, remotePath, hash string) error {
 	now := time.Now().UTC().Unix()
-	_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_uploads
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
 		SET status = ?, remote_path = ?, content_hash = ?, size = ?, last_error = '',
 			completed_at = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`,
@@ -411,7 +411,7 @@ func failUpload(ctx context.Context, db *sql.DB, item upload, cause error, now t
 		status = statusAbandoned
 		next = time.Time{}
 	}
-	_, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_uploads
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
 		SET status = ?, attempts = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
 		WHERE user_id = ? AND id = ?`,
 		status, attempts, unixSeconds(next), truncateError(cause.Error()),
@@ -422,7 +422,7 @@ func failUpload(ctx context.Context, db *sql.DB, item upload, cause error, now t
 // retryUpload puts one abandoned or failed row back at the front of the queue,
 // which is what the Retry button asks for.
 func retryUpload(ctx context.Context, db *sql.DB, userID, uploadID int64) error {
-	res, err := db.ExecContext(ctx, `UPDATE plugin_webdav_archive_uploads
+	res, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
 		SET status = ?, attempts = 0, next_attempt_at = 0, last_error = '', updated_at = ?
 		WHERE user_id = ? AND id = ? AND status IN (?, ?)`,
 		statusQueued, time.Now().UTC().Unix(), userID, uploadID, statusFailed, statusAbandoned)
@@ -443,7 +443,7 @@ func duplicateUploadPath(ctx context.Context, db *sql.DB, userID, targetID int64
 		return "", nil
 	}
 	var remotePath string
-	err := db.QueryRowContext(ctx, `SELECT remote_path FROM plugin_webdav_archive_uploads
+	err := db.QueryRowContext(ctx, `SELECT remote_path FROM plugin_file_archive_uploads
 		WHERE user_id = ? AND target_id = ? AND content_hash = ? AND status = ? AND id <> ?
 		ORDER BY id LIMIT 1`, userID, targetID, hash, statusDone, exceptID).Scan(&remotePath)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -456,7 +456,7 @@ func listUploads(ctx context.Context, db *sql.DB, userID, targetID int64, status
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT ` + uploadColumns + ` FROM plugin_webdav_archive_uploads WHERE user_id = ?`
+	query := `SELECT ` + uploadColumns + ` FROM plugin_file_archive_uploads WHERE user_id = ?`
 	args := []any{userID}
 	if targetID > 0 {
 		query += ` AND target_id = ?`
@@ -486,7 +486,7 @@ func listUploads(ctx context.Context, db *sql.DB, userID, targetID int64, status
 
 // uploadCounts is the per-status tally the settings page shows above the list.
 func uploadCounts(ctx context.Context, db *sql.DB, userID int64) (map[string]int64, error) {
-	rows, err := db.QueryContext(ctx, `SELECT status, COUNT(*) FROM plugin_webdav_archive_uploads
+	rows, err := db.QueryContext(ctx, `SELECT status, COUNT(*) FROM plugin_file_archive_uploads
 		WHERE user_id = ? GROUP BY status`, userID)
 	if err != nil {
 		return nil, err
@@ -507,7 +507,7 @@ func uploadCounts(ctx context.Context, db *sql.DB, userID int64) (map[string]int
 // usersWithWork lists the tenants the worker has something to do for, so a
 // tick costs one query rather than one per account on the install.
 func usersWithWork(ctx context.Context, db *sql.DB, now time.Time) ([]int64, error) {
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT user_id FROM plugin_webdav_archive_uploads
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT user_id FROM plugin_file_archive_uploads
 		WHERE status IN (?, ?) AND next_attempt_at <= ? ORDER BY user_id`,
 		statusQueued, statusFailed, unixSeconds(now))
 	if err != nil {
@@ -526,7 +526,7 @@ func usersWithWork(ctx context.Context, db *sql.DB, now time.Time) ([]int64, err
 }
 
 // retryDelay is the ladder between attempts: a minute, then doubling to an
-// hour. A WebDAV server that is down for a night is back on the queue within
+// hour. A server that is down for a night is back on the queue within
 // the hour of returning, without a failed upload spinning every minute in
 // between.
 func retryDelay(attempts int) time.Duration {

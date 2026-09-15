@@ -1,4 +1,4 @@
-// File overview: Lifecycle and HTTP surface for the WebDAV archive plugin.
+// File overview: Lifecycle and HTTP surface for the file archive plugin.
 //
 // The plugin does three things and this file wires all three to the host: it
 // hooks mail sync so attachments worth keeping are noticed, it runs the worker
@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	pluginID = "webdav_archive"
-	apiPath  = "plugins/webdav_archive"
+	pluginID = "file_archive"
+	apiPath  = "plugins/file_archive"
 	// defaultContentTypes is what a new target watches for. Audio is the case
 	// this plugin was written for -- voice memos mailed to oneself -- and it is
 	// a prefix, so every audio format is covered by the one entry.
@@ -65,7 +65,7 @@ func (p *webdavArchiveBackend) Start(host plugins.BackendStartHost) error {
 	st, ok := host.Store().(*store.Store)
 	if !ok || st == nil {
 		p.stopLocked()
-		return errors.New("the WebDAV archive store is not available")
+		return errors.New("the file archive store is not available")
 	}
 	p.worker = newWorker(host, st)
 	p.worker.Start()
@@ -228,7 +228,7 @@ func (p *webdavArchiveBackend) handleAPI(host plugins.APIHost, path string, w ht
 	}
 	st, ok := host.Store().(*store.Store)
 	if !ok || st == nil {
-		host.WriteAPIError(w, http.StatusServiceUnavailable, "the WebDAV archive is not available")
+		host.WriteAPIError(w, http.StatusServiceUnavailable, "the file archive is not available")
 		return
 	}
 	db, err := st.UserDB(r.Context(), current.UserID)
@@ -261,7 +261,7 @@ func (p *webdavArchiveBackend) handleAPI(host plugins.APIHost, path string, w ht
 	case rest == "file" && r.Method == http.MethodDelete:
 		p.apiDeleteFile(host, db, current.UserID, w, r)
 	default:
-		host.WriteAPIError(w, http.StatusNotFound, "WebDAV archive route not found")
+		host.WriteAPIError(w, http.StatusNotFound, "file archive route not found")
 	}
 }
 
@@ -291,7 +291,7 @@ func (p *webdavArchiveBackend) apiListTargets(host plugins.APIHost, st *store.St
 func (p *webdavArchiveBackend) apiTargetAction(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 {
-		host.WriteAPIError(w, http.StatusNotFound, "WebDAV archive route not found")
+		host.WriteAPIError(w, http.StatusNotFound, "file archive route not found")
 		return
 	}
 	id, err := strconv.ParseInt(parts[1], 10, 64)
@@ -328,7 +328,7 @@ func (p *webdavArchiveBackend) apiTargetAction(host plugins.APIHost, db *sql.DB,
 	case len(parts) == 3 && parts[2] == "test" && r.Method == http.MethodPost:
 		p.apiTestTarget(host, db, userID, id, w, r)
 	default:
-		host.WriteAPIError(w, http.StatusNotFound, "WebDAV archive route not found")
+		host.WriteAPIError(w, http.StatusNotFound, "file archive route not found")
 	}
 }
 
@@ -505,7 +505,7 @@ func (p *webdavArchiveBackend) apiRetryUpload(host plugins.APIHost, db *sql.DB, 
 	}
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) != 3 {
-		host.WriteAPIError(w, http.StatusNotFound, "WebDAV archive route not found")
+		host.WriteAPIError(w, http.StatusNotFound, "file archive route not found")
 		return
 	}
 	id, err := strconv.ParseInt(parts[1], 10, 64)

@@ -31,6 +31,6 @@
     "plugins/remote_image_blocklist/frontend",
     "plugins/remote_imap_sync/frontend",
     "plugins/trusted_image_sources/frontend",
-    "plugins/webdav_archive/frontend"
+    "plugins/file_archive/frontend"
   ]
 }

@@ -67,7 +67,7 @@ func TestSMBStoreResolvesInsideTheShare(t *testing.T) {
 
 // The dial guard is one decision for all three transports.
 func TestSMBStoreObeysTheDialGuard(t *testing.T) {
-	t.Setenv("ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS", "0")
+	t.Setenv("ROLLTOP_FILE_ARCHIVE_ALLOW_PRIVATE_HOSTS", "0")
 	address, err := parseTargetAddress("smb://127.0.0.1/share")
 	if err != nil {
 		t.Fatal(err)

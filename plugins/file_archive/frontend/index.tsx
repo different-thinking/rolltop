@@ -11,7 +11,7 @@ import type { AccountSettingsRuntimePlugin, AppRouteRuntimePlugin } from "../../
 import type { Mailbox, User } from "../../../frontend/src/types";
 import "./styles.css";
 
-const apiBase = "/api/plugins/webdav_archive";
+const apiBase = "/api/plugins/file_archive";
 
 type Target = {
   id: number;
@@ -106,9 +106,9 @@ const emptyForm = {
  * disagree with the address that is actually stored.
  */
 const transportLabels: Record<string, string> = {
-  webdav: "WebDAV",
   sftp: "SFTP",
   smb: "SMB",
+  webdav: "WebDAV",
   unknown: "Address not understood"
 };
 
@@ -258,7 +258,7 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
   return (
     <SettingsPage
       title="File archive"
-      description="Attachments from a watched folder are copied onto storage you run — over WebDAV, SFTP or SMB. What cannot be delivered stays queued until the server answers."
+      description="Attachments from a watched folder are copied onto storage you run — over SFTP, SMB or WebDAV. What cannot be delivered stays queued until the server answers."
       backPath="/settings/account"
       navigate={navigate}
       actions={
@@ -275,25 +275,25 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
       {error ? <SettingsError message={error} onRetry={() => void load()} /> : null}
 
       {form ? (
-        <form className="panel webdav-form" onSubmit={save}>
+        <form className="panel archive-form" onSubmit={save}>
           <h2>{form.id > 0 ? "Edit target" : "New target"}</h2>
           <label>
             <span>Name</span>
-            <input value={form.name} placeholder="Nextcloud" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <input value={form.name} placeholder="Recordings" onChange={(e) => setForm({ ...form, name: e.target.value })} />
           </label>
           <label>
             <span>Address</span>
             <input
               required
               value={form.base_url}
-              placeholder="https://cloud.example.org/remote.php/dav/files/me/Recordings/"
+              placeholder="sftp://storage.example.org/recordings"
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
             />
             <small>
               The folder everything is filed under; Rolltop never writes above it. The scheme picks
               the protocol:{" "}
-              <code>https://</code> for WebDAV, <code>sftp://host/folder</code> for SSH,{" "}
-              <code>smb://host/share/folder</code> for a Windows share.
+              <code>sftp://host/folder</code> for SSH, <code>smb://host/share/folder</code> for a
+              Windows share, <code>https://</code> for WebDAV.
               {formTransport === "unknown" ? (
                 <>
                   {" "}<strong>This address names a protocol this plugin cannot speak.</strong>
@@ -303,7 +303,7 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
           </label>
 
           {formTransport === "smb" ? (
-            <div className="webdav-note">
+            <div className="archive-note">
               SMB needs port 445 open outbound from this server, which many hosters block. If a test
               times out, the same files are usually reachable over <code>sftp://</code> — at
               ALL-INKL.COM the network drive and the webspace are the same storage.
@@ -381,11 +381,11 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
               <code>{"{from}"}</code>. Folders are created as needed.
             </small>
           </label>
-          <label className="webdav-check">
+          <label className="archive-check">
             <input type="checkbox" checked={form.include_inline} onChange={(e) => setForm({ ...form, include_inline: e.target.checked })} />
             <span>Also file inline parts (signatures, embedded images)</span>
           </label>
-          <div className="webdav-form-actions">
+          <div className="archive-form-actions">
             <button type="submit" disabled={busy}>Save</button>
             <button className="secondary" type="button" onClick={() => setForm(null)}>Cancel</button>
           </div>
@@ -402,13 +402,13 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
       ) : null}
 
       {(targets || []).map((target) => (
-        <section className="panel webdav-target" key={target.id}>
+        <section className="panel archive-target" key={target.id}>
           <div className="panel-headline">
             <div>
               <h2>{target.name || target.base_url}</h2>
               <div className="muted">{target.base_url}</div>
             </div>
-            <div className="webdav-target-actions">
+            <div className="archive-target-actions">
               <button className="secondary" type="button" disabled={busy} onClick={() => void test(target)}>
                 <Icon name="sync" />Test
               </button>
@@ -439,7 +439,7 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
               </button>
             </div>
           </div>
-          <dl className="webdav-target-facts">
+          <dl className="archive-target-facts">
             <div><dt>Protocol</dt><dd>{transportLabels[target.transport] || target.transport}</dd></div>
             <div><dt>Sign-in</dt><dd>{target.has_private_key ? "Key" : target.has_password ? "Password" : "None"}</dd></div>
             <div><dt>Watching</dt><dd>{mailboxLabel(mailboxes, target.watch_mailbox_id)}</dd></div>
@@ -447,11 +447,11 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
             <div><dt>Filed</dt><dd>{target.uploaded_total.toLocaleString()}</dd></div>
             <div><dt>State</dt><dd>{target.enabled ? "Active" : "Paused"}</dd></div>
           </dl>
-          {target.last_error ? <div className="error webdav-target-error">{target.last_error}</div> : null}
+          {target.last_error ? <div className="error archive-target-error">{target.last_error}</div> : null}
         </section>
       ))}
 
-      <section className="panel webdav-queue">
+      <section className="panel archive-queue">
         <div className="panel-headline">
           <div>
             <h2>Queue</h2>
@@ -461,7 +461,7 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
                 : `${(counts.done || 0).toLocaleString()} filed`}
             </div>
           </div>
-          <div className="webdav-target-actions">
+          <div className="archive-target-actions">
             <button className="secondary" type="button" onClick={() => void runNow()}><Icon name="sync" />Run now</button>
             <button className="secondary" type="button" onClick={() => void loadUploads()}>Refresh</button>
           </div>
@@ -469,19 +469,19 @@ function FileArchiveSettings({ csrf, navigate, addToast }: SettingsContext) {
         {uploads.length === 0 ? (
           <p className="muted">Nothing has been queued yet.</p>
         ) : (
-          <div className="webdav-rows">
+          <div className="archive-rows">
             {uploads.map((item) => (
-              <div className={`webdav-row status-${item.status}`} key={item.id}>
-                <span className="webdav-row-icon"><Icon name={item.status === "done" || item.status === "duplicate" ? "check" : "clock"} /></span>
-                <div className="webdav-row-text">
+              <div className={`archive-row status-${item.status}`} key={item.id}>
+                <span className="archive-row-icon"><Icon name={item.status === "done" || item.status === "duplicate" ? "check" : "clock"} /></span>
+                <div className="archive-row-text">
                   <strong>{item.filename || "(unnamed)"}</strong>
-                  <div className="webdav-row-meta">
+                  <div className="archive-row-meta">
                     <span>{statusLabels[item.status] || item.status}</span>
                     {item.remote_path ? <span title={item.remote_path}>{item.remote_path}</span> : null}
                     {item.subject ? <span>{item.subject}</span> : null}
                     {item.size > 0 ? <span>{formatBytes(item.size)}</span> : null}
                   </div>
-                  {item.last_error ? <div className="webdav-row-error">{item.last_error}</div> : null}
+                  {item.last_error ? <div className="archive-row-error">{item.last_error}</div> : null}
                 </div>
                 {item.status === "failed" || item.status === "abandoned" ? (
                   <button className="secondary" type="button" onClick={() => void retry(item)}>Retry</button>
@@ -583,7 +583,7 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
         <div>
           <h1>Files</h1>
           {targets && targets.length > 1 ? (
-            <select className="webdav-target-picker" value={targetID} onChange={(e) => { setTargetID(Number(e.target.value)); navigate(filesURL("")); }}>
+            <select className="archive-target-picker" value={targetID} onChange={(e) => { setTargetID(Number(e.target.value)); navigate(filesURL("")); }}>
               {targets.map((target) => <option key={target.id} value={target.id}>{target.name || target.base_url}</option>)}
             </select>
           ) : null}
@@ -591,12 +591,12 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
       </div>
 
       {targets && targets.length === 0 ? (
-        <section className="panel webdav-idle">
+        <section className="panel archive-idle">
           <Icon name="folder" />
           <div>
             <strong>No storage target configured.</strong>
             <p>Add one in settings, and the attachments filed onto it appear here.</p>
-            <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/webdav")}>
+            <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/file-archive")}>
               <Icon name="settings" />Open settings
             </button>
           </div>
@@ -606,8 +606,8 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
       {error ? <div className="error">{error}</div> : null}
 
       {targetID > 0 ? (
-        <section className="panel webdav-browser">
-          <nav className="webdav-crumbs" aria-label="Folder path">
+        <section className="panel archive-browser">
+          <nav className="archive-crumbs" aria-label="Folder path">
             <button type="button" className="link-button" onClick={() => openFolder("")}>
               <Icon name="folder" />Top
             </button>
@@ -623,23 +623,23 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
 
           {listing && entries.length === 0 && !loading ? <p className="muted">This folder is empty.</p> : null}
 
-          <div className="webdav-entries">
+          <div className="archive-entries">
             {folders.map((entry) => (
-              <button className="webdav-entry" type="button" key={entry.path} onClick={() => openFolder(entry.path)}>
+              <button className="archive-entry" type="button" key={entry.path} onClick={() => openFolder(entry.path)}>
                 <Icon name="folder" weight="fill" />
-                <span className="webdav-entry-name">{entry.name}</span>
-                <span className="webdav-entry-meta">{unixLabel(entry.modified_at)}</span>
+                <span className="archive-entry-name">{entry.name}</span>
+                <span className="archive-entry-meta">{unixLabel(entry.modified_at)}</span>
               </button>
             ))}
             {files.map((entry) => (
-              <div className="webdav-entry webdav-entry-file" key={entry.path}>
+              <div className="archive-entry archive-entry-file" key={entry.path}>
                 <Icon name={fileIcon(entry.content_type, entry.name)} />
-                <span className="webdav-entry-name">{entry.name}</span>
-                <span className="webdav-entry-meta">
+                <span className="archive-entry-name">{entry.name}</span>
+                <span className="archive-entry-meta">
                   {formatBytes(entry.size)}
                   {entry.modified_at ? ` · ${unixLabel(entry.modified_at)}` : ""}
                 </span>
-                <span className="webdav-entry-actions">
+                <span className="archive-entry-actions">
                   <a
                     className="secondary"
                     href={`${apiBase}/download?target=${targetID}&path=${encodeURIComponent(entry.path)}`}
@@ -653,7 +653,7 @@ function FilesView({ csrf, location, navigate, addToast }: FilesContext) {
                 </span>
                 {playable(entry.content_type, entry.name) ? (
                   <audio
-                    className="webdav-entry-player"
+                    className="archive-entry-player"
                     controls
                     preload="none"
                     src={`${apiBase}/download?target=${targetID}&path=${encodeURIComponent(entry.path)}&inline=1`}
@@ -772,10 +772,10 @@ function messageFromError(err: unknown) {
 export default {
   accountSettingsRoutes: [
     {
-      path: "/settings/account/plugins/webdav",
+      path: "/settings/account/plugins/file-archive",
       title: "File archive",
       label: "File archive",
-      description: "File attachments from a watched folder onto storage you run — WebDAV, SFTP or SMB — and browse what landed there.",
+      description: "File attachments from a watched folder onto storage you run — SFTP, SMB or WebDAV — and browse what landed there.",
       icon: "folder",
       section: "plugins",
       render: (context: SettingsContext) => <FileArchiveSettings {...context} />
@@ -797,7 +797,7 @@ export default {
           <h2>File archive</h2>
           <div className="muted">Attachments from a watched folder, filed onto storage you run.</div>
         </div>
-        <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/webdav")}>
+        <button className="secondary" type="button" onClick={() => navigate("/settings/account/plugins/file-archive")}>
           <Icon name="folder" />Manage
         </button>
       </div>

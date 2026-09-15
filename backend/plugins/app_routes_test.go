@@ -24,7 +24,7 @@ func TestAppRoutePathRefusesEverythingElse(t *testing.T) {
 		{"a core route", "/mail"},
 		{"below a core route", "/settings/account"},
 		{"the api tree", "/api/plugins/x"},
-		{"the plugin asset tree", "/plugins/webdav_archive/assets"},
+		{"the plugin asset tree", "/plugins/file_archive/assets"},
 		{"the attachment route", "/attachments/1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

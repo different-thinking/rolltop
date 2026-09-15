@@ -27,7 +27,7 @@ func openArchiveStore(t *testing.T) *store.Store {
 	t.Helper()
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
-		t.Fatal("locate the WebDAV archive test source")
+		t.Fatal("locate the file archive test source")
 	}
 	manifests, err := plugins.LoadManifests(filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..")))
 	if err != nil {
@@ -40,7 +40,7 @@ func openArchiveStore(t *testing.T) *store.Store {
 		}
 	}
 	if len(selected) != 1 {
-		t.Fatalf("WebDAV archive manifests = %d, want 1", len(selected))
+		t.Fatalf("file archive manifests = %d, want 1", len(selected))
 	}
 	st, err := storetest.OpenWithManifests(t, selected)
 	if err != nil {

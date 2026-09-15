@@ -1,77 +1,77 @@
-.webdav-form {
+.archive-form {
   display: grid;
   gap: 14px;
 }
 
-.webdav-form label {
+.archive-form label {
   display: grid;
   gap: 4px;
 }
 
-.webdav-form label > span {
+.archive-form label > span {
   font-weight: 600;
 }
 
-.webdav-form input,
-.webdav-form select {
+.archive-form input,
+.archive-form select {
   width: 100%;
 }
 
-.webdav-form small {
+.archive-form small {
   color: var(--muted);
 }
 
-.webdav-form code {
+.archive-form code {
   background: var(--surface-subtle);
   border-radius: 4px;
   padding: 0 4px;
 }
 
-.webdav-check {
+.archive-check {
   grid-auto-flow: column;
   justify-content: start;
   align-items: center;
   gap: 8px;
 }
 
-.webdav-check input {
+.archive-check input {
   width: auto;
 }
 
-.webdav-form-actions,
-.webdav-target-actions {
+.archive-form-actions,
+.archive-target-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.webdav-target-facts {
+.archive-target-facts {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 24px;
   margin: 12px 0 0;
 }
 
-.webdav-target-facts dt {
+.archive-target-facts dt {
   color: var(--muted);
   font-size: 0.85em;
 }
 
-.webdav-target-facts dd {
+.archive-target-facts dd {
   margin: 0;
   font-weight: 600;
 }
 
-.webdav-target-error {
+.archive-target-error {
   margin-top: 12px;
 }
 
-.webdav-rows {
+.archive-rows {
   display: grid;
   gap: 8px;
 }
 
-.webdav-row {
+.archive-row {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: start;
@@ -81,27 +81,27 @@
   border-radius: 8px;
 }
 
-.webdav-row.status-abandoned,
-.webdav-row.status-failed {
+.archive-row.status-abandoned,
+.archive-row.status-failed {
   border-color: var(--danger);
 }
 
-.webdav-row-icon {
+.archive-row-icon {
   display: flex;
   align-items: center;
   color: var(--muted);
 }
 
-.webdav-row-text {
+.archive-row-text {
   min-width: 0;
 }
 
-.webdav-row-text strong {
+.archive-row-text strong {
   display: block;
   overflow-wrap: anywhere;
 }
 
-.webdav-row-meta {
+.archive-row-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 12px;
@@ -109,32 +109,32 @@
   font-size: 0.85em;
 }
 
-.webdav-row-meta span {
+.archive-row-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 40ch;
 }
 
-.webdav-row-error {
+.archive-row-error {
   color: var(--danger);
   font-size: 0.85em;
   margin-top: 4px;
   overflow-wrap: anywhere;
 }
 
-.webdav-idle {
+.archive-idle {
   display: flex;
   gap: 16px;
   align-items: start;
 }
 
-.webdav-browser {
+.archive-browser {
   display: grid;
   gap: 12px;
 }
 
-.webdav-crumbs {
+.archive-crumbs {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -142,7 +142,7 @@
   color: var(--muted);
 }
 
-.webdav-crumbs span {
+.archive-crumbs span {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -164,12 +164,12 @@
   background: var(--surface-subtle);
 }
 
-.webdav-entries {
+.archive-entries {
   display: grid;
   gap: 4px;
 }
 
-.webdav-entry {
+.archive-entry {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
   align-items: center;
@@ -183,60 +183,60 @@
   width: 100%;
 }
 
-.webdav-entry:hover {
+.archive-entry:hover {
   background: var(--surface-subtle);
 }
 
-.webdav-entry-name {
+.archive-entry-name {
   overflow-wrap: anywhere;
 }
 
-.webdav-entry-meta {
+.archive-entry-meta {
   color: var(--muted);
   font-size: 0.85em;
   white-space: nowrap;
 }
 
-.webdav-entry-actions {
+.archive-entry-actions {
   display: inline-flex;
   gap: 4px;
 }
 
-.webdav-entry-actions a,
-.webdav-entry-actions button {
+.archive-entry-actions a,
+.archive-entry-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-.webdav-entry-player {
+.archive-entry-player {
   grid-column: 1 / -1;
   width: 100%;
   height: 32px;
 }
 
-.webdav-target-picker {
+.archive-target-picker {
   margin-left: 12px;
 }
 
 @media (max-width: 640px) {
-  .webdav-entry {
+  .archive-entry {
     grid-template-columns: auto 1fr auto;
   }
 
-  .webdav-entry-meta {
+  .archive-entry-meta {
     grid-column: 2 / -1;
   }
 }
 
-.webdav-form textarea {
+.archive-form textarea {
   width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85em;
   resize: vertical;
 }
 
-.webdav-note {
+.archive-note {
   border: 1px solid var(--border);
   border-left-width: 3px;
   border-radius: 6px;
@@ -245,7 +245,7 @@
   font-size: 0.9em;
 }
 
-.webdav-note code {
+.archive-note code {
   background: var(--surface-subtle);
   border-radius: 4px;
   padding: 0 4px;

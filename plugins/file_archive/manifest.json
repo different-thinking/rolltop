@@ -1,14 +1,14 @@
 {
-  "id": "webdav_archive",
+  "id": "file_archive",
   "name": "File archive",
-  "description": "Files attachments from a watched mail folder onto storage you run -- WebDAV, SFTP or SMB -- with a queue that survives an unreachable server, and browses what landed there.",
+  "description": "Files attachments from a watched mail folder onto storage you run -- SFTP, SMB or WebDAV -- with a queue that survives an unreachable server, and browses what landed there.",
   "version": "1.0.0",
   "enabled_by_default": false,
   "auto_start": true,
   "experimental": true,
   "backend": {
     "kind": "go-plugin",
-    "binary": "backend/webdav_archive.so"
+    "binary": "backend/file_archive.so"
   },
   "frontend": {
     "module": "frontend_dist/index.js",

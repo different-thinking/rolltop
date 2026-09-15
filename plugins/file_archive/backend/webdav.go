@@ -1,5 +1,5 @@
 // File overview: A small WebDAV client -- PUT, MKCOL, PROPFIND, GET, DELETE --
-// over net/http, with the dial guard a user-supplied host needs.
+// over net/http. The dial guard every transport shares is in dial.go.
 //
 // There is no WebDAV client in the module and pulling one in for five verbs
 // would be a dependency to keep current for less code than this file. What is
@@ -17,10 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -32,9 +30,6 @@ const (
 	// link is the long case, so it is generous rather than tight; the worker
 	// that calls this is asynchronous and nothing waits on it.
 	requestTimeout = 2 * time.Minute
-	// dialTimeout is separate: a server that does not answer at all should fail
-	// long before the request budget above is spent.
-	dialTimeout = 15 * time.Second
 	// maxListingBytes bounds a PROPFIND response. A directory listing is read
 	// into memory to be parsed, so a server answering with an unbounded body --
 	// or an XML bomb -- must not be able to decide this process's memory use.
@@ -465,142 +460,3 @@ func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
 
 func (l *limitedReadCloser) Read(p []byte) (int, error) { return l.reader.Read(p) }
 func (l *limitedReadCloser) Close() error               { return l.closer.Close() }
-
-// safeDialContext refuses the addresses a WebDAV server is never at but an SSRF
-// probe would want to reach.
-//
-// It is deliberately more permissive than the remote-image fetcher's guard,
-// and for a reason that is about what is being addressed rather than about
-// risk appetite: a remote image URL is chosen by whoever sent the mail, while
-// a WebDAV address is typed by the account holder into their own settings --
-// and the whole point of this plugin is a Nextcloud or a dav share the reader
-// runs themselves, which on most installs is on the same private network as
-// Rolltop. Blocking RFC1918 would block the intended case.
-//
-// What stays blocked is what no self-hosted WebDAV is ever on and what an SSRF
-// is worth attempting: link-local, and above all 169.254.169.254, the cloud
-// metadata endpoint that hands out instance credentials. Multicast,
-// unspecified, and the IANA special-purpose ranges go with it.
-//
-// Be clear about what that leaves reachable, because it is the whole cost of
-// the decision: by default an account holder can point a target at RFC1918, at
-// a ULA, and at loopback -- including services bound to 127.0.0.1 on this very
-// host, which are often the ones with no authentication because they assumed
-// nobody outside the machine could reach them. The browse and download routes
-// return what the target answers, so a configured target is an authenticated
-// GET proxy into whatever it can reach. Only the account holder's own targets
-// are readable, and only by them, so this is a signed-in user reaching the
-// private network rather than an anonymous one -- but on an install where the
-// accounts are not all trusted, that is still a capability worth withholding.
-//
-// An operator in that position sets ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0,
-// which promotes this to the stricter guard: loopback, RFC1918, ULA, shared
-// address space and site-local all become undialable, leaving only public
-// addresses.
-func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	allowPrivate := privateWebDAVHostsAllowed()
-	dialer := &net.Dialer{Timeout: dialTimeout}
-	var firstErr error
-	for _, ip := range ips {
-		if blockedWebDAVIP(ip.IP, allowPrivate) {
-			continue
-		}
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
-		if err == nil {
-			return conn, nil
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return nil, fmt.Errorf("the WebDAV host %q resolves only to addresses this server will not dial", host)
-}
-
-func privateWebDAVHostsAllowed() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS"))) {
-	case "0", "false", "no", "off":
-		return false
-	}
-	return true
-}
-
-// blockedWebDAVIPNets are the ranges refused whatever the private-host setting
-// says: none of them is somewhere a WebDAV server lives, and the first is the
-// one an SSRF is usually aimed at.
-var blockedWebDAVIPNets = parseCIDRs(
-	"169.254.0.0/16",  // link-local, including the cloud metadata endpoint
-	"0.0.0.0/8",       // "this host on this network"
-	"192.0.0.0/24",    // IETF protocol assignments
-	"192.0.2.0/24",    // TEST-NET-1
-	"192.88.99.0/24",  // 6to4 relay anycast
-	"198.18.0.0/15",   // benchmarking
-	"198.51.100.0/24", // TEST-NET-2
-	"203.0.113.0/24",  // TEST-NET-3
-	"240.0.0.0/4",     // reserved / future use
-	"2002::/16",       // 6to4, which embeds an IPv4 target
-	"64:ff9b::/96",    // NAT64, likewise
-	"100::/64",        // discard-only
-	"2001:db8::/32",   // documentation
-)
-
-// privateWebDAVIPNets are refused only when the operator has turned private
-// hosts off. Loopback and the RFC1918/ULA ranges are handled by net.IP's own
-// predicates in blockedWebDAVIP.
-var privateWebDAVIPNets = parseCIDRs(
-	"100.64.0.0/10", // shared address space (carrier-grade NAT)
-	"fec0::/10",     // deprecated site-local
-)
-
-func parseCIDRs(cidrs ...string) []*net.IPNet {
-	nets := make([]*net.IPNet, 0, len(cidrs))
-	for _, cidr := range cidrs {
-		_, parsed, err := net.ParseCIDR(cidr)
-		if err != nil {
-			panic("webdav_archive: invalid blocked CIDR " + cidr + ": " + err.Error())
-		}
-		nets = append(nets, parsed)
-	}
-	return nets
-}
-
-// blockedWebDAVIP reports whether one resolved address must not be dialed. An
-// IPv4-mapped IPv6 address is matched against the IPv4 ranges too, because
-// net.IPNet.Contains folds it to its v4 form -- so spelling a blocked v4 as
-// ::ffff:a.b.c.d does not slip past.
-func blockedWebDAVIP(ip net.IP, allowPrivate bool) bool {
-	if ip == nil {
-		return true
-	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	for _, blocked := range blockedWebDAVIPNets {
-		if blocked.Contains(ip) {
-			return true
-		}
-	}
-	if allowPrivate {
-		return false
-	}
-	if ip.IsLoopback() || ip.IsPrivate() {
-		return true
-	}
-	for _, blocked := range privateWebDAVIPNets {
-		if blocked.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}

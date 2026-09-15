@@ -2,7 +2,7 @@
 // collection, read one file, remove one file.
 //
 // Every one of them goes through this server rather than letting the browser
-// talk to the WebDAV host: the credentials are stored encrypted here and must
+// talk to the remote store: the credentials are stored encrypted here and must
 // not reach a page, the host may be one only this server can route to, and the
 // dial guard in the client is worth nothing if the browser can be pointed
 // anywhere instead.
@@ -47,7 +47,7 @@ func (p *webdavArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userI
 	entries, err := store.List(ctx, requested)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
-			host.WriteAPIError(w, http.StatusNotFound, "that folder is not on the WebDAV server")
+			host.WriteAPIError(w, http.StatusNotFound, "that folder is not on the server")
 			return
 		}
 		// A server that is unreachable or rejecting the credentials is a
@@ -78,7 +78,7 @@ func (p *webdavArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, use
 	body, contentType, size, err := store.Get(r.Context(), requested)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
-			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the WebDAV server")
+			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the server")
 			return
 		}
 		host.WriteAPIError(w, http.StatusBadGateway, err.Error())
@@ -133,7 +133,7 @@ func (p *webdavArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, u
 	defer cancel()
 	if err := store.Delete(ctx, requested); err != nil {
 		if errors.Is(err, errNotFound) {
-			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the WebDAV server")
+			host.WriteAPIError(w, http.StatusNotFound, "that file is not on the server")
 			return
 		}
 		host.WriteAPIError(w, http.StatusBadGateway, err.Error())
@@ -150,7 +150,7 @@ func (p *webdavArchiveBackend) resolveBrowseRequest(host plugins.APIHost, db *sq
 	query := r.URL.Query()
 	targetID, err := strconv.ParseInt(strings.TrimSpace(query.Get("target")), 10, 64)
 	if err != nil || targetID <= 0 {
-		host.WriteAPIError(w, http.StatusBadRequest, "a WebDAV target is required")
+		host.WriteAPIError(w, http.StatusBadRequest, "a target is required")
 		return nil, target{}, "", false
 	}
 	store, configured, err := openTargetStore(r.Context(), host, db, userID, targetID)

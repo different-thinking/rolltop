@@ -94,9 +94,9 @@ const pluginConfig: Record<string, { entry: string; outDir: string }> = {
     entry: "plugins/experimental_spam_filter/frontend/index.tsx",
     outDir: "plugins/experimental_spam_filter/frontend_dist"
   },
-  webdav_archive: {
-    entry: "plugins/webdav_archive/frontend/index.tsx",
-    outDir: "plugins/webdav_archive/frontend_dist"
+  file_archive: {
+    entry: "plugins/file_archive/frontend/index.tsx",
+    outDir: "plugins/file_archive/frontend_dist"
   }
 };
 

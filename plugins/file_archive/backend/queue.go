@@ -1,4 +1,4 @@
-// File overview: What turns mail into files on a WebDAV server -- the hook that
+// File overview: What turns mail into files on storage you run -- the hook that
 // notices an attachment worth keeping, the queue row it writes, and the worker
 // that carries the bytes across.
 //
@@ -485,7 +485,7 @@ func renderRemotePath(template string, item upload) string {
 
 // safeSegment reduces one substituted value to a path segment: no separators,
 // no relative-path meaning, no control characters, and short enough that a long
-// subject line does not exceed what a filesystem behind the WebDAV server will
+// subject line does not exceed what a filesystem behind the server will
 // take.
 func safeSegment(value string) string {
 	value = strings.TrimSpace(value)

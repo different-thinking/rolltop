@@ -9,16 +9,17 @@ Three protocols, chosen by the scheme of the address:
 
 | Address | Protocol | Port |
 | --- | --- | --- |
-| `https://cloud.example.org/remote.php/dav/files/me/Recordings/` | WebDAV | 443 |
 | `sftp://w0123456.kasserver.com/recordings` | SFTP over SSH | 22 |
 | `smb://s0123456.kasserver.com/s0123456/recordings` | SMB / CIFS | 445 |
+| `https://cloud.example.org/remote.php/dav/files/me/Recordings/` | WebDAV | 443 |
 
 There is no separate protocol setting: the address already says which one it is,
 and two fields that can disagree are a support question waiting to happen.
 
-*(The plugin's id is still `webdav_archive`, which is what its tables and API
-paths are named after. It kept the id when it grew the other two transports,
-because an id is an identifier and renaming one costs a migration for nothing.)*
+*(The plugin's id is `file_archive`, which is what its tables, its API paths and
+its settings route are named after. It was `webdav_archive` while WebDAV was the
+only transport; the name was corrected before the plugin had ever been
+deployed, so no migration was owed to it.)*
 
 ## ALL-INKL.COM
 
@@ -66,8 +67,8 @@ directories above it as needed. One connection is opened per target per batch
 rather than per upload, which for SFTP and SMB is one handshake instead of
 twenty.
 
-**Keeps trying.** A WebDAV server that is switched off, unreachable, or
-rejecting the password is the normal case, not the exception. Nothing is lost to
+**Keeps trying.** A server that is switched off, unreachable, or rejecting the
+password is the normal case, not the exception. Nothing is lost to
 it: the row stays queued and the retry ladder climbs from a minute to an hour,
 for ten attempts — the better part of a day — before the row is marked given up
 and left visible, with its last error, for someone to look at. Nothing is ever
@@ -151,7 +152,7 @@ client dials RFC1918, ULA and loopback addresses.
 
 What stays refused, always, is link-local — above all `169.254.169.254`, the
 cloud metadata endpoint that hands out instance credentials — along with
-multicast, unspecified, and the IANA special-purpose ranges no WebDAV server is
+multicast, unspecified, and the IANA special-purpose ranges no storage server is
 ever on. Redirects are not followed at all, because a redirect target is a host
 the guard was never asked about.
 
@@ -163,17 +164,18 @@ configured target is an authenticated GET proxy into whatever it can reach. Only
 the account holder's own targets are readable, and only by them, so this is a
 signed-in user reaching the private network rather than an anonymous one.
 
-On an install where the accounts are not all trusted, set
-`ROLLTOP_WEBDAV_ALLOW_PRIVATE_HOSTS=0`. That promotes the guard to the stricter
-one: loopback, RFC1918, ULA, shared address space and site-local all become
+The guard is shared: WebDAV over `net/http`, SFTP and SMB over their own TCP
+connections all dial through it (`dial.go`). On an install where the accounts
+are not all trusted, set `ROLLTOP_FILE_ARCHIVE_ALLOW_PRIVATE_HOSTS=0`. That
+promotes the guard to the stricter one: loopback, RFC1918, ULA, shared address space and site-local all become
 undialable, leaving only public addresses.
 
 ## Tables
 
 | Table | What it holds |
 | --- | --- |
-| `plugin_webdav_archive_targets` | One configured destination: address, user name, encrypted password and private key, the folder watched, the Content-Type filter, and the path template. |
-| `plugin_webdav_archive_uploads` | The queue and its history. Unique on `(user, target, message, attachment)`, so a refetched UID adds nothing. |
+| `plugin_file_archive_targets` | One configured destination: address, user name, encrypted password and private key, the folder watched, the Content-Type filter, and the path template. |
+| `plugin_file_archive_uploads` | The queue and its history. Unique on `(user, target, message, attachment)`, so a refetched UID adds nothing. |
 
 Both are per-user and cascade from `users`; removing a target takes its queue
 rows with it.
