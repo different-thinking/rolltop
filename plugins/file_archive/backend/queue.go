@@ -42,7 +42,7 @@ const uploadBatch = 20
 // ImportStoredMessage is the sync-time hook. It runs for every mirrored
 // message, so its cost when there is nothing to do -- the common case by far --
 // is one indexed query returning no rows.
-func (p *webdavArchiveBackend) ImportStoredMessage(ctx context.Context, host plugins.StoredMessageHost, msg plugins.StoredMessageContext) error {
+func (p *fileArchiveBackend) ImportStoredMessage(ctx context.Context, host plugins.StoredMessageHost, msg plugins.StoredMessageContext) error {
 	st, ok := host.Store().(*store.Store)
 	if !ok || st == nil {
 		return plugins.ErrUnsupported
@@ -164,7 +164,7 @@ func (w *worker) loop() {
 	// owed, not done, so they go back on the queue before the first sweep.
 	if db, err := w.store.UserDB(w.ctx, 0); err == nil {
 		if err := releaseInterruptedUploads(w.ctx, db); err != nil {
-			log.Printf("webdav archive could not release interrupted uploads error_type=%T", err)
+			log.Printf("file archive could not release interrupted uploads error_type=%T", err)
 		}
 	}
 	ticker := time.NewTicker(workerInterval)
@@ -190,7 +190,7 @@ func (w *worker) sweep() {
 	}
 	userIDs, err := usersWithWork(w.ctx, db, now)
 	if err != nil {
-		log.Printf("webdav archive could not list pending work error_type=%T", err)
+		log.Printf("file archive could not list pending work error_type=%T", err)
 		return
 	}
 	for _, userID := range userIDs {
@@ -208,7 +208,7 @@ func (w *worker) runUser(userID int64) {
 	}
 	items, err := claimDueUploads(w.ctx, db, userID, time.Now().UTC(), uploadBatch)
 	if err != nil {
-		log.Printf("webdav archive could not claim uploads user_id=%d error_type=%T", userID, err)
+		log.Printf("file archive could not claim uploads user_id=%d error_type=%T", userID, err)
 		return
 	}
 	// One open destination per target rather than per upload: a batch is
@@ -232,7 +232,7 @@ func (w *worker) runUser(userID int64) {
 				return
 			}
 			if failErr := failUpload(w.ctx, db, item, err, time.Now().UTC()); failErr != nil {
-				log.Printf("webdav archive could not record a failed upload user_id=%d upload_id=%d error_type=%T",
+				log.Printf("file archive could not record a failed upload user_id=%d upload_id=%d error_type=%T",
 					userID, item.ID, failErr)
 			}
 			_ = recordTargetResult(w.ctx, db, userID, item.TargetID, false, err.Error())
@@ -302,7 +302,7 @@ func (w *worker) runUpload(db *sql.DB, item upload, stores map[int64]remoteStore
 	// `done` back to `failed` -- and the retry would then upload nothing and
 	// count the same file twice. Logged and dropped instead.
 	if err := recordTargetResult(w.ctx, db, item.UserID, item.TargetID, true, ""); err != nil {
-		log.Printf("webdav archive could not record a target's success user_id=%d target_id=%d error_type=%T",
+		log.Printf("file archive could not record a target's success user_id=%d target_id=%d error_type=%T",
 			item.UserID, item.TargetID, err)
 	}
 	return nil

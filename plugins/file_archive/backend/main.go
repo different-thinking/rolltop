@@ -33,25 +33,25 @@ const (
 	defaultPathTemplate = "{yyyy}/{mm}/{filename}"
 )
 
-type webdavArchiveBackend struct {
+type fileArchiveBackend struct {
 	mu     sync.Mutex
 	routes []plugins.ProtectedAPIRouteHandle
 	worker *worker
 }
 
 var (
-	_ plugins.BackendPlugin     = (*webdavArchiveBackend)(nil)
-	_ plugins.StoredMessageHook = (*webdavArchiveBackend)(nil)
+	_ plugins.BackendPlugin     = (*fileArchiveBackend)(nil)
+	_ plugins.StoredMessageHook = (*fileArchiveBackend)(nil)
 )
 
 // RolltopPlugin is the symbol loaded by plugin.Open.
 func RolltopPlugin() plugins.BackendPlugin {
-	return &webdavArchiveBackend{}
+	return &fileArchiveBackend{}
 }
 
-func (*webdavArchiveBackend) ID() string { return pluginID }
+func (*fileArchiveBackend) ID() string { return pluginID }
 
-func (p *webdavArchiveBackend) Start(host plugins.BackendStartHost) error {
+func (p *fileArchiveBackend) Start(host plugins.BackendStartHost) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopLocked()
@@ -72,14 +72,14 @@ func (p *webdavArchiveBackend) Start(host plugins.BackendStartHost) error {
 	return nil
 }
 
-func (p *webdavArchiveBackend) Stop(plugins.BackendStartHost) error {
+func (p *fileArchiveBackend) Stop(plugins.BackendStartHost) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopLocked()
 	return nil
 }
 
-func (p *webdavArchiveBackend) stopLocked() {
+func (p *fileArchiveBackend) stopLocked() {
 	if p.worker != nil {
 		p.worker.Stop()
 		p.worker = nil
@@ -93,7 +93,7 @@ func (p *webdavArchiveBackend) stopLocked() {
 // wake asks the worker for a sweep now. The hook calls it after queuing, so a
 // recording that arrives is on its way to the server in the same second rather
 // than at the next tick.
-func (p *webdavArchiveBackend) wake() {
+func (p *fileArchiveBackend) wake() {
 	p.mu.Lock()
 	current := p.worker
 	p.mu.Unlock()
@@ -221,7 +221,7 @@ func presentUpload(item upload) uploadView {
 	}
 }
 
-func (p *webdavArchiveBackend) handleAPI(host plugins.APIHost, path string, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) handleAPI(host plugins.APIHost, path string, w http.ResponseWriter, r *http.Request) {
 	current, ok := host.RequireAPIAuth(w, r)
 	if !ok {
 		return
@@ -265,7 +265,7 @@ func (p *webdavArchiveBackend) handleAPI(host plugins.APIHost, path string, w ht
 	}
 }
 
-func (p *webdavArchiveBackend) apiListTargets(host plugins.APIHost, st *store.Store, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiListTargets(host plugins.APIHost, st *store.Store, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	items, err := listTargets(r.Context(), db, userID, false)
 	if err != nil {
 		host.ServerError(w, err)
@@ -288,7 +288,7 @@ func (p *webdavArchiveBackend) apiListTargets(host plugins.APIHost, st *store.St
 	host.WriteJSON(w, map[string]any{"targets": views, "mailboxes": mailboxes, "counts": counts})
 }
 
-func (p *webdavArchiveBackend) apiTargetAction(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiTargetAction(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 {
 		host.WriteAPIError(w, http.StatusNotFound, "file archive route not found")
@@ -332,7 +332,7 @@ func (p *webdavArchiveBackend) apiTargetAction(host plugins.APIHost, db *sql.DB,
 	}
 }
 
-func (p *webdavArchiveBackend) apiSaveTarget(host plugins.APIHost, db *sql.DB, userID, targetID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiSaveTarget(host plugins.APIHost, db *sql.DB, userID, targetID int64, w http.ResponseWriter, r *http.Request) {
 	if !host.VerifyCSRF(w, r) {
 		return
 	}
@@ -452,7 +452,7 @@ func prepareTarget(ctx context.Context, host plugins.APIHost, db *sql.DB, userID
 	return item, nil
 }
 
-func (p *webdavArchiveBackend) apiTestTarget(host plugins.APIHost, db *sql.DB, userID, targetID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiTestTarget(host plugins.APIHost, db *sql.DB, userID, targetID int64, w http.ResponseWriter, r *http.Request) {
 	if !host.VerifyCSRF(w, r) {
 		return
 	}
@@ -478,7 +478,7 @@ func (p *webdavArchiveBackend) apiTestTarget(host plugins.APIHost, db *sql.DB, u
 	host.WriteJSON(w, map[string]any{"ok": true})
 }
 
-func (p *webdavArchiveBackend) apiListUploads(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiListUploads(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	targetID, _ := strconv.ParseInt(query.Get("target"), 10, 64)
 	limit, _ := strconv.Atoi(query.Get("limit"))
@@ -499,7 +499,7 @@ func (p *webdavArchiveBackend) apiListUploads(host plugins.APIHost, db *sql.DB, 
 	host.WriteJSON(w, map[string]any{"uploads": views, "counts": counts})
 }
 
-func (p *webdavArchiveBackend) apiRetryUpload(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiRetryUpload(host plugins.APIHost, db *sql.DB, userID int64, rest string, w http.ResponseWriter, r *http.Request) {
 	if !host.VerifyCSRF(w, r) {
 		return
 	}

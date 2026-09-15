@@ -35,7 +35,7 @@ type browseView struct {
 	Entries  []resourceEntry `json:"entries"`
 }
 
-func (p *webdavArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	store, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
 	if !ok {
 		return
@@ -65,7 +65,7 @@ func (p *webdavArchiveBackend) apiBrowse(host plugins.APIHost, db *sql.DB, userI
 	})
 }
 
-func (p *webdavArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	store, _, requested, ok := p.resolveBrowseRequest(host, db, userID, w, r)
 	if !ok {
 		return
@@ -116,7 +116,7 @@ func (p *webdavArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, use
 	}
 }
 
-func (p *webdavArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
+func (p *fileArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	if !host.VerifyCSRF(w, r) {
 		return
 	}
@@ -146,7 +146,7 @@ func (p *webdavArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, u
 // target, checks it belongs to this user, and reduces the requested path to a
 // relative one. It answers the error itself and reports whether the caller
 // should continue.
-func (p *webdavArchiveBackend) resolveBrowseRequest(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) (remoteStore, target, string, bool) {
+func (p *fileArchiveBackend) resolveBrowseRequest(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) (remoteStore, target, string, bool) {
 	query := r.URL.Query()
 	targetID, err := strconv.ParseInt(strings.TrimSpace(query.Get("target")), 10, 64)
 	if err != nil || targetID <= 0 {
