@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appRoutes, matchAppRoute, type RuntimePlugin } from "./runtime";
+import { appRouteErrorMessage, appRoutes, matchAppRoute, type RuntimePlugin, type RuntimePlugins } from "./runtime";
 
 const page = () => null;
 
@@ -62,5 +62,28 @@ describe("matchAppRoute", () => {
 
   it("ignores a query string or hash on the path it is asked about", () => {
     expect(matchAppRoute(plugins, "/files?open=1")?.path).toBe("/files");
+  });
+});
+
+describe("appRouteErrorMessage", () => {
+  const plugins = (errors: RuntimePlugins["errors"]): RuntimePlugins => ({ all: [], byID: {}, status: "ready", errors });
+
+  it("names the plugin that failed and what it said", () => {
+    expect(appRouteErrorMessage(plugins([{ id: "file_archive", name: "File archive", message: "Network error" }])))
+      .toBe("File archive could not load: Network error");
+  });
+
+  it("counts the rest rather than listing them", () => {
+    const message = appRouteErrorMessage(plugins([
+      { id: "file_archive", name: "File archive", message: "Network error" },
+      { id: "mail_filters", name: "Filters", message: "Boom" }
+    ]));
+    expect(message).toBe("File archive could not load: Network error (1 other plugin failed too.)");
+  });
+
+  // A page the manifest declares but no module registers is a different fault
+  // from a module that threw, and the reader is told which one it is.
+  it("says so when nothing failed to load but the page is unclaimed", () => {
+    expect(appRouteErrorMessage(plugins([]))).toBe("The plugin that provides this page is enabled but did not register it.");
   });
 });

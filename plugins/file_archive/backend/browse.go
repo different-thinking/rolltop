@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"path"
 	"strconv"
@@ -71,7 +72,7 @@ func (p *fileArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, userI
 		return
 	}
 	defer store.Close()
-	if requested == "" || strings.HasSuffix(requested, "/") {
+	if !namesAFile(requested) {
 		host.WriteAPIError(w, http.StatusBadRequest, "a file path is required")
 		return
 	}
@@ -111,7 +112,11 @@ func (p *fileArchiveBackend) apiDownload(host plugins.APIHost, db *sql.DB, userI
 	}
 	if _, err := io.Copy(w, body); err != nil {
 		// The status line is already written, so this can only be logged. The
-		// browser sees a truncated response, which is what actually happened.
+		// browser sees a truncated response, which is what actually happened --
+		// and errTooLarge lands here too, which is the whole point of the
+		// reader failing instead of ending the stream quietly.
+		log.Printf("file archive could not finish a download user_id=%d path=%q error_type=%T",
+			userID, requested, err)
 		return
 	}
 }
@@ -125,8 +130,8 @@ func (p *fileArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, use
 		return
 	}
 	defer store.Close()
-	if requested == "" {
-		host.WriteAPIError(w, http.StatusBadRequest, "a path is required")
+	if !namesAFile(requested) {
+		host.WriteAPIError(w, http.StatusBadRequest, "a file path is required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), browseTimeout)
@@ -140,6 +145,17 @@ func (p *fileArchiveBackend) apiDeleteFile(host plugins.APIHost, db *sql.DB, use
 		return
 	}
 	host.WriteJSON(w, map[string]any{"ok": true})
+}
+
+// namesAFile answers whether a browse path addresses a file rather than a
+// collection, which both the download and the delete route require.
+//
+// The delete route is why it is a rule and not a detail: DELETE on a
+// collection is recursive on all three transports, so `?path=2026/` would take
+// the year with it. cleanRemotePath keeps the trailing slash exactly so the
+// difference survives to here.
+func namesAFile(requested string) bool {
+	return requested != "" && !strings.HasSuffix(requested, "/")
 }
 
 // resolveBrowseRequest is the shared front half of all three: it reads the

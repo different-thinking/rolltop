@@ -34,14 +34,7 @@ const (
 	// into memory to be parsed, so a server answering with an unbounded body --
 	// or an XML bomb -- must not be able to decide this process's memory use.
 	maxListingBytes = 8 << 20
-	// maxDownloadBytes bounds a proxied GET. The browser streams through this
-	// process, so the same argument applies.
-	maxDownloadBytes = 512 << 20
 )
-
-// errNotFound is what a 404 becomes, so callers can tell "no such collection"
-// from "the server refused". MKCOL-on-demand reads it as "create the parent".
-var errNotFound = errors.New("webdav: resource not found")
 
 // errConflict is 409, which WebDAV uses for "a parent collection is missing".
 var errConflict = errors.New("webdav: parent collection is missing")
@@ -418,8 +411,12 @@ func (c *webdavClient) Get(ctx context.Context, relative string) (io.ReadCloser,
 	size := res.ContentLength
 	if size > maxDownloadBytes {
 		drainAndClose(res)
-		return nil, "", 0, errors.New("the file is larger than this proxy will serve")
+		return nil, "", 0, errTooLarge
 	}
+	// A chunked response declares no length -- size is -1 and the check above
+	// says nothing. The limit is enforced by the reader instead, which fails
+	// rather than ending the stream quietly: a truncated recording that
+	// arrives with a 200 looks complete to whoever saved it.
 	return newLimitedReadCloser(res.Body, maxDownloadBytes), contentType, size, nil
 }
 
@@ -448,15 +445,3 @@ func drainAndClose(res *http.Response) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
 	_ = res.Body.Close()
 }
-
-type limitedReadCloser struct {
-	reader io.Reader
-	closer io.Closer
-}
-
-func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
-	return &limitedReadCloser{reader: io.LimitReader(body, limit), closer: body}
-}
-
-func (l *limitedReadCloser) Read(p []byte) (int, error) { return l.reader.Read(p) }
-func (l *limitedReadCloser) Close() error               { return l.closer.Close() }

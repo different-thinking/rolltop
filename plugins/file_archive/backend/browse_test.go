@@ -74,3 +74,19 @@ func TestParentPathWalksUpAndStopsAtTheRoot(t *testing.T) {
 		}
 	}
 }
+
+// Both routes that take a path require a file. The delete route is the one
+// with teeth: a collection deletes recursively, so `2026/` would take a year
+// of recordings with it.
+func TestNamesAFileRefusesCollectionsAndEmptyPaths(t *testing.T) {
+	for _, requested := range []string{"", "2026/", "2026/05/", "/"} {
+		if namesAFile(cleanRemotePath(requested)) {
+			t.Errorf("%q was taken for a file", requested)
+		}
+	}
+	for _, requested := range []string{"memo.m4a", "2026/05/memo.m4a", "/2026/memo.m4a"} {
+		if !namesAFile(cleanRemotePath(requested)) {
+			t.Errorf("%q was refused, but it is a file", requested)
+		}
+	}
+}

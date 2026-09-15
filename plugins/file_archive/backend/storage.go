@@ -52,6 +52,59 @@ type remoteStore interface {
 	Close() error
 }
 
+// maxDownloadBytes bounds a proxied read. The browser streams through this
+// process, so an unbounded body would let the server on the other end decide
+// this process's memory use.
+const maxDownloadBytes = 512 << 20
+
+// errNotFound is what every transport's "no such file" becomes, so callers can
+// tell it from "the server refused". WebDAV's MKCOL-on-demand reads it as
+// "create the parent".
+var errNotFound = errors.New("resource not found")
+
+// errTooLarge is refused up front where the size is known and mid-stream where
+// it is not.
+var errTooLarge = errors.New("the file is larger than this proxy will serve")
+
+// limitedReadCloser stops a read at maxDownloadBytes and FAILS there rather
+// than reporting the end of the file.
+//
+// The difference matters for the one case that reaches it: a WebDAV server
+// answering chunked declares no length, so nothing checked the size before the
+// first byte. An io.LimitReader alone would end the stream at the limit, and a
+// half-written recording that arrives under a 200 with no error is
+// indistinguishable from a complete one -- to the browser, and to whoever
+// keeps the file afterwards. A broken transfer is the honest answer.
+type limitedReadCloser struct {
+	reader io.Reader
+	closer io.Closer
+	limit  int64
+	read   int64
+}
+
+func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
+	// One byte past the limit is read on purpose: it is how the reader can
+	// tell "exactly the limit" from "more than fits".
+	return &limitedReadCloser{reader: io.LimitReader(body, limit+1), closer: body, limit: limit}
+}
+
+func (l *limitedReadCloser) Read(p []byte) (int, error) {
+	n, err := l.reader.Read(p)
+	l.read += int64(n)
+	if l.read > l.limit {
+		// The overflow byte is not handed on: the caller never sees more than
+		// the limit, it sees the error instead.
+		n -= int(l.read - l.limit)
+		if n < 0 {
+			n = 0
+		}
+		return n, errTooLarge
+	}
+	return n, err
+}
+
+func (l *limitedReadCloser) Close() error { return l.closer.Close() }
+
 // The transports a target address can name.
 const (
 	transportWebDAV = "webdav"

@@ -244,6 +244,83 @@ func TestClaimDueUploadsTakesEachRowOnce(t *testing.T) {
 	}
 }
 
+// Pausing a target is the one control the reader has over the queue. If the
+// claim ignored the flag, the click would flush everything pending at exactly
+// the server they had just decided not to write to.
+func TestClaimDueUploadsLeavesAPausedTargetAlone(t *testing.T) {
+	st := openArchiveStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, _, mailbox := archiveFixture(t, st, "paused@example.test")
+	configured := newTestTarget(t, db, user.ID, mailbox.ID)
+	if _, err := enqueueUpload(ctx, db, upload{UserID: user.ID, TargetID: configured.ID,
+		MessageID: 1, AttachmentID: 1, Filename: "memo.m4a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setTargetEnabled(ctx, db, user.ID, configured.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimed, err := claimDueUploads(ctx, db, user.ID, now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed %d rows for a paused target", len(claimed))
+	}
+	// A sweep must not even open this user's database for work that cannot be
+	// done.
+	ids, err := usersWithWork(ctx, db, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if id == user.ID {
+			t.Fatal("a user whose only target is paused was listed as having work")
+		}
+	}
+	// The row is owed, not dropped: switching the target back on returns it.
+	if err := setTargetEnabled(ctx, db, user.ID, configured.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = claimDueUploads(ctx, db, user.ID, now, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim after unpausing = %d rows, %v", len(claimed), err)
+	}
+}
+
+// A row claimed just before the target was paused is put back without spending
+// an attempt -- ten pauses would otherwise abandon the recording.
+func TestRequeueUploadReturnsARowWithoutCountingAnAttempt(t *testing.T) {
+	st := openArchiveStore(t)
+	db := st.DB()
+	ctx := context.Background()
+	user, _, mailbox := archiveFixture(t, st, "requeue@example.test")
+	configured := newTestTarget(t, db, user.ID, mailbox.ID)
+	if _, err := enqueueUpload(ctx, db, upload{UserID: user.ID, TargetID: configured.ID,
+		MessageID: 1, AttachmentID: 1, Filename: "memo.m4a"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimed, err := claimDueUploads(ctx, db, user.ID, now, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d rows, %v", len(claimed), err)
+	}
+	if err := requeueUpload(ctx, db, claimed[0]); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := listUploads(ctx, db, user.ID, 0, "", 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %d, %v", len(rows), err)
+	}
+	if rows[0].Status != statusQueued {
+		t.Fatalf("status after requeue = %q, want %q", rows[0].Status, statusQueued)
+	}
+	if rows[0].Attempts != 0 {
+		t.Fatalf("attempts after requeue = %d, want 0 -- nothing was tried", rows[0].Attempts)
+	}
+}
+
 func TestFailUploadClimbsTheLadderThenGivesUp(t *testing.T) {
 	st := openArchiveStore(t)
 	db := st.DB()

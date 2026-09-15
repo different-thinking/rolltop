@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -130,5 +133,36 @@ func TestTargetTransportReportsAnUnreadableAddressAsUnknown(t *testing.T) {
 	// An address stored by hand, or by an older build, must not be guessed at.
 	if got := targetTransport(target{BaseURL: "not an address"}); got != "unknown" {
 		t.Fatalf("transport = %q, want unknown", got)
+	}
+}
+
+// The limit is a backstop for the case nothing checked up front: a WebDAV
+// server answering chunked declares no length. Ending the stream quietly there
+// would hand the reader a truncated recording under a 200 -- which looks
+// exactly like a complete one.
+func TestLimitedReadCloserFailsInsteadOfTruncating(t *testing.T) {
+	body := io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("x"), 40)))
+	reader := newLimitedReadCloser(body, 16)
+	got, err := io.ReadAll(reader)
+	if !errors.Is(err, errTooLarge) {
+		t.Fatalf("ReadAll error = %v, want errTooLarge", err)
+	}
+	// Not one byte past the limit reaches the caller.
+	if len(got) != 16 {
+		t.Fatalf("bytes handed on = %d, want 16", len(got))
+	}
+}
+
+// A file that is exactly the limit is not too large, and reading it must end
+// the ordinary way.
+func TestLimitedReadCloserPassesAFileOfExactlyTheLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("y"), 16)
+	reader := newLimitedReadCloser(io.NopCloser(bytes.NewReader(payload)), 16)
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll = %v, want the file", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("bytes = %d, want %d", len(got), len(payload))
 	}
 }

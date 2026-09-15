@@ -337,6 +337,12 @@ func enqueueUpload(ctx context.Context, db *sql.DB, item upload) (bool, error) {
 // claimDueUploads takes the next batch of work for one user and marks it
 // uploading in the same statement, so two workers -- or a manual run racing
 // the ticker -- cannot both pick up the same row.
+//
+// A paused target has no due work: its rows stay queued and wait for it to be
+// switched back on. Pausing a destination that is misbehaving is the one
+// control the reader has over the queue, and it has to hold -- otherwise the
+// click would flush everything pending at exactly the server they just decided
+// not to write to.
 func claimDueUploads(ctx context.Context, db *sql.DB, userID int64, now time.Time, limit int) ([]upload, error) {
 	if limit <= 0 {
 		limit = 20
@@ -345,12 +351,17 @@ func claimDueUploads(ctx context.Context, db *sql.DB, userID int64, now time.Tim
 		WHERE id IN (
 			SELECT id FROM plugin_file_archive_uploads
 			WHERE user_id = ? AND status IN (?, ?) AND next_attempt_at <= ?
+				AND target_id IN (
+					SELECT id FROM plugin_file_archive_targets
+					WHERE user_id = ? AND enabled = 1
+				)
 			ORDER BY next_attempt_at, id
 			LIMIT ?
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING `+uploadColumns,
-		statusUploading, unixSeconds(now), userID, statusQueued, statusFailed, unixSeconds(now), limit)
+		statusUploading, unixSeconds(now), userID, statusQueued, statusFailed, unixSeconds(now),
+		userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -416,6 +427,17 @@ func failUpload(ctx context.Context, db *sql.DB, item upload, cause error, now t
 		WHERE user_id = ? AND id = ?`,
 		status, attempts, unixSeconds(next), truncateError(cause.Error()),
 		unixSeconds(now), item.UserID, item.ID)
+	return err
+}
+
+// requeueUpload puts a claimed row back without counting an attempt. It is for
+// the case where nothing was tried: the target was paused between the claim
+// and the upload. Counting it would spend one of the ten attempts on a
+// decision the reader made, and ten pauses would abandon the recording.
+func requeueUpload(ctx context.Context, db *sql.DB, item upload) error {
+	_, err := db.ExecContext(ctx, `UPDATE plugin_file_archive_uploads
+		SET status = ?, updated_at = ? WHERE user_id = ? AND id = ? AND status = ?`,
+		statusQueued, time.Now().UTC().Unix(), item.UserID, item.ID, statusUploading)
 	return err
 }
 
@@ -505,10 +527,17 @@ func uploadCounts(ctx context.Context, db *sql.DB, userID int64) (map[string]int
 }
 
 // usersWithWork lists the tenants the worker has something to do for, so a
-// tick costs one query rather than one per account on the install.
+// tick costs one query rather than one per account on the install. It asks the
+// same question claimDueUploads does, down to leaving out paused targets, so a
+// sweep does not open a user's database only to claim nothing.
 func usersWithWork(ctx context.Context, db *sql.DB, now time.Time) ([]int64, error) {
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT user_id FROM plugin_file_archive_uploads
-		WHERE status IN (?, ?) AND next_attempt_at <= ? ORDER BY user_id`,
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT u.user_id FROM plugin_file_archive_uploads u
+		WHERE u.status IN (?, ?) AND u.next_attempt_at <= ?
+			AND EXISTS (
+				SELECT 1 FROM plugin_file_archive_targets t
+				WHERE t.id = u.target_id AND t.user_id = u.user_id AND t.enabled = 1
+			)
+		ORDER BY u.user_id`,
 		statusQueued, statusFailed, unixSeconds(now))
 	if err != nil {
 		return nil, err

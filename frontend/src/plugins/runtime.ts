@@ -228,6 +228,21 @@ export async function loadRuntimePlugins(definitions: readonly FrontendPluginDef
   return plugins;
 }
 
+/**
+ * appRouteErrorMessage explains why a page a manifest declared has nothing to
+ * draw it. It names the plugin when the loader knows which one failed: a reader
+ * told the name can switch that one plugin off; one told "a plugin" cannot.
+ */
+export function appRouteErrorMessage(plugins: RuntimePlugins): string {
+  const [first] = plugins.errors;
+  if (!first) {
+    return "The plugin that provides this page is enabled but did not register it.";
+  }
+  const others = plugins.errors.length - 1;
+  const message = `${first.name} could not load: ${first.message}`;
+  return others > 0 ? `${message} (${others} other plugin${others === 1 ? "" : "s"} failed too.)` : message;
+}
+
 export function getRuntimePlugin<T extends RuntimePlugin>(plugins: RuntimePlugins, id: string): T | undefined {
   return plugins.byID[id] as T | undefined;
 }

@@ -14,8 +14,9 @@ import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/S
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
 import { mailRouteView, organizerRoute, pluginAppRoute, type PluginAppRoute } from "./lib/routes";
-import { matchAppRoute, type RuntimePlugins } from "./plugins/runtime";
+import { appRouteErrorMessage, matchAppRoute, type RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
+import { Icon } from "./components/Icon";
 
 /**
  * RouteView is the app's manual router. Each branch maps one URL family to a
@@ -121,8 +122,27 @@ export function RouteView({
     if (pluginRoute) {
       return <>{pluginRoute.render({ csrf, user, mailboxes, location, navigate, addToast })}</>;
     }
-    if (runtimePlugins.status === "loading" && pluginAppRoute(location.path, pluginAppRoutes)) {
-      return <div className="settings-state settings-loading compact" role="status" aria-live="polite" aria-busy="true" />;
+    if (pluginAppRoute(location.path, pluginAppRoutes)) {
+      if (runtimePlugins.status === "loading") {
+        return <div className="settings-state settings-loading compact" role="status" aria-live="polite" aria-busy="true" />;
+      }
+      // Loaded, and still nothing claims the path: the module the manifest
+      // declared this page for did not come up. Saying so is the only honest
+      // answer -- falling through from here would paint the inbox at /files,
+      // which reads as "the page is gone" rather than "the plugin is broken",
+      // and the reader would go looking for their files instead of the plugin.
+      return (
+        <div className="settings-state settings-error" role="alert">
+          <Icon name="report" />
+          <div>
+            <strong>This page could not load</strong>
+            <p>{appRouteErrorMessage(runtimePlugins)}</p>
+          </div>
+          <button className="secondary" type="button" onClick={() => void reloadRuntimePlugins()}>
+            <Icon name="sync" />Retry
+          </button>
+        </div>
+      );
     }
     if (location.path === "/compose") {
       return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;

@@ -211,26 +211,28 @@ func (w *worker) runUser(userID int64) {
 		log.Printf("file archive could not claim uploads user_id=%d error_type=%T", userID, err)
 		return
 	}
-	// One open destination per target rather than per upload: a batch is
-	// usually several recordings from the same folder going to the same
-	// server, and for SFTP and SMB that is one handshake instead of twenty.
-	stores := map[int64]remoteStore{}
-	targets := map[int64]target{}
+	batch := newStoreBatch()
 	// SFTP and SMB hold a live connection, so the batch closes what it opened
 	// rather than leaving it to the garbage collector.
-	defer func() {
-		for _, store := range stores {
-			_ = store.Close()
-		}
-	}()
+	defer batch.close()
 	for _, item := range items {
 		if w.ctx.Err() != nil {
 			return
 		}
-		if err := w.runUpload(db, item, stores, targets); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
+		err := w.runUpload(db, item, batch)
+		switch {
+		case err == nil:
+		case errors.Is(err, context.Canceled):
+			return
+		case errors.Is(err, errTargetPaused):
+			// Nothing was tried, so nothing is owed to the retry ladder: the
+			// row goes back on the queue and waits for the target to be
+			// switched on again.
+			if requeueErr := requeueUpload(w.ctx, db, item); requeueErr != nil {
+				log.Printf("file archive could not requeue an upload of a paused target user_id=%d upload_id=%d error_type=%T",
+					userID, item.ID, requeueErr)
 			}
+		default:
 			if failErr := failUpload(w.ctx, db, item, err, time.Now().UTC()); failErr != nil {
 				log.Printf("file archive could not record a failed upload user_id=%d upload_id=%d error_type=%T",
 					userID, item.ID, failErr)
@@ -240,25 +242,90 @@ func (w *worker) runUser(userID int64) {
 	}
 }
 
-func (w *worker) runUpload(db *sql.DB, item upload, stores map[int64]remoteStore, targets map[int64]target) error {
-	store, ok := stores[item.TargetID]
-	if !ok {
-		configured, err := getTarget(w.ctx, db, item.UserID, item.TargetID)
-		if err != nil {
-			return fmt.Errorf("the target this upload belongs to is gone: %w", err)
-		}
-		password, privateKey, err := targetCredentials(w.host, configured)
-		if err != nil {
-			return err
-		}
-		store, err = openRemoteStore(w.ctx, configured, password, privateKey)
-		if err != nil {
-			return err
-		}
-		stores[item.TargetID] = store
-		targets[item.TargetID] = configured
+// errTargetPaused says the upload was not attempted because its destination is
+// switched off. It is not a failure of the upload and must not spend one of its
+// attempts.
+var errTargetPaused = errors.New("the target is paused")
+
+// storeBatch is what one user's batch knows about its targets: the open
+// connections, the rows they were opened from, and the targets that could not
+// be opened at all.
+//
+// The last of those is why it exists. Opening is where SFTP and SMB connect,
+// and a destination that is switched off costs the full dial timeout. Without
+// remembering the failure, twenty queued recordings for one unreachable server
+// would dial it twenty times -- five minutes of a single worker's time for an
+// answer already known after the first attempt.
+type storeBatch struct {
+	// One open destination per target rather than per upload: a batch is
+	// usually several recordings from the same folder going to the same
+	// server, and for SFTP and SMB that is one handshake instead of twenty.
+	stores  map[int64]remoteStore
+	targets map[int64]target
+	failed  map[int64]error
+}
+
+func newStoreBatch() *storeBatch {
+	return &storeBatch{
+		stores:  map[int64]remoteStore{},
+		targets: map[int64]target{},
+		failed:  map[int64]error{},
 	}
-	configured := targets[item.TargetID]
+}
+
+func (b *storeBatch) close() {
+	for _, store := range b.stores {
+		_ = store.Close()
+	}
+}
+
+// storeFor answers with the destination this upload goes to, opening it the
+// first time it is asked and remembering either outcome for the rest of the
+// batch.
+func (w *worker) storeFor(db *sql.DB, item upload, batch *storeBatch) (remoteStore, target, error) {
+	if err, ok := batch.failed[item.TargetID]; ok {
+		return nil, target{}, err
+	}
+	if store, ok := batch.stores[item.TargetID]; ok {
+		return store, batch.targets[item.TargetID], nil
+	}
+	store, configured, err := w.openTarget(db, item)
+	if err != nil {
+		batch.failed[item.TargetID] = err
+		return nil, target{}, err
+	}
+	batch.stores[item.TargetID] = store
+	batch.targets[item.TargetID] = configured
+	return store, configured, nil
+}
+
+func (w *worker) openTarget(db *sql.DB, item upload) (remoteStore, target, error) {
+	configured, err := getTarget(w.ctx, db, item.UserID, item.TargetID)
+	if err != nil {
+		return nil, target{}, fmt.Errorf("the target this upload belongs to is gone: %w", err)
+	}
+	// Claimed while enabled, paused since: the claim already filters on the
+	// flag, so this is the narrow race rather than the ordinary case -- and it
+	// is checked before the connection is opened, not after.
+	if !configured.Enabled {
+		return nil, target{}, errTargetPaused
+	}
+	password, privateKey, err := targetCredentials(w.host, configured)
+	if err != nil {
+		return nil, target{}, err
+	}
+	store, err := openRemoteStore(w.ctx, configured, password, privateKey)
+	if err != nil {
+		return nil, target{}, err
+	}
+	return store, configured, nil
+}
+
+func (w *worker) runUpload(db *sql.DB, item upload, batch *storeBatch) error {
+	store, configured, err := w.storeFor(db, item, batch)
+	if err != nil {
+		return err
+	}
 	data, contentType, err := w.attachmentBytes(item)
 	if err != nil {
 		return err

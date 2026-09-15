@@ -247,7 +247,7 @@ func (s *sftpStore) Get(ctx context.Context, name string) (io.ReadCloser, string
 		return nil, "", 0, errors.New("that path is a folder, not a file")
 	}
 	if info.Size() > maxDownloadBytes {
-		return nil, "", 0, errors.New("the file is larger than this proxy will serve")
+		return nil, "", 0, errTooLarge
 	}
 	file, err := s.client.Open(target)
 	if err != nil {
