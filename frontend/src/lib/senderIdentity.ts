@@ -4,6 +4,8 @@
 // agree: the same correspondent has to keep one letter and one colour wherever
 // they appear.
 
+import { parseAddressList } from "./addresses";
+
 /**
  * displayLabel reduces an address line to the text a human reads, mirroring the
  * server's senderDisplayName (backend/web/conversations.go): the display name
@@ -11,14 +13,8 @@
  * reduced to its first entry, which is the one the row names first.
  */
 function displayLabel(value: string): string {
-  const first = (value.split(",")[0] || "").trim();
-  if (!first) return "";
-  const angled = first.match(/^(.*)<([^>]*)>\s*$/);
-  if (angled) {
-    const name = angled[1].trim().replace(/^"(.*)"$/, "$1").trim();
-    return name || angled[2].trim();
-  }
-  return first.replace(/^"(.*)"$/, "$1").trim();
+  const first = parseAddressList(value)[0];
+  return first ? first.name || first.email : "";
 }
 
 /**

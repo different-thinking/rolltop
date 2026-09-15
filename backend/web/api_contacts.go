@@ -39,6 +39,23 @@ func (s *Server) apiContacts(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		// An exact address asks a different question from the listing's
+		// substring search: "who holds this address", answered through the
+		// normalized column the rest of the server resolves contacts by, so
+		// the address card and a reply agree on which contact an address is.
+		if email := strings.TrimSpace(r.URL.Query().Get("email")); email != "" {
+			contact, err := s.store.GetContactByEmailForUser(r.Context(), cu.User.ID, email)
+			if store.IsNotFound(err) {
+				writeJSON(w, map[string]any{"contacts": []apiContact{}})
+				return
+			}
+			if err != nil {
+				s.serverError(w, r, err)
+				return
+			}
+			writeJSON(w, map[string]any{"contacts": []apiContact{apiContactFromStore(contact)}})
+			return
+		}
 		filter, ok := contactListFilter(r.URL.Query())
 		if !ok {
 			writeAPIError(w, http.StatusBadRequest, "Unknown contact source.")

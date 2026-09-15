@@ -347,6 +347,56 @@ func TestContactListFilterTravelsToTheStore(t *testing.T) {
 	}
 }
 
+// The address card asks for the holder of one exact address. That goes through
+// the normalized column, so a contact whose stored address carries a display
+// name or different casing is still found, and nothing of another tenant's is.
+func TestContactLookupByEmailIsExactAndScoped(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.db.CreateContact(ctx, env.owner.ID, store.Contact{
+		DisplayName: "Ann Lee",
+		Emails:      []store.ContactEmail{{Label: "Work", Email: "Ann Lee <Ann@Example.test>", IsPrimary: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.CreateContact(ctx, env.other.ID, store.Contact{
+		DisplayName: "Other Tenant's Ann",
+		Emails:      []store.ContactEmail{{Label: "Work", Email: "ann@example.test", IsPrimary: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	names := func(query string) []string {
+		response := env.send(t, env.owner, http.MethodGet, "/api/contacts?"+query, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		var payload struct {
+			Contacts []apiContact `json:"contacts"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(payload.Contacts))
+		for _, contact := range payload.Contacts {
+			out = append(out, contact.DisplayName)
+		}
+		return out
+	}
+
+	if got := names("email=ann%40example.test"); len(got) != 1 || got[0] != "Ann Lee" {
+		t.Fatalf("lookup = %v, want the owner's contact alone", got)
+	}
+	if got := names("email=nobody%40example.test"); len(got) != 0 {
+		t.Fatalf("unknown address = %v, want nothing", got)
+	}
+	// A substring of the address is not the address: the exact lookup must not
+	// fall through to the listing's LIKE search.
+	if got := names("email=example.test"); len(got) != 0 {
+		t.Fatalf("partial address = %v, want nothing", got)
+	}
+}
+
 // A rejected edit answers 409 with the version that won at Google. The editor
 // shows that body instead of the values the user submitted, so the payload is a
 // contract and not just an error string.

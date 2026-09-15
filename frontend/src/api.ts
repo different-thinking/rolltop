@@ -727,6 +727,11 @@ export const api = {
     const suffix = params.size > 0 ? `?${params}` : "";
     return getJSON<{ contacts: Contact[] }>(`/api/contacts${suffix}`);
   },
+  // The holder of one exact address, through the server's normalized column
+  // rather than the listing's substring search; the answer is one contact or
+  // none.
+  contactByEmail: (email: string) => getJSON<{ contacts: Contact[] }>(`/api/contacts?${new URLSearchParams({ email })}`),
+  contact: (id: number) => getJSON<{ contact: Contact }>(`/api/contacts/${id}`),
   contactAutocomplete: (query: string) =>
     getJSON<{ contacts: ContactAutocomplete[] }>(`/api/contacts/autocomplete?${new URLSearchParams({ q: query })}`),
   createContact: (csrf: string, contact: Contact) => postJSON<{ contact: Contact }>("/api/contacts", csrf, contact),
