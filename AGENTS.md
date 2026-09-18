@@ -282,6 +282,15 @@ site and in review.
   original message's source and were never breaks. Removing the `pre-wrap` rule
   instead would fix new pastes and silently flatten every draft already saved
   with bare newlines in it.
+- **The text part of a composed message is read off the same markup the HTML
+  part is, never off `innerText`** (`composeTextFromHTML`). `innerText` counts a
+  line twice wherever the browser left a `<br>` at the end of a block: the empty
+  line between two typed paragraphs is one `<div><br></div>`, renders as one
+  blank line, and came out of `innerText` as two -- so the reader who sees only
+  the text part, which is the reader who has no HTML part to fall back on, got
+  the message spaced out twice as far as it was written. What matches the
+  rendering is that a block ends its line and a `<br>` adds one only when
+  something follows it inside that block.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`

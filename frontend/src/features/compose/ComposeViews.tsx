@@ -11,7 +11,7 @@ import { Icon, LogoMark } from "../../components/Icon";
 import { formatAddress, splitAddressList } from "../../lib/addresses";
 import { messageFromError } from "../../lib/errors";
 import { isSendChord } from "../../lib/keyboard";
-import { convertTextNewlinesToBreaks, textToHTML } from "../../lib/html";
+import { composeTextFromHTML, convertTextNewlinesToBreaks, textToHTML } from "../../lib/html";
 import { defaultMailURL, messageBackURL } from "../../lib/routes";
 import {
   clearComposeRecovery,
@@ -744,7 +744,7 @@ export function ComposeBox({
     const nextForm: ComposeForm = {
       ...form,
       from_identity_id: form.from_identity_id || primaryIdentity?.id || 0,
-      body: editor?.innerText || "",
+      body: composeTextFromHTML(preparedHTML.html),
       body_html: preparedHTML.html,
       attach_public_key: composeSecurity.attachPublicKey,
       archive_after_send: archiveOnSend.current && canSendAndArchive
@@ -795,7 +795,7 @@ export function ComposeBox({
     const nextForm: ComposeForm = {
       ...form,
       from_identity_id: form.from_identity_id || primaryIdentity?.id || 0,
-      body: editor?.innerText || "",
+      body: composeTextFromHTML(preparedHTML.html),
       body_html: preparedHTML.html,
       attach_public_key: composeSecurity.attachPublicKey
     };
@@ -1274,14 +1274,6 @@ function safeRecoveredEditorHTML(recovery: LocalComposeRecovery): string {
 
 function safeTemplateHTML(template: LocalComposeTemplate): string {
   return recoverableEditorHTML(template.bodyHTML || textToHTML(template.body));
-}
-
-function composeTextFromHTML(html: string): string {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  template.content.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
-  template.content.querySelectorAll("p, div, blockquote, li").forEach((node) => node.append("\n"));
-  return (template.content.textContent || "").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "");
 }
 
 function composeIsDirty(form: ComposeForm, editor: HTMLDivElement | null, baseline: LocalComposeContent | null): boolean {

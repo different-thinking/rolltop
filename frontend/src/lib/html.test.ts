@@ -2,7 +2,7 @@
 // compose editor on the way out to a recipient's mail client.
 
 import { describe, expect, it } from "vitest";
-import { convertTextNewlinesToBreaks, textToHTML } from "./html";
+import { composeTextFromHTML, convertTextNewlinesToBreaks, textToHTML } from "./html";
 
 function converted(html: string): string {
   const template = document.createElement("template");
@@ -51,5 +51,49 @@ describe("convertTextNewlinesToBreaks", () => {
 
   it("does nothing to a body that already carries only markup", () => {
     expect(converted(textToHTML("Guten Morgen,\n\nRobert"))).toBe("Guten Morgen,<br><br>Robert");
+  });
+});
+
+describe("composeTextFromHTML", () => {
+  it("spaces typed paragraphs the way the editor shows them", () => {
+    // What Chromium leaves behind for "A", Enter, Enter, "B". innerText reports
+    // two blank lines here; the editor renders one.
+    expect(composeTextFromHTML("<div>A</div><div><br></div><div>B</div>")).toBe("A\n\nB");
+  });
+
+  it("keeps a second blank line when the writer typed one", () => {
+    expect(composeTextFromHTML("<div>A</div><div><br></div><div><br></div><div>B</div>")).toBe("A\n\n\nB");
+  });
+
+  it("does not turn the break that ends a block into a blank line", () => {
+    expect(composeTextFromHTML("<div>A<br></div><div>B</div>")).toBe("A\nB");
+  });
+
+  it("reads a break inside a block as the line break it renders", () => {
+    expect(composeTextFromHTML("<div>A<br>B</div>")).toBe("A\nB");
+  });
+
+  it("reads pasted text that carries its own breaks", () => {
+    expect(composeTextFromHTML("Guten Morgen,<br><br>Robert")).toBe("Guten Morgen,\n\nRobert");
+  });
+
+  it("does not add a line for a block that only wraps another", () => {
+    expect(composeTextFromHTML("<div><div>A</div></div><div>B</div>")).toBe("A\nB");
+  });
+
+  it("starts a block on its own line after loose text", () => {
+    expect(composeTextFromHTML("A<div>B</div>")).toBe("A\nB");
+  });
+
+  it("gives a quoted table one line per row", () => {
+    expect(composeTextFromHTML("<table><tr><td>Vorspeise</td></tr><tr><td>Nachtisch</td></tr></table>")).toBe("Vorspeise\nNachtisch");
+  });
+
+  it("keeps inline formatting on the line it belongs to", () => {
+    expect(composeTextFromHTML("<div>Preis <strong>29 EUR</strong> pro Person</div>")).toBe("Preis 29 EUR pro Person");
+  });
+
+  it("drops the trailing blank lines an editor leaves behind", () => {
+    expect(composeTextFromHTML("<div>A</div><div><br></div><div><br></div>")).toBe("A");
   });
 });
