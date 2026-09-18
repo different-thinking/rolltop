@@ -269,6 +269,19 @@ site and in review.
   offers a message would deliver one, and pressing a button in settings must
   not write to anybody.
 - Keep IMAP credentials and OAuth tokens encrypted with `ROLLTOP_MASTER_KEY`.
+- **The compose editor renders line breaks that are not in the markup, so the
+  outgoing HTML has to be given them** (`convertTextNewlinesToBreaks`, called
+  from `prepareComposeHTML` for both the send and the draft). `.compose-editor`
+  is `white-space: pre-wrap`, and a browser pasting plain text into such an
+  element inserts the newlines as text rather than as `<br>`: the writer sees
+  their paragraphs, and every mail client renders the same body -- whose HTML
+  part is read with the CSS default -- as one run-on block with the signature
+  folded onto the last sentence. The conversion runs over text nodes on the way
+  out and skips `pre`, `.rolltop-reply-body` and `.rolltop-forwarded-body`,
+  because the newlines inside quoted and forwarded markup came from the
+  original message's source and were never breaks. Removing the `pre-wrap` rule
+  instead would fix new pastes and silently flatten every draft already saved
+  with bare newlines in it.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`

@@ -11,7 +11,7 @@ import { Icon, LogoMark } from "../../components/Icon";
 import { formatAddress, splitAddressList } from "../../lib/addresses";
 import { messageFromError } from "../../lib/errors";
 import { isSendChord } from "../../lib/keyboard";
-import { textToHTML } from "../../lib/html";
+import { convertTextNewlinesToBreaks, textToHTML } from "../../lib/html";
 import { defaultMailURL, messageBackURL } from "../../lib/routes";
 import {
   clearComposeRecovery,
@@ -1171,10 +1171,13 @@ function randomAttachmentID(): string {
 }
 
 // Convert editor-only inline media markers into MIME Content-ID references that
-// the backend can package into the outgoing message.
+// the backend can package into the outgoing message, and give the line breaks
+// the editor only renders (see convertTextNewlinesToBreaks) the markup every
+// other mail client needs to render them too.
 function prepareComposeHTML(html: string, attachments: ComposeAttachment[]): { html: string; inlineIDs: Set<string> } {
   const template = document.createElement("template");
   template.innerHTML = html;
+  convertTextNewlinesToBreaks(template.content);
   template.content.querySelectorAll<HTMLElement>("[data-compose-caret-start]").forEach((node) => {
     node.removeAttribute("data-compose-caret-start");
   });
