@@ -83,11 +83,12 @@ function textFromChildNodes(parent: ParentNode): string {
       if (index < children.length - 1) text += "\n";
       return;
     }
-    const inner = textFromChildNodes(element);
+    const raw = textFromChildNodes(element);
     if (!element.matches(blockSelector)) {
-      text += inner;
+      text += raw;
       return;
     }
+    const inner = element.tagName === "BLOCKQUOTE" ? quoted(raw) : raw;
     // A block starts on a line of its own and ends the one it is on. An empty
     // block still ends a line, which is what keeps a blank paragraph blank.
     if (text !== "" && !text.endsWith("\n")) text += "\n";
@@ -95,4 +96,17 @@ function textFromChildNodes(parent: ParentNode): string {
     if (inner === "" || !inner.endsWith("\n")) text += "\n";
   });
   return text;
+}
+
+// The message being answered is a <blockquote> in the editor, and the text part
+// is where that has to be said in characters: without the quote markers a reply
+// reads to a plain-text reader as if the writer had written the original's
+// sentences themselves. A line already quoted gains a second marker rather than
+// a second "> ", which is how a quote of a quote has always been written.
+function quoted(text: string): string {
+  return text
+    .replace(/\n+$/, "")
+    .split("\n")
+    .map((line) => (line === "" ? ">" : line.startsWith(">") ? `>${line}` : `> ${line}`))
+    .join("\n");
 }

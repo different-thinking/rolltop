@@ -290,7 +290,9 @@ site and in review.
   the text part, which is the reader who has no HTML part to fall back on, got
   the message spaced out twice as far as it was written. What matches the
   rendering is that a block ends its line and a `<br>` adds one only when
-  something follows it inside that block.
+  something follows it inside that block. The quoted message of a reply is a
+  `<blockquote>` there and gets its `>` markers back on the way out, because
+  the text part has no other way to say what the writer did not write.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`

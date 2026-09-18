@@ -96,4 +96,17 @@ describe("composeTextFromHTML", () => {
   it("drops the trailing blank lines an editor leaves behind", () => {
     expect(composeTextFromHTML("<div>A</div><div><br></div><div><br></div>")).toBe("A");
   });
+
+  it("marks the quoted message of a reply", () => {
+    const reply = 'Gern.<br><br><div>On Oct 9, 2026, counter@kamin-mainz.de wrote:</div>'
+      + '<blockquote class="rolltop-reply-body"><div>Guten Tag,</div><div><br></div><div>das geht.</div></blockquote>';
+    expect(composeTextFromHTML(reply)).toBe(
+      "Gern.\n\nOn Oct 9, 2026, counter@kamin-mainz.de wrote:\n> Guten Tag,\n>\n> das geht."
+    );
+  });
+
+  it("marks a quote inside a quote once more", () => {
+    const nested = "<blockquote><div>Antwort</div><blockquote><div>Frage</div></blockquote></blockquote>";
+    expect(composeTextFromHTML(nested)).toBe("> Antwort\n>> Frage");
+  });
 });
