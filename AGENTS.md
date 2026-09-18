@@ -269,6 +269,37 @@ site and in review.
   offers a message would deliver one, and pressing a button in settings must
   not write to anybody.
 - Keep IMAP credentials and OAuth tokens encrypted with `ROLLTOP_MASTER_KEY`.
+- **The compose editor renders line breaks that are not in the markup, so the
+  outgoing HTML has to be given them** (`convertTextNewlinesToBreaks`, called
+  from `prepareComposeHTML` for both the send and the draft). `.compose-editor`
+  is `white-space: pre-wrap`, and a browser pasting plain text into such an
+  element inserts the newlines as text rather than as `<br>`: the writer sees
+  their paragraphs, and every mail client renders the same body -- whose HTML
+  part is read with the CSS default -- as one run-on block with the signature
+  folded onto the last sentence. The conversion runs over text nodes on the way
+  out and skips `pre`, `.rolltop-reply-body` and `.rolltop-forwarded-body`,
+  because the newlines inside quoted and forwarded markup came from the
+  original message's source and were never breaks. Removing the `pre-wrap` rule
+  instead would fix new pastes and silently flatten every draft already saved
+  with bare newlines in it.
+- **The text part of a composed message is read off the same markup the HTML
+  part is, never off `innerText`** (`composeTextFromHTML`). `innerText` counts a
+  line twice wherever the browser left a `<br>` at the end of a block: the empty
+  line between two typed paragraphs is one `<div><br></div>`, renders as one
+  blank line, and came out of `innerText` as two -- so the reader who sees only
+  the text part, which is the reader who has no HTML part to fall back on, got
+  the message spaced out twice as far as it was written. What matches the
+  rendering is that a block ends the line it is on, a cell ends a column, and a
+  `<br>` ends a line wherever it stands -- one at the end of a block adds
+  nothing on top of the block's own ending, while one that ends a bold run
+  still breaks the line that run is on. Inside a quoted or forwarded block the
+  whitespace is read the way the client that rendered the original read it,
+  runs of it as one space, for the same reason `convertTextNewlinesToBreaks`
+  leaves those blocks alone: otherwise a reply to any mail whose source is
+  indented one tag per line went out as a text part of empty quote markers with
+  a word adrift in each. The quoted message of a reply is a `<blockquote>`
+  there and gets its `>` markers back on the way out, because the text part has
+  no other way to say what the writer did not write.
 - Keep tests for tenant isolation current when changing sync, search, message, attachment, blob, or route behavior.
 - Keep sync incremental: fetch by UID after each mailbox's last stored UID, stream messages into storage, and update `sync_runs` progress during long runs.
 - An account's `auth_type` decides how it authenticates. A `google_oauth`
