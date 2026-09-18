@@ -49,6 +49,11 @@ describe("convertTextNewlinesToBreaks", () => {
     expect(converted(preformatted)).toBe(preformatted);
   });
 
+  it("does not break a stylesheet that reached the editor", () => {
+    const styled = "<style>.x {\n  color: red;\n}</style><div>Angebot</div>";
+    expect(converted(styled)).toBe(styled);
+  });
+
   it("does nothing to a body that already carries only markup", () => {
     expect(converted(textToHTML("Guten Morgen,\n\nRobert"))).toBe("Guten Morgen,<br><br>Robert");
   });
@@ -138,6 +143,14 @@ describe("composeTextFromHTML", () => {
   it("leaves a preformatted block inside a quote preformatted", () => {
     const quoted = '<blockquote class="rolltop-reply-body">\n  <pre>zeile eins\nzeile zwei</pre>\n</blockquote>';
     expect(composeTextFromHTML(quoted)).toBe("> zeile eins\n> zeile zwei");
+  });
+
+  it("leaves a stylesheet out of what the reader is shown", () => {
+    expect(composeTextFromHTML("<style>.x { color: red; }</style><div>Angebot</div>")).toBe("Angebot");
+  });
+
+  it("says nothing for a quote of a message with no body", () => {
+    expect(composeTextFromHTML('Danke!<blockquote class="rolltop-reply-body"></blockquote>')).toBe("Danke!");
   });
 
   it("marks a quote inside a quote once more", () => {

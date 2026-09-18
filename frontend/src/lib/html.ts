@@ -23,8 +23,15 @@ export function textToHTML(value: string): string {
 // copied out of the message being answered, and the newlines between its tags
 // were never line breaks; converting them would add a blank line for every
 // newline in the original's source.
+//
+// <style> and <script> hold code rather than prose, and a <br> in the middle of
+// a rule or a statement corrupts it. Chromium's own paste sanitizer inlines a
+// pasted stylesheet and drops the element, and both other ways into the editor
+// strip them (the server's sanitizeComposeHTML, DOMPurify on a recovered
+// draft), so this guard is for the engine that does not.
 const quotedSourceSelector = ".rolltop-reply-body, .rolltop-forwarded-body";
-const quotedOrPreformattedSelector = `pre, textarea, ${quotedSourceSelector}`;
+const codeSelector = "script, style";
+const quotedOrPreformattedSelector = `pre, textarea, ${codeSelector}, ${quotedSourceSelector}`;
 
 export function convertTextNewlinesToBreaks(root: ParentNode): void {
   for (const node of Array.from(root.childNodes)) {
@@ -97,6 +104,9 @@ function textFromChildNodes(parent: ParentNode, sourceWhitespace: boolean): stri
       text += "\n";
       continue;
     }
+    // A stylesheet is not something anybody wrote to be read. innerText left it
+    // out because it renders nothing; reading the markup has to say so.
+    if (element.matches(codeSelector)) continue;
     const nested = element.tagName === "PRE" ? false : sourceWhitespace || element.matches(quotedSourceSelector);
     const raw = textFromChildNodes(element, nested);
     if (!element.matches(blockSelector)) {
@@ -136,6 +146,9 @@ function trimmedLines(text: string): string {
 // sentences themselves. A line already quoted gains a second marker rather than
 // a second "> ", which is how a quote of a quote has always been written.
 function quoted(text: string): string {
+  // An empty quote is no quote: a lone ">" would claim the message being
+  // answered said something.
+  if (text === "") return "";
   return text
     .replace(/\n+$/, "")
     .split("\n")
