@@ -23,7 +23,8 @@ export function textToHTML(value: string): string {
 // copied out of the message being answered, and the newlines between its tags
 // were never line breaks; converting them would add a blank line for every
 // newline in the original's source.
-const quotedOrPreformattedSelector = "pre, textarea, .rolltop-reply-body, .rolltop-forwarded-body";
+const quotedSourceSelector = ".rolltop-reply-body, .rolltop-forwarded-body";
+const quotedOrPreformattedSelector = `pre, textarea, ${quotedSourceSelector}`;
 
 export function convertTextNewlinesToBreaks(root: ParentNode): void {
   for (const node of Array.from(root.childNodes)) {
@@ -58,44 +59,75 @@ function replaceNewlinesWithBreaks(node: Text): void {
 // out twice as far as the writer spaced it -- and a plain-text reader is
 // exactly who cannot fall back on the HTML part.
 //
-// What matches the rendering is that a block element ends its line, and a <br>
-// adds one only when something follows it inside that block: a <br> at the end
-// of a block is what makes an empty line editable, not a line of its own.
-const blockSelector = "address, blockquote, dd, div, dl, dt, h1, h2, h3, h4, h5, h6, li, ol, p, pre, table, tr, ul";
+// What matches the rendering is that a block element ends the line it is on, a
+// cell ends a column, and a <br> ends a line wherever it stands: a <br> at the
+// end of a block adds nothing on top of the block's own line ending, while one
+// at the end of a bold run still breaks the line the bold run is on.
+const blockSelector =
+  "address, article, aside, blockquote, center, dd, div, dl, dt, figcaption, figure, footer, "
+  + "h1, h2, h3, h4, h5, h6, header, hr, li, main, ol, p, pre, section, table, tr, ul";
+const cellSelector = "td, th";
 
 export function composeTextFromHTML(html: string): string {
   const template = document.createElement("template");
   template.innerHTML = html;
-  return textFromChildNodes(template.content).replace(/\n+$/, "");
+  return textFromChildNodes(template.content, false).replace(/\n+$/, "");
 }
 
-function textFromChildNodes(parent: ParentNode): string {
-  const children = Array.from(parent.childNodes);
+// `sourceWhitespace` marks the markup whose newlines were never line breaks:
+// the quoted and forwarded blocks convertTextNewlinesToBreaks leaves alone for
+// exactly that reason, and reading them literally here would undo the same care
+// on the other side of the message. A reply to an ordinary HTML mail, whose
+// source is indented one tag per line, otherwise arrived as a text part of
+// empty quote markers with a word adrift in each of them. Inside those blocks
+// the whitespace is read the way the mail client that rendered the original
+// read it -- runs of it are one space -- and only <br> and the blocks
+// themselves end a line. A <pre> in there means what it says and is exempt.
+function textFromChildNodes(parent: ParentNode, sourceWhitespace: boolean): string {
   let text = "";
-  children.forEach((node, index) => {
+  for (const node of Array.from(parent.childNodes)) {
     if (node.nodeType === Node.TEXT_NODE) {
-      text += (node as Text).data;
-      return;
+      const data = (node as Text).data;
+      text += sourceWhitespace ? collapsedWhitespace(data, text) : data;
+      continue;
     }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
     const element = node as Element;
     if (element.tagName === "BR") {
-      if (index < children.length - 1) text += "\n";
-      return;
+      text += "\n";
+      continue;
     }
-    const raw = textFromChildNodes(element);
+    const nested = element.tagName === "PRE" ? false : sourceWhitespace || element.matches(quotedSourceSelector);
+    const raw = textFromChildNodes(element, nested);
     if (!element.matches(blockSelector)) {
+      // Two cells of a row are two columns and not one word: without something
+      // between them an item and its price arrive as "Artikel12,50".
+      if (element.matches(cellSelector) && text !== "" && !/\s$/.test(text)) text += "\t";
       text += raw;
-      return;
+      continue;
     }
-    const inner = element.tagName === "BLOCKQUOTE" ? quoted(raw) : raw;
+    const cleaned = nested ? trimmedLines(raw) : raw;
+    const inner = element.tagName === "BLOCKQUOTE" ? quoted(cleaned) : cleaned;
     // A block starts on a line of its own and ends the one it is on. An empty
     // block still ends a line, which is what keeps a blank paragraph blank.
+    if (sourceWhitespace) text = text.replace(/[ \t]+$/, "");
     if (text !== "" && !text.endsWith("\n")) text += "\n";
     text += inner;
     if (inner === "" || !inner.endsWith("\n")) text += "\n";
-  });
+  }
   return text;
+}
+
+// A run of source whitespace is one space, and a space that lands where a line
+// has just ended is not a space at all.
+function collapsedWhitespace(data: string, text: string): string {
+  const collapsed = data.replace(/\s+/g, " ");
+  if (!collapsed.startsWith(" ")) return collapsed;
+  return text === "" || /\s$/.test(text) ? collapsed.slice(1) : collapsed;
+}
+
+function trimmedLines(text: string): string {
+  return text.replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n").replace(/^[ \t]+|[ \t]+$/g, "");
 }
 
 // The message being answered is a <blockquote> in the editor, and the text part

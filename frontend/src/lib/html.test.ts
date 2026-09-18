@@ -105,6 +105,41 @@ describe("composeTextFromHTML", () => {
     );
   });
 
+  it("reads the indentation of a quoted message's source as the whitespace it is", () => {
+    // What a reply to any ordinary HTML mail carries: one tag per line, the
+    // newlines belonging to the source rather than to anything anyone wrote.
+    const reply = "Danke!<br><br><div>On Oct 9, 2026, counter@kamin-mainz.de wrote:</div>"
+      + '<blockquote class="rolltop-reply-body">\n  <table>\n    <tr>\n      <td>Artikel</td>\n'
+      + "      <td>12,50</td>\n    </tr>\n  </table>\n</blockquote>";
+    expect(composeTextFromHTML(reply)).toBe(
+      "Danke!\n\nOn Oct 9, 2026, counter@kamin-mainz.de wrote:\n> Artikel 12,50"
+    );
+  });
+
+  it("keeps a forwarded message's source formatting off its own lines", () => {
+    const forwarded = '<div class="rolltop-forwarded-body">\n  <p>Angebot</p>\n\n  <p>Anlage</p>\n</div>';
+    expect(composeTextFromHTML(forwarded)).toBe("Angebot\nAnlage");
+  });
+
+  it("reads a break that ends a formatting run as the line break it renders", () => {
+    expect(composeTextFromHTML("<div><strong>Erste Zeile<br></strong>Zweite Zeile</div>")).toBe(
+      "Erste Zeile\nZweite Zeile"
+    );
+  });
+
+  it("keeps the two cells of a row two columns", () => {
+    expect(composeTextFromHTML("<table><tr><td>Artikel</td><td>12,50</td></tr></table>")).toBe("Artikel\t12,50");
+  });
+
+  it("gives a centered block of an old newsletter its own line", () => {
+    expect(composeTextFromHTML("<center>Angebot</center><center>Anlage</center>")).toBe("Angebot\nAnlage");
+  });
+
+  it("leaves a preformatted block inside a quote preformatted", () => {
+    const quoted = '<blockquote class="rolltop-reply-body">\n  <pre>zeile eins\nzeile zwei</pre>\n</blockquote>';
+    expect(composeTextFromHTML(quoted)).toBe("> zeile eins\n> zeile zwei");
+  });
+
   it("marks a quote inside a quote once more", () => {
     const nested = "<blockquote><div>Antwort</div><blockquote><div>Frage</div></blockquote></blockquote>";
     expect(composeTextFromHTML(nested)).toBe("> Antwort\n>> Frage");
