@@ -870,16 +870,16 @@ func (s *Server) receivingAccountIdentityID(ctx context.Context, cu currentUser,
 		}
 		return identityIDForAddressValues(unbound, account.Email, account.Username, account.SMTPUsername)
 	}
-	if !messageFromOwnAddress(msg, own) {
-		if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
+	addressed := []string{msg.ToAddr, msg.CCAddr}
+	sender := []string{msg.FromAddr}
+	order := [][]string{addressed, sender}
+	if messageFromOwnAddress(msg, own) {
+		order = [][]string{sender, addressed}
+	}
+	for _, values := range order {
+		if id := identityIDForAddressValues(bound, values...); id > 0 {
 			return id
 		}
-	}
-	if id := identityIDForAddressValues(bound, msg.FromAddr); id > 0 {
-		return id
-	}
-	if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
-		return id
 	}
 	choice, err := selectedComposeIdentityFromChoices(bound, 0)
 	if err != nil {
