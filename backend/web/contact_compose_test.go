@@ -815,7 +815,17 @@ func TestReplyComposeSelectsIdentityOfReceivingAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, address := range []string{"work@example.test", "personal@example.test"} {
+	// An alias whose address is no account's own is bound to the first account
+	// by default, which makes it the work account's alias here.
+	alias, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Alias Me",
+		IsMe:        true,
+		Emails:      []store.ContactEmail{{Email: "alias@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"work@example.test", "personal@example.test", "alias@example.test"} {
 		if err := db.EnsureMailIdentityForEmail(ctx, user.ID, address); err != nil {
 			t.Fatal(err)
 		}
@@ -836,7 +846,7 @@ func TestReplyComposeSelectsIdentityOfReceivingAccount(t *testing.T) {
 	server := &Server{store: db}
 	cu := currentUser{User: user}
 	var uid uint32
-	received := func(account store.MailAccount, to string) store.MessageRecord {
+	received := func(account store.MailAccount, from, to string) store.MessageRecord {
 		t.Helper()
 		uid++
 		mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
@@ -854,7 +864,7 @@ func TestReplyComposeSelectsIdentityOfReceivingAccount(t *testing.T) {
 			MailboxID:       mailbox.ID,
 			BlobID:          blobRec.ID,
 			MessageIDHeader: fmt.Sprintf("<incoming-%d@example.test>", uid),
-			FromAddr:        "Sender <sender@example.test>",
+			FromAddr:        from,
 			ToAddr:          to,
 			Subject:         "Which account",
 			UID:             uid,
@@ -866,20 +876,28 @@ func TestReplyComposeSelectsIdentityOfReceivingAccount(t *testing.T) {
 		}
 		return msg
 	}
+	const sender = "Sender <sender@example.test>"
 	cases := []struct {
 		name    string
 		account store.MailAccount
+		from    string
 		to      string
 		want    int64
 	}{
-		{"list mail in personal account", personal, "Team <team@example.test>", personalMe.Emails[0].ID},
-		{"work address forwarded into personal account", personal, "Work Me <work@example.test>", personalMe.Emails[0].ID},
-		{"personal address forwarded into work account", work, "Personal Me <personal@example.test>", workMe.Emails[0].ID},
-		{"work mail in work account", work, "Work Me <work@example.test>", workMe.Emails[0].ID},
+		{"list mail in personal account", personal, sender, "Team <team@example.test>", personalMe.Emails[0].ID},
+		{"work address forwarded into personal account", personal, sender, "Work Me <work@example.test>", personalMe.Emails[0].ID},
+		{"personal address forwarded into work account", work, sender, "Personal Me <personal@example.test>", workMe.Emails[0].ID},
+		{"work mail in work account", work, sender, "Work Me <work@example.test>", workMe.Emails[0].ID},
+		// Among one account's identities the address the mail was sent to picks
+		// the alias ...
+		{"alias mail in work account", work, sender, "Alias Me <alias@example.test>", alias.Emails[0].ID},
+		// ... unless the mail is the reader's own, where the alias that sent it
+		// outranks the one it was copied to.
+		{"own mail to an alias replies as its sender", work, "Work Me <work@example.test>", "Alias Me <alias@example.test>", workMe.Emails[0].ID},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := received(tc.account, tc.to)
+			msg := received(tc.account, tc.from, tc.to)
 			got := server.replyFromIdentityID(ctx, cu, msg, []store.MessageRecord{msg})
 			if got != tc.want {
 				t.Fatalf("from_identity_id = %d, want %d", got, tc.want)

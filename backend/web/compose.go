@@ -807,10 +807,10 @@ func (s *Server) replyFromIdentityID(ctx context.Context, cu currentUser, msg st
 	if len(choices) == 0 {
 		return 0
 	}
-	if id := s.receivingAccountIdentityID(ctx, cu, choices, msg); id > 0 {
+	own := s.ownAddresses(ctx, cu.User)
+	if id := s.receivingAccountIdentityID(ctx, cu, choices, msg, own); id > 0 {
 		return id
 	}
-	own := s.ownAddresses(ctx, cu.User)
 	if !messageFromOwnAddress(msg, own) {
 		if id := identityIDForAddressValues(choices, msg.ToAddr, msg.CCAddr); id > 0 {
 			return id
@@ -843,10 +843,11 @@ func (s *Server) replyFromIdentityID(ctx context.Context, cu currentUser, msg st
 // receivingAccountIdentityID resolves the identity that belongs to the IMAP
 // account the message was received through. Several identities on the same
 // account are the account's aliases, and the one the message was addressed to
-// wins among them; otherwise the account's primary identity, then its first.
-// An identity that is not bound to any account still counts as the account's
-// own when it carries the account's address.
-func (s *Server) receivingAccountIdentityID(ctx context.Context, cu currentUser, choices []composeIdentity, msg store.MessageRecord) int64 {
+// wins among them -- unless the message is the reader's own, where the alias
+// that sent it wins over one it was copied to; otherwise the account's primary
+// identity, then its first. An identity that is not bound to any account still
+// counts as the account's own when it carries the account's address.
+func (s *Server) receivingAccountIdentityID(ctx context.Context, cu currentUser, choices []composeIdentity, msg store.MessageRecord, own map[string]bool) int64 {
 	if msg.AccountID <= 0 {
 		return 0
 	}
@@ -869,18 +870,22 @@ func (s *Server) receivingAccountIdentityID(ctx context.Context, cu currentUser,
 		}
 		return identityIDForAddressValues(unbound, account.Email, account.Username, account.SMTPUsername)
 	}
-	if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
-		return id
+	if !messageFromOwnAddress(msg, own) {
+		if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
+			return id
+		}
 	}
 	if id := identityIDForAddressValues(bound, msg.FromAddr); id > 0 {
 		return id
 	}
-	for _, choice := range bound {
-		if choice.IsPrimary && choice.ID > 0 {
-			return choice.ID
-		}
+	if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
+		return id
 	}
-	return bound[0].ID
+	choice, err := selectedComposeIdentityFromChoices(bound, 0)
+	if err != nil {
+		return 0
+	}
+	return choice.ID
 }
 
 func identityIDForAddressValues(choices []composeIdentity, values ...string) int64 {
