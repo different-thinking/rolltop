@@ -794,10 +794,21 @@ func selectedComposeIdentityFromChoices(choices []composeIdentity, id int64) (co
 	return choices[0], nil
 }
 
+// replyFromIdentityID picks the From identity a reply is sent as. The account
+// that received the message answers it: a reply goes out through the identity
+// bound to the message's own IMAP account, whatever addresses the headers
+// carry. A message that reached this account through an alias, a distribution
+// list, or Bcc names none of the user's addresses in To/Cc -- or names one that
+// belongs to a different account -- and answering it from another account would
+// be a reply the recipient did not write to. Only a message with no identity on
+// its account falls back to matching the header addresses, and then the thread.
 func (s *Server) replyFromIdentityID(ctx context.Context, cu currentUser, msg store.MessageRecord, thread []store.MessageRecord) int64 {
 	choices := s.composeIdentityChoices(ctx, cu)
 	if len(choices) == 0 {
 		return 0
+	}
+	if id := s.receivingAccountIdentityID(ctx, cu, choices, msg); id > 0 {
+		return id
 	}
 	own := s.ownAddresses(ctx, cu.User)
 	if !messageFromOwnAddress(msg, own) {
@@ -827,6 +838,49 @@ func (s *Server) replyFromIdentityID(ctx context.Context, cu currentUser, msg st
 		}
 	}
 	return 0
+}
+
+// receivingAccountIdentityID resolves the identity that belongs to the IMAP
+// account the message was received through. Several identities on the same
+// account are the account's aliases, and the one the message was addressed to
+// wins among them; otherwise the account's primary identity, then its first.
+// An identity that is not bound to any account still counts as the account's
+// own when it carries the account's address.
+func (s *Server) receivingAccountIdentityID(ctx context.Context, cu currentUser, choices []composeIdentity, msg store.MessageRecord) int64 {
+	if msg.AccountID <= 0 {
+		return 0
+	}
+	var bound, unbound []composeIdentity
+	for _, choice := range choices {
+		switch choice.IMAPAccountID {
+		case msg.AccountID:
+			bound = append(bound, choice)
+		case 0:
+			unbound = append(unbound, choice)
+		}
+	}
+	if len(bound) == 0 {
+		if len(unbound) == 0 {
+			return 0
+		}
+		account, err := s.store.GetMailAccountForUser(ctx, cu.User.ID, msg.AccountID)
+		if err != nil {
+			return 0
+		}
+		return identityIDForAddressValues(unbound, account.Email, account.Username, account.SMTPUsername)
+	}
+	if id := identityIDForAddressValues(bound, msg.ToAddr, msg.CCAddr); id > 0 {
+		return id
+	}
+	if id := identityIDForAddressValues(bound, msg.FromAddr); id > 0 {
+		return id
+	}
+	for _, choice := range bound {
+		if choice.IsPrimary && choice.ID > 0 {
+			return choice.ID
+		}
+	}
+	return bound[0].ID
 }
 
 func identityIDForAddressValues(choices []composeIdentity, values ...string) int64 {

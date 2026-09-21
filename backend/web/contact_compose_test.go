@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -758,6 +759,132 @@ func TestReplyComposeSelectsIdentityMatchingRecipient(t *testing.T) {
 	form.FromIdentityID = server.replyFromIdentityID(ctx, currentUser{User: user}, msg, []store.MessageRecord{msg})
 	if form.FromIdentityID != alias.Emails[0].ID {
 		t.Fatalf("from_identity_id = %d, want %d", form.FromIdentityID, alias.Emails[0].ID)
+	}
+}
+
+// The account a message was received through answers it, whatever the headers
+// say: mail that reached the personal account through a list, an alias, or a
+// forward from the work address still goes back out as the personal identity.
+func TestReplyComposeSelectsIdentityOfReceivingAccount(t *testing.T) {
+	ctx := context.Background()
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err := db.CreateUser(ctx, "work@example.test", "Me", "hash", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAccount := func(email string) store.MailAccount {
+		t.Helper()
+		account, err := db.UpsertMailAccount(ctx, store.MailAccount{
+			UserID:            user.ID,
+			Email:             email,
+			Host:              "imap.example.test",
+			Port:              993,
+			Username:          email,
+			EncryptedPassword: "encrypted",
+			UseTLS:            true,
+			Mailbox:           "INBOX",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return account
+	}
+	work := newAccount("work@example.test")
+	personal := newAccount("personal@example.test")
+	if work.ID == personal.ID {
+		t.Fatalf("expected two accounts, got one (%d)", work.ID)
+	}
+	workMe, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Work Me",
+		IsMe:        true,
+		IsPrimary:   true,
+		Emails:      []store.ContactEmail{{Email: "work@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	personalMe, err := db.CreateContact(ctx, user.ID, store.Contact{
+		DisplayName: "Personal Me",
+		IsMe:        true,
+		Emails:      []store.ContactEmail{{Email: "personal@example.test", IsPrimary: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"work@example.test", "personal@example.test"} {
+		if err := db.EnsureMailIdentityForEmail(ctx, user.ID, address); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identities, err := db.ListMailIdentitiesForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range identities {
+		want := work.ID
+		if identity.Email == "personal@example.test" {
+			want = personal.ID
+		}
+		if identity.IMAPAccountID != want {
+			t.Fatalf("identity %s bound to account %d, want %d", identity.Email, identity.IMAPAccountID, want)
+		}
+	}
+	server := &Server{store: db}
+	cu := currentUser{User: user}
+	var uid uint32
+	received := func(account store.MailAccount, to string) store.MessageRecord {
+		t.Helper()
+		uid++
+		mailbox, err := db.GetOrCreateMailbox(ctx, user.ID, account.ID, "INBOX")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := fmt.Sprintf("users/%d/blobs/accounts/%d/mailboxes/INBOX/uid-%d.eml", user.ID, account.ID, uid)
+		blobRec, err := db.CreateBlob(ctx, store.BlobRecord{UserID: user.ID, Kind: "message", Path: path, SHA256: path, Size: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := db.CreateMessage(ctx, store.CreateMessage{
+			UserID:          user.ID,
+			AccountID:       account.ID,
+			MailboxID:       mailbox.ID,
+			BlobID:          blobRec.ID,
+			MessageIDHeader: fmt.Sprintf("<incoming-%d@example.test>", uid),
+			FromAddr:        "Sender <sender@example.test>",
+			ToAddr:          to,
+			Subject:         "Which account",
+			UID:             uid,
+			BlobPath:        blobRec.Path,
+			BodyText:        "hello",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return msg
+	}
+	cases := []struct {
+		name    string
+		account store.MailAccount
+		to      string
+		want    int64
+	}{
+		{"list mail in personal account", personal, "Team <team@example.test>", personalMe.Emails[0].ID},
+		{"work address forwarded into personal account", personal, "Work Me <work@example.test>", personalMe.Emails[0].ID},
+		{"personal address forwarded into work account", work, "Personal Me <personal@example.test>", workMe.Emails[0].ID},
+		{"work mail in work account", work, "Work Me <work@example.test>", workMe.Emails[0].ID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := received(tc.account, tc.to)
+			got := server.replyFromIdentityID(ctx, cu, msg, []store.MessageRecord{msg})
+			if got != tc.want {
+				t.Fatalf("from_identity_id = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
