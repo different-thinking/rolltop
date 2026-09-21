@@ -575,6 +575,16 @@ site and in review.
   second of them unstorable and failed the whole sync rather than one row. One
   contact still carries an address once; saving dedupes by normalized address,
   because two rows for one address are two answers to a question that has one.
+- **A reply is sent from the account that received the message**
+  (`replyFromIdentityID` asks `receivingAccountIdentityID` first). The identity
+  is chosen by `messages.account_id`, the IMAP account the message arrived
+  through, and only among that account's identities does the address the
+  message was sent to pick the alias. The headers alone cannot answer this: mail
+  that arrived through a list, an alias the address book does not carry, a Bcc,
+  or a forward from the reader's other account names no address of this account
+  in To/Cc -- or names one of a different account -- and matching them sent the
+  reply out through a server the message never touched. Header matching remains
+  the fallback for a message whose account has no identity at all.
 - An outgoing identity is created by hand and never derived. It comes from the
   identity editor, from adding a mailbox, or from provisioning a user (sign-up,
   OIDC) -- `Store.EnsureMailIdentityForEmail` is the only door, and every caller
