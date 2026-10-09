@@ -468,3 +468,248 @@ func connectionsList(t *testing.T, env *googleTestEnv) apiGoogleConnection {
 	}
 	return payload.Connections[0]
 }
+
+// secondCalendar stores another writable calendar beside storedCalendar's.
+func secondCalendar(t *testing.T, env *googleTestEnv, user store.User, connectionID int64, accessRole string) store.Calendar {
+	t.Helper()
+	calendar, err := env.db.UpsertCalendar(context.Background(), user.ID, store.CalendarUpsert{
+		GoogleConnectionID: connectionID,
+		GoogleCalendarID:   "family@group.calendar.google.com",
+		Summary:            "Family",
+		AccessRole:         accessRole,
+		Selected:           true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return calendar
+}
+
+func rangeEvents(t *testing.T, env *googleTestEnv, user store.User, from time.Time) []apiCalendarEvent {
+	t.Helper()
+	response := env.send(t, user, http.MethodGet, rangeQuery(from, 7), nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Events []apiCalendarEvent `json:"events"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Events
+}
+
+// An event kept in two calendars is one appointment, so the week draws it once
+// and names the other calendar on it. The entered copy is drawn while its
+// calendar is on; with it switched off the copy stands in, still naming where
+// else the appointment lives.
+func TestCalendarRangeDrawsALinkedPairOnce(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	ctx := context.Background()
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	family := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	primary, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1", Summary: "Parents' evening",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c1", Summary: "Parents' evening",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated event in the second calendar is drawn as itself.
+	if _, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: family.ID, ExternalID: "f1", Summary: "Football",
+		StartAt: start.Add(2 * time.Hour), EndAt: start.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want the pair once and the unrelated event", events)
+	}
+	if events[0].ID != primary.ID || !events[0].LinkPrimary ||
+		len(events[0].AlsoIn) != 1 || events[0].AlsoIn[0].CalendarID != family.ID || events[0].AlsoIn[0].EventID != copied.ID {
+		t.Fatalf("drawn entry = %+v, want the entered copy naming the second calendar", events[0])
+	}
+	if events[1].Summary != "Football" || len(events[1].AlsoIn) != 0 {
+		t.Fatalf("unrelated entry = %+v, want it drawn as itself", events[1])
+	}
+
+	if err := env.db.SetCalendarSelected(ctx, env.owner.ID, work.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	events = rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
+	if len(events) != 2 || events[0].ID != copied.ID ||
+		len(events[0].AlsoIn) != 1 || events[0].AlsoIn[0].CalendarID != work.ID {
+		t.Fatalf("events with the work calendar off = %+v, want the copy naming the hidden calendar", events)
+	}
+
+	// The other tenant sees none of it.
+	if theirs := rangeEvents(t, env, env.other, start.AddDate(0, 0, -1)); len(theirs) != 0 {
+		t.Fatalf("other tenant saw %+v, want nothing", theirs)
+	}
+}
+
+// Choosing the second calendar is a protected write, refuses a calendar that
+// could never take a copy, and moves the mark rather than adding one.
+func TestCalendarCopyTargetIsProtected(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	shared := secondCalendar(t, env, env.owner, connection.ID, "reader")
+	withCalendarSync(t, env, &fakeCalendarAPI{}, true)
+	path := func(calendar store.Calendar) string {
+		return "/api/calendar/calendars/" + strconv.FormatInt(calendar.ID, 10)
+	}
+
+	if other := env.send(t, env.other, http.MethodPut, path(work), []byte(`{"copy_target":true}`)); other.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant choice status=%d, want 404", other.Code)
+	}
+	if response := env.send(t, env.owner, http.MethodPut, path(shared), []byte(`{"copy_target":true}`)); response.Code != http.StatusBadRequest {
+		t.Fatalf("read-only choice status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	response := env.send(t, env.owner, http.MethodPut, path(work), []byte(`{"copy_target":true}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Calendar apiCalendar `json:"calendar"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	// Leaving out "selected" must not switch the calendar off.
+	if !payload.Calendar.CopyTarget || !payload.Calendar.Selected {
+		t.Fatalf("calendar = %+v, want it chosen and still visible", payload.Calendar)
+	}
+}
+
+// Asked for a copy, the route creates the event and its copy at Google and
+// answers with the event naming where the copy went. Deleting the event takes
+// the copy with it.
+func TestCreateEventWithACopyAndDeleteBoth(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	family := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	body := []byte(`{"calendar_id":` + strconv.FormatInt(work.ID, 10) +
+		`,"summary":"Parents' evening","copy":true,"start_at":"` + start.Format(time.RFC3339) +
+		`","end_at":"` + start.Add(time.Hour).Format(time.RFC3339) + `"}`)
+
+	// No second calendar chosen yet: the request is refused rather than
+	// quietly saving without the copy the reader asked for.
+	if response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body); response.Code != http.StatusBadRequest {
+		t.Fatalf("copy without a second calendar status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	if fake.created != 0 {
+		fake.mu.Unlock()
+		t.Fatalf("Google was asked to create %d events for a refused request", fake.created)
+	}
+	fake.mu.Unlock()
+
+	if err := env.db.SetCalendarCopyTarget(context.Background(), env.owner.ID, family.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Event    apiCalendarEvent `json:"event"`
+		Warnings []string         `json:"warnings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", payload.Warnings)
+	}
+	if !payload.Event.LinkPrimary || len(payload.Event.AlsoIn) != 1 || payload.Event.AlsoIn[0].CalendarID != family.ID {
+		t.Fatalf("event = %+v, want it to name the copy in the second calendar", payload.Event)
+	}
+	fake.mu.Lock()
+	created := fake.created
+	fake.mu.Unlock()
+	if created != 2 {
+		t.Fatalf("Google was asked to create %d events, want the event and its copy", created)
+	}
+
+	target := "/api/calendar/events/" + strconv.FormatInt(payload.Event.ID, 10)
+	if response := env.send(t, env.owner, http.MethodDelete, target, nil); response.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	deleted := len(fake.deleted)
+	fake.mu.Unlock()
+	if deleted != 2 {
+		t.Fatalf("Google was asked to delete %d events, want both copies", deleted)
+	}
+	if events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1)); len(events) != 0 {
+		t.Fatalf("events after the delete = %+v, want none", events)
+	}
+}
+
+// Every single-event answer names the event's copies. The dialog starts its
+// "also add to" box from them, so an answer without them -- after an RSVP, or
+// the version that won a conflict -- would have the next save delete the copy.
+func TestEventAnswersNameTheirCopies(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	ctx := context.Background()
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	family := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	primary, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1", ETag: "etag-1", Summary: "Review",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+		Attendees: []store.CalendarAttendee{{Email: "owner@example.test", Self: true, Response: "needsAction"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c1", Summary: "Review",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeCalendarAPI{event: map[string]any{
+		"id": "p1", "etag": "etag-2", "status": "confirmed", "summary": "Review",
+		"start":     map[string]any{"dateTime": start.Format(time.RFC3339)},
+		"end":       map[string]any{"dateTime": start.Add(time.Hour).Format(time.RFC3339)},
+		"attendees": []map[string]any{{"email": "owner@example.test", "self": true, "responseStatus": "accepted"}},
+		"extendedProperties": map[string]any{"private": map[string]any{
+			"rolltopLink": "k1", "rolltopLinkRole": "primary",
+		}},
+	}}
+	withCalendarSync(t, env, fake, true)
+
+	target := "/api/calendar/events/" + strconv.FormatInt(primary.ID, 10) + "/respond"
+	response := env.send(t, env.owner, http.MethodPost, target, []byte(`{"response":"accepted"}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Event apiCalendarEvent `json:"event"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Event.MyResponse != "accepted" || len(payload.Event.AlsoIn) != 1 || payload.Event.AlsoIn[0].CalendarID != family.ID {
+		t.Fatalf("event = %+v, want the answer and the copy named", payload.Event)
+	}
+}

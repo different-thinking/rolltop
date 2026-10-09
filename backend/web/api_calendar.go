@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ type apiCalendar struct {
 	CanWrite        bool   `json:"can_write"`
 	IsPrimary       bool   `json:"is_primary"`
 	Selected        bool   `json:"selected"`
+	// CopyTarget marks the reader's second calendar, the one a new event can
+	// be copied into as well.
+	CopyTarget bool `json:"copy_target"`
 	// SyncedFrom is the oldest point the mirror covers. An empty week before it
 	// means "not synced", not "nothing scheduled".
 	SyncedFrom   string `json:"synced_from"`
@@ -76,6 +80,20 @@ type apiCalendarEvent struct {
 	Attendees        []apiCalendarAttendee `json:"attendees"`
 	MyResponse       string                `json:"my_response"`
 	HTMLLink         string                `json:"html_link"`
+	// LinkPrimary marks the copy of a linked pair that was entered, and the
+	// one that carries its guest list.
+	LinkPrimary bool `json:"link_primary"`
+	// AlsoIn lists the other calendars holding a copy of this event. The week
+	// view draws a linked pair once, and this is how the entry it draws says
+	// where else the appointment lives -- including a calendar that is
+	// switched off.
+	AlsoIn []apiCalendarEventCopy `json:"also_in"`
+}
+
+// apiCalendarEventCopy is one other copy of a linked event.
+type apiCalendarEventCopy struct {
+	CalendarID int64 `json:"calendar_id"`
+	EventID    int64 `json:"event_id"`
 }
 
 // apiGoogleCalendarSync is the per-connection calendar sync state shown in
@@ -105,6 +123,7 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 		CanWrite:        calendar.CanWrite(),
 		IsPrimary:       calendar.IsPrimary,
 		Selected:        calendar.Selected,
+		CopyTarget:      calendar.CopyTarget,
 		SyncedFrom:      timeString(calendar.WindowStartAt),
 		LastSyncAt:      timeString(calendar.LastSyncAt),
 		Status:          calendar.Status,
@@ -142,7 +161,32 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 		Attendees:        attendees,
 		MyResponse:       event.MyResponse,
 		HTMLLink:         event.HTMLLink,
+		LinkPrimary:      event.Linked() && event.LinkPrimary,
+		AlsoIn:           []apiCalendarEventCopy{},
 	}
+}
+
+// presentCalendarEvent renders one event a write answered with, naming its
+// copies. Every single-event answer has to: the dialog reads also_in to decide
+// whether the "also add to" box starts ticked, and an answer without it would
+// have the next save delete a copy nobody asked to remove. A failed lookup
+// costs the names, which the next week reload restores.
+func (s *Server) presentCalendarEvent(ctx context.Context, userID int64, event store.CalendarEvent) apiCalendarEvent {
+	copies, err := s.store.ListCalendarEventCopies(ctx, userID, event)
+	if err != nil {
+		log.Printf("calendar event copies user_id=%d event_id=%d: %v", userID, event.ID, err)
+	}
+	return apiCalendarEventWithCopies(event, copies)
+}
+
+// apiCalendarEventWithCopies renders an event together with the copies it
+// stands for.
+func apiCalendarEventWithCopies(event store.CalendarEvent, copies []store.CalendarEvent) apiCalendarEvent {
+	out := apiCalendarEventFromStore(event)
+	for _, copied := range copies {
+		out.AlsoIn = append(out.AlsoIn, apiCalendarEventCopy{CalendarID: copied.CalendarID, EventID: copied.ID})
+	}
+	return out
 }
 
 // apiCalendarPath routes everything under /api/calendar/.
@@ -205,7 +249,9 @@ func (s *Server) presentCalendars(ctx context.Context, userID int64, calendars [
 	return out
 }
 
-// apiCalendarByID switches one calendar's visibility.
+// apiCalendarByID switches one calendar's visibility, or makes it the reader's
+// second calendar. Either field may be left out; a request naming neither
+// changes nothing and answers with the calendar as it is.
 func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID int64, rest string) {
 	calendarID, ok := parsePositiveID(w, rest)
 	if !ok {
@@ -219,12 +265,14 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		return
 	}
 	var in struct {
-		Selected bool `json:"selected"`
+		Selected   *bool `json:"selected"`
+		CopyTarget *bool `json:"copy_target"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := s.store.SetCalendarSelected(r.Context(), userID, calendarID, in.Selected); err != nil {
+	calendar, err := s.store.Calendar(r.Context(), userID, calendarID)
+	if err != nil {
 		if store.IsNotFound(err) {
 			http.NotFound(w, r)
 			return
@@ -232,7 +280,25 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		s.serverError(w, r, err)
 		return
 	}
-	calendar, err := s.store.Calendar(r.Context(), userID, calendarID)
+	if in.CopyTarget != nil {
+		// A copy is a write, so a calendar shared read-only would turn every
+		// event entered with a copy into a copy Google refuses.
+		if *in.CopyTarget && !calendar.CanWrite() {
+			writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
+			return
+		}
+		if err := s.store.SetCalendarCopyTarget(r.Context(), userID, calendarID, *in.CopyTarget); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	if in.Selected != nil {
+		if err := s.store.SetCalendarSelected(r.Context(), userID, calendarID, *in.Selected); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	calendar, err = s.store.Calendar(r.Context(), userID, calendarID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -241,7 +307,7 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	// waiting for the next poll would show the user an empty week they would
 	// read as "nothing scheduled". A sync failure is not fatal here: the
 	// visibility change itself succeeded and the poll will retry.
-	if in.Selected && calendar.LastSuccessAt.IsZero() && s.googleCalendar != nil {
+	if in.Selected != nil && *in.Selected && calendar.LastSuccessAt.IsZero() && s.googleCalendar != nil {
 		if err := s.googleCalendar.SyncCalendar(r.Context(), userID, calendarID); err != nil {
 			log.Printf("calendar first sync user_id=%d calendar_id=%d: %v", userID, calendarID, err)
 		}
@@ -299,11 +365,73 @@ func (s *Server) calendarEventRange(w http.ResponseWriter, r *http.Request, user
 		s.serverError(w, r, err)
 		return
 	}
+	linked, err := s.store.ListLinkedCalendarEventsInRange(r.Context(), userID, from, to)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	writeJSON(w, map[string]any{"events": foldLinkedEvents(events, linked, calendars)})
+}
+
+// linkedGroupKey identifies one appointment kept in several calendars. The
+// start is part of it because Google hands a link down to every occurrence of
+// a series, and because a copy moved at Google is no longer the same
+// appointment: it is drawn on its own rather than hidden behind the other.
+func linkedGroupKey(event store.CalendarEvent) string {
+	return event.LinkKey + "\x00" + strconv.FormatInt(event.StartAt.Unix(), 10)
+}
+
+// foldLinkedEvents draws each linked pair once. events are the visible
+// calendars' events in drawing order; linked is every linked event in the
+// range, from every calendar, which is what the drawn entry needs to name the
+// copies it stands for.
+//
+// The entry drawn is the copy that was entered when its calendar is switched
+// on -- it carries the guest list and the invitation answer -- and otherwise
+// the copy in the first visible calendar. Folding never hides an event whose
+// group it cannot find: drawing a copy twice is recoverable, hiding the only
+// one is not.
+func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Calendar) []apiCalendarEvent {
+	rank := make(map[int64]int, len(calendars))
+	visible := make(map[int64]bool, len(calendars))
+	for i, calendar := range calendars {
+		rank[calendar.ID] = i
+		visible[calendar.ID] = calendar.Selected
+	}
+	groups := map[string][]store.CalendarEvent{}
+	for _, event := range linked {
+		key := linkedGroupKey(event)
+		groups[key] = append(groups[key], event)
+	}
+	for key, members := range groups {
+		sort.SliceStable(members, func(i, j int) bool {
+			a, b := members[i], members[j]
+			if visible[a.CalendarID] != visible[b.CalendarID] {
+				return visible[a.CalendarID]
+			}
+			if a.LinkPrimary != b.LinkPrimary {
+				return a.LinkPrimary
+			}
+			if rank[a.CalendarID] != rank[b.CalendarID] {
+				return rank[a.CalendarID] < rank[b.CalendarID]
+			}
+			return a.ID < b.ID
+		})
+		groups[key] = members
+	}
 	out := make([]apiCalendarEvent, 0, len(events))
 	for _, event := range events {
-		out = append(out, apiCalendarEventFromStore(event))
+		members := groups[linkedGroupKey(event)]
+		if !event.Linked() || len(members) == 0 {
+			out = append(out, apiCalendarEventFromStore(event))
+			continue
+		}
+		if members[0].ID != event.ID {
+			continue
+		}
+		out = append(out, apiCalendarEventWithCopies(event, members[1:]))
 	}
-	writeJSON(w, map[string]any{"events": out})
+	return out
 }
 
 // calendarEventInput is what the event dialog submits.
@@ -321,6 +449,22 @@ type calendarEventInput struct {
 		Name     string `json:"name"`
 		Optional bool   `json:"optional"`
 	} `json:"attendees"`
+	// Copy asks for the event to be kept in the reader's second calendar as
+	// well (true) or no longer (false). Left out, an edit keeps whatever
+	// copies the event has and a create makes none.
+	Copy *bool `json:"copy"`
+}
+
+// copyChange reads what the submission asks of the second calendar's copy.
+func (in calendarEventInput) copyChange() googlecalendar.CopyChange {
+	switch {
+	case in.Copy == nil:
+		return googlecalendar.CopyKeep
+	case *in.Copy:
+		return googlecalendar.CopyAdd
+	default:
+		return googlecalendar.CopyRemove
+	}
 }
 
 // toStoreEvent validates the submitted event and renders it as a stored row.
@@ -380,12 +524,89 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		writeAPIError(w, http.StatusBadRequest, "An event needs a calendar.")
 		return
 	}
-	created, err := s.googleCalendar.CreateRemoteEvent(r.Context(), userID, in.CalendarID, event)
+	var copyCalendarID int64
+	if in.copyChange() == googlecalendar.CopyAdd {
+		target, ok := s.copyTargetForWrite(w, r, userID)
+		if !ok {
+			return
+		}
+		copyCalendarID = target.ID
+	}
+	created, problems, err := s.googleCalendar.CreateRemoteEventWithCopy(r.Context(), userID, in.CalendarID, copyCalendarID, event)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
 	}
-	writeJSON(w, map[string]any{"event": apiCalendarEventFromStore(created)})
+	writeJSON(w, map[string]any{
+		"event":    s.presentCalendarEvent(r.Context(), userID, created),
+		"warnings": s.linkedProblemMessages(r.Context(), userID, problems),
+	})
+}
+
+// copyTargetForWrite resolves the reader's second calendar for a request that
+// asked for a copy. Asking for one with no second calendar chosen is a stale
+// form, not something to ignore: the reader would believe the copy was made.
+func (s *Server) copyTargetForWrite(w http.ResponseWriter, r *http.Request, userID int64) (store.Calendar, bool) {
+	target, err := s.store.CopyTargetCalendar(r.Context(), userID)
+	if store.IsNotFound(err) {
+		writeAPIError(w, http.StatusBadRequest, "No second calendar is chosen to copy events into.")
+		return store.Calendar{}, false
+	}
+	if err != nil {
+		s.serverError(w, r, err)
+		return store.Calendar{}, false
+	}
+	if !target.CanWrite() {
+		writeAPIError(w, http.StatusBadRequest, "Your second calendar is shared read-only, so nothing can be copied into it.")
+		return store.Calendar{}, false
+	}
+	return target, true
+}
+
+// linkedProblemMessages describes the copies a write could not bring along.
+// The write itself succeeded, so these travel beside its answer rather than as
+// an error. The reason is chosen from the error's kind, never its text, for
+// the same reason writeCalendarError never forwards Google's.
+func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, problems []googlecalendar.LinkedProblem) []string {
+	out := []string{}
+	for _, problem := range problems {
+		log.Printf("calendar linked copy user_id=%d calendar_id=%d action=%s: %v",
+			userID, problem.CalendarID, problem.Action, problem.Err)
+		name := "the other calendar"
+		if calendar, err := s.store.Calendar(ctx, userID, problem.CalendarID); err == nil && strings.TrimSpace(calendar.Summary) != "" {
+			name = "“" + calendar.Summary + "”"
+		}
+		var what string
+		switch problem.Action {
+		case googlecalendar.LinkedCreate:
+			what = "The event could not be copied to " + name
+		case googlecalendar.LinkedDelete:
+			what = "The copy in " + name + " could not be deleted"
+		default:
+			what = "The copy in " + name + " could not be updated"
+		}
+		out = append(out, what+": "+linkedProblemReason(problem.Err))
+	}
+	return out
+}
+
+func linkedProblemReason(err error) string {
+	switch {
+	case errors.Is(err, googlecalendar.ErrReadOnlyCalendar):
+		return "that calendar is shared read-only."
+	case errors.Is(err, googlecalendar.ErrRemoteDeleted):
+		return "it was deleted in Google."
+	case errors.Is(err, googlecalendar.ErrRemoteChanged), errors.Is(err, googlecalendar.ErrConflict):
+		return "it was changed in Google, and that version was kept."
+	case errors.Is(err, googlecalendar.ErrUnauthorized):
+		return "its Google account needs to be authorized again."
+	case errors.Is(err, googlecalendar.ErrScopeMissing), errors.Is(err, googlecalendar.ErrForbidden):
+		return "its Google account has not granted access to calendars."
+	case errors.Is(err, googlecalendar.ErrUpstream), errors.Is(err, context.DeadlineExceeded):
+		return "Google could not be reached."
+	default:
+		return "Google refused it."
+	}
 }
 
 // apiCalendarEventByID handles the per-event operations.
@@ -438,13 +659,37 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	// the request claims.
 	edited.CalendarID = existing.CalendarID
 	edited.ExternalID = existing.ExternalID
-	updated, err := s.googleCalendar.UpdateRemoteEvent(r.Context(), userID, existing, edited)
+	change := in.copyChange()
+	var copyCalendarID int64
+	switch change {
+	case googlecalendar.CopyAdd:
+		target, ok := s.copyTargetForWrite(w, r, userID)
+		if !ok {
+			return
+		}
+		copyCalendarID = target.ID
+	case googlecalendar.CopyRemove:
+		// Taking a copy away needs no write access to check up front: the
+		// delete itself is refused on a read-only calendar and says so.
+		if target, err := s.store.CopyTargetCalendar(r.Context(), userID); err == nil {
+			copyCalendarID = target.ID
+		} else if !store.IsNotFound(err) {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	copies, err := s.store.ListCalendarEventCopies(r.Context(), userID, existing)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	updated, problems, err := s.googleCalendar.UpdateRemoteEventGroup(r.Context(), userID, existing, edited, copies, copyCalendarID, change)
 	if errors.Is(err, googlecalendar.ErrRemoteChanged) {
 		// The user's edit lost, and the version that won is what they need to
 		// see. 409 with the winning event is more useful than a bare error.
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
 			"error": "This event was changed in Google while you were editing it. The Google version is now shown.",
-			"event": apiCalendarEventFromStore(updated),
+			"event": s.presentCalendarEvent(r.Context(), userID, updated),
 		})
 		return
 	}
@@ -452,7 +697,10 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 		s.writeCalendarError(w, r, err)
 		return
 	}
-	writeJSON(w, map[string]any{"event": apiCalendarEventFromStore(updated)})
+	writeJSON(w, map[string]any{
+		"event":    s.presentCalendarEvent(r.Context(), userID, updated),
+		"warnings": s.linkedProblemMessages(r.Context(), userID, problems),
+	})
 }
 
 func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, userID, eventID int64) {
@@ -472,16 +720,19 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
-	if err := s.googleCalendar.DeleteRemoteEvent(r.Context(), userID, event); err != nil {
-		if errors.Is(err, googlecalendar.ErrRemoteDeleted) {
-			// Already gone at Google is the end state the user asked for.
-			writeJSON(w, map[string]any{"ok": true})
-			return
-		}
+	copies, err := s.store.ListCalendarEventCopies(r.Context(), userID, event)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	// Already gone at Google is the end state the user asked for, and is
+	// absorbed inside the group delete so the copies still go with it.
+	problems, err := s.googleCalendar.DeleteRemoteEventGroup(r.Context(), userID, event, copies)
+	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "warnings": s.linkedProblemMessages(r.Context(), userID, problems)})
 }
 
 func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, userID, eventID int64) {
@@ -511,7 +762,7 @@ func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, us
 	if errors.Is(err, googlecalendar.ErrRemoteChanged) {
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
 			"error": "This event was changed in Google while you were answering it. The Google version is now shown.",
-			"event": apiCalendarEventFromStore(answered),
+			"event": s.presentCalendarEvent(r.Context(), userID, answered),
 		})
 		return
 	}
@@ -519,7 +770,7 @@ func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, us
 		s.writeCalendarError(w, r, err)
 		return
 	}
-	writeJSON(w, map[string]any{"event": apiCalendarEventFromStore(answered)})
+	writeJSON(w, map[string]any{"event": s.presentCalendarEvent(r.Context(), userID, answered)})
 }
 
 // googleCalendarSyncState assembles the calendar sync state of one connection.

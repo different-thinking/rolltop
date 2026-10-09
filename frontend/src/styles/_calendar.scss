@@ -511,3 +511,59 @@ $calendar-gutter: 58px;
     }
   }
 }
+
+// The second-calendar picker sits under the visibility switches, separated from
+// them because it is a setting rather than a switch.
+.calendar-copy-target {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+
+  select {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+.calendar-copy-target-hint {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+// One dot per other calendar holding a copy of an entry the week draws once.
+// The surface-coloured ring keeps a dot visible on an entry of its own colour.
+.calendar-event-copies {
+  display: inline-flex;
+  gap: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.calendar-event-copy-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--surface);
+}
+
+.calendar-also-in {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+
+.calendar-also-in-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.calendar-also-in-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

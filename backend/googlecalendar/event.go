@@ -57,6 +57,7 @@ func ToEvent(event Event, calendarID int64) store.CalendarEvent {
 		RemoteUpdatedAt:  parseTimestamp(event.Updated),
 	}
 	out.Attendees, out.MyResponse = attendees(event.Attendees)
+	out.LinkKey, out.LinkPrimary = eventLink(event)
 	return out
 }
 
@@ -127,13 +128,18 @@ func attendees(list []EventAttendee) ([]store.CalendarAttendee, string) {
 // ToWrite renders a stored event as the body of an insert or an update. The
 // guest list is deliberately left out: whether a write may touch it is a
 // decision only the caller can make, and getting it wrong resets every RSVP.
+//
+// A linked event writes its link along with it. Google merges private
+// properties key by key, so restating a link it already holds changes nothing,
+// and an unlinked event leaves the field out entirely.
 func ToWrite(event store.CalendarEvent) EventWrite {
 	return EventWrite{
-		Summary:     event.Summary,
-		Description: event.Description,
-		Location:    event.Location,
-		Start:       toEventDateTime(event.StartAt, event.AllDay, event.TimeZone),
-		End:         toEventDateTime(event.EndAt, event.AllDay, event.TimeZone),
+		Summary:            event.Summary,
+		Description:        event.Description,
+		Location:           event.Location,
+		Start:              toEventDateTime(event.StartAt, event.AllDay, event.TimeZone),
+		End:                toEventDateTime(event.EndAt, event.AllDay, event.TimeZone),
+		ExtendedProperties: linkProperties(event),
 	}
 }
 

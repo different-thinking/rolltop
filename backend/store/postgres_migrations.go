@@ -499,6 +499,26 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_messages_invoice_version ON messages (user_id, category, invoice_version, id)`,
 		},
 	},
+	{
+		// An event entered once and kept in two calendars. copy_target is the
+		// reader's one chosen second calendar, and the partial unique index is
+		// what makes "one" true rather than a convention the setter keeps.
+		//
+		// link_key mirrors a private extended property both Google copies
+		// carry (googlecalendar.linkKeyProperty). Google holds the link, not
+		// this row: a full resync, a reconnect or a second Rolltop rebuilds it
+		// from the events themselves. link_primary marks the copy that was
+		// entered -- the one with the guest list -- so the week view draws that
+		// one when both calendars are switched on.
+		Version: "0014-calendar-event-copies",
+		Statements: []string{
+			`ALTER TABLE calendars ADD COLUMN copy_target bigint NOT NULL DEFAULT 0`,
+			`CREATE UNIQUE INDEX idx_calendars_copy_target ON calendars (user_id) WHERE copy_target = 1`,
+			`ALTER TABLE calendar_events ADD COLUMN link_key text COLLATE "C" NOT NULL DEFAULT ''`,
+			`ALTER TABLE calendar_events ADD COLUMN link_primary bigint NOT NULL DEFAULT 0`,
+			`CREATE INDEX idx_calendar_events_link ON calendar_events (user_id, link_key, start_at) WHERE link_key <> ''`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

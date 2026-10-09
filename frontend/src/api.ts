@@ -763,18 +763,24 @@ export const api = {
   calendars: () => getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars"),
   setCalendarSelected: (csrf: string, id: number, selected: boolean) =>
     putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { selected }),
+  // The second calendar is one per reader; choosing one moves the mark off the
+  // calendar that had it.
+  setCalendarCopyTarget: (csrf: string, id: number, copyTarget: boolean) =>
+    putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { copy_target: copyTarget }),
   // The range is sent as absolute instants; which calendars are drawn is stored
   // server-side, so the client never has to keep a second copy of that choice.
   calendarEvents: (from: Date, to: Date) =>
     getJSON<{ events: CalendarEvent[] }>(
       `/api/calendar/events?${new URLSearchParams({ from: from.toISOString(), to: to.toISOString() })}`
     ),
+  // warnings name the copies in other calendars a write could not bring
+  // along; the event itself was saved.
   createCalendarEvent: (csrf: string, input: CalendarEventInput) =>
-    postJSON<{ event: CalendarEvent }>("/api/calendar/events", csrf, input),
+    postJSON<{ event: CalendarEvent; warnings?: string[] }>("/api/calendar/events", csrf, input),
   updateCalendarEvent: (csrf: string, id: number, input: CalendarEventInput) =>
-    putJSON<{ event: CalendarEvent }>(`/api/calendar/events/${id}`, csrf, input),
+    putJSON<{ event: CalendarEvent; warnings?: string[] }>(`/api/calendar/events/${id}`, csrf, input),
   deleteCalendarEvent: (csrf: string, id: number) =>
-    deleteJSON<{ ok: boolean }>(`/api/calendar/events/${id}`, csrf),
+    deleteJSON<{ ok: boolean; warnings?: string[] }>(`/api/calendar/events/${id}`, csrf),
   // Sync-now for one connected account. The calendar view offers it because a
   // week that looks empty is the moment a user wants to force a refresh, and
   // the settings page is two navigations away.

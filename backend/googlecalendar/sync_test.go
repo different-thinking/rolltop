@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,10 +40,12 @@ type fakeCalendar struct {
 
 	// events answers reads and receives writes, keyed by event id.
 	events map[string]Event
-	// created, patched and deleted record the write-back calls.
-	created []EventWrite
-	patched []map[string]any
-	deleted []string
+	// created, patched and deleted record the write-back calls; createdIn is
+	// the calendar each create was addressed to.
+	created   []EventWrite
+	createdIn []string
+	patched   []map[string]any
+	deleted   []string
 	// patchConflict makes the next patch fail with a stale-etag precondition.
 	patchConflict bool
 	// ifMatch records the precondition header of each write.
@@ -73,7 +76,8 @@ func (f *fakeCalendar) handler() http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if eventID == "" {
-			f.serveEventList(w, r)
+			calendarID, _, _ := strings.Cut(rest, "/")
+			f.serveEventList(w, r, calendarID)
 			return
 		}
 		f.serveEvent(w, r, eventID)
@@ -81,16 +85,17 @@ func (f *fakeCalendar) handler() http.Handler {
 	return mux
 }
 
-func (f *fakeCalendar) serveEventList(w http.ResponseWriter, r *http.Request) {
+func (f *fakeCalendar) serveEventList(w http.ResponseWriter, r *http.Request, calendarID string) {
 	if r.Method == http.MethodPost {
 		var write EventWrite
 		_ = json.NewDecoder(r.Body).Decode(&write)
 		f.created = append(f.created, write)
+		f.createdIn = append(f.createdIn, calendarID)
 		f.sendUpdates = append(f.sendUpdates, r.URL.Query().Get("sendUpdates"))
 		created := Event{
-			ID: "created-1", ETag: "etag-created", Status: "confirmed",
+			ID: "created-" + strconv.Itoa(len(f.created)), ETag: "etag-created", Status: "confirmed",
 			Summary: write.Summary, Description: write.Description, Location: write.Location,
-			Start: write.Start, End: write.End,
+			Start: write.Start, End: write.End, ExtendedProperties: write.ExtendedProperties,
 		}
 		if write.Attendees != nil {
 			created.Attendees = *write.Attendees

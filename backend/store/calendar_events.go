@@ -45,7 +45,7 @@ const allDayRangePadding = 24 * time.Hour
 const calendarEventSelectColumns = `id, user_id, calendar_id, external_id, etag, ical_uid,
 	summary, description, location, status, start_at, end_at, all_day, time_zone,
 	recurring_event_id, organizer_email, organizer_name, attendees_json, my_response,
-	html_link, remote_updated_at`
+	html_link, remote_updated_at, link_key, link_primary`
 
 // CalendarAttendee is one invitee as Google reports them. It is display data:
 // nothing queries against it, so the list is stored as JSON on the event.
@@ -94,6 +94,18 @@ type CalendarEvent struct {
 	MyResponse      string
 	HTMLLink        string
 	RemoteUpdatedAt time.Time
+	// LinkKey ties together the copies of one event entered once and kept in
+	// two calendars. It is read from the event at Google, never invented here,
+	// so it means the same thing after a resync. Empty for an ordinary event.
+	LinkKey string
+	// LinkPrimary marks the copy that was entered, as opposed to the one made
+	// in the second calendar. Only it carries the guest list.
+	LinkPrimary bool
+}
+
+// Linked reports whether this event is one copy of a linked pair.
+func (e CalendarEvent) Linked() bool {
+	return e.LinkKey != ""
 }
 
 // CalendarEventRef is the minimal row a full resync needs to decide whether an
@@ -118,8 +130,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			(user_id, calendar_id, external_id, etag, ical_uid, summary, description,
 			 location, status, start_at, end_at, all_day, time_zone, recurring_event_id,
 			 organizer_email, organizer_name, attendees_json, my_response, html_link,
-			 remote_updated_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 remote_updated_at, link_key, link_primary, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, calendar_id, external_id) DO UPDATE SET
 			etag = excluded.etag,
 			ical_uid = excluded.ical_uid,
@@ -138,6 +150,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			my_response = excluded.my_response,
 			html_link = excluded.html_link,
 			remote_updated_at = excluded.remote_updated_at,
+			link_key = excluded.link_key,
+			link_primary = excluded.link_primary,
 			updated_at = excluded.updated_at`,
 		userID, event.CalendarID, trimLimit(externalID, 300), trimLimit(event.ETag, 200),
 		trimLimit(event.ICalUID, 300), trimLimit(event.Summary, 500),
@@ -146,7 +160,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 		boolInt(event.AllDay), trimLimit(event.TimeZone, 100), trimLimit(event.RecurringEventID, 300),
 		cleanEmail(event.OrganizerEmail), trimLimit(event.OrganizerName, 300),
 		encodeAttendees(event.Attendees), trimLimit(strings.TrimSpace(event.MyResponse), 40),
-		trimLimit(event.HTMLLink, 1000), timeUnix(event.RemoteUpdatedAt), ts, ts)
+		trimLimit(event.HTMLLink, 1000), timeUnix(event.RemoteUpdatedAt),
+		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary), ts, ts)
 	if err != nil {
 		return CalendarEvent{}, err
 	}
@@ -183,6 +198,65 @@ func (s *Store) ListCalendarEventsInRange(ctx context.Context, userID int64, cal
 			return nil, err
 		}
 		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// ListLinkedCalendarEventsInRange returns every linked event that overlaps
+// [from, to), from every calendar the user has -- switched on or not. The week
+// view folds each linked pair into one entry, and the entry has to be able to
+// say which other calendar holds the event even when that calendar is hidden.
+func (s *Store) ListLinkedCalendarEventsInRange(ctx context.Context, userID int64, from, to time.Time) ([]CalendarEvent, error) {
+	if userID <= 0 || !to.After(from) {
+		return []CalendarEvent{}, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+		FROM calendar_events
+		WHERE user_id = ? AND link_key <> '' AND start_at < ? AND end_at > ?
+		ORDER BY start_at ASC, id ASC`,
+		userID, timeUnix(to.Add(allDayRangePadding)), timeUnix(from.Add(-allDayRangePadding)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []CalendarEvent{}
+	for rows.Next() {
+		event, err := scanCalendarEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// ListCalendarEventCopies returns the other copies of one linked event: the
+// rows carrying its link key at its start. The start is part of the identity
+// because Google hands an extended property down to every occurrence of a
+// series, so the key alone names a whole series of appointments; and a copy
+// somebody moved at Google is no longer the same appointment and is left out
+// rather than dragged along by an edit made to the other one.
+func (s *Store) ListCalendarEventCopies(ctx context.Context, userID int64, event CalendarEvent) ([]CalendarEvent, error) {
+	key := strings.TrimSpace(event.LinkKey)
+	if userID <= 0 || key == "" {
+		return []CalendarEvent{}, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+		FROM calendar_events
+		WHERE user_id = ? AND link_key = ? AND start_at = ? AND id <> ?
+		ORDER BY link_primary DESC, id ASC`,
+		userID, key, timeUnix(event.StartAt), event.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []CalendarEvent{}
+	for rows.Next() {
+		copied, err := scanCalendarEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, copied)
 	}
 	return events, rows.Err()
 }
@@ -298,14 +372,15 @@ func decodeAttendees(raw string) []CalendarAttendee {
 func scanCalendarEvent(dest scanDest) (CalendarEvent, error) {
 	var event CalendarEvent
 	var attendees string
-	var allDay, startAt, endAt, remoteUpdated int64
+	var allDay, startAt, endAt, remoteUpdated, linkPrimary int64
 	if err := dest.Scan(&event.ID, &event.UserID, &event.CalendarID, &event.ExternalID,
 		&event.ETag, &event.ICalUID, &event.Summary, &event.Description, &event.Location,
 		&event.Status, &startAt, &endAt, &allDay, &event.TimeZone, &event.RecurringEventID,
 		&event.OrganizerEmail, &event.OrganizerName, &attendees, &event.MyResponse,
-		&event.HTMLLink, &remoteUpdated); err != nil {
+		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary); err != nil {
 		return CalendarEvent{}, err
 	}
+	event.LinkPrimary = linkPrimary != 0
 	event.StartAt = unixTime(startAt)
 	event.EndAt = unixTime(endAt)
 	event.AllDay = allDay != 0
