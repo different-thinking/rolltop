@@ -134,7 +134,12 @@ func (s *Syncer) CreateRemoteEventWithCopy(ctx context.Context, userID, calendar
 	if err != nil {
 		return store.CalendarEvent{}, nil, err
 	}
-	if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copyFor(event, copyCalendarID)); err != nil {
+	// The copy is rendered from what Google accepted, not from what was
+	// submitted: a pair is its key and its start, and a start Google
+	// normalized on the event would otherwise leave the copy unmatched.
+	copied := copyFor(created, copyCalendarID)
+	copied.LinkKey = event.LinkKey
+	if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
 		return created, []LinkedProblem{{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err}}, nil
 	}
 	return created, nil, nil
@@ -159,10 +164,24 @@ func (s *Syncer) UpdateRemoteEventGroup(ctx context.Context, userID int64, exist
 		}
 	}
 	addCopy := change == CopyAdd && copyCalendarID > 0 && copyCalendarID != existing.CalendarID && inTarget == nil
-	removeCopy := change == CopyRemove && inTarget != nil
+	// Only a copy is ever removed. The second calendar can be changed after a
+	// pair was made, so the member it holds may be the event that was entered
+	// -- the one carrying the guest list -- and deleting that would cancel the
+	// meeting for every guest when the reader only unticked a box on the copy.
+	removeCopy := change == CopyRemove && inTarget != nil && !inTarget.LinkPrimary
 
 	edited.LinkKey = existing.LinkKey
 	edited.LinkPrimary = existing.LinkPrimary
+	if existing.Linked() && !existing.LinkPrimary {
+		for _, copied := range copies {
+			if copied.LinkPrimary {
+				// The guests were invited by the entered event; a list written
+				// through the copy would invite each of them a second time.
+				edited.Attendees = existing.Attendees
+				break
+			}
+		}
+	}
 	if addCopy && edited.LinkKey == "" {
 		// An event entered before it had a copy becomes the primary of a new
 		// pair. The link travels in the same patch as the edit, so there is no

@@ -426,10 +426,23 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 			out = append(out, apiCalendarEventFromStore(event))
 			continue
 		}
-		if members[0].ID != event.ID {
+		head := members[0]
+		if head.ID != event.ID {
+			if head.CalendarID == event.CalendarID {
+				// Two rows of one calendar are not a pair: an event
+				// duplicated at Google carries the private link along, and
+				// folding it would hide an appointment of its own.
+				out = append(out, apiCalendarEventFromStore(event))
+			}
 			continue
 		}
-		out = append(out, apiCalendarEventWithCopies(event, members[1:]))
+		copies := make([]store.CalendarEvent, 0, len(members)-1)
+		for _, member := range members[1:] {
+			if member.CalendarID != event.CalendarID {
+				copies = append(copies, member)
+			}
+		}
+		out = append(out, apiCalendarEventWithCopies(event, copies))
 	}
 	return out
 }

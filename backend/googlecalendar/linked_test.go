@@ -256,6 +256,50 @@ func TestUpdateRemoteEventGroupAddsAndRemovesTheCopy(t *testing.T) {
 	}
 }
 
+// The second calendar can change after a pair was made. Unticking the box on
+// the copy, once the calendar holding the entered event is the second one,
+// must not delete that event -- it carries the guests, and deleting it cancels
+// the meeting for every one of them. A guest list sent through the copy is
+// ignored for the same reason.
+func TestUpdateRemoteEventGroupNeverRemovesThePrimary(t *testing.T) {
+	fake := &fakeCalendar{}
+	syncer, db, user, work, family := twoCalendarFixture(t, fake)
+	ctx := context.Background()
+	primary := createLinkedMeeting(t, syncer, user.ID, work, family)
+	copies, err := db.ListCalendarEventCopies(ctx, user.ID, primary)
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("copies = %+v err=%v, want one", copies, err)
+	}
+	copied := copies[0]
+	siblings, err := db.ListCalendarEventCopies(ctx, user.ID, copied)
+	if err != nil || len(siblings) != 1 || !siblings[0].LinkPrimary {
+		t.Fatalf("siblings of the copy = %+v err=%v, want the primary", siblings, err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user.ID, work.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	edited := copied
+	edited.Attendees = []store.CalendarAttendee{{Email: "stranger@example.test"}}
+	_, _, err = syncer.UpdateRemoteEventGroup(ctx, user.ID, copied, edited, siblings, work.ID, CopyRemove)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted = %v, want nothing", fake.deleted)
+	}
+	if _, err := db.CalendarEvent(ctx, user.ID, primary.ID); err != nil {
+		t.Fatalf("the entered event went: %v", err)
+	}
+	stored, err := db.CalendarEvent(ctx, user.ID, copied.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Attendees) != 0 {
+		t.Fatalf("copy attendees = %+v, want none", stored.Attendees)
+	}
+}
+
 // The reader saw one appointment and deleted it, so every copy goes.
 func TestDeleteRemoteEventGroupDeletesEveryCopy(t *testing.T) {
 	fake := &fakeCalendar{}

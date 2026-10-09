@@ -471,6 +471,9 @@ function CalendarSidebar({
 }) {
   const writable = calendars.filter((calendar) => calendar.can_write);
   const copyTarget = calendars.find((calendar) => calendar.copy_target);
+  // A chosen calendar that has since become read-only stays listed, or the
+  // select would read "None" while the choice is still stored.
+  const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
   const groups = useMemo(() => {
     const byAccount = new Map<string, CalendarSummary[]>();
     for (const calendar of calendars) {
@@ -520,7 +523,7 @@ function CalendarSidebar({
             onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
           >
             <option value={0}>None</option>
-            {writable.map((calendar) => (
+            {copyOptions.map((calendar) => (
               <option key={calendar.id} value={calendar.id}>
                 {calendar.name}
                 {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}

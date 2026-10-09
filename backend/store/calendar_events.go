@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"strings"
@@ -190,16 +191,7 @@ func (s *Store) ListCalendarEventsInRange(ctx context.Context, userID int64, cal
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	events := []CalendarEvent{}
-	for rows.Next() {
-		event, err := scanCalendarEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
+	return collectCalendarEvents(rows)
 }
 
 // ListLinkedCalendarEventsInRange returns every linked event that overlaps
@@ -218,6 +210,36 @@ func (s *Store) ListLinkedCalendarEventsInRange(ctx context.Context, userID int6
 	if err != nil {
 		return nil, err
 	}
+	return collectCalendarEvents(rows)
+}
+
+// ListCalendarEventCopies returns the other copies of one linked event: the
+// rows carrying its link key at its start. The start is part of the identity
+// because Google hands an extended property down to every occurrence of a
+// series, so the key alone names a whole series of appointments; and a copy
+// somebody moved at Google is no longer the same appointment and is left out
+// rather than dragged along by an edit made to the other one. A row in the
+// event's own calendar is never a copy of it either: the pair lives in two
+// calendars, and an event duplicated at Google carries its private properties
+// along without being the same appointment.
+func (s *Store) ListCalendarEventCopies(ctx context.Context, userID int64, event CalendarEvent) ([]CalendarEvent, error) {
+	key := strings.TrimSpace(event.LinkKey)
+	if userID <= 0 || key == "" {
+		return []CalendarEvent{}, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+		FROM calendar_events
+		WHERE user_id = ? AND link_key = ? AND start_at = ? AND calendar_id <> ?
+		ORDER BY link_primary DESC, id ASC`,
+		userID, key, timeUnix(event.StartAt), event.CalendarID)
+	if err != nil {
+		return nil, err
+	}
+	return collectCalendarEvents(rows)
+}
+
+// collectCalendarEvents scans every row of an event query and closes it.
+func collectCalendarEvents(rows *sql.Rows) ([]CalendarEvent, error) {
 	defer rows.Close()
 	events := []CalendarEvent{}
 	for rows.Next() {
@@ -226,37 +248,6 @@ func (s *Store) ListLinkedCalendarEventsInRange(ctx context.Context, userID int6
 			return nil, err
 		}
 		events = append(events, event)
-	}
-	return events, rows.Err()
-}
-
-// ListCalendarEventCopies returns the other copies of one linked event: the
-// rows carrying its link key at its start. The start is part of the identity
-// because Google hands an extended property down to every occurrence of a
-// series, so the key alone names a whole series of appointments; and a copy
-// somebody moved at Google is no longer the same appointment and is left out
-// rather than dragged along by an edit made to the other one.
-func (s *Store) ListCalendarEventCopies(ctx context.Context, userID int64, event CalendarEvent) ([]CalendarEvent, error) {
-	key := strings.TrimSpace(event.LinkKey)
-	if userID <= 0 || key == "" {
-		return []CalendarEvent{}, nil
-	}
-	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
-		FROM calendar_events
-		WHERE user_id = ? AND link_key = ? AND start_at = ? AND id <> ?
-		ORDER BY link_primary DESC, id ASC`,
-		userID, key, timeUnix(event.StartAt), event.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	events := []CalendarEvent{}
-	for rows.Next() {
-		copied, err := scanCalendarEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, copied)
 	}
 	return events, rows.Err()
 }

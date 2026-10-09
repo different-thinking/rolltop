@@ -398,6 +398,15 @@ func TestListCalendarEventCopiesMatchesKeyAndStart(t *testing.T) {
 	if len(back) != 1 || back[0].ID != primary.ID || !back[0].LinkPrimary {
 		t.Fatalf("copies of the copy = %+v, want the primary", back)
 	}
+	// An event duplicated at Google in the same calendar carries the private
+	// link along; it is not a copy of the event it was duplicated from.
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1-dup", Summary: "Weekly (duplicate)",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+	})
+	if again, err := db.ListCalendarEventCopies(ctx, user, primary); err != nil || len(again) != 1 || again[0].ID != copied.ID {
+		t.Fatalf("copies beside a same-calendar duplicate = %+v err=%v, want only the copy", again, err)
+	}
 	plain := mustEvent(t, db, ctx, user, CalendarEvent{
 		CalendarID: work.ID, ExternalID: "plain", StartAt: start, EndAt: start.Add(time.Hour),
 	})
