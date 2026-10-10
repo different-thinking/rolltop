@@ -147,6 +147,32 @@ export function CalendarView({
     }
   };
 
+  // Choosing a second calendar moves the mark off whichever calendar had it,
+  // so the whole list is updated from the one answer rather than reloaded.
+  const chooseCopyTarget = async (calendarID: number) => {
+    const previous = calendars.find((calendar) => calendar.copy_target);
+    if ((previous?.id || 0) === calendarID) return;
+    try {
+      const data = calendarID
+        ? await api.setCalendarCopyTarget(csrf, calendarID, true)
+        : previous
+          ? await api.setCalendarCopyTarget(csrf, previous.id, false)
+          : null;
+      if (!data) return;
+      setCalendars((current) =>
+        current.map((item) => (item.id === data.calendar.id ? data.calendar : { ...item, copy_target: false }))
+      );
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
+  // A write whose copies did not all follow still saved the event itself, so
+  // what went wrong with a copy is told after the dialog closes, not in it.
+  const reportWarnings = (warnings: string[] | undefined) => {
+    if (warnings && warnings.length > 0) addToast(warnings.join(" "), "error");
+  };
+
   const syncNow = async () => {
     const connectionIDs = Array.from(new Set(calendars.map((calendar) => calendar.connection_id))).filter(Boolean);
     if (connectionIDs.length === 0) return;
@@ -216,19 +242,22 @@ export function CalendarView({
 
   const saveEvent = (input: CalendarEventInput) =>
     runWrite(async () => {
-      if (dialog?.event) await api.updateCalendarEvent(csrf, dialog.event.id, input);
-      else await api.createCalendarEvent(csrf, input);
+      const data = dialog?.event
+        ? await api.updateCalendarEvent(csrf, dialog.event.id, input)
+        : await api.createCalendarEvent(csrf, input);
       await reload("events");
       closeDialog();
+      reportWarnings(data.warnings);
     });
 
   const deleteEvent = () =>
     runWrite(async () => {
       if (!dialog?.event) return;
-      await api.deleteCalendarEvent(csrf, dialog.event.id);
+      const data = await api.deleteCalendarEvent(csrf, dialog.event.id);
       await reload("events");
       closeDialog();
-      addToast("Event deleted in Google too.", "success");
+      if (data.warnings && data.warnings.length > 0) reportWarnings(data.warnings);
+      else addToast("Event deleted in Google too.", "success");
     });
 
   const respond = (response: string) =>
@@ -247,7 +276,11 @@ export function CalendarView({
 
   return (
     <div className="calendar-shell">
-      <CalendarSidebar calendars={calendars} onToggle={toggleCalendar} />
+      <CalendarSidebar
+        calendars={calendars}
+        onToggle={toggleCalendar}
+        onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+      />
       <section className="calendar-main">
         <header className="content-head calendar-head">
           <div className="calendar-nav">
@@ -321,11 +354,13 @@ export function CalendarView({
                     type="button"
                     className="calendar-chip"
                     style={{ background: color, color: readableTextColor(color) }}
+                    title={eventTooltip(event, calendarsByID.get(event.calendar_id), calendarsByID)}
                     onClick={() => {
                       setDialogProblem("");
                       setDialog({ event, day, formKey: `event-${event.id}` });
                     }}
                   >
+                    <CopyMarks event={event} calendarsByID={calendarsByID} />
                     {event.summary || "(No title)"}
                   </button>
                 );
@@ -381,14 +416,17 @@ export function CalendarView({
                         borderColor: color,
                         color: declined ? "var(--text)" : readableTextColor(color)
                       }}
-                      title={eventTooltip(placed.event, calendar)}
+                      title={eventTooltip(placed.event, calendar, calendarsByID)}
                       onClick={() => {
                         setDialogProblem("");
                         setDialog({ event: placed.event, day, formKey: `event-${placed.event.id}` });
                       }}
                     >
                       <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
-                      <span className="calendar-event-title">{placed.event.summary || "(No title)"}</span>
+                      <span className="calendar-event-title">
+                        <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+                        {placed.event.summary || "(No title)"}
+                      </span>
                       {placed.event.location ? (
                         <span className="calendar-event-location">{placed.event.location}</span>
                       ) : null}
@@ -424,11 +462,18 @@ export function CalendarView({
  * because two accounts routinely have a calendar called the same thing. */
 function CalendarSidebar({
   calendars,
-  onToggle
+  onToggle,
+  onChooseCopyTarget
 }: {
   calendars: CalendarSummary[];
   onToggle: (calendar: CalendarSummary) => Promise<void>;
+  onChooseCopyTarget: (calendarID: number) => void;
 }) {
+  const writable = calendars.filter((calendar) => calendar.can_write);
+  const copyTarget = calendars.find((calendar) => calendar.copy_target);
+  // A chosen calendar that has since become read-only stays listed, or the
+  // select would read "None" while the choice is still stored.
+  const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
   const groups = useMemo(() => {
     const byAccount = new Map<string, CalendarSummary[]>();
     for (const calendar of calendars) {
@@ -467,7 +512,55 @@ function CalendarSidebar({
           })}
         </div>
       ))}
+      {writable.length > 1 ? (
+        <div className="calendar-sidebar-group calendar-copy-target">
+          <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
+            Second calendar
+          </label>
+          <select
+            id="calendar-copy-target"
+            value={copyTarget?.id || 0}
+            onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
+          >
+            <option value={0}>None</option>
+            {copyOptions.map((calendar) => (
+              <option key={calendar.id} value={calendar.id}>
+                {calendar.name}
+                {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
+              </option>
+            ))}
+          </select>
+          <p className="calendar-copy-target-hint">
+            An event in any other calendar can be added here as well. It is shown once, marked with the other
+            calendar's colour.
+          </p>
+        </div>
+      ) : null}
     </aside>
+  );
+}
+
+/** CopyMarks shows, on an entry the week draws once, the colour of every other
+ * calendar holding a copy of it. */
+function CopyMarks({
+  event,
+  calendarsByID
+}: {
+  event: CalendarEvent;
+  calendarsByID: Map<number, CalendarSummary>;
+}) {
+  const copies = event.also_in || [];
+  if (copies.length === 0) return null;
+  return (
+    <span className="calendar-event-copies" aria-hidden="true">
+      {copies.map((copy) => (
+        <span
+          key={copy.event_id}
+          className="calendar-event-copy-mark"
+          style={{ background: calendarColor(calendarsByID.get(copy.calendar_id)) }}
+        />
+      ))}
+    </span>
   );
 }
 
@@ -497,10 +590,18 @@ function formatTimeRange(event: CalendarEvent): string {
   return start.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
-function eventTooltip(event: CalendarEvent, calendar: CalendarSummary | undefined): string {
+function eventTooltip(
+  event: CalendarEvent,
+  calendar: CalendarSummary | undefined,
+  calendarsByID: Map<number, CalendarSummary>
+): string {
   const parts = [event.summary || "(No title)"];
   if (event.location) parts.push(event.location);
   if (calendar) parts.push(calendar.name);
+  const copies = (event.also_in || [])
+    .map((copy) => calendarsByID.get(copy.calendar_id)?.name)
+    .filter((name): name is string => Boolean(name));
+  if (copies.length > 0) parts.push(`also in ${copies.join(", ")}`);
   return parts.join(" — ");
 }
 

@@ -7,6 +7,7 @@ import type { FormEvent } from "react";
 import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
 import { Icon } from "../../components/Icon";
+import { calendarColor } from "./weekModel";
 
 /** responseOptions are the answers an invitee can give. */
 const responseOptions: { value: string; label: string }[] = [
@@ -30,6 +31,9 @@ type DraftState = {
   startTime: string;
   endTime: string;
   attendees: CalendarAttendee[];
+  /** copy is the "also add to the second calendar" box. It is only sent when
+   * the box is shown, so an edit that never offered it keeps the copies. */
+  copy: boolean;
 };
 
 function pad(value: number): string {
@@ -50,9 +54,10 @@ function utcDateValue(date: Date): string {
 
 /** draftFromEvent fills the form from an existing event, reading an all-day
  * event's bounds in UTC because that is the zone they were anchored in. */
-function draftFromEvent(event: CalendarEvent): DraftState {
+function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState {
   const start = new Date(event.start_at);
   const end = new Date(event.end_at);
+  const copy = (event.also_in || []).some((item) => item.calendar_id === copyTargetID);
   if (event.all_day) {
     const inclusiveEnd = new Date(end.getTime() - 86_400_000);
     return {
@@ -65,7 +70,8 @@ function draftFromEvent(event: CalendarEvent): DraftState {
       endDate: utcDateValue(inclusiveEnd >= start ? inclusiveEnd : start),
       startTime: "09:00",
       endTime: "10:00",
-      attendees: event.attendees || []
+      attendees: event.attendees || [],
+      copy
     };
   }
   return {
@@ -78,7 +84,8 @@ function draftFromEvent(event: CalendarEvent): DraftState {
     endDate: localDateValue(end),
     startTime: localTimeValue(start),
     endTime: localTimeValue(end),
-    attendees: event.attendees || []
+    attendees: event.attendees || [],
+    copy
   };
 }
 
@@ -97,7 +104,8 @@ function draftForNewEvent(day: Date, calendarID: number): DraftState {
     endDate: localDateValue(end),
     startTime: localTimeValue(start),
     endTime: localTimeValue(end),
-    attendees: []
+    attendees: [],
+    copy: false
   };
 }
 
@@ -221,8 +229,9 @@ export function EventDialog({
   // form should start over, so there is deliberately no effect resetting the
   // draft here: the calendar list is reloaded on a poll, after a sync and after
   // every write, and any reset keyed on it would wipe what the user is typing.
+  const copyTarget = calendars.find((item) => item.copy_target && item.can_write);
   const [draft, setDraft] = useState<DraftState>(() =>
-    event ? draftFromEvent(event) : draftForNewEvent(day, writable[0]?.id || 0)
+    event ? draftFromEvent(event, copyTarget?.id || 0) : draftForNewEvent(day, writable[0]?.id || 0)
   );
   const [localProblem, setLocalProblem] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -245,6 +254,18 @@ export function EventDialog({
   // about it can be edited, so the form is shown as a read-only summary.
   const editable = !event || Boolean(calendar?.can_write);
   const update = (patch: Partial<DraftState>) => setDraft((current) => ({ ...current, ...patch }));
+  // The box is offered whenever the event lives anywhere but the second
+  // calendar itself; an event already in it has nothing to copy.
+  const offerCopy = editable && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
+  const alsoIn = (event?.also_in || [])
+    .map((item) => calendars.find((option) => option.id === item.calendar_id))
+    .filter((item): item is CalendarSummary => Boolean(item));
+  // While the box is shown it already says whether the second calendar holds
+  // a copy, so the line only names the calendars it does not cover.
+  const alsoInOthers = offerCopy ? alsoIn.filter((item) => item.id !== copyTarget?.id) : alsoIn;
+  // A copy carries no guests -- they were invited by the event that was
+  // entered -- so a guest list edited here would invite them all a second time.
+  const guestsElsewhere = Boolean(event) && alsoIn.length > 0 && !event?.link_primary;
 
   const submit = (formEvent: FormEvent) => {
     formEvent.preventDefault();
@@ -258,7 +279,7 @@ export function EventDialog({
       return;
     }
     setLocalProblem("");
-    onSave(input);
+    onSave(offerCopy ? { ...input, copy: draft.copy } : input);
   };
 
   const message = localProblem || problem;
@@ -385,6 +406,34 @@ export function EventDialog({
             </select>
           </div>
 
+          {offerCopy && copyTarget ? (
+            <label className="calendar-checkbox">
+              <input
+                type="checkbox"
+                checked={draft.copy}
+                disabled={saving}
+                onChange={(changeEvent) => update({ copy: changeEvent.target.checked })}
+              />
+              <span className="calendar-swatch" style={{ background: calendarColor(copyTarget) }} />
+              Also add to {copyTarget.name}
+            </label>
+          ) : null}
+
+          {alsoInOthers.length > 0 ? (
+            <div className="calendar-also-in">
+              <span className="calendar-also-in-label">
+                <Icon name="copy" />
+                Also in
+              </span>
+              {alsoInOthers.map((item) => (
+                <span key={item.id} className="calendar-also-in-item" title={item.connection_email || undefined}>
+                  <span className="calendar-swatch" style={{ background: calendarColor(item) }} />
+                  {item.name}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
           <div>
             <label htmlFor="calendar-event-location">Location</label>
             <input
@@ -398,9 +447,14 @@ export function EventDialog({
 
           <AttendeeEditor
             attendees={draft.attendees}
-            disabled={!editable || saving}
+            disabled={!editable || saving || guestsElsewhere}
             onChange={(attendees) => update({ attendees })}
           />
+          {guestsElsewhere ? (
+            <p className="calendar-dialog-note">
+              This is the copy. Guests are invited from the original event, so they cannot be changed here.
+            </p>
+          ) : null}
 
           <div>
             <label htmlFor="calendar-event-notes">Notes</label>
@@ -432,7 +486,11 @@ export function EventDialog({
           {event && editable ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
-                <span>Delete this event in Google too?</span>
+                <span>
+                  {alsoIn.length > 0
+                    ? `Delete this event in Google too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
+                    : "Delete this event in Google too?"}
+                </span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete
                 </button>

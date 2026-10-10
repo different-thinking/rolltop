@@ -28,7 +28,8 @@ const (
 
 const calendarSelectColumns = `id, user_id, google_connection_id, google_calendar_id,
 	summary, description, time_zone, color, access_role, is_primary, selected,
-	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail`
+	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail,
+	copy_target`
 
 // Calendar is one calendar of one connected Google account.
 type Calendar struct {
@@ -56,6 +57,10 @@ type Calendar struct {
 	LastSuccessAt time.Time
 	Status        string
 	StatusDetail  string
+	// CopyTarget marks the reader's second calendar: the one an event entered
+	// in any other calendar can be copied into as well. At most one calendar of
+	// a user carries it.
+	CopyTarget bool
 }
 
 // CanWrite reports whether Google would accept a write to this calendar. A
@@ -194,6 +199,53 @@ func (s *Store) SetCalendarSelected(ctx context.Context, userID, calendarID int6
 		return err
 	}
 	return requireCalendarRow(res)
+}
+
+// SetCalendarCopyTarget makes one calendar the reader's second calendar, or
+// stops it being one. Choosing a calendar takes the mark off whichever calendar
+// carried it before, in the same transaction, so there is never a moment with
+// two -- the unique index would refuse it anyway.
+func (s *Store) SetCalendarCopyTarget(ctx context.Context, userID, calendarID int64, on bool) error {
+	if userID <= 0 || calendarID <= 0 {
+		return ErrNotFound
+	}
+	db, err := s.dataDB(ctx, userID)
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	ts := nowUnix()
+	if on {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE calendars SET copy_target = 0, updated_at = ? WHERE user_id = ? AND copy_target = 1 AND id <> ?`,
+			ts, userID, calendarID); err != nil {
+			return err
+		}
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE calendars SET copy_target = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		boolInt(on), ts, userID, calendarID)
+	if err != nil {
+		return err
+	}
+	if err := requireCalendarRow(res); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CopyTargetCalendar returns the reader's second calendar. A user who never
+// chose one reads as ErrNotFound, which is the answer "no copy is offered".
+func (s *Store) CopyTargetCalendar(ctx context.Context, userID int64) (Calendar, error) {
+	if userID <= 0 {
+		return Calendar{}, ErrNotFound
+	}
+	return scanCalendar(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarSelectColumns+`
+		FROM calendars WHERE user_id = ? AND copy_target = 1`, userID))
 }
 
 // CalendarSyncState is the outcome of one calendar's event sync.
@@ -357,17 +409,18 @@ func requireCalendarRow(res sql.Result) error {
 
 func scanCalendar(dest scanDest) (Calendar, error) {
 	var calendar Calendar
-	var isPrimary, selected int64
+	var isPrimary, selected, copyTarget int64
 	var windowStart, lastSync, lastSuccess int64
 	if err := dest.Scan(&calendar.ID, &calendar.UserID, &calendar.GoogleConnectionID,
 		&calendar.GoogleCalendarID, &calendar.Summary, &calendar.Description,
 		&calendar.TimeZone, &calendar.Color, &calendar.AccessRole, &isPrimary, &selected,
 		&calendar.SyncToken, &windowStart, &lastSync, &lastSuccess,
-		&calendar.Status, &calendar.StatusDetail); err != nil {
+		&calendar.Status, &calendar.StatusDetail, &copyTarget); err != nil {
 		return Calendar{}, err
 	}
 	calendar.IsPrimary = isPrimary != 0
 	calendar.Selected = selected != 0
+	calendar.CopyTarget = copyTarget != 0
 	calendar.WindowStartAt = unixTime(windowStart)
 	calendar.LastSyncAt = unixTime(lastSync)
 	calendar.LastSuccessAt = unixTime(lastSuccess)

@@ -645,6 +645,30 @@ site and in review.
 - A calendar the user has switched off is not synced. Switching one on triggers
   its own first sync, because an unsynced week renders as an empty one and reads
   as "nothing scheduled".
+- **An event kept in two calendars is two Google events and one appointment.**
+  A reader picks one second calendar (`calendars.copy_target`, unique per user)
+  and an event entered anywhere else can be copied into it
+  (`backend/googlecalendar/linked.go`). Five properties keep that honest. The
+  link lives **at Google**, as a private extended property on both copies, and
+  `calendar_events.link_key` only mirrors it on every sync -- so a resync, a
+  reconnect or a rebuilt mirror finds the pair again, and nothing local can
+  invent one. A pair is the key **and the start** (`ListCalendarEventCopies`,
+  `linkedGroupKey`): Google hands an extended property down to every occurrence
+  of a series, and a copy somebody moved at Google is no longer the same
+  appointment, so it is drawn on its own and an edit to the other leaves it
+  alone. Only the copy that was entered (`link_primary`) carries guests; the
+  copy carries none and every write to it restates its own empty list, or each
+  guest is invited twice. The week folds a pair into one entry
+  (`foldLinkedEvents`) -- the entered copy while its calendar is on, otherwise
+  the first visible one -- and names the rest in `also_in` even when their
+  calendar is switched off; folding never hides an event whose pair it cannot
+  find. Edits and deletes reach every copy, the acted-on event first and alone
+  deciding the error; a copy Google refuses afterwards is a `LinkedProblem`
+  reported beside a successful answer, never a reason to undo the event the
+  reader asked for. Every single-event answer names its copies
+  (`presentCalendarEvent`), because the dialog starts its "Also add to" box
+  from `also_in` and an answer without it would have the next save delete the
+  copy.
 - A cross-account duplicate copy is hidden behind a pointer to the row that stays
   visible, and that pointer is only safe while it resolves. Deletes clear it in a
   SQLite trigger rather than in Go, because reconciliation, folder purges, account

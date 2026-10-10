@@ -306,3 +306,119 @@ func TestDeleteGoogleConnectionRemovesCalendars(t *testing.T) {
 		t.Fatalf("list cursor survived the disconnect: %q", state.SyncToken)
 	}
 }
+
+// A reader has one second calendar. Choosing another moves the mark rather
+// than adding a second one, and nobody can set or read it for somebody else.
+func TestCalendarCopyTargetIsOnePerUser(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "copy-target@example.test")
+	other := mustUser(t, db, ctx, "copy-target-other@example.test")
+	work := mustCalendar(t, db, ctx, user, 1, "work")
+	family := mustCalendar(t, db, ctx, user, 1, "family")
+	theirs := mustCalendar(t, db, ctx, other, 1, "theirs")
+
+	if _, err := db.CopyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("copy target before one is chosen: err=%v, want not found", err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, work.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, family.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	target, err := db.CopyTargetCalendar(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != family.ID || !target.CopyTarget {
+		t.Fatalf("copy target = %+v, want the calendar chosen last", target)
+	}
+	if reread, err := db.Calendar(ctx, user, work.ID); err != nil || reread.CopyTarget {
+		t.Fatalf("previous copy target = %+v err=%v, want the mark moved off it", reread, err)
+	}
+
+	if err := db.SetCalendarCopyTarget(ctx, other, family.ID, false); !IsNotFound(err) {
+		t.Fatalf("clearing another tenant's copy target: err=%v, want not found", err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, theirs.ID, true); !IsNotFound(err) {
+		t.Fatalf("choosing another tenant's calendar: err=%v, want not found", err)
+	}
+	if _, err := db.CopyTargetCalendar(ctx, other); !IsNotFound(err) {
+		t.Fatalf("other tenant's copy target: err=%v, want not found", err)
+	}
+
+	if err := db.SetCalendarCopyTarget(ctx, user, family.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CopyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("copy target after clearing: err=%v, want not found", err)
+	}
+}
+
+// The copies of an event are the rows sharing its key at its start: an
+// occurrence of the same series on another day, a copy moved away at Google,
+// and another tenant's row under the same key are none of them.
+func TestListCalendarEventCopiesMatchesKeyAndStart(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "copies@example.test")
+	other := mustUser(t, db, ctx, "copies-other@example.test")
+	work := mustCalendar(t, db, ctx, user, 1, "work")
+	family := mustCalendar(t, db, ctx, user, 1, "family")
+	theirs := mustCalendar(t, db, ctx, other, 1, "family")
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+
+	primary := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1", Summary: "Weekly",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+	})
+	copied := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c1", Summary: "Weekly",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1",
+	})
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c2", Summary: "Weekly, next week",
+		StartAt: start.AddDate(0, 0, 7), EndAt: start.AddDate(0, 0, 7).Add(time.Hour), LinkKey: "k1",
+	})
+	mustEvent(t, db, ctx, other, CalendarEvent{
+		CalendarID: theirs.ID, ExternalID: "x1", Summary: "Not yours",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1",
+	})
+
+	copies, err := db.ListCalendarEventCopies(ctx, user, primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || copies[0].ID != copied.ID || copies[0].LinkPrimary {
+		t.Fatalf("copies = %+v, want only the same-day copy", copies)
+	}
+	back, err := db.ListCalendarEventCopies(ctx, user, copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != 1 || back[0].ID != primary.ID || !back[0].LinkPrimary {
+		t.Fatalf("copies of the copy = %+v, want the primary", back)
+	}
+	// An event duplicated at Google in the same calendar carries the private
+	// link along; it is not a copy of the event it was duplicated from.
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1-dup", Summary: "Weekly (duplicate)",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+	})
+	if again, err := db.ListCalendarEventCopies(ctx, user, primary); err != nil || len(again) != 1 || again[0].ID != copied.ID {
+		t.Fatalf("copies beside a same-calendar duplicate = %+v err=%v, want only the copy", again, err)
+	}
+	plain := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "plain", StartAt: start, EndAt: start.Add(time.Hour),
+	})
+	if none, err := db.ListCalendarEventCopies(ctx, user, plain); err != nil || len(none) != 0 {
+		t.Fatalf("copies of an unlinked event = %+v err=%v, want none", none, err)
+	}
+
+	linked, err := db.ListLinkedCalendarEventsInRange(ctx, other, start.Add(-time.Hour), start.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(linked) != 1 || linked[0].ExternalID != "x1" {
+		t.Fatalf("other tenant's linked events = %+v, want only their own", linked)
+	}
+}

@@ -1123,6 +1123,9 @@ export type CalendarSummary = {
   can_write: boolean;
   is_primary: boolean;
   selected: boolean;
+  /** copy_target marks the reader's second calendar: an event entered in any
+   * other calendar can be kept in this one as well. At most one carries it. */
+  copy_target: boolean;
   /** synced_from is the oldest point the mirror covers. An empty week before it
    * means "not synced", not "nothing scheduled". */
   synced_from: string;
@@ -1165,6 +1168,19 @@ export type CalendarEvent = {
   attendees: CalendarAttendee[];
   my_response: string;
   html_link: string;
+  /** link_primary marks the copy of a linked pair that was entered, the one
+   * carrying the guest list. */
+  link_primary: boolean;
+  /** also_in lists the other calendars holding a copy of this event. The week
+   * draws a linked pair once; this is what says where else it lives, including
+   * a calendar that is switched off. */
+  also_in: CalendarEventCopy[];
+};
+
+/** CalendarEventCopy is one other copy of a linked event. */
+export type CalendarEventCopy = {
+  calendar_id: number;
+  event_id: number;
 };
 
 /** CalendarEventInput is what the event dialog submits. */
@@ -1178,6 +1194,9 @@ export type CalendarEventInput = {
   all_day: boolean;
   time_zone: string;
   attendees: { email: string; name: string; optional: boolean }[];
+  /** copy asks for the event to be kept in the second calendar as well (true)
+   * or no longer (false). Left out, an edit keeps the copies it has. */
+  copy?: boolean;
 };
 
 /** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */

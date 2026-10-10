@@ -96,6 +96,18 @@ type Event struct {
 	Creator          EventPerson     `json:"creator"`
 	Attendees        []EventAttendee `json:"attendees"`
 	Updated          string          `json:"updated"`
+	// ExtendedProperties carries the link between the two copies of an event
+	// entered once and kept in two calendars. Google stores it per copy and
+	// hands it down to every occurrence of a series.
+	ExtendedProperties *EventExtendedProperties `json:"extendedProperties,omitempty"`
+}
+
+// EventExtendedProperties is Google's free-form key/value storage on an event.
+// Private properties are visible only on the calendar copy that carries them,
+// which is what Rolltop wants: the link is the reader's own bookkeeping and
+// must not reach the guests' copies of a meeting.
+type EventExtendedProperties struct {
+	Private map[string]string `json:"private,omitempty"`
 }
 
 // IsCancelled reports Google's tombstone. On a delta a removed occurrence
@@ -129,6 +141,11 @@ type EventWrite struct {
 	Start       EventDateTime    `json:"start"`
 	End         EventDateTime    `json:"end"`
 	Attendees   *[]EventAttendee `json:"attendees,omitempty"`
+	// ExtendedProperties is set only on a write that links an event to its
+	// copy. Google merges a patch's private properties key by key, so leaving
+	// it out keeps a link that exists and writing it never drops another
+	// application's keys.
+	ExtendedProperties *EventExtendedProperties `json:"extendedProperties,omitempty"`
 }
 
 const statusCancelled = "cancelled"
