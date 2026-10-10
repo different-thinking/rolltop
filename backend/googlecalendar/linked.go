@@ -1,19 +1,16 @@
-// File overview: One event kept in two calendars. The reader enters an event
-// once and asks for it to appear in their second calendar as well; Google ends
-// up holding two independent events, and what makes them one appointment is a
-// private extended property both carry. Every write here goes to Google first
-// and per copy, exactly as a write to a single event does, so a copy Google
-// refuses is reported on its own instead of failing the copy that succeeded.
+// File overview: How Google holds the link between the two copies of one event
+// kept in two calendars: a private extended property both carry. The pair
+// logic itself -- which copy is written when, and what a refused copy means --
+// is provider-neutral and lives in calendarlink, because the second calendar
+// may just as well be a Microsoft 365 one.
 
 package googlecalendar
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"strings"
 
+	"rolltop/backend/calendarlink"
 	"rolltop/backend/store"
 )
 
@@ -29,47 +26,26 @@ const (
 	linkRoleCopy     = "copy"
 )
 
-// LinkedAction names what was being done to a copy when it failed.
-type LinkedAction string
-
-const (
-	LinkedCreate LinkedAction = "create"
-	LinkedUpdate LinkedAction = "update"
-	LinkedDelete LinkedAction = "delete"
+// The pair logic is shared with Microsoft 365 and lives in calendarlink; these
+// names keep the Google package's callers and tests reading as they did.
+type (
+	LinkedAction  = calendarlink.LinkedAction
+	LinkedProblem = calendarlink.LinkedProblem
+	CopyChange    = calendarlink.CopyChange
 )
 
-// LinkedProblem is a copy that could not be brought along with the event the
-// reader acted on. The event itself succeeded; this is what the caller has to
-// tell the reader is out of step.
-type LinkedProblem struct {
-	CalendarID int64
-	Action     LinkedAction
-	Err        error
-}
-
-// CopyChange is what an edit asks of the copy in the reader's second calendar.
-type CopyChange int
-
 const (
-	// CopyKeep leaves the copies as they are, apart from carrying the edit.
-	CopyKeep CopyChange = iota
-	// CopyAdd makes sure the second calendar holds a copy.
-	CopyAdd
-	// CopyRemove deletes the second calendar's copy and keeps the rest.
-	CopyRemove
+	LinkedCreate = calendarlink.LinkedCreate
+	LinkedUpdate = calendarlink.LinkedUpdate
+	LinkedDelete = calendarlink.LinkedDelete
+	CopyKeep     = calendarlink.CopyKeep
+	CopyAdd      = calendarlink.CopyAdd
+	CopyRemove   = calendarlink.CopyRemove
 )
 
-// NewLinkKey returns a fresh key for a pair. It only has to be unique among
-// one reader's events, and 128 random bits are that with room to spare.
+// NewLinkKey returns a fresh key for a pair.
 func NewLinkKey() string {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		// crypto/rand does not fail on any platform Rolltop runs on; if it
-		// ever did, refusing to link is better than linking two unrelated
-		// events under a predictable key.
-		panic("googlecalendar: no randomness for a link key: " + err.Error())
-	}
-	return hex.EncodeToString(raw[:])
+	return calendarlink.NewLinkKey()
 }
 
 // eventLink reads the pair an event belongs to off its extended properties.
@@ -101,148 +77,20 @@ func linkProperties(event store.CalendarEvent) *EventExtendedProperties {
 	}}
 }
 
-// copyFor renders the second calendar's copy of an event. The copy carries no
-// guests: they were invited by the primary, and a guest list on the copy would
-// send every one of them a second invitation to the same meeting.
-func copyFor(event store.CalendarEvent, calendarID int64) store.CalendarEvent {
-	return store.CalendarEvent{
-		CalendarID:  calendarID,
-		Summary:     event.Summary,
-		Description: event.Description,
-		Location:    event.Location,
-		StartAt:     event.StartAt,
-		EndAt:       event.EndAt,
-		AllDay:      event.AllDay,
-		TimeZone:    event.TimeZone,
-		LinkKey:     event.LinkKey,
-		LinkPrimary: false,
-	}
-}
-
 // CreateRemoteEventWithCopy creates an event and its copy in the second
-// calendar. The event comes first and decides the outcome: a refused copy
-// leaves the event in place and is returned as a problem, because the reader
-// asked for the appointment above all and it now exists.
+// calendar, both in Google. See calendarlink.CreateWithCopy.
 func (s *Syncer) CreateRemoteEventWithCopy(ctx context.Context, userID, calendarID, copyCalendarID int64, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
-	if copyCalendarID <= 0 || copyCalendarID == calendarID {
-		created, err := s.CreateRemoteEvent(ctx, userID, calendarID, event)
-		return created, nil, err
-	}
-	event.LinkKey = NewLinkKey()
-	event.LinkPrimary = true
-	created, err := s.CreateRemoteEvent(ctx, userID, calendarID, event)
-	if err != nil {
-		return store.CalendarEvent{}, nil, err
-	}
-	// The copy is rendered from what Google accepted, not from what was
-	// submitted: a pair is its key and its start, and a start Google
-	// normalized on the event would otherwise leave the copy unmatched.
-	copied := copyFor(created, copyCalendarID)
-	copied.LinkKey = event.LinkKey
-	if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
-		return created, []LinkedProblem{{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err}}, nil
-	}
-	return created, nil, nil
+	return calendarlink.CreateWithCopy(ctx, s, userID, calendarID, copyCalendarID, event)
 }
 
 // UpdateRemoteEventGroup applies an edit to an event and carries it to the
-// event's copies. copies are the other members of its pair as they stood
-// before the edit (store.ListCalendarEventCopies); copyCalendarID is the
-// reader's second calendar and change says what the edit wants of it.
-//
-// The edited event is written first and alone decides the error: a conflict or
-// a deletion there is reported exactly as it is for an unlinked event, and
-// nothing is carried to a copy of an edit Google refused. Each copy keeps its
-// own guest list -- the copy has none, and an edit made through the copy must
-// not wipe the primary's.
+// event's copies. See calendarlink.UpdateGroup.
 func (s *Syncer) UpdateRemoteEventGroup(ctx context.Context, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, copyCalendarID int64, change CopyChange) (store.CalendarEvent, []LinkedProblem, error) {
-	var inTarget *store.CalendarEvent
-	for i := range copies {
-		if copyCalendarID > 0 && copies[i].CalendarID == copyCalendarID {
-			inTarget = &copies[i]
-			break
-		}
-	}
-	addCopy := change == CopyAdd && copyCalendarID > 0 && copyCalendarID != existing.CalendarID && inTarget == nil
-	// Only a copy is ever removed. The second calendar can be changed after a
-	// pair was made, so the member it holds may be the event that was entered
-	// -- the one carrying the guest list -- and deleting that would cancel the
-	// meeting for every guest when the reader only unticked a box on the copy.
-	removeCopy := change == CopyRemove && inTarget != nil && !inTarget.LinkPrimary
-
-	edited.LinkKey = existing.LinkKey
-	edited.LinkPrimary = existing.LinkPrimary
-	if existing.Linked() && !existing.LinkPrimary {
-		for _, copied := range copies {
-			if copied.LinkPrimary {
-				// The guests were invited by the entered event; a list written
-				// through the copy would invite each of them a second time.
-				edited.Attendees = existing.Attendees
-				break
-			}
-		}
-	}
-	if addCopy && edited.LinkKey == "" {
-		// An event entered before it had a copy becomes the primary of a new
-		// pair. The link travels in the same patch as the edit, so there is no
-		// state in which the copy exists and the event does not know it.
-		edited.LinkKey = NewLinkKey()
-		edited.LinkPrimary = true
-	}
-	updated, err := s.UpdateRemoteEvent(ctx, userID, existing, edited)
-	if err != nil {
-		return updated, nil, err
-	}
-
-	// The copies follow what Google accepted, not what was submitted, for the
-	// reason CreateRemoteEventWithCopy gives: a pair is its key and its start,
-	// and a start Google normalized on the event would otherwise leave every
-	// copy behind on the old one.
-	var problems []LinkedProblem
-	for _, copied := range copies {
-		if removeCopy && copied.ID == inTarget.ID {
-			continue
-		}
-		follow := updated
-		follow.ID = copied.ID
-		follow.CalendarID = copied.CalendarID
-		follow.ExternalID = copied.ExternalID
-		follow.ETag = copied.ETag
-		follow.Attendees = copied.Attendees
-		follow.LinkKey = copied.LinkKey
-		follow.LinkPrimary = copied.LinkPrimary
-		if _, err := s.UpdateRemoteEvent(ctx, userID, copied, follow); err != nil {
-			problems = append(problems, LinkedProblem{CalendarID: copied.CalendarID, Action: LinkedUpdate, Err: err})
-		}
-	}
-	if removeCopy {
-		if err := s.DeleteRemoteEvent(ctx, userID, *inTarget); err != nil {
-			problems = append(problems, LinkedProblem{CalendarID: inTarget.CalendarID, Action: LinkedDelete, Err: err})
-		}
-	}
-	if addCopy {
-		copied := copyFor(updated, copyCalendarID)
-		copied.LinkKey = edited.LinkKey
-		if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
-			problems = append(problems, LinkedProblem{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err})
-		}
-	}
-	return updated, problems, nil
+	return calendarlink.UpdateGroup(ctx, s, userID, existing, edited, copies, copyCalendarID, change)
 }
 
-// DeleteRemoteEventGroup deletes an event and every copy of it. The reader saw
-// one appointment and deleted it; leaving its copy behind would bring it back
-// the moment the other calendar is switched on. The event goes first, so a
-// refusal there leaves the whole pair as it was.
+// DeleteRemoteEventGroup deletes an event and every copy of it. See
+// calendarlink.DeleteGroup.
 func (s *Syncer) DeleteRemoteEventGroup(ctx context.Context, userID int64, event store.CalendarEvent, copies []store.CalendarEvent) ([]LinkedProblem, error) {
-	if err := s.DeleteRemoteEvent(ctx, userID, event); err != nil && !errors.Is(err, ErrRemoteDeleted) {
-		return nil, err
-	}
-	var problems []LinkedProblem
-	for _, copied := range copies {
-		if err := s.DeleteRemoteEvent(ctx, userID, copied); err != nil && !errors.Is(err, ErrRemoteDeleted) {
-			problems = append(problems, LinkedProblem{CalendarID: copied.CalendarID, Action: LinkedDelete, Err: err})
-		}
-	}
-	return problems, nil
+	return calendarlink.DeleteGroup(ctx, s, userID, event, copies)
 }

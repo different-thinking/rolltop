@@ -648,8 +648,10 @@ site and in review.
 - **An event kept in two calendars is two Google events and one appointment.**
   A reader picks one second calendar (`calendars.copy_target`, unique per user)
   and an event entered anywhere else can be copied into it
-  (`backend/googlecalendar/linked.go`). Five properties keep that honest. The
-  link lives **at Google**, as a private extended property on both copies, and
+  (`backend/calendarlink/linked.go`; each provider stores the link its own way,
+  `backend/googlecalendar/linked.go` and `linkPropertyID` in
+  `backend/m365calendar`). Five properties keep that honest. The
+  link lives **at the provider**, as a private extended property on both copies, and
   `calendar_events.link_key` only mirrors it on every sync -- so a resync, a
   reconnect or a rebuilt mirror finds the pair again, and nothing local can
   invent one. A pair is the key **and the start** (`ListCalendarEventCopies`,
@@ -669,6 +671,53 @@ site and in review.
   (`presentCalendarEvent`), because the dialog starts its "Also add to" box
   from `also_in` and an answer without it would have the next save delete the
   copy.
+- **A calendar belongs to one provider, and a pair may span two.** Rows in
+  `calendars` say `provider` (`google` or `microsoft`), carry the provider's own
+  id in `remote_calendar_id`, and fill exactly one of `google_connection_id` and
+  `microsoft_connection_id`; every per-connection query names the provider, so a
+  Google connection 3 and a Microsoft connection 3 never read each other's
+  calendars. The web layer never calls a provider directly: every write goes
+  through `calendarlink.Router`, which asks the calendar which provider it is,
+  so an event entered in Microsoft 365 can keep its copy in a Google second
+  calendar and the other way round. The pair logic lives once, in
+  `calendarlink`; a provider only writes and reads `LinkKey`/`LinkPrimary`.
+  Shared outcomes (`calendarlink.ErrRemoteChanged` and its relatives) are what
+  the pair logic and the routes test against; each provider's own error values
+  unwrap to them (`calendarlink.Sentinel`) and keep their own wording, which is
+  how a message names the provider that refused.
+- **A copy is never an online meeting of its own.** `calendarlink.CopyFor` and
+  the follow step of `UpdateGroup` keep the copy's own `OnlineMeeting`, exactly
+  as they keep its empty guest list: a copy of a Teams meeting that asked for a
+  meeting would create a second one nobody was invited to. The join details
+  reach the copy in the notes, where Microsoft wrote them. Once an event is
+  online it stays so -- Outlook ignores a later `isOnlineMeeting: false` -- so
+  the write-back only ever asks to turn a meeting on, never off.
+- **Microsoft 365 is read in windows, not deltas.** Graph v1.0 has a delta
+  cursor only for the primary calendar's view, and a delta cannot `$expand` the
+  extended property the link lives in. So `m365calendar` reads the near window
+  (a fortnight back, four months ahead) on every poll and the whole mirrored
+  window (a year back, two years ahead) on `fullReadInterval`, with
+  `calendars.full_read_at` pacing it. A window read can only conclude that an
+  event is gone for rows it would have returned, so reconciliation is limited
+  to rows that **start** inside the window and further than `edgeMargin` from
+  its edges (`ListCalendarEventRefsStartingIn`): an all-day event is stored at
+  midnight UTC while Graph decides overlap from its midnight in the zone it was
+  entered in, and a row near the edge deleted for its absence would flicker out
+  and back every poll. Rows that ended before the whole window are dropped on
+  the full read only. Every read asks for UTC and for text bodies
+  (`preferHeader`); an all-day event is placed on the nearest UTC midnight.
+- **A Microsoft write sends only what it changed.** Graph merges a PATCH, so
+  the notes travel only when they were edited (rewriting them turns an
+  organizer's formatted agenda into the text it was read as), the guest list
+  only when it changed (Graph mails every guest about it, and the current
+  version is read first so a stale mirror cannot drop anybody invited since),
+  and every write carries the etag as `If-Match`; a refusal adopts Microsoft's
+  version exactly as Google's does. A meeting somebody else organizes is read
+  only in the dialog -- only its organizer can change it -- and the invitee's
+  part is the answer (`accept`, `tentativelyAccept`, `decline`, always with
+  `sendResponse`). Microsoft has no per-app revocation for one user, so
+  disconnecting deletes the connection and its calendars and tells the reader
+  where to remove the grant.
 - A cross-account duplicate copy is hidden behind a pointer to the row that stays
   visible, and that pointer is only safe while it resolves. Deletes clear it in a
   SQLite trigger rather than in Go, because reconciliation, folder purges, account

@@ -90,6 +90,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiCalendarPath(w, r, strings.TrimPrefix(path, "calendar/"))
 	case path == "brand-icons":
 		s.apiBrandIcons(w, r)
+	case strings.HasPrefix(path, "microsoft/"):
+		s.apiMicrosoftPath(w, r, strings.TrimPrefix(path, "microsoft/"))
 	case path == "google/connect":
 		s.apiGoogleConnect(w, r)
 	case path == "google/callback":

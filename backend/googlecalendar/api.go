@@ -82,7 +82,11 @@ type Event struct {
 	ETag     string `json:"etag"`
 	Status   string `json:"status"`
 	HTMLLink string `json:"htmlLink"`
-	Summary  string `json:"summary"`
+	// HangoutLink is the Google Meet link of an event that has one. It is
+	// read only: creating a Meet is a conference request Rolltop does not
+	// make.
+	HangoutLink string `json:"hangoutLink"`
+	Summary     string `json:"summary"`
 	// Description carries the organizer's notes and may contain HTML. It is
 	// stored as-is and escaped where it is rendered.
 	Description string        `json:"description"`

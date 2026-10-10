@@ -17,6 +17,7 @@ import (
 	"rolltop/backend/googleauth"
 	"rolltop/backend/logging"
 	"rolltop/backend/memlimit"
+	"rolltop/backend/microsoftauth"
 	"rolltop/backend/pgdsn"
 )
 
@@ -64,6 +65,7 @@ type Config struct {
 	WebhookToken      string
 	LogLevel          string
 	Google            GoogleConfig
+	Microsoft         MicrosoftConfig
 
 	// MemoryLimit is the soft ceiling the Go runtime is given at startup so a
 	// large sync collects instead of growing into the container's limit.
@@ -212,6 +214,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	microsoft, err := loadMicrosoftConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	// The memlimit package owns what a ceiling means, so a typo is rejected here
 	// by the same parser the runtime setting applies.
 	memoryLimit, err := memlimit.ParseRequest(os.Getenv("ROLLTOP_MEMORY_LIMIT"))
@@ -241,6 +247,7 @@ func Load() (Config, error) {
 		PublicURL:              publicURL,
 		LogLevel:               logLevel,
 		Google:                 google,
+		Microsoft:              microsoft,
 		MemoryLimit:            memoryLimit,
 		StartupLockWait:        startupLockWait,
 		BreakInstanceLock:      breakInstanceLock,
@@ -294,6 +301,55 @@ func loadGoogleConfig() (GoogleConfig, error) {
 		return GoogleConfig{}, errors.New("ROLLTOP_GOOGLE_REDIRECT_URLS is required when Google client credentials are set")
 	}
 	return google, nil
+}
+
+// MicrosoftConfig carries the operator's Microsoft identity platform app
+// registration, validated at startup for the same reason GoogleConfig is.
+type MicrosoftConfig struct {
+	ClientID     string
+	ClientSecret string
+	// Tenant is "common" (work, school and personal accounts), "organizations",
+	// "consumers", or one directory's id or domain.
+	Tenant       string
+	RedirectURLs []string
+	Scopes       []string
+}
+
+// Configured reports whether Microsoft 365 features can be offered at all.
+func (m MicrosoftConfig) Configured() bool {
+	return m.ClientID != "" && m.ClientSecret != ""
+}
+
+func loadMicrosoftConfig() (MicrosoftConfig, error) {
+	microsoft := MicrosoftConfig{
+		ClientID:     strings.TrimSpace(os.Getenv("ROLLTOP_MICROSOFT_CLIENT_ID")),
+		ClientSecret: strings.TrimSpace(os.Getenv("ROLLTOP_MICROSOFT_CLIENT_SECRET")),
+		Tenant:       strings.TrimSpace(os.Getenv("ROLLTOP_MICROSOFT_TENANT")),
+		RedirectURLs: splitList(os.Getenv("ROLLTOP_MICROSOFT_REDIRECT_URLS")),
+		Scopes:       splitList(os.Getenv("ROLLTOP_MICROSOFT_SCOPES")),
+	}
+	if (microsoft.ClientID == "") != (microsoft.ClientSecret == "") {
+		return MicrosoftConfig{}, errors.New("ROLLTOP_MICROSOFT_CLIENT_ID and ROLLTOP_MICROSOFT_CLIENT_SECRET must be set together")
+	}
+	if strings.ContainsAny(microsoft.Tenant, "/?#") {
+		return MicrosoftConfig{}, fmt.Errorf("ROLLTOP_MICROSOFT_TENANT: %q must be a tenant id, a domain, or one of common, organizations, consumers", microsoft.Tenant)
+	}
+	for _, raw := range microsoft.RedirectURLs {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return MicrosoftConfig{}, fmt.Errorf("ROLLTOP_MICROSOFT_REDIRECT_URLS: %q is not a URL: %w", raw, err)
+		}
+		if parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return MicrosoftConfig{}, fmt.Errorf("ROLLTOP_MICROSOFT_REDIRECT_URLS: %q must be an absolute http or https URL", raw)
+		}
+		if parsed.Path != microsoftauth.CallbackPath {
+			return MicrosoftConfig{}, fmt.Errorf("ROLLTOP_MICROSOFT_REDIRECT_URLS: %q must end in %s", raw, microsoftauth.CallbackPath)
+		}
+	}
+	if microsoft.Configured() && len(microsoft.RedirectURLs) == 0 {
+		return MicrosoftConfig{}, errors.New("ROLLTOP_MICROSOFT_REDIRECT_URLS is required when Microsoft client credentials are set")
+	}
+	return microsoft, nil
 }
 
 // splitList accepts comma, whitespace, or newline separated values so operators

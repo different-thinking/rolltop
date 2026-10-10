@@ -24,6 +24,7 @@ import { PluginTogglePanel } from "./admin/PluginTogglePanel";
 import { RetentionSettingsPanel } from "./RetentionSettings";
 import { SMTPTrafficPanel } from "./SMTPTraffic";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
+import { MicrosoftAccountsSettings } from "./MicrosoftAccounts";
 import { GmailSubmissionPortField, GoogleConnectionField, SignInMethodField } from "./GoogleSignIn";
 import { loadGoogleConnections, type GoogleConnection } from "./googleConnections";
 import { SettingsEmpty, SettingsError, SettingsIndex, SettingsIndexRow, SettingsLoading, SettingsPage, SettingsShell } from "./SettingsUI";
@@ -455,7 +456,7 @@ function cloneMailIdentity(identity: MailIdentity): MailIdentity {
 }
 
 type SettingsRoute = {
-  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "preferences" | "swipes" | "search" | "retention" | "plugins" | "unknown";
+  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "microsoft" | "preferences" | "swipes" | "search" | "retention" | "plugins" | "unknown";
   id: number | null;
   isNew: boolean;
 };
@@ -473,6 +474,7 @@ function settingsRouteFromPath(path: string): SettingsRoute {
   if (path === "/settings/account/general/about") return { kind: "about", id: null, isNew: false };
   if (path === "/settings/account/mail") return { kind: "mail", id: null, isNew: false };
   if (path === "/settings/account/google") return { kind: "google", id: null, isNew: false };
+  if (path === "/settings/account/microsoft") return { kind: "microsoft", id: null, isNew: false };
   if (path === "/settings/account/preferences") return { kind: "preferences", id: null, isNew: false };
   if (path === "/settings/account/preferences/swipes") return { kind: "swipes", id: null, isNew: false };
   if (path === "/settings/account/preferences/search") return { kind: "search", id: null, isNew: false };
@@ -2848,6 +2850,7 @@ export function SettingsView({
     if (route.kind === "plugins" || route.kind === "unknown") return "plugins";
     if (["mail", "imap", "smtp", "identities"].includes(route.kind)) return "mail";
     if (route.kind === "google") return "google";
+    if (route.kind === "microsoft") return "microsoft";
     if (["preferences", "swipes", "search", "retention"].includes(route.kind)) return "preferences";
     return "general";
   };
@@ -3137,6 +3140,13 @@ export function SettingsView({
       <SettingsPage title="Google" description="Google accounts authorized for mail, contacts, and calendar." navigate={navigate}>
         {noticeNode}
         <GoogleAccountsSettings csrf={csrf} search={location.search} replaceRoute={replaceRoute} addToast={addToast} />
+      </SettingsPage>
+    );
+  } else if (route.kind === "microsoft") {
+    page = (
+      <SettingsPage title="Microsoft 365" description="Microsoft accounts authorized for calendar, Teams meetings included." navigate={navigate}>
+        {noticeNode}
+        <MicrosoftAccountsSettings csrf={csrf} search={location.search} replaceRoute={replaceRoute} addToast={addToast} />
       </SettingsPage>
     );
   } else if (route.kind === "preferences") {

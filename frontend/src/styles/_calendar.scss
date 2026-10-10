@@ -547,6 +547,22 @@ $calendar-gutter: 58px;
   box-shadow: 0 0 0 1px var(--surface);
 }
 
+// An online meeting carries a camera beside its title, so a Teams call reads
+// differently from a meeting room at a glance.
+.calendar-event-online {
+  display: inline-flex;
+  margin-right: 4px;
+  vertical-align: middle;
+  font-size: 12px;
+}
+
+.calendar-join a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
 .calendar-also-in {
   display: flex;
   align-items: center;

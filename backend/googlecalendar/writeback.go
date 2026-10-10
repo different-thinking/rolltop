@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"rolltop/backend/calendarlink"
 	"rolltop/backend/store"
 )
 
@@ -22,22 +23,22 @@ const writeTimeout = 30 * time.Second
 // last read it. The local row has been refreshed to Google's version by the
 // time this is returned, so the caller can show what the event looks like now
 // instead of leaving the user with a copy that no longer exists anywhere.
-var ErrRemoteChanged = errors.New("this event was changed in Google")
+var ErrRemoteChanged = calendarlink.Sentinel("this event was changed in Google", calendarlink.ErrRemoteChanged)
 
 // ErrRemoteDeleted reports that the event was removed at Google while it was
 // being edited here. The local mirror is gone by the time this is returned;
 // there is no version left to show, which is what separates it from
 // ErrRemoteChanged.
-var ErrRemoteDeleted = errors.New("this event was deleted in Google")
+var ErrRemoteDeleted = calendarlink.Sentinel("this event was deleted in Google", calendarlink.ErrRemoteDeleted)
 
 // ErrReadOnlyCalendar reports a write to a calendar the account may only read.
 // Google would refuse it, and refusing here means the user is told why rather
 // than watching a save fail with a generic upstream error.
-var ErrReadOnlyCalendar = errors.New("this calendar is shared read-only")
+var ErrReadOnlyCalendar = calendarlink.Sentinel("this calendar is shared read-only", calendarlink.ErrReadOnlyCalendar)
 
 // ErrNotAnInvitation reports an answer to an event the account was not invited
 // to. Only an attendee has a response to give.
-var ErrNotAnInvitation = errors.New("this event has no invitation to answer")
+var ErrNotAnInvitation = calendarlink.Sentinel("this event has no invitation to answer", calendarlink.ErrNotAnInvitation)
 
 // CreateRemoteEvent adds an event to a Google calendar and stores the result
 // locally. The local row is built from Google's response rather than from the
@@ -60,7 +61,7 @@ func (s *Syncer) CreateRemoteEvent(ctx context.Context, userID, calendarID int64
 	var created Event
 	if err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
-		created, callErr = s.client().CreateEvent(ctx, token, calendar.GoogleCalendarID, write, len(guests) > 0)
+		created, callErr = s.client().CreateEvent(ctx, token, calendar.RemoteCalendarID, write, len(guests) > 0)
 		return callErr
 	}); err != nil {
 		return store.CalendarEvent{}, err
@@ -116,7 +117,7 @@ func (s *Syncer) UpdateRemoteEvent(ctx context.Context, userID int64, existing s
 	var updated Event
 	err = s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
-		updated, callErr = s.client().UpdateEvent(ctx, token, calendar.GoogleCalendarID,
+		updated, callErr = s.client().UpdateEvent(ctx, token, calendar.RemoteCalendarID,
 			existing.ExternalID, existing.ETag, write, notify)
 		return callErr
 	})
@@ -149,7 +150,7 @@ func (s *Syncer) DeleteRemoteEvent(ctx context.Context, userID int64, event stor
 	defer cancel()
 
 	if err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
-		return s.client().DeleteEvent(ctx, token, calendar.GoogleCalendarID,
+		return s.client().DeleteEvent(ctx, token, calendar.RemoteCalendarID,
 			event.ExternalID, event.ETag, len(event.Attendees) > 0)
 	}); err != nil {
 		return err
@@ -194,7 +195,7 @@ func (s *Syncer) RespondToRemoteEvent(ctx context.Context, userID int64, event s
 	var updated Event
 	err = s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
-		updated, callErr = s.client().RespondToEvent(ctx, token, calendar.GoogleCalendarID,
+		updated, callErr = s.client().RespondToEvent(ctx, token, calendar.RemoteCalendarID,
 			event.ExternalID, current.ETag, attendees)
 		return callErr
 	})
@@ -214,7 +215,7 @@ func (s *Syncer) readRemote(ctx context.Context, userID int64, calendar store.Ca
 	var current Event
 	err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 		var callErr error
-		current, callErr = s.client().GetEvent(ctx, token, calendar.GoogleCalendarID, event.ExternalID)
+		current, callErr = s.client().GetEvent(ctx, token, calendar.RemoteCalendarID, event.ExternalID)
 		return callErr
 	})
 	if errors.Is(err, ErrNotFound) {

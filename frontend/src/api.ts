@@ -789,6 +789,11 @@ export const api = {
       `/api/google/connections/${connectionID}/calendar/sync`,
       csrf
     ),
+  syncMicrosoftCalendar: (csrf: string, connectionID: number) =>
+    postJSON<{ calendars: number; created: number; updated: number; deleted: number }>(
+      `/api/microsoft/connections/${connectionID}/calendar/sync`,
+      csrf
+    ),
   respondToCalendarEvent: (csrf: string, id: number, response: string) =>
     postJSON<{ event: CalendarEvent }>(`/api/calendar/events/${id}/respond`, csrf, { response }),
   addSenderContact: (csrf: string, id: number) =>

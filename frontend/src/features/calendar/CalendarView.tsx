@@ -1,7 +1,8 @@
-// File overview: The week view. Every calendar of every connected Google
-// account is drawn in one overlay, coloured the way Google colours it, with a
-// visibility switch per calendar. Google is the leading system, so every write
-// here goes through the API that reaches Google first.
+// File overview: The week view. Every calendar of every connected Google and
+// Microsoft 365 account is drawn in one overlay, coloured the way its provider
+// colours it, with a visibility switch per calendar. The provider is the
+// leading system, so every write here goes through the API that reaches it
+// first.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "../../api";
@@ -21,6 +22,7 @@ import {
   layoutDayEvents,
   localDateKey,
   minutesIntoDay,
+  providerName,
   readableTextColor,
   startOfDay,
   startOfWeek,
@@ -174,16 +176,26 @@ export function CalendarView({
   };
 
   const syncNow = async () => {
-    const connectionIDs = Array.from(new Set(calendars.map((calendar) => calendar.connection_id))).filter(Boolean);
-    if (connectionIDs.length === 0) return;
+    // A connection id is only unique within its provider, so accounts are
+    // told apart by both.
+    const accounts = new Map<string, { provider: CalendarSummary["provider"]; connectionID: number }>();
+    for (const calendar of calendars) {
+      if (!calendar.connection_id) continue;
+      accounts.set(`${calendar.provider}:${calendar.connection_id}`, {
+        provider: calendar.provider,
+        connectionID: calendar.connection_id
+      });
+    }
+    if (accounts.size === 0) return;
     setSyncing(true);
     // Each account is synced on its own: one revoked grant must not stop the
     // others, and it must not cost the refresh that shows what the accounts
     // that did sync came back with.
     const failures: string[] = [];
-    for (const connectionID of connectionIDs) {
+    for (const account of accounts.values()) {
       try {
-        await api.syncGoogleCalendar(csrf, connectionID);
+        if (account.provider === "microsoft") await api.syncMicrosoftCalendar(csrf, account.connectionID);
+        else await api.syncGoogleCalendar(csrf, account.connectionID);
       } catch (err) {
         failures.push(messageFromError(err));
       }
@@ -253,11 +265,12 @@ export function CalendarView({
   const deleteEvent = () =>
     runWrite(async () => {
       if (!dialog?.event) return;
+      const provider = providerName(calendarsByID.get(dialog.event.calendar_id));
       const data = await api.deleteCalendarEvent(csrf, dialog.event.id);
       await reload("events");
       closeDialog();
       if (data.warnings && data.warnings.length > 0) reportWarnings(data.warnings);
-      else addToast("Event deleted in Google too.", "success");
+      else addToast(`Event deleted in ${provider} too.`, "success");
     });
 
   const respond = (response: string) =>
@@ -327,8 +340,9 @@ export function CalendarView({
 
         {calendars.length === 0 && !loading ? (
           <p className="calendar-empty">
-            No calendars yet. Connect a Google account under <a href="/settings/account/google">Google settings</a> and
-            allow calendar access.
+            No calendars yet. Connect a Google account under <a href="/settings/account/google">Google settings</a> or a
+            Microsoft 365 account under <a href="/settings/account/microsoft">Microsoft 365 settings</a> and allow
+            calendar access.
           </p>
         ) : null}
 
@@ -399,12 +413,14 @@ export function CalendarView({
                   const calendar = calendarsByID.get(placed.event.calendar_id);
                   const color = calendarColor(calendar);
                   const width = 100 / placed.columns;
-                  const declined = placed.event.my_response === "declined";
+                  const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
                   return (
                     <button
                       key={placed.event.id}
                       type="button"
                       className={`calendar-event ${declined ? "declined" : ""} ${
+                        placed.event.status === "cancelled" ? "cancelled" : ""
+                      } ${
                         placed.continuesBefore ? "continues-before" : ""
                       } ${placed.continuesAfter ? "continues-after" : ""}`}
                       style={{
@@ -425,6 +441,11 @@ export function CalendarView({
                       <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
                       <span className="calendar-event-title">
                         <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+                        {placed.event.online_meeting ? (
+                          <span className="calendar-event-online" title="Online meeting">
+                            <Icon name="video" />
+                          </span>
+                        ) : null}
                         {placed.event.summary || "(No title)"}
                       </span>
                       {placed.event.location ? (
@@ -477,7 +498,7 @@ function CalendarSidebar({
   const groups = useMemo(() => {
     const byAccount = new Map<string, CalendarSummary[]>();
     for (const calendar of calendars) {
-      const key = calendar.connection_email || "Google";
+      const key = calendar.connection_email || providerName(calendar);
       const list = byAccount.get(key) || [];
       list.push(calendar);
       byAccount.set(key, list);

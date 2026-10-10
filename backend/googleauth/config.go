@@ -118,6 +118,13 @@ func (c Config) ScopeString() string {
 // configuration problem, and failing at the connect button with a clear message
 // beats bouncing the user off Google with redirect_uri_mismatch.
 func (c Config) RedirectURL(r *http.Request) string {
+	return RedirectURLFor(c.RedirectURLs, r)
+}
+
+// RedirectURLFor applies the selection RedirectURL describes to any allowlist.
+// The Microsoft sign-in is held to the same rule, so it uses the same code.
+func RedirectURLFor(redirectURLs []string, r *http.Request) string {
+	c := struct{ RedirectURLs []string }{redirectURLs}
 	if len(c.RedirectURLs) == 1 {
 		return c.RedirectURLs[0]
 	}
