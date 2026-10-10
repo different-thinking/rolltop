@@ -327,17 +327,22 @@ func (c *Client) attempt(ctx context.Context, accessToken, method, target, etag 
 	if etag = strings.TrimSpace(etag); etag != "" {
 		req.Header.Set("If-Match", etag)
 	}
+	// A POST creates something -- an event, its invitations, a Teams meeting --
+	// so it is only sent again when Graph said it did not process it. A lost
+	// connection or a gateway that timed out may have let the first one land,
+	// and a retry would create everything twice.
+	idempotent := method != http.MethodPost
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, 0, false, ctx.Err()
 		}
-		return nil, 0, true, fmt.Errorf("%w: %v", ErrUpstream, err)
+		return nil, 0, idempotent, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	_ = resp.Body.Close()
 	if readErr != nil {
-		return nil, 0, true, fmt.Errorf("%w: %v", ErrUpstream, readErr)
+		return nil, 0, idempotent, fmt.Errorf("%w: %v", ErrUpstream, readErr)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return body, 0, false, nil
@@ -345,9 +350,9 @@ func (c *Client) attempt(ctx context.Context, accessToken, method, target, etag 
 	code := errorCode(body)
 	retryable := resp.StatusCode == http.StatusTooManyRequests ||
 		resp.StatusCode == http.StatusServiceUnavailable ||
-		resp.StatusCode == http.StatusGatewayTimeout ||
-		resp.StatusCode == http.StatusBadGateway ||
-		resp.StatusCode == http.StatusInternalServerError
+		(idempotent && (resp.StatusCode == http.StatusGatewayTimeout ||
+			resp.StatusCode == http.StatusBadGateway ||
+			resp.StatusCode == http.StatusInternalServerError))
 	return nil, retryAfter(resp.Header.Get("Retry-After")), retryable, statusError(resp.StatusCode, code)
 }
 

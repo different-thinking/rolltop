@@ -36,6 +36,25 @@ var (
 	ErrNoOnlineMeeting = calendarlink.Sentinel("this calendar cannot hold Teams meetings", calendarlink.ErrNoOnlineMeeting)
 )
 
+// ownErrors are every error value this package defines. They sit beside the
+// definitions so a new one is listed where it is written, rather than in a
+// caller that has to remember it exists.
+var ownErrors = []error{
+	ErrUnauthorized, ErrForbidden, ErrConflict, ErrNotFound, ErrUpstream, ErrScopeMissing,
+	ErrRemoteChanged, ErrRemoteDeleted, ErrReadOnlyCalendar, ErrNotAnInvitation, ErrNoOnlineMeeting,
+}
+
+// IsOwnError reports whether a failure came from Microsoft 365, which is what
+// lets a message name the provider that refused.
+func IsOwnError(err error) bool {
+	for _, own := range ownErrors {
+		if errors.Is(err, own) {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateRemoteEvent adds an event to a Microsoft calendar and stores what
 // Graph answered. Graph sends the invitations of an event with attendees, and
 // creates the Teams meeting of one that asks for it, in the same call.

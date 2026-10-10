@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"rolltop/backend/calendarlink"
@@ -87,10 +87,19 @@ type Syncer struct {
 	// Now is the clock; a field so a test can place a window boundary.
 	Now func() time.Time
 
-	// linksUnsupported is set once Graph refuses a calendarView that asks for
-	// the link property. Reads then go without it and keep the links already
-	// mirrored, rather than failing every calendar on every poll.
-	linksUnsupported atomic.Bool
+	// linksRefused holds the calendars (by row id) for which Graph refused a
+	// calendarView that asks for the link property. Reads of those then go
+	// without it and keep the links already mirrored, rather than failing on
+	// every poll. It is per calendar on purpose: one tenant's calendar that
+	// answers 400 must not stop every other reader's links being read.
+	linksRefused sync.Map
+}
+
+// linksUnsupported reports whether Graph refused the link property for one
+// calendar.
+func (s *Syncer) linksUnsupported(calendarID int64) bool {
+	_, refused := s.linksRefused.Load(calendarID)
+	return refused
 }
 
 // NewSyncer wires a syncer for production use.
@@ -306,10 +315,12 @@ func (s *Syncer) syncCalendarEvents(ctx context.Context, userID int64, connectio
 		// mirror and is no longer kept current.
 		removed, err := s.Store.DeleteCalendarEventsEndingBefore(ctx, userID, calendar.ID, from)
 		if err != nil {
+			s.recordCalendarFailure(ctx, userID, calendar, err)
 			return counts, err
 		}
 		counts.Deleted += int(removed)
 		if err := s.Store.MarkCalendarFullRead(ctx, userID, calendar.ID, now); err != nil {
+			s.recordCalendarFailure(ctx, userID, calendar, err)
 			return counts, err
 		}
 	}
@@ -332,7 +343,7 @@ func (s *Syncer) readWindow(ctx context.Context, userID int64, connection store.
 	if err != nil {
 		return counts, err
 	}
-	withLinks := !s.linksUnsupported.Load()
+	withLinks := !s.linksUnsupported(calendar.ID)
 	nextLink := ""
 	for {
 		var page EventsPage
@@ -352,7 +363,7 @@ func (s *Syncer) readWindow(ctx context.Context, userID int64, connection store.
 			// keeps the calendar in step; the links already mirrored are kept
 			// by applyEvent rather than cleared.
 			log.Printf("microsoft calendar sync user_id=%d calendar_id=%d: the link property was refused, reading without it", userID, calendar.ID)
-			s.linksUnsupported.Store(true)
+			s.linksRefused.Store(calendar.ID, true)
 			withLinks = false
 			continue
 		}
@@ -364,7 +375,13 @@ func (s *Syncer) readWindow(ctx context.Context, userID int64, connection store.
 			if externalID == "" || strings.EqualFold(event.Type, "seriesMaster") {
 				continue
 			}
+			ref, listed := known[externalID]
 			delete(known, externalID)
+			if listed && ref.ETag != "" && ref.ETag == event.version() {
+				// Most of a poll is events nobody touched; the reconciliation
+				// list already carries their version, so they cost no query.
+				continue
+			}
 			outcome, err := s.applyEvent(ctx, userID, calendar.ID, connection.Email, event, withLinks)
 			if err != nil {
 				return counts, err
@@ -452,6 +469,11 @@ func tokenError(err error) error {
 		return fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	case errors.Is(err, microsoftauth.ErrUpstream):
 		return fmt.Errorf("%w: %w", ErrUpstream, err)
+	case errors.Is(err, microsoftauth.ErrNotConfigured):
+		// The operator removed the app registration while accounts were still
+		// connected: the calendars stay listed, and a write to one is the
+		// provider being unavailable here, not an internal fault.
+		return fmt.Errorf("%w: %w", calendarlink.ErrProviderUnavailable, err)
 	}
 	return err
 }

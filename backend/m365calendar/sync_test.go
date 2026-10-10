@@ -705,7 +705,7 @@ func TestSyncWithoutTheLinkPropertyKeepsMirroredLinks(t *testing.T) {
 	if event.Summary != "Renamed" || event.LinkKey != "k" {
 		t.Fatalf("after fallback = %+v", event)
 	}
-	if !f.syncer.linksUnsupported.Load() {
+	if !f.syncer.linksUnsupported(main.ID) {
 		t.Fatal("the fallback was not remembered")
 	}
 }
@@ -785,6 +785,49 @@ func TestOrganizerRowDoesNotTravelAsAGuest(t *testing.T) {
 	for _, guest := range sent {
 		if strings.EqualFold(guest.(map[string]any)["emailAddress"].(map[string]any)["address"].(string), selfEmail) {
 			t.Fatalf("the organizer was sent as a guest: %v", sent)
+		}
+	}
+}
+
+// A create that Graph may already have carried out is not sent again: a
+// second POST is a second event, a second set of invitations and a second
+// Teams meeting.
+func TestCreateIsNotRetriedAfterAnUncertainFailure(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+	client := &Client{HTTPClient: server.Client(), BaseURL: server.URL, RetryDelay: func(int) time.Duration { return 0 }}
+	if _, err := client.CreateEvent(context.Background(), "token", "cal", map[string]any{"subject": "x"}); err == nil {
+		t.Fatal("create succeeded against a failing Graph")
+	}
+	if calls != 1 {
+		t.Fatalf("POST sent %d times, want once", calls)
+	}
+	calls = 0
+	if _, err := client.GetEvent(context.Background(), "token", "evt"); err == nil {
+		t.Fatal("read succeeded against a failing Graph")
+	}
+	if calls != defaultMaxAttempts {
+		t.Fatalf("GET sent %d times, want %d", calls, defaultMaxAttempts)
+	}
+}
+
+// Outlook names zones the Windows way; only an IANA name may travel on, into a
+// Google copy or back into Graph.
+func TestPortableZone(t *testing.T) {
+	cases := map[string]string{
+		"Europe/Berlin":            "Europe/Berlin",
+		"UTC":                      "UTC",
+		"W. Europe Standard Time":  "",
+		"tzone://Microsoft/Custom": "",
+		"":                         "",
+	}
+	for in, want := range cases {
+		if got := portableZone(in); got != want {
+			t.Errorf("portableZone(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

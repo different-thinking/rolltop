@@ -693,23 +693,12 @@ func linkedProblemReason(err error) string {
 	}
 }
 
-// microsoftCalendarErrors are the Microsoft provider's own error values. A
-// failure carrying one of them is described as Microsoft's; anything else
-// keeps the Google wording every message had before there were two
-// providers.
-var microsoftCalendarErrors = []error{
-	m365calendar.ErrUnauthorized, m365calendar.ErrForbidden, m365calendar.ErrConflict,
-	m365calendar.ErrNotFound, m365calendar.ErrUpstream, m365calendar.ErrScopeMissing,
-	m365calendar.ErrRemoteChanged, m365calendar.ErrRemoteDeleted, m365calendar.ErrReadOnlyCalendar,
-	m365calendar.ErrNotAnInvitation, m365calendar.ErrNoOnlineMeeting,
-}
-
 // calendarProviderName names the provider a failure came from, for a message.
+// A failure Microsoft's package does not claim keeps the Google wording every
+// message had before there were two providers.
 func calendarProviderName(err error) string {
-	for _, own := range microsoftCalendarErrors {
-		if errors.Is(err, own) {
-			return "Microsoft 365"
-		}
+	if m365calendar.IsOwnError(err) {
+		return "Microsoft 365"
 	}
 	return "Google"
 }

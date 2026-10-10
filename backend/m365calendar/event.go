@@ -112,7 +112,7 @@ func ToEvent(event Event, calendarID int64, selfEmail string) store.CalendarEven
 		StartAt:          start,
 		EndAt:            end,
 		AllDay:           allDay,
-		TimeZone:         strings.TrimSpace(event.OriginalStartTimeZone),
+		TimeZone:         portableZone(event.OriginalStartTimeZone),
 		RecurringEventID: strings.TrimSpace(event.SeriesMasterID),
 		HTMLLink:         strings.TrimSpace(event.WebLink),
 		RemoteUpdatedAt:  parseTimestamp(event.LastModifiedDateTime),
@@ -168,6 +168,23 @@ func eventBounds(event Event) (time.Time, time.Time, bool) {
 		end = start
 	}
 	return start, end, false
+}
+
+// portableZone keeps an event's zone only when it is an IANA name. Graph
+// reports the zone an event was entered in the way Outlook spells it -- a
+// Windows name such as "W. Europe Standard Time", or "tzone://Microsoft/Custom"
+// -- and the stored zone travels on: into a copy in a Google calendar, which
+// refuses anything but an IANA name, and back into Graph on an edit. An empty
+// zone is the safe answer there, because the stored bounds are absolute.
+func portableZone(zone string) string {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return ""
+	}
+	if _, err := time.LoadLocation(zone); err != nil {
+		return ""
+	}
+	return zone
 }
 
 func nearestMidnight(at time.Time) time.Time {
