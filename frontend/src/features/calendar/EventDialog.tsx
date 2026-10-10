@@ -35,6 +35,9 @@ type DraftState = {
   /** copy is the "also add to the second calendar" box. It is only sent when
    * the box is shown, so an edit that never offered it keeps the copies. */
   copy: boolean;
+  /** busyCopy is the "block the time in the busy calendar" box, sent under
+   * the same rule. */
+  busyCopy: boolean;
   /** onlineMeeting is the "Teams meeting" box. */
   onlineMeeting: boolean;
 };
@@ -57,10 +60,11 @@ function utcDateValue(date: Date): string {
 
 /** draftFromEvent fills the form from an existing event, reading an all-day
  * event's bounds in UTC because that is the zone they were anchored in. */
-function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState {
+function draftFromEvent(event: CalendarEvent, copyTargetID: number, busyTargetID: number): DraftState {
   const start = new Date(event.start_at);
   const end = new Date(event.end_at);
   const copy = (event.also_in || []).some((item) => item.calendar_id === copyTargetID);
+  const busyCopy = (event.also_in || []).some((item) => item.calendar_id === busyTargetID);
   if (event.all_day) {
     const inclusiveEnd = new Date(end.getTime() - 86_400_000);
     return {
@@ -75,6 +79,7 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState 
       endTime: "10:00",
       attendees: event.attendees || [],
       copy,
+      busyCopy,
       onlineMeeting: Boolean(event.online_meeting)
     };
   }
@@ -90,6 +95,7 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState 
     endTime: localTimeValue(end),
     attendees: event.attendees || [],
     copy,
+    busyCopy,
     onlineMeeting: Boolean(event.online_meeting)
   };
 }
@@ -111,6 +117,7 @@ function draftForNewEvent(day: Date, calendarID: number): DraftState {
     endTime: localTimeValue(end),
     attendees: [],
     copy: false,
+    busyCopy: false,
     onlineMeeting: false
   };
 }
@@ -242,8 +249,11 @@ export function EventDialog({
   // draft here: the calendar list is reloaded on a poll, after a sync and after
   // every write, and any reset keyed on it would wipe what the user is typing.
   const copyTarget = calendars.find((item) => item.copy_target && item.can_write);
+  const busyTarget = calendars.find((item) => item.busy_target && item.can_write);
   const [draft, setDraft] = useState<DraftState>(() =>
-    event ? draftFromEvent(event, copyTarget?.id || 0) : draftForNewEvent(day, writable[0]?.id || 0)
+    event
+      ? draftFromEvent(event, copyTarget?.id || 0, busyTarget?.id || 0)
+      : draftForNewEvent(day, writable[0]?.id || 0)
   );
   const [localProblem, setLocalProblem] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -272,16 +282,27 @@ export function EventDialog({
   const update = (patch: Partial<DraftState>) => setDraft((current) => ({ ...current, ...patch }));
   // The box is offered whenever the event lives anywhere but the second
   // calendar itself; an event already in it has nothing to copy.
-  const offerCopy = editable && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
+  // A placeholder is the time of an event entered elsewhere and nothing more,
+  // so nothing can be copied from it; it moves when that event does.
+  const placeholder = Boolean(event?.link_masked);
+  // A placeholder cannot be deleted while its event exists, just as the copy
+  // in the second calendar is the event's and not a thing of its own: it goes
+  // when the box on the event is unticked or the event is deleted. One whose
+  // event is gone is an ordinary event and can be deleted like one.
+  const placeholderOfEvent = placeholder && (event?.also_in || []).length > 0;
+  const offerCopy = editable && !placeholder && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
+  const offerBusyCopy = editable && !placeholder && Boolean(busyTarget) && busyTarget?.id !== draft.calendarID;
   const alsoIn = (event?.also_in || [])
     .map((item) => calendars.find((option) => option.id === item.calendar_id))
     .filter((item): item is CalendarSummary => Boolean(item));
   // While the box is shown it already says whether the second calendar holds
   // a copy, so the line only names the calendars it does not cover.
-  const alsoInOthers = offerCopy ? alsoIn.filter((item) => item.id !== copyTarget?.id) : alsoIn;
+  const alsoInOthers = alsoIn.filter(
+    (item) => !(offerCopy && item.id === copyTarget?.id) && !(offerBusyCopy && item.id === busyTarget?.id)
+  );
   // A copy carries no guests -- they were invited by the event that was
   // entered -- so a guest list edited here would invite them all a second time.
-  const guestsElsewhere = Boolean(event) && alsoIn.length > 0 && !event?.link_primary;
+  const guestsElsewhere = (Boolean(event) && alsoIn.length > 0 && !event?.link_primary) || placeholder;
   // A Teams meeting is offered where the calendar can hold one, and never on
   // the copy of an event: the meeting belongs to the event that was entered.
   // Once a meeting is online it stays so -- Outlook keeps it whatever a later
@@ -303,7 +324,11 @@ export function EventDialog({
     }
     setLocalProblem("");
     const withMeeting = { ...input, online_meeting: offerOnlineMeeting && draft.onlineMeeting };
-    onSave(offerCopy ? { ...withMeeting, copy: draft.copy } : withMeeting);
+    onSave({
+      ...withMeeting,
+      ...(offerCopy ? { copy: draft.copy } : {}),
+      ...(offerBusyCopy ? { busy_copy: draft.busyCopy } : {})
+    });
   };
 
   const message = localProblem || problem;
@@ -443,6 +468,29 @@ export function EventDialog({
             </label>
           ) : null}
 
+          {offerBusyCopy && busyTarget ? (
+            <label className="calendar-checkbox">
+              <input
+                type="checkbox"
+                checked={draft.busyCopy}
+                disabled={saving}
+                onChange={(changeEvent) => update({ busyCopy: changeEvent.target.checked })}
+              />
+              <span className="calendar-swatch" style={{ background: calendarColor(busyTarget) }} />
+              Block the time in {busyTarget.name} as “{busyTarget.busy_title}”
+            </label>
+          ) : null}
+
+          {placeholder ? (
+            <p className="calendar-dialog-note">
+              This is a placeholder: it shows only the time of an event in another calendar. Moving it moves that
+              event too; its title, notes and guests stay there.
+              {placeholderOfEvent
+                ? " To remove it, untick “Block the time” on that event, or delete the event itself."
+                : ""}
+            </p>
+          ) : null}
+
           {alsoInOthers.length > 0 ? (
             <div className="calendar-also-in">
               <span className="calendar-also-in-label">
@@ -487,7 +535,7 @@ export function EventDialog({
             <input
               id="calendar-event-location"
               value={draft.location}
-              disabled={!editable || saving}
+              disabled={!editable || saving || placeholder}
               onChange={(changeEvent) => update({ location: changeEvent.target.value })}
               placeholder="Where?"
             />
@@ -498,7 +546,7 @@ export function EventDialog({
             disabled={!editable || saving || guestsElsewhere}
             onChange={(attendees) => update({ attendees })}
           />
-          {guestsElsewhere ? (
+          {guestsElsewhere && !placeholder ? (
             <p className="calendar-dialog-note">
               This is the copy. Guests are invited from the original event, so they cannot be changed here.
             </p>
@@ -510,7 +558,7 @@ export function EventDialog({
               id="calendar-event-notes"
               rows={4}
               value={draft.description}
-              disabled={!editable || saving}
+              disabled={!editable || saving || placeholder}
               onChange={(changeEvent) => update({ description: changeEvent.target.value })}
             />
           </div>
@@ -536,15 +584,15 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-footer">
-          {event && editable ? (
+          {event && editable && !placeholderOfEvent ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
                 <span>
                   {alsoIn.length > 0
-                    ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
-                    : event.attendees.length > 0 && !event.my_response
-                      ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
-                      : `Delete this event in ${provider} too?`}
+                      ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
+                      : event.attendees.length > 0 && !event.my_response
+                        ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
+                        : `Delete this event in ${provider} too?`}
                 </span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete

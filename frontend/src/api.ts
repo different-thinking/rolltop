@@ -767,6 +767,11 @@ export const api = {
   // calendar that had it.
   setCalendarCopyTarget: (csrf: string, id: number, copyTarget: boolean) =>
     putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { copy_target: copyTarget }),
+  // The busy calendar is one per reader too, and never the second calendar:
+  // choosing it for one role takes the other off it. The label is the title
+  // its placeholders carry and may be sent alone.
+  setCalendarBusyTarget: (csrf: string, id: number, busy: { busy_target?: boolean; busy_label?: string }) =>
+    putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, busy),
   // Hiding a calendar from the calendar view also switches it off and stops it
   // being the second calendar; the answer carries all three.
   setCalendarListed: (csrf: string, id: number, listed: boolean) =>

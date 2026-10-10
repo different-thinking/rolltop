@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"rolltop/backend/calendarlink"
 	"rolltop/backend/store"
 )
 
@@ -342,5 +343,48 @@ func TestSyncReadsTheLinkFromGoogle(t *testing.T) {
 	}
 	if write := ToWrite(plain); write.ExtendedProperties != nil {
 		t.Fatalf("write = %+v, want no extended properties for an unlinked event", write)
+	}
+}
+
+// A placeholder in the busy calendar is written to Google with the "busy" role
+// and nothing of the event but its time, and the role is read back from
+// Google rather than from the calendar it sits in.
+func TestCreateRemoteEventWithPlaceholderMarksItAtGoogle(t *testing.T) {
+	fake := &fakeCalendar{}
+	syncer, db, user, work, family := twoCalendarFixture(t, fake)
+	ctx := context.Background()
+	start := fixedNow.Add(48 * time.Hour)
+	created, problems, err := calendarlink.CreateWithCopies(ctx, syncer, user.ID, work.ID, []calendarlink.Target{
+		{CalendarID: family.ID, Masked: true, Title: "Away", Change: CopyAdd},
+	}, store.CalendarEvent{
+		Summary: "Parents' evening", Description: "Room 12", Location: "School",
+		StartAt: start, EndAt: start.Add(time.Hour), TimeZone: "Europe/Berlin",
+		Attendees: []store.CalendarAttendee{{Email: "partner@example.test"}},
+	})
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("create: %v %v", err, problems)
+	}
+	if len(fake.created) != 2 {
+		t.Fatalf("creates = %d", len(fake.created))
+	}
+	placeholder := fake.created[1]
+	if placeholder.Summary != "Away" || placeholder.Description != "" || placeholder.Location != "" ||
+		(placeholder.Attendees != nil && len(*placeholder.Attendees) != 0) || placeholder.Start != fake.created[0].Start {
+		t.Fatalf("placeholder at Google = %+v", placeholder)
+	}
+	if placeholder.ExtendedProperties == nil || placeholder.ExtendedProperties.Private[linkRoleProperty] != linkRoleBusy {
+		t.Fatalf("placeholder properties = %+v, want the busy role", placeholder.ExtendedProperties)
+	}
+	copies, err := db.ListCalendarEventCopies(ctx, user.ID, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || !copies[0].LinkMasked || copies[0].LinkPrimary {
+		t.Fatalf("stored copies = %+v, want one placeholder", copies)
+	}
+
+	key, primary, masked := eventLink(Event{ExtendedProperties: placeholder.ExtendedProperties})
+	if key == "" || primary || !masked {
+		t.Fatalf("read back key=%q primary=%v masked=%v", key, primary, masked)
 	}
 }

@@ -14,8 +14,8 @@ import (
 )
 
 // linkPropertyID is the single-value extended property naming the pair an
-// event belongs to and which side of it the event is ("<key>:primary" or
-// "<key>:copy"). The GUID is Rolltop's own property set; it is fixed forever,
+// event belongs to and which side of it the event is ("<key>:primary",
+// "<key>:copy", or "<key>:busy" for a placeholder in the busy calendar). The GUID is Rolltop's own property set; it is fixed forever,
 // because a second Rolltop, a reconnect and a rebuilt mirror all have to find
 // the pairs the first one made. Key and role share one property so a single
 // $expand filter reads both.
@@ -27,6 +27,7 @@ const linkExpand = "singleValueExtendedProperties($filter=id eq '" + linkPropert
 const (
 	linkRolePrimary = "primary"
 	linkRoleCopy    = "copy"
+	linkRoleBusy    = "busy"
 )
 
 // graphDateLayout is Graph's dateTime: a wall time with up to seven fractional
@@ -141,7 +142,7 @@ func ToEvent(event Event, calendarID int64, selfEmail string) store.CalendarEven
 	}
 	out.Attendees = attendees(event, selfEmail)
 	out.MyResponse = myResponse(event)
-	out.LinkKey, out.LinkPrimary = eventLink(event)
+	out.LinkKey, out.LinkPrimary, out.LinkMasked = eventLink(event)
 	return out
 }
 
@@ -306,8 +307,10 @@ func responseAction(response string) (string, bool) {
 	return "", false
 }
 
-// eventLink reads the pair an event belongs to off its extended property.
-func eventLink(event Event) (string, bool) {
+// eventLink reads the pair an event belongs to off its extended property:
+// the key, whether this is the copy that was entered, and whether it is a
+// placeholder.
+func eventLink(event Event) (key string, primary, masked bool) {
 	for _, property := range event.ExtendedProperties {
 		if !strings.EqualFold(strings.TrimSpace(property.ID), linkPropertyID) {
 			continue
@@ -315,11 +318,11 @@ func eventLink(event Event) (string, bool) {
 		key, role, _ := strings.Cut(strings.TrimSpace(property.Value), ":")
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return "", false
+			return "", false, false
 		}
-		return key, role == linkRolePrimary
+		return key, role == linkRolePrimary, role == linkRoleBusy
 	}
-	return "", false
+	return "", false, false
 }
 
 // linkValue renders an event's link for the extended property, or nothing for
@@ -330,8 +333,11 @@ func linkValue(event store.CalendarEvent) string {
 		return ""
 	}
 	role := linkRoleCopy
-	if event.LinkPrimary {
+	switch {
+	case event.LinkPrimary:
 		role = linkRolePrimary
+	case event.LinkMasked:
+		role = linkRoleBusy
 	}
 	return key + ":" + role
 }

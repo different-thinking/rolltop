@@ -66,7 +66,7 @@ func ToEvent(event Event, calendarID int64) store.CalendarEvent {
 		out.OnlineMeetingURL = link
 	}
 	out.Attendees, out.MyResponse = attendees(event.Attendees)
-	out.LinkKey, out.LinkPrimary = eventLink(event)
+	out.LinkKey, out.LinkPrimary, out.LinkMasked = eventLink(event)
 	return out
 }
 

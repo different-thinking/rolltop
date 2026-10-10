@@ -478,3 +478,95 @@ func TestSetCalendarListedClearsVisibilityAndCopyTarget(t *testing.T) {
 		t.Fatalf("calendar = %+v, want it listed again and still switched off", shown)
 	}
 }
+
+// A reader has one busy calendar beside the second calendar, never the same
+// calendar for both: choosing a calendar for one role takes the other off it.
+// The placeholder title is stored per calendar, scoped like everything else,
+// and reads back as the default when empty.
+func TestCalendarBusyTargetIsOnePerUserAndApartFromTheCopyTarget(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "busy-target@example.test")
+	other := mustUser(t, db, ctx, "busy-target-other@example.test")
+	work := mustCalendar(t, db, ctx, user, 1, "work")
+	family := mustCalendar(t, db, ctx, user, 1, "family")
+	theirs := mustCalendar(t, db, ctx, other, 1, "theirs")
+
+	if _, err := db.BusyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("busy target before one is chosen: err=%v", err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, family.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCalendarBusyTarget(ctx, user, work.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCalendarBusyTarget(ctx, user, family.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	busy, err := db.BusyTargetCalendar(ctx, user)
+	if err != nil || busy.ID != family.ID || busy.CopyTarget {
+		t.Fatalf("busy target = %+v err=%v, want family and no longer the second calendar", busy, err)
+	}
+	if _, err := db.CopyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("second calendar survived becoming the busy one: err=%v", err)
+	}
+	if reread, _ := db.Calendar(ctx, user, work.ID); reread.BusyTarget {
+		t.Fatal("previous busy target kept its mark")
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, family.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BusyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("busy calendar survived becoming the second one: err=%v", err)
+	}
+
+	if busy.PlaceholderTitle() != DefaultBusyLabel {
+		t.Fatalf("default title = %q", busy.PlaceholderTitle())
+	}
+	if err := db.SetCalendarBusyLabel(ctx, user, work.ID, "  Away  "); err != nil {
+		t.Fatal(err)
+	}
+	if reread, _ := db.Calendar(ctx, user, work.ID); reread.BusyLabel != "Away" || reread.PlaceholderTitle() != "Away" {
+		t.Fatalf("label = %q", reread.BusyLabel)
+	}
+
+	if err := db.SetCalendarBusyTarget(ctx, user, theirs.ID, true); !IsNotFound(err) {
+		t.Fatalf("choosing another tenant's calendar: err=%v", err)
+	}
+	if err := db.SetCalendarBusyLabel(ctx, other, work.ID, "x"); !IsNotFound(err) {
+		t.Fatalf("labelling another tenant's calendar: err=%v", err)
+	}
+	if err := db.SetCalendarBusyTarget(ctx, user, work.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BusyTargetCalendar(ctx, other); !IsNotFound(err) {
+		t.Fatalf("other tenant's busy target: err=%v", err)
+	}
+	if err := db.SetCalendarListed(ctx, user, work.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BusyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("hidden calendar kept the busy mark: err=%v", err)
+	}
+	if err := db.SetCalendarBusyTarget(ctx, user, work.ID, true); !errors.Is(err, ErrCalendarHidden) {
+		t.Fatalf("busy target hidden err = %v, want ErrCalendarHidden", err)
+	}
+}
+
+// A placeholder's role is stored with it, and only on a linked row.
+func TestUpsertCalendarEventStoresThePlaceholderRole(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "busy-event@example.test")
+	calendar := mustCalendar(t, db, ctx, user, 1, "busy")
+	start := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	masked := mustEvent(t, db, ctx, user, CalendarEvent{CalendarID: calendar.ID, ExternalID: "m", Summary: "Busy",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k", LinkMasked: true})
+	if !masked.LinkMasked {
+		t.Fatalf("placeholder role lost: %+v", masked)
+	}
+	unlinked := mustEvent(t, db, ctx, user, CalendarEvent{CalendarID: calendar.ID, ExternalID: "u", Summary: "x",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkMasked: true})
+	if unlinked.LinkMasked {
+		t.Fatal("an unlinked event was stored as a placeholder")
+	}
+}

@@ -1132,6 +1132,14 @@ export type CalendarSummary = {
   /** copy_target marks the reader's second calendar: an event entered in any
    * other calendar can be kept in this one as well. At most one carries it. */
   copy_target: boolean;
+  /** busy_target marks the reader's busy calendar: an event entered in any
+   * other calendar can be blocked out here as a placeholder -- its time under
+   * busy_title and nothing else. At most one carries it, never the second
+   * calendar. busy_label is the title as the reader set it, empty for the
+   * default; busy_title is what placeholders actually carry. */
+  busy_target: boolean;
+  busy_label: string;
+  busy_title: string;
   /** listed says whether the calendar view lists the calendar at all (chosen
    * under Settings -> Preferences -> Calendars). One that is not listed is
    * never selected and never the second calendar. */
@@ -1184,6 +1192,9 @@ export type CalendarEvent = {
   /** link_primary marks the copy of a linked pair that was entered, the one
    * carrying the guest list. */
   link_primary: boolean;
+  /** link_masked marks a placeholder in the busy calendar, standing for an
+   * event entered elsewhere. */
+  link_masked: boolean;
   /** also_in lists the other calendars holding a copy of this event. The week
    * draws a linked pair once; this is what says where else it lives, including
    * a calendar that is switched off. */
@@ -1215,6 +1226,8 @@ export type CalendarEventInput = {
   /** copy asks for the event to be kept in the second calendar as well (true)
    * or no longer (false). Left out, an edit keeps the copies it has. */
   copy?: boolean;
+  /** busy_copy asks the same of the placeholder in the busy calendar. */
+  busy_copy?: boolean;
   /** online_meeting asks for a Teams meeting. Once an event is online it
    * stays so; false on an edit does not take it back. */
   online_meeting?: boolean;
