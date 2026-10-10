@@ -1,6 +1,6 @@
 // File overview: Which calendars the calendar view lists at all. With Google
 // and Microsoft 365 side by side a reader routinely has a dozen calendars, most
-// of which they never want to see; hiding one here takes it out of the sidebar,
+// of which they never want to see; hiding one here takes it out of the calendar menu,
 // out of the week and out of the second-calendar choice in one step.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -12,7 +12,7 @@ import { calendarAccountGroups, calendarColor } from "../calendar/weekModel";
 
 /**
  * CalendarSettingsPanel switches calendars in and out of the calendar view.
- * Each switch is saved on its own, as the sidebar's visibility switches are:
+ * Each switch is saved on its own, as the calendar menu's visibility switches are:
  * there is nothing to combine, and a form with a save button would let a
  * reader leave with the choice they made unsaved.
  */
@@ -81,7 +81,7 @@ export function CalendarSettingsPanel({
   return (
     <div className="panel calendar-settings">
       <p className="muted">
-        Only the calendars ticked here appear in the calendar's left column, in the week and as a choice for the second
+        Only the calendars ticked here appear in the calendar's Calendars menu, in the week and as a choice for the second
         calendar. A hidden calendar is not synced either; nothing is changed in Google or Microsoft 365.
       </p>
       {calendars.length === 0 ? (
@@ -92,7 +92,7 @@ export function CalendarSettingsPanel({
         <>
           <small className="muted">
             {listedCount} of {calendars.length} calendar{calendars.length === 1 ? "" : "s"} shown. A calendar shown again
-            starts switched off; tick it in the calendar's left column to draw it.
+            starts switched off; tick it in the calendar's Calendars menu to draw it.
           </small>
           {groups.map(([account, items]) => (
             <section key={account} className="calendar-settings-group">

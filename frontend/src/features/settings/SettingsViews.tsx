@@ -3103,7 +3103,7 @@ export function SettingsView({
     page = (
       <SettingsPage
         title="Calendars"
-        description="Which calendars the calendar shows in its left column and offers as the second calendar."
+        description="Which calendars the calendar lists in its Calendars menu and offers as the second calendar."
         backPath="/settings/account/preferences"
         navigate={navigate}
       >
@@ -3170,7 +3170,7 @@ export function SettingsView({
           <SettingsIndexRow icon="arrow_back" title="Swipe actions" description="Configure left and right gestures, archive folders, and snooze timing." meta={`Left: ${swipeLabel(swipeDraft.left_action)} · Right: ${swipeLabel(swipeDraft.right_action)}`} path="/settings/account/preferences/swipes" navigate={navigate} />
           <SettingsIndexRow icon="search" title="Search tuning" description="Adjust ranking, typo matching, contacts, and attachment text." meta={profileForm.search_preset || "Balanced"} path="/settings/account/preferences/search" navigate={navigate} />
           <SettingsIndexRow icon="delete" title="Retention" description="Throw away old mail per category, and empty the Trash on a schedule." meta="Trash and categories" path="/settings/account/preferences/retention" navigate={navigate} />
-          <SettingsIndexRow icon="calendar" title="Calendars" description="Choose which calendars appear in the calendar's left column and as the second calendar." meta="Calendar view" path="/settings/account/preferences/calendars" navigate={navigate} />
+          <SettingsIndexRow icon="calendar" title="Calendars" description="Choose which calendars appear in the calendar's Calendars menu and as the second calendar." meta="Calendar view" path="/settings/account/preferences/calendars" navigate={navigate} />
         </SettingsIndex>
       </SettingsPage>
     );

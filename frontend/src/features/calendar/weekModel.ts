@@ -272,7 +272,7 @@ export function readableTextColor(color: string): string {
 
 /** calendarAccountGroups groups calendars by the account they came from, in
  * the order the accounts first appear, because two accounts routinely have a
- * calendar called the same thing. The sidebar, the day lens's lanes and the
+ * calendar called the same thing. The Calendars menu, the day lens's lanes and the
  * calendar settings all read this one order, so a calendar sits in the same
  * place in each. */
 export function calendarAccountGroups(calendars: CalendarSummary[]): [string, CalendarSummary[]][] {
@@ -289,7 +289,7 @@ export function calendarAccountGroups(calendars: CalendarSummary[]): [string, Ca
 /**
  * lensLaneCalendarIDs names the calendars that get a lane of their own in the
  * day lens: those with a timed event on that day, in the order given (the
- * sidebar's). A calendar the order does not know -- a linked copy's calendar
+ * Calendars menu's). A calendar the order does not know -- a linked copy's calendar
  * hidden since -- still gets a lane, after the known ones: drawing an event in
  * an unnamed lane is recoverable, dropping it is not.
  */

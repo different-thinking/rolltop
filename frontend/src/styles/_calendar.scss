@@ -1,15 +1,91 @@
 @use "mixins/components" as *;
 
+// The week takes the whole width: the calendar list is a menu in the header
+// (.calendar-picker), not a column beside the days.
 .calendar-shell {
   display: grid;
-  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.calendar-sidebar {
-  position: sticky;
-  top: 82px;
+.calendar-picker {
+  position: relative;
+
+  &[open] .calendar-picker-summary {
+    background: var(--accent-soft);
+    color: var(--text);
+
+    .icon:last-child {
+      transform: rotate(180deg);
+    }
+  }
+}
+
+.calendar-picker-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .icon {
+    flex: none;
+    width: 16px;
+    height: 16px;
+  }
+
+  .icon:last-child {
+    width: 14px;
+    height: 14px;
+    color: var(--muted);
+    transition: transform 0.16s ease;
+  }
+}
+
+// One dot per calendar being drawn, so the closed menu still says what the
+// week shows.
+.calendar-picker-dots {
+  display: inline-flex;
+  gap: 3px;
+
+  &:empty {
+    display: none;
+  }
+
+  span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+}
+
+.calendar-picker-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: min(300px, calc(100vw - 24px));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
   display: grid;
   gap: 14px;
   align-content: start;
@@ -17,6 +93,13 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calendar-picker-summary .icon:last-child {
+    transition: none;
+  }
 }
 
 .calendar-sidebar-group {

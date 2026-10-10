@@ -320,7 +320,7 @@ export function CalendarView({
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
   // The day lens: one day opened up with a lane per calendar, every other day
-  // sized by how much it has at once. Lanes follow the sidebar's order.
+  // sized by how much it has at once. Lanes follow the Calendars menu's order.
   const lensIndex = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
   const lensLanes =
     lensIndex >= 0
@@ -392,13 +392,6 @@ export function CalendarView({
 
   return (
     <div className="calendar-shell">
-      <CalendarSidebar
-        calendars={listedCalendars}
-        hiddenCount={calendars.length - listedCalendars.length}
-        onToggle={toggleCalendar}
-        onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
-        navigate={navigate}
-      />
       <section
         className={`calendar-main ${dayLens ? "day-lens" : ""}`}
         style={dayColumns ? ({ "--calendar-day-columns": dayColumns } as CSSProperties) : undefined}
@@ -427,6 +420,13 @@ export function CalendarView({
             <h1>{weekLabel}</h1>
           </div>
           <div className="calendar-head-actions">
+            <CalendarPicker
+              calendars={listedCalendars}
+              hiddenCount={calendars.length - listedCalendars.length}
+              onToggle={toggleCalendar}
+              onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+              navigate={navigate}
+            />
             <button
               type="button"
               className="ghost calendar-lens-toggle"
@@ -612,11 +612,15 @@ export function CalendarView({
   );
 }
 
-/** CalendarSidebar lists the calendars the reader chose to list, grouped by
- * the account they came from, because two accounts routinely have a calendar
- * called the same thing. The second-calendar choice is made among the same
- * calendars: one hidden under settings is never offered there. */
-function CalendarSidebar({
+/** CalendarPicker is the menu in the calendar header that lists the calendars
+ * the reader chose to list, grouped by the account they came from, because two
+ * accounts routinely have a calendar called the same thing. It used to be a
+ * column of its own beside the week, which with four calendars took a sixth of
+ * the screen from the days that needed it; folded into the header it costs one
+ * button, and the button's dots still say which calendars are drawn. The
+ * second-calendar choice is made among the same calendars: one hidden under
+ * settings is never offered there. */
+function CalendarPicker({
   calendars,
   hiddenCount,
   onToggle,
@@ -635,76 +639,121 @@ function CalendarSidebar({
   // select would read "None" while the choice is still stored.
   const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
   const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
+  const shown = calendars.filter((calendar) => calendar.selected);
+  const menuRef = useRef<HTMLDetailsElement | null>(null);
+  const [open, setOpen] = useState(false);
+
+  // A click anywhere else or Escape closes the menu. Toggling calendars inside
+  // it does not: switching three of them on in a row is the ordinary use.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => {
+      if (menuRef.current) menuRef.current.open = false;
+    };
+    const onPointerDown = (pointerEvent: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(pointerEvent.target as Node)) close();
+    };
+    const onKeyDown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   return (
-    <aside className="calendar-sidebar">
-      {groups.map(([account, items]) => (
-        <div key={account} className="calendar-sidebar-group">
-          <div className="calendar-sidebar-account">{account}</div>
-          {items.map((calendar) => {
-            const color = calendarColor(calendar);
-            return (
-              <label key={calendar.id} className="calendar-toggle">
-                <input
-                  type="checkbox"
-                  checked={calendar.selected}
-                  onChange={() => void onToggle(calendar)}
-                />
-                <span className="calendar-swatch" style={{ background: color }} />
-                <span className="calendar-toggle-name">{calendar.name}</span>
-                {calendar.status === "error" ? (
-                  <span className="calendar-toggle-problem" title={calendar.status_detail}>
-                    <Icon name="report" />
-                  </span>
-                ) : null}
-                {!calendar.can_write ? <span className="calendar-toggle-tag">read-only</span> : null}
-              </label>
-            );
-          })}
-        </div>
-      ))}
-      {writable.length > 1 ? (
-        <div className="calendar-sidebar-group calendar-copy-target">
-          <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
-            Second calendar
-          </label>
-          <select
-            id="calendar-copy-target"
-            value={copyTarget?.id || 0}
-            onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
-          >
-            <option value={0}>None</option>
-            {copyOptions.map((calendar) => (
-              <option key={calendar.id} value={calendar.id}>
-                {calendar.name}
-                {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
-              </option>
-            ))}
-          </select>
-          <p className="calendar-copy-target-hint">
-            An event in any other calendar can be added here as well. It is shown once, marked with the other
-            calendar's colour.
-          </p>
-        </div>
-      ) : null}
-      {calendars.length > 0 || hiddenCount > 0 ? (
-        <div className="calendar-sidebar-manage">
-          {calendars.length === 0 ? (
-            <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
-          ) : null}
-          <a
-            href={calendarSettingsPath}
-            onClick={(clickEvent) => {
-              clickEvent.preventDefault();
-              navigate(calendarSettingsPath);
-            }}
-          >
-            <Icon name="settings" />
-            {hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"}
-          </a>
-        </div>
-      ) : null}
-    </aside>
+    <details
+      className="calendar-picker"
+      ref={menuRef}
+      onToggle={(toggleEvent) => setOpen((toggleEvent.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary
+        className="calendar-picker-summary"
+        aria-label={`Calendars, ${shown.length} of ${calendars.length} shown`}
+        title={shown.length > 0 ? `Shown: ${shown.map((calendar) => calendar.name).join(", ")}` : "No calendar shown"}
+      >
+        <Icon name="calendar" />
+        Calendars
+        <span className="calendar-picker-dots" aria-hidden="true">
+          {shown.map((calendar) => (
+            <span key={calendar.id} style={{ background: calendarColor(calendar) }} />
+          ))}
+        </span>
+        <Icon name="expand_more" />
+      </summary>
+      <div className="calendar-picker-panel">
+        {groups.map(([account, items]) => (
+          <div key={account} className="calendar-sidebar-group">
+            <div className="calendar-sidebar-account">{account}</div>
+            {items.map((calendar) => {
+              const color = calendarColor(calendar);
+              return (
+                <label key={calendar.id} className="calendar-toggle">
+                  <input
+                    type="checkbox"
+                    checked={calendar.selected}
+                    onChange={() => void onToggle(calendar)}
+                  />
+                  <span className="calendar-swatch" style={{ background: color }} />
+                  <span className="calendar-toggle-name">{calendar.name}</span>
+                  {calendar.status === "error" ? (
+                    <span className="calendar-toggle-problem" title={calendar.status_detail}>
+                      <Icon name="report" />
+                    </span>
+                  ) : null}
+                  {!calendar.can_write ? <span className="calendar-toggle-tag">read-only</span> : null}
+                </label>
+              );
+            })}
+          </div>
+        ))}
+        {writable.length > 1 ? (
+          <div className="calendar-sidebar-group calendar-copy-target">
+            <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
+              Second calendar
+            </label>
+            <select
+              id="calendar-copy-target"
+              value={copyTarget?.id || 0}
+              onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
+            >
+              <option value={0}>None</option>
+              {copyOptions.map((calendar) => (
+                <option key={calendar.id} value={calendar.id}>
+                  {calendar.name}
+                  {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
+                </option>
+              ))}
+            </select>
+            <p className="calendar-copy-target-hint">
+              An event in any other calendar can be added here as well. It is shown once, marked with the other
+              calendar's colour.
+            </p>
+          </div>
+        ) : null}
+        {calendars.length > 0 || hiddenCount > 0 ? (
+          <div className="calendar-sidebar-manage">
+            {calendars.length === 0 ? (
+              <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
+            ) : null}
+            <a
+              href={calendarSettingsPath}
+              onClick={(clickEvent) => {
+                clickEvent.preventDefault();
+                if (menuRef.current) menuRef.current.open = false;
+                navigate(calendarSettingsPath);
+              }}
+            >
+              <Icon name="settings" />
+              {hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"}
+            </a>
+          </div>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
