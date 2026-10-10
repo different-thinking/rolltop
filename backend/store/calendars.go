@@ -519,7 +519,7 @@ func (s *Store) SetCalendarBusyLabel(ctx context.Context, userID, calendarID int
 	}
 	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
 		`UPDATE calendars SET busy_label = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
-		trimLimit(strings.TrimSpace(label), maxBusyLabelLength), nowUnix(), userID, calendarID)
+		trimLimit(strings.ReplaceAll(label, "\x00", ""), maxBusyLabelLength), nowUnix(), userID, calendarID)
 	if err != nil {
 		return err
 	}

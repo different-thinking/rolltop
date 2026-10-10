@@ -202,14 +202,16 @@ export function CalendarView({
   // along: the title is stored on the calendar, and moving the role should not
   // quietly reset what the reader chose to call their blocked time. Becoming
   // the busy calendar also stops a calendar being the second one.
-  const chooseBusyTarget = async (calendarID: number) => {
+  // label is the title as the picker holds it, which may be a draft whose save
+  // has not answered yet; the stored one would carry the title from before it.
+  const chooseBusyTarget = async (calendarID: number, label: string) => {
     const previous = calendars.find((calendar) => calendar.busy_target);
     if ((previous?.id || 0) === calendarID) return;
     try {
       const data = calendarID
         ? await api.setCalendarBusyTarget(csrf, calendarID, {
             busy_target: true,
-            ...(previous ? { busy_label: previous.busy_label } : {})
+            ...(previous ? { busy_label: label } : {})
           })
         : previous
           ? await api.setCalendarBusyTarget(csrf, previous.id, { busy_target: false })
@@ -465,7 +467,7 @@ export function CalendarView({
               hiddenCount={calendars.length - listedCalendars.length}
               onToggle={toggleCalendar}
               onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
-              onChooseBusyTarget={(calendarID) => void chooseBusyTarget(calendarID)}
+              onChooseBusyTarget={(calendarID, label) => void chooseBusyTarget(calendarID, label)}
               onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
               navigate={navigate}
             />
@@ -675,7 +677,7 @@ function CalendarPicker({
   hiddenCount: number;
   onToggle: (calendar: CalendarSummary) => Promise<void>;
   onChooseCopyTarget: (calendarID: number) => void;
-  onChooseBusyTarget: (calendarID: number) => void;
+  onChooseBusyTarget: (calendarID: number, label: string) => void;
   onSetBusyLabel: (calendarID: number, label: string) => void;
   navigate: (url: string) => void;
 }) {
@@ -817,7 +819,7 @@ function CalendarPicker({
             <select
               id="calendar-busy-target"
               value={busyTarget?.id || 0}
-              onChange={(changeEvent) => onChooseBusyTarget(Number(changeEvent.target.value))}
+              onChange={(changeEvent) => onChooseBusyTarget(Number(changeEvent.target.value), busyLabel.trim())}
             >
               <option value={0}>None</option>
               {busyOptions.map((calendar) => (
@@ -839,8 +841,10 @@ function CalendarPicker({
                 onBlur={saveBusyLabel}
                 onKeyDown={(keyEvent) => {
                   if (keyEvent.key === "Enter") {
+                    // Leaving the field saves it; saving here as well would
+                    // send the same title twice before the first answer.
                     keyEvent.preventDefault();
-                    saveBusyLabel();
+                    keyEvent.currentTarget.blur();
                   }
                 }}
               />

@@ -714,7 +714,7 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
-	targets, ok := s.copyTargetsForWrite(w, r, userID, in)
+	targets, ok := s.copyTargetsForWrite(w, r, userID, in, false)
 	if !ok {
 		return
 	}
@@ -734,7 +734,7 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 // form, not something to ignore: the reader would believe the copy was made.
 // Taking a copy away needs no write access to check up front: the delete
 // itself is refused on a read-only calendar and says so.
-func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, userID int64, in calendarEventInput) ([]calendarlink.Target, bool) {
+func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, userID int64, in calendarEventInput, editing bool) ([]calendarlink.Target, bool) {
 	kinds := []struct {
 		change  calendarlink.CopyChange
 		masked  bool
@@ -751,7 +751,8 @@ func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, use
 	}
 	targets := []calendarlink.Target{}
 	for _, kind := range kinds {
-		if kind.change == calendarlink.CopyKeep {
+		// A create only ever adds copies; there is nothing yet to remove.
+		if kind.change == calendarlink.CopyKeep || (!editing && kind.change != calendarlink.CopyAdd) {
 			continue
 		}
 		calendar, err := kind.lookup(r.Context(), userID)
@@ -778,8 +779,8 @@ func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, use
 	}
 	// A placeholder that is merely carried along keeps its busy calendar's
 	// current title, so that calendar is named even when nothing is asked of
-	// it.
-	if copyChange(in.BusyCopy) == calendarlink.CopyKeep {
+	// it. A create has no placeholder to carry.
+	if editing && copyChange(in.BusyCopy) == calendarlink.CopyKeep {
 		if busy, err := s.store.BusyTargetCalendar(r.Context(), userID); err == nil {
 			targets = append(targets, calendarlink.Target{
 				CalendarID: busy.ID, Masked: true, Title: busy.PlaceholderTitle(), Change: calendarlink.CopyKeep,
@@ -901,7 +902,7 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	// the request claims.
 	edited.CalendarID = existing.CalendarID
 	edited.ExternalID = existing.ExternalID
-	targets, ok := s.copyTargetsForWrite(w, r, userID, in)
+	targets, ok := s.copyTargetsForWrite(w, r, userID, in, true)
 	if !ok {
 		return
 	}

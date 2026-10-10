@@ -255,6 +255,11 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 	edited.LinkPrimary = existing.LinkPrimary
 	edited.LinkMasked = existing.LinkMasked
 	if throughPlaceholder {
+		// A placeholder never takes on content, whoever asks: the dialog
+		// greys these fields out, but the route accepts whatever is sent, and
+		// the busy calendar is the one other people read.
+		edited.Description = existing.Description
+		edited.Location = existing.Location
 		edited.Attendees = existing.Attendees
 		edited.OnlineMeeting = existing.OnlineMeeting
 	} else if existing.Linked() && !existing.LinkPrimary {

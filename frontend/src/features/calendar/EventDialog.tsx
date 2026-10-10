@@ -580,11 +580,13 @@ export function EventDialog({
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
                 <span>
-                  {alsoIn.length > 0
-                    ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
-                    : event.attendees.length > 0 && !event.my_response
-                      ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
-                      : `Delete this event in ${provider} too?`}
+                  {placeholder && alsoIn.length > 0
+                    ? `This placeholder stands for an event in ${alsoIn.map((item) => item.name).join(", ")}. Deleting it deletes that event too, and any guests are told it is cancelled.`
+                    : alsoIn.length > 0
+                      ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
+                      : event.attendees.length > 0 && !event.my_response
+                        ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
+                        : `Delete this event in ${provider} too?`}
                 </span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete

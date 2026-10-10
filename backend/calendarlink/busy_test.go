@@ -138,6 +138,7 @@ func TestUpdateGroupThroughThePlaceholder(t *testing.T) {
 	edited.StartAt = start.Add(time.Hour)
 	edited.EndAt = start.Add(2 * time.Hour)
 	edited.Attendees = []store.CalendarAttendee{{Email: "intruder@example.test"}}
+	edited.Description, edited.Location = "leaked notes", "leaked place"
 	_, problems, err := router.UpdateGroupTargets(context.Background(), 7, existing, edited, []store.CalendarEvent{primary}, []Target{
 		{CalendarID: googleCalendarID, Change: CopyAdd},
 	})
@@ -148,7 +149,7 @@ func TestUpdateGroupThroughThePlaceholder(t *testing.T) {
 		t.Fatalf("a copy was made from the placeholder: %+v", google.creates)
 	}
 	written := google.updates[0]
-	if !written.LinkMasked || len(written.Attendees) != 0 {
+	if !written.LinkMasked || len(written.Attendees) != 0 || written.Description != "" || written.Location != "" {
 		t.Fatalf("placeholder edit = %+v", written)
 	}
 	follow := microsoft.updates[0]
