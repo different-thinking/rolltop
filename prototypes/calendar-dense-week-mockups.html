@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rolltop parallele Termine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&display=swap">
+<style>
+/* Layout: a document of four stacked mockup frames for the dense case, each
+   with its rationale beside it; colours are Rolltop's own Classic tokens. */
+:root {
+  --bg: #f6f8fc;
+  --surface: #ffffff;
+  --surface-subtle: #f2f6fc;
+  --text: #1f1f1f;
+  --muted: #5f6368;
+  --border: #dadce0;
+  --separator: #e8eaed;
+  --accent: #0b57d0;
+  --accent-soft: #d3e3fd;
+  --danger: #b3261e;
+  --danger-soft: rgba(179, 38, 30, .10);
+  --warn: #9a6700;
+  --now: #d93025;
+  --hatch: rgba(95, 99, 104, .16);
+  --shadow: 0 6px 24px rgba(32, 33, 36, .18);
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-brand: "Fraunces", Georgia, "Times New Roman", serif;
+  --cal-p: #1a73e8;
+  --cal-f: #188038;
+  --cal-w: #c2410c;
+  --cal-t: #8430ce;
+  --tint: 16%;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131314; --surface: #1e1f20; --surface-subtle: #28292a; --text: #e3e3e3; --muted: #a2a9b0;
+    --border: #444746; --separator: #333537; --accent: #a8c7fa; --accent-soft: #0842a0; --danger: #f2b8b5;
+    --danger-soft: rgba(242, 184, 181, .13); --warn: #e2b340; --now: #f28b82; --hatch: rgba(162, 169, 176, .18);
+    --shadow: 0 6px 24px rgba(0, 0, 0, .55);
+    --cal-p: #6ea8fe; --cal-f: #5bb974; --cal-w: #f28b4b; --cal-t: #c58af9; --tint: 24%;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131314; --surface: #1e1f20; --surface-subtle: #28292a; --text: #e3e3e3; --muted: #a2a9b0;
+  --border: #444746; --separator: #333537; --accent: #a8c7fa; --accent-soft: #0842a0; --danger: #f2b8b5;
+  --danger-soft: rgba(242, 184, 181, .13); --warn: #e2b340; --now: #f28b82; --hatch: rgba(162, 169, 176, .18);
+  --shadow: 0 6px 24px rgba(0, 0, 0, .55);
+  --cal-p: #6ea8fe; --cal-f: #5bb974; --cal-w: #f28b4b; --cal-t: #c58af9; --tint: 24%;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 14px; line-height: 1.45; }
+.page { max-width: 1280px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 64px; display: grid; gap: 36px; }
+
+header.intro { display: grid; gap: 10px; max-width: 780px; }
+header.intro h1 { font-family: var(--font-brand); font-weight: 650; font-size: clamp(26px, 4vw, 36px); line-height: 1.1; margin: 0; text-wrap: balance; }
+header.intro p { margin: 0; color: var(--muted); max-width: 68ch; }
+.eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+
+/* The two levers */
+.levers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.lever { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.lever h2 { font-family: var(--font-brand); font-weight: 500; font-size: 19px; margin: 0; }
+.lever p { margin: 0; font-size: 13px; }
+.lever .src { font-size: 12px; color: var(--muted); }
+.lever code { font-size: 12px; background: var(--surface-subtle); padding: 1px 5px; border-radius: 4px; }
+.funnel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.funnel b { font-size: 22px; font-family: var(--font-brand); font-weight: 650; font-variant-numeric: tabular-nums; }
+.funnel .arrow { color: var(--muted); }
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.switch input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+
+nav.jump { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.jump a { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); text-decoration: none; background: var(--surface); font-size: 13px; }
+nav.jump a:hover { border-color: var(--accent); }
+nav.jump b { font-family: var(--font-brand); font-weight: 650; color: var(--accent); }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+section.mock { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 20px; align-items: start; scroll-margin-top: 16px; }
+@media (max-width: 1000px) { section.mock { grid-template-columns: minmax(0, 1fr); } }
+.mock-head { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.mock-head .letter { font-family: var(--font-brand); font-size: 30px; font-weight: 650; color: var(--accent); line-height: 1; }
+.mock-head h2 { font-family: var(--font-brand); font-weight: 500; font-size: 24px; margin: 0; text-wrap: balance; }
+.notes { display: grid; gap: 14px; font-size: 13px; min-width: 0; }
+.notes p { margin: 0; }
+.notes h3 { margin: 0 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.effort { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.effort i { width: 18px; height: 6px; border-radius: 3px; background: var(--separator); display: inline-block; }
+.effort i.on { background: var(--accent); }
+
+.frame { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; min-width: 0; }
+.frame-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.frame-bar .wk { font-size: 18px; font-weight: 500; margin-right: auto; }
+.hint { font-size: 12px; color: var(--muted); }
+.scroller { overflow-x: auto; }
+.week { min-width: 800px; position: relative; }
+
+.row { display: grid; grid-template-columns: 52px repeat(7, minmax(0, 1fr)); }
+.dayname { padding: 8px 4px 6px; text-align: center; border-left: 1px solid var(--separator); }
+.dayname .wd { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.dayname .num { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; font-size: 17px; }
+.dayname.today .num { background: var(--accent); color: var(--surface); }
+.dayname.today .wd { color: var(--accent); font-weight: 600; }
+button.dayname { background: none; border: 0; border-left: 1px solid var(--separator); font: inherit; color: inherit; cursor: pointer; }
+button.dayname:hover .num { background: var(--surface-subtle); }
+button.dayname[aria-pressed="true"] { background: var(--accent-soft); }
+.gutter { font-size: 10px; color: var(--muted); text-align: right; padding-right: 6px; }
+.subhead { border-left: 1px solid var(--separator); display: flex; font-size: 10px; color: var(--muted); }
+.subhead span { flex: 1 1 0; min-width: 0; text-align: center; padding: 2px 0 3px; border-bottom: 2px solid var(--lc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.allday { position: relative; border-top: 1px solid var(--separator); border-bottom: 1px solid var(--border); padding: 4px 0; }
+.allday .lab { position: absolute; left: 0; top: 6px; width: 52px; }
+.span-bars { margin-left: 52px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px 0; padding: 0 2px; }
+.bar { font-size: 11px; padding: 2px 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0 2px; background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); border-left: 3px solid var(--c); }
+
+.body { position: relative; display: grid; grid-template-columns: 52px repeat(7, minmax(0, 1fr)); }
+.hours { position: relative; }
+.hours div { position: absolute; right: 6px; transform: translateY(-50%); font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.day { position: relative; border-left: 1px solid var(--separator); }
+.day.weekend { background: var(--surface-subtle); }
+.hline { position: absolute; left: 0; right: 0; border-top: 1px solid var(--separator); }
+.now { position: absolute; left: -1px; right: 0; border-top: 2px solid var(--now); z-index: 6; }
+.now::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--now); }
+.lanebox { position: absolute; top: 0; bottom: 0; }
+.lanebox + .lanebox { border-left: 1px dashed var(--separator); }
+
+.ev { position: absolute; border-radius: 6px; padding: 3px 6px; font-size: 11px; line-height: 1.25; overflow: hidden; background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); border-left: 3px solid var(--c); color: var(--text); box-shadow: 0 0 0 1.5px var(--surface); }
+.ev .t { font-weight: 600; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ev .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .s { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ev svg, .pop svg, .bundle svg, .tl-text svg { width: 11px; height: 11px; flex: none; }
+.ev.tent { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) var(--tint), var(--surface)) 0 6px, var(--surface) 6px 9px); }
+.ev.info { background: repeating-linear-gradient(135deg, var(--hatch) 0 5px, transparent 5px 10px); border-left-style: dotted; color: var(--muted); }
+.ev.decl { opacity: .5; text-decoration: line-through; }
+.ev.conflict { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3px var(--danger); }
+.more { position: absolute; right: 3px; bottom: 3px; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 999px; background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.dots { display: inline-flex; gap: 2px; flex: none; }
+.dots i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1.5px var(--surface); }
+
+/* E: slivers */
+.sliver { position: absolute; width: 6px; border-radius: 3px; background: var(--c); opacity: .75; }
+.sliver.tent { opacity: .6; background: repeating-linear-gradient(180deg, var(--c) 0 4px, transparent 4px 6px); }
+.sliver.info { opacity: .45; background: repeating-linear-gradient(180deg, var(--c) 0 2px, transparent 2px 5px); }
+
+/* F: bundle and popover */
+.bundle { position: absolute; border-radius: 6px; padding: 4px 6px; font-size: 11px; background: var(--surface); border: 1px solid var(--border-strong, var(--border)); box-shadow: 0 0 0 1.5px var(--surface); cursor: pointer; text-align: left; font: inherit; color: var(--text); overflow: hidden; display: grid; align-content: start; gap: 2px; }
+.bundle:hover { border-color: var(--accent); }
+.bundle[aria-expanded="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.bundle .bh { font-size: 11px; font-weight: 700; white-space: nowrap; }
+.bundle .bl { display: flex; align-items: center; gap: 4px; font-size: 10.5px; min-width: 0; line-height: 1.2; }
+.bundle .bl i { width: 7px; height: 7px; border-radius: 2px; background: var(--c); flex: none; }
+.bundle .bl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bundle .bl.main span { font-weight: 700; }
+.bundle .bl.low { color: var(--muted); }
+.pop { position: absolute; z-index: 20; width: 330px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 6px; }
+.pop header { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.pop header b { display: block; font-size: 14px; }
+.pop header small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.pop .x { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.pop .x:hover { background: var(--surface-subtle); }
+.slice { position: relative; display: grid; gap: 2px; }
+.prow { display: grid; grid-template-columns: 4px minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 4px 6px; border-radius: 6px; }
+.prow:hover { background: var(--surface-subtle); }
+.prow .st { align-self: stretch; border-radius: 2px; background: var(--c); }
+.prow .pt { font-weight: 600; font-size: 13px; display: flex; gap: 4px; align-items: center; min-width: 0; }
+.prow .pt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow .ps { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.prow.decl .pt span { text-decoration: line-through; color: var(--muted); }
+.rchip { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.rchip.acc, .rchip.org { border-color: transparent; background: var(--accent-soft); color: var(--text); }
+.pacts { grid-column: 2 / -1; display: flex; gap: 6px; }
+.pacts button { font: inherit; font-size: 11px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.pacts button:hover { border-color: var(--accent); }
+.mini { position: relative; height: 6px; margin-top: 3px; border-radius: 3px; background: var(--surface-subtle); }
+.mini i { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--c); opacity: .8; }
+
+/* G: horizontal rows per calendar */
+.tl { min-width: 880px; }
+.tl-axis, .tl-day { display: grid; grid-template-columns: 60px 100px minmax(0, 1fr); }
+.tl-axis { border-bottom: 1px solid var(--border); }
+.tl-ticks { position: relative; height: 22px; }
+.tl-ticks span { position: absolute; top: 4px; transform: translateX(-50%); font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tl-day { border-bottom: 1px solid var(--separator); }
+.tl-day.weekend { background: var(--surface-subtle); }
+.tl-label { padding: 6px 8px; display: grid; align-content: start; gap: 2px; border-right: 1px solid var(--separator); }
+.tl-label .wd { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.tl-label .num { font-size: 18px; line-height: 1.1; }
+.tl-label.today .wd, .tl-label.today .num { color: var(--accent); font-weight: 600; }
+.tl-label .ad { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-names { display: grid; align-content: start; border-right: 1px solid var(--separator); }
+.tl-names div { height: 22px; display: flex; align-items: center; gap: 5px; padding: 0 6px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.tl-track { position: relative; background-image: linear-gradient(to right, var(--separator) 1px, transparent 1px); background-size: calc(100% / 13) 100%; }
+.tl-lane { position: relative; height: 22px; }
+.tl-item { position: absolute; top: 2px; height: 18px; }
+.tl-ev { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); border-left: 3px solid var(--c); }
+.tl-ev.tent { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) var(--tint), var(--surface)) 0 6px, var(--surface) 6px 9px); }
+.tl-ev.info { background: repeating-linear-gradient(135deg, var(--hatch) 0 5px, transparent 5px 10px); border-left-style: dotted; }
+.tl-text { position: relative; z-index: 1; height: 100%; padding: 0 4px 0 7px; font-size: 11px; display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; color: var(--text); }
+.tl-text span { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.tl-item.info .tl-text, .tl-item.decl .tl-text { color: var(--muted); }
+.tl-item.info .tl-text span { font-weight: 500; }
+.tl-item.decl { opacity: .55; }
+.tl-item.decl .tl-text span { text-decoration: line-through; }
+.tl-band { position: absolute; top: 0; bottom: 0; background: var(--danger-soft); border-left: 2px solid var(--danger); border-right: 2px solid var(--danger); pointer-events: none; }
+.tl-now { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--now); z-index: 3; }
+
+.verdict { border-top: 1px solid var(--border); padding-top: 22px; display: grid; gap: 12px; max-width: 920px; }
+.verdict h2 { font-family: var(--font-brand); font-weight: 500; font-size: 24px; margin: 0; }
+.verdict p, .verdict ol { margin: 0; max-width: 74ch; }
+.verdict ol { padding-left: 20px; display: grid; gap: 6px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; min-width: 640px; width: 100%; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--separator); vertical-align: top; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+td:first-child { font-family: var(--font-brand); font-weight: 650; color: var(--accent); }
+.key { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 12px; color: var(--muted); }
+.key span { display: inline-flex; align-items: center; gap: 6px; }
+.key i { width: 26px; height: 12px; border-radius: 3px; display: inline-block; --c: var(--cal-w); }
+</style>
+
+<div class="page">
+  <header class="intro">
+    <span class="eyebrow">Rolltop · Kalender · Entwurf 2</span>
+    <h1>Wenn vier Termine gleichzeitig stattfinden</h1>
+    <p>Ein Tag ist in der Woche etwa 120 Pixel breit. Vier parallele Termine bekommen davon je 30 Pixel, und darin passt kein Titel. Am Zeichnen allein lässt sich das nicht lösen. Es gibt zwei Auswege: weniger Termine nebeneinander zeichnen, oder die Geometrie ändern. Die vier Varianten unten kombinieren beides. Die Woche ist dichter als im ersten Entwurf: Am Dienstag um 10 Uhr liegen fünf Termine aus allen vier Kalendern übereinander.</p>
+    <div class="legend" id="legend"></div>
+    <div class="key">
+      <span><i style="background:color-mix(in srgb,var(--c) var(--tint),var(--surface));border-left:3px solid var(--c)"></i>zugesagt / organisiert</span>
+      <span><i style="background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--c) var(--tint),var(--surface)) 0 6px,var(--surface) 6px 9px);border-left:3px solid var(--c)"></i>vorläufig / offen</span>
+      <span><i style="background:repeating-linear-gradient(135deg,var(--hatch) 0 5px,transparent 5px 10px);border-left:3px dotted var(--c)"></i>nur zur Info (geteilter Kalender)</span>
+    </div>
+  </header>
+
+  <div class="levers">
+    <div class="lever">
+      <span class="eyebrow">Hebel 1</span>
+      <h2>Doppelte Einladungen zusammenführen</h2>
+      <p>Oft sind drei von vier parallelen Terminen derselbe Termin: die Einladung im Arbeitskonto, die weitergeleitete Kopie im Gmail-Konto und der Eintrag im geteilten Teamkalender. Alle tragen dieselbe iCalUID. Gezeichnet wird ein Termin, die anderen Kalender erscheinen als Punkte daran.</p>
+      <p class="src">Daten vorhanden: <code>calendar_events.ical_uid</code> wird von Google und Microsoft schon gespeichert.</p>
+      <label class="switch"><input type="checkbox" id="merge" checked> In allen Mockups zusammenführen</label>
+    </div>
+    <div class="lever">
+      <span class="eyebrow">Hebel 2</span>
+      <h2>Rang nach eigener Antwort</h2>
+      <p>Man kann nur in einem Termin gleichzeitig sitzen. Zugesagte und selbst organisierte Termine sind die Hauptsache. Vorläufige und unbeantwortete Einladungen sind offen, Einträge im geteilten Teamkalender nur zur Info, abgesagte erledigt. Dieser Rang entscheidet, wer Platz bekommt.</p>
+      <p class="src">Daten vorhanden: <code>calendar_events.my_response</code> und der Zugriff auf den Kalender (<code>can_write</code>).</p>
+      <div class="funnel" id="funnel"></div>
+    </div>
+  </div>
+
+  <nav class="jump" aria-label="Mockups">
+    <a href="#e"><b>E</b> Hauptspur + Randstreifen</a>
+    <a href="#f"><b>F</b> Bündel mit Aufklapper</a>
+    <a href="#g"><b>G</b> Zeilen pro Kalender</a>
+    <a href="#h"><b>H</b> Tageslupe</a>
+  </nav>
+
+  <section class="mock" id="e">
+    <div class="mock-head"><span class="letter">E</span><h2>Hauptspur und Randstreifen</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="hint">Mauszeiger auf einen Streifen zeigt den Termin</span></div>
+      <div class="scroller"><div class="week" id="e-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Zugesagte Termine bekommen die volle Breite. Alles mit niedrigerem Rang wird zu einem schmalen Streifen am rechten Rand des Tages: in der Kalenderfarbe, gestrichelt für offen, gepunktet für nur zur Info. Ein Zähler am Haupttermin sagt, wie viel parallel läuft.</p></div>
+      <div><h3>Bei vier parallelen Terminen</h3><ul><li>Der Termin, in dem man sitzt, bleibt voll lesbar.</li><li>Die anderen bleiben sichtbar, kosten aber nur je 7 Pixel.</li><li>Zwei Zusagen zur selben Zeit sind ein echter Konflikt und bekommen einen roten Ring.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Die Titel der Nebentermine stehen erst nach Hover oder Klick da. Wer viele offene Einladungen hat, sieht viele Streifen.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, Rangfunktion plus Layout</span>
+    </div>
+  </section>
+
+  <section class="mock" id="f">
+    <div class="mock-head"><span class="letter">F</span><h2>Bündel mit Aufklapper</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="hint">Ein Bündel anklicken; in der Liste lässt sich direkt antworten</span></div>
+      <div class="scroller"><div class="week" id="f-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Ab drei überlappenden Terminen werden sie zu einem Block, der über die volle Tagesbreite eine kurze Liste zeigt, der wichtigste Termin fett zuerst. Ein Klick klappt das Zeitfenster auf: alle Termine untereinander, mit Antwort-Status, einer Mini-Zeitleiste und direkten Zusagen- und Absagen-Knöpfen.</p></div>
+      <div><h3>Bei vier parallelen Terminen</h3><ul><li>Statt vier Streifen eine lesbare Liste.</li><li>Das Bündel sagt „hier ist es voll“, ohne dass man es aus Farbflächen erraten muss.</li><li>Absagen im Aufklapper räumt die Woche sofort auf, probiere es aus.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Im Bündel sieht man die genaue Dauer jedes Termins erst im Aufklapper.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, Popover existiert als Dialog schon fast</span>
+    </div>
+  </section>
+
+  <section class="mock" id="g">
+    <div class="mock-head"><span class="letter">G</span><h2>Zeilen pro Kalender</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="hint">Zeit läuft nach rechts · rotes Band: zwei Zusagen gleichzeitig</span></div>
+      <div class="scroller"><div id="g-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Die Woche wird um 90 Grad gedreht. Jeder Tag ist eine Zeile, darin eine Unterzeile pro Kalender, die Zeit läuft von links nach rechts. Gleichzeitige Termine stehen untereinander statt nebeneinander, und die Breite reicht für Titel. Leere Kalenderzeilen eines Tages fallen weg. Rote Bänder markieren Zeiten, in denen sich zwei Zusagen überschneiden.</p></div>
+      <div><h3>Bei vier parallelen Terminen</h3><ul><li>Vier Zeilen à 22 Pixel statt vier Spalten à 30 Pixel, und jede Zeile ist über 50 Pixel pro Stunde breit.</li><li>Konflikte sind ein senkrechtes Band über alle Kalender.</li><li>Skaliert auf mehr Kalender, die Zeilen werden nur höher.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Ungewohnt: so sehen Ressourcenplaner aus, nicht Kalender. Kurze Termine unter 30 Minuten zeigen nur den Anfang des Titels. Als zweite Ansicht neben der Woche gedacht.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i class="on"></i> größer, eigene Ansicht</span>
+    </div>
+  </section>
+
+  <section class="mock" id="h">
+    <div class="mock-head"><span class="letter">H</span><h2>Tageslupe</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="hint">Einen Wochentag oben anklicken, um ihn aufzuklappen</span></div>
+      <div class="scroller"><div class="week" id="h-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Die Woche bleibt eine Woche, aber nicht jeder Tag ist gleich breit. Ein angeklickter Tag wird dreimal so breit und teilt sich in eine Spalte pro Kalender. Volle Tage bekommen auch ohne Klick etwas mehr Platz, ein leeres Wochenende wird schmaler.</p></div>
+      <div><h3>Bei vier parallelen Terminen</h3><ul><li>Am aufgeklappten Tag hat jeder Kalender seine eigene, lesbare Spalte.</li><li>Der Rest der Woche bleibt als Kontext daneben stehen.</li><li>Kein neues Konzept: ein Klick auf den Tag, den man genauer ansehen will.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Immer nur ein Tag ist richtig lesbar. Die anderen Tage werden enger als heute.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, weekModel bekommt variable Breiten</span>
+    </div>
+  </section>
+
+  <section class="verdict">
+    <h2>Vergleich und Vorschlag</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Variante</th><th>Was bei 4 parallelen Terminen lesbar bleibt</th><th>Schwäche</th><th>Aufwand</th></tr></thead>
+        <tbody>
+          <tr><td>E</td><td>Der zugesagte Termin, voll; der Rest als Streifen</td><td>Nebentermine erst per Hover</td><td>mittel</td></tr>
+          <tr><td>F</td><td>Alle Titel als Liste im Block, Details im Aufklapper</td><td>Dauer nur im Aufklapper</td><td>mittel</td></tr>
+          <tr><td>G</td><td>Alle Termine mit Titel, untereinander</td><td>Ungewohnte Ausrichtung, eigene Ansicht</td><td>größer</td></tr>
+          <tr><td>H</td><td>Alle Termine des gewählten Tages, eine Spalte je Kalender</td><td>Nur ein Tag gleichzeitig</td><td>mittel</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Mein Vorschlag in drei Schritten, jeder für sich nützlich:</p>
+    <ol>
+      <li><strong>Beide Hebel zuerst.</strong> Doppelte Einladungen zusammenführen und nach eigener Antwort ordnen. Das ist unsichtbare Logik ohne neue Bedienung und nimmt den meisten Tagen schon die Hälfte der Parallelität.</li>
+      <li><strong>F als Standard für den Rest.</strong> Wo danach noch drei oder mehr Termine übereinander liegen, ein Bündel mit Aufklapper. Das bleibt eine normale Wochenansicht und verliert keinen Termin.</li>
+      <li><strong>G später als zweite Ansicht</strong>, falls die Wochen noch voller werden. Sie ist die einzige Variante, die mit der Zahl der Kalender wächst statt an ihr zu scheitern.</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+const H0 = 7, H1 = 20, HH = 34;
+const DAYS = [["Mo", 5], ["Di", 6], ["Mi", 7], ["Do", 8], ["Fr", 9], ["Sa", 10], ["So", 11]];
+const TODAY = 5, NOW = 11.33;
+const CAL = {
+  p: { name: "Privat", acct: "Google", color: "var(--cal-p)" },
+  f: { name: "Familie", acct: "Google", color: "var(--cal-f)" },
+  w: { name: "Arbeit", acct: "Microsoft 365", color: "var(--cal-w)" },
+  t: { name: "Team (geteilt)", acct: "Microsoft 365", color: "var(--cal-t)", shared: true }
+};
+const CAL_ORDER = ["w", "t", "p", "f"];
+// r: org | acc | tent | none | decl. uid marks the same invitation in several calendars.
+const RAW = [
+  { d: 0, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", r: "acc", online: 1 },
+  { d: 0, s: 9, e: 10.5, c: "w", t: "Kundentermin Weber GmbH", r: "org", loc: "Mainz" },
+  { d: 0, s: 9, e: 10, c: "t", t: "Ticket-Triage", r: "none", online: 1 },
+  { d: 0, s: 9.5, e: 10, c: "p", t: "Zahnarzt", r: "acc", loc: "Dr. Lang" },
+  { d: 0, s: 13, e: 14, c: "w", t: "Angebot Review", r: "acc" },
+  { d: 0, s: 13, e: 14.5, c: "t", t: "Azure-Schulung Teil 1", r: "none", online: 1 },
+  { d: 0, s: 17.5, e: 18.5, c: "f", t: "Elternabend", r: "acc", loc: "Grundschule" },
+  { d: 1, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", r: "acc", online: 1 },
+  { d: 1, s: 10, e: 11, c: "w", t: "Jour fixe Vertrieb", r: "org", uid: "jf", online: 1 },
+  { d: 1, s: 10, e: 11, c: "p", t: "Jour fixe Vertrieb", r: "none", uid: "jf", online: 1 },
+  { d: 1, s: 10, e: 11.5, c: "t", t: "Release-Planung", r: "none", online: 1 },
+  { d: 1, s: 10.5, e: 11, c: "f", t: "Handwerker kommt", r: "acc" },
+  { d: 1, s: 10.5, e: 11.5, c: "w", t: "Lieferant: Lizenzen", r: "tent", online: 1 },
+  { d: 1, s: 12.5, e: 13.5, c: "p", t: "Mittag mit Jan", r: "acc", loc: "Bistro am Markt" },
+  { d: 1, s: 14, e: 15, c: "w", t: "Sales-Call Nordlicht", r: "acc", online: 1 },
+  { d: 1, s: 14, e: 16, c: "t", t: "Workshop Nordlicht", r: "none" },
+  { d: 1, s: 18, e: 19, c: "f", t: "Fußballtraining", r: "acc" },
+  { d: 2, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", r: "acc", online: 1 },
+  { d: 2, s: 11, e: 12, c: "w", t: "Bewerbungsgespräch", r: "acc", online: 1 },
+  { d: 2, s: 11, e: 12, c: "t", t: "Kaffeerunde", r: "none" },
+  { d: 2, s: 11.5, e: 12, c: "p", t: "Auto in die Werkstatt", r: "acc" },
+  { d: 2, s: 16, e: 17, c: "w", t: "Lieferant: Verträge", r: "acc", online: 1 },
+  { d: 3, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", r: "acc", online: 1 },
+  { d: 3, s: 9, e: 10, c: "w", t: "1:1 mit Sabine", r: "acc" },
+  { d: 3, s: 14, e: 15.5, c: "w", t: "Abnahme Weber GmbH", r: "acc", uid: "ab", loc: "Mainz" },
+  { d: 3, s: 14, e: 15.5, c: "t", t: "Abnahme Weber GmbH", r: "none", uid: "ab", loc: "Mainz" },
+  { d: 3, s: 14, e: 16, c: "t", t: "Azure-Schulung Teil 2", r: "none", online: 1 },
+  { d: 3, s: 14.5, e: 15.5, c: "w", t: "Partner-Webinar", r: "tent", online: 1 },
+  { d: 3, s: 15, e: 15.5, c: "p", t: "Paket abholen", r: "acc" },
+  { d: 3, s: 16, e: 17, c: "f", t: "Kinderarzt", r: "acc", loc: "Dr. Brandt" },
+  { d: 4, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", r: "acc", online: 1 },
+  { d: 4, s: 10, e: 11, c: "w", t: "Monatsabschluss", r: "org" },
+  { d: 4, s: 10, e: 12, c: "t", t: "Inventur Lager", r: "none" },
+  { d: 4, s: 10.5, e: 11, c: "w", t: "Rückfrage Buchhaltung", r: "decl", online: 1 },
+  { d: 4, s: 15, e: 16, c: "p", t: "Steuerberater", r: "acc", loc: "Kanzlei Roth" },
+  { d: 4, s: 15, e: 16, c: "w", t: "Quartalszahlen", r: "acc", online: 1 },
+  { d: 4, s: 19, e: 20, c: "f", t: "Geburtstag Oma", r: "acc" },
+  { d: 5, s: 10, e: 12, c: "f", t: "Flohmarkt Schule", r: "acc" },
+  { d: 5, s: 14, e: 15, c: "p", t: "Laufen", r: "acc" },
+  { d: 6, s: 12, e: 14, c: "f", t: "Familienessen", r: "acc" }
+].map((e, id) => ({ ...e, id }));
+const ALLDAY = [
+  { d0: 0, d1: 2, c: "t", t: "Anna – Urlaub" },
+  { d0: 3, d1: 4, c: "t", t: "Max – Urlaub" },
+  { d0: 4, d1: 4, c: "p", t: "Frist Steuererklärung" },
+  { d0: 5, d1: 6, c: "f", t: "Herbstferien" }
+];
+const RESP_LABEL = { org: "Organisiert", acc: "Zugesagt", tent: "Vorläufig", none: "Keine Antwort", decl: "Abgesagt", info: "Nur zur Info" };
+const ICON = {
+  video: '<svg viewBox="0 0 16 16" fill="currentColor" aria-label="Online"><path d="M1 4.5A1.5 1.5 0 0 1 2.5 3h7A1.5 1.5 0 0 1 11 4.5v1.2l3.2-2A.5.5 0 0 1 15 4.1v7.8a.5.5 0 0 1-.8.4L11 10.3v1.2A1.5 1.5 0 0 1 9.5 13h-7A1.5 1.5 0 0 1 1 11.5z"/></svg>'
+};
+
+let MERGE = true;
+const answers = new Map(); // id -> response chosen in the F popover
+let openBundle = "1-10"; // day-start key of the bundle F shows open
+
+const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const y = (h) => (Math.max(H0, Math.min(H1, h)) - H0) * HH;
+const fmt = (h) => `${String(Math.floor(h)).padStart(2, "0")}:${String(Math.round((h % 1) * 60)).padStart(2, "0")}`;
+const overlaps = (a, b) => a.s < b.e && b.s < a.e;
+const esc = (s) => s.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+const resp = (e) => answers.get(e.id) || e.r;
+// kind is the drawing class: full (org/acc), tent (tent/none), info (shared, unanswered), decl.
+function kind(e) {
+  const r = resp(e);
+  if (r === "org" || r === "acc") return "full";
+  if (r === "decl") return "decl";
+  if (r === "none" && CAL[e.c].shared) return "info";
+  return "tent";
+}
+const RANK = { full: 3, tent: 2, info: 1, decl: 0 };
+const rank = (e) => RANK[kind(e)];
+const label = (e) => kind(e) === "info" ? RESP_LABEL.info : RESP_LABEL[resp(e)];
+
+function events() {
+  if (!MERGE) return RAW.map((e) => ({ ...e, also: [] }));
+  const groups = new Map(), out = [];
+  for (const e of RAW) {
+    if (!e.uid) { out.push({ ...e, also: [] }); continue; }
+    const key = `${e.uid}|${e.d}|${e.s}`;
+    const g = groups.get(key);
+    if (!g) { const c = { ...e, also: [] }; groups.set(key, c); out.push(c); continue; }
+    if (rank(e) > rank(g)) { const also = [...g.also, g.c]; Object.assign(g, e); g.also = also; } else g.also.push(e.c);
+  }
+  return out;
+}
+
+function layout(list) {
+  const sorted = [...list].sort((a, b) => a.s - b.s || b.e - a.e);
+  const out = []; let cluster = [], cols = [], clusterEnd = -1;
+  const flush = () => { cluster.forEach((p) => (p.cols = cols.length)); out.push(...cluster); cluster = []; cols = []; };
+  for (const ev of sorted) {
+    if (ev.s >= clusterEnd && cluster.length) flush();
+    let col = cols.findIndex((end) => end <= ev.s);
+    if (col < 0) { col = cols.length; cols.push(ev.e); } else cols[col] = ev.e;
+    cluster.push({ ev, col }); clusterEnd = Math.max(clusterEnd, ev.e);
+  }
+  if (cluster.length) flush();
+  return out;
+}
+function clusters(list) {
+  const sorted = [...list].sort((a, b) => a.s - b.s || b.e - a.e);
+  const out = []; let cur = null;
+  for (const ev of sorted) {
+    if (cur && ev.s < cur.e) { cur.items.push(ev); cur.e = Math.max(cur.e, ev.e); }
+    else { cur = { s: ev.s, e: ev.e, items: [ev] }; out.push(cur); }
+  }
+  return out;
+}
+
+const dots = (ev) => ev.also && ev.also.length ? `<span class="dots" title="auch in ${ev.also.map((c) => CAL[c].name).join(", ")}">${ev.also.map((c) => `<i style="background:${CAL[c].color}"></i>`).join("")}</span>` : "";
+function tile(ev, extraCls = "") {
+  const short = ev.e - ev.s <= 0.5;
+  const n = el("div", `ev ${kind(ev) === "full" ? "" : kind(ev)} ${extraCls}`,
+    `<span class="t">${dots(ev)}${ev.online ? ICON.video : ""}<span>${esc(ev.t)}</span></span>` +
+    (short ? "" : `<span class="s">${fmt(ev.s)}–${fmt(ev.e)}${ev.loc ? " · " + esc(ev.loc) : ""}</span>`));
+  n.style.setProperty("--c", CAL[ev.c].color);
+  n.title = `${fmt(ev.s)}–${fmt(ev.e)} ${ev.t} · ${CAL[ev.c].name} · ${label(ev)}`;
+  return n;
+}
+const place = (n, ev, left, width) => { n.style.top = y(ev.s) + 1 + "px"; n.style.height = (ev.e - ev.s) * HH - 2 + "px"; n.style.left = left; n.style.width = width; return n; };
+
+function grid(root, { cols, head, sub, renderDay }) {
+  const week = el("div");
+  const tmpl = `52px ${cols ? cols.map((f) => `minmax(0, ${f}fr)`).join(" ") : "repeat(7, minmax(0, 1fr))"}`;
+  const headRow = el("div", "row"); headRow.style.gridTemplateColumns = tmpl;
+  headRow.append(el("div", "gutter"));
+  DAYS.forEach(([wd, n], i) => headRow.append(head ? head(i, wd, n) : el("div", `dayname ${i === TODAY ? "today" : ""}`, `<span class="wd">${wd}</span><span class="num">${n}</span>`)));
+  week.append(headRow);
+  if (sub) { const r = el("div", "row"); r.style.gridTemplateColumns = tmpl; r.append(el("div", "gutter")); DAYS.forEach((_, i) => r.append(sub(i))); week.append(r); }
+  const ad = el("div", "allday"); ad.append(el("div", "gutter lab", "Ganztägig"));
+  const bars = el("div", "span-bars"); bars.style.gridTemplateColumns = tmpl.replace(/^52px /, "");
+  ALLDAY.forEach((a) => { const b = el("div", "bar", esc(a.t)); b.style.setProperty("--c", CAL[a.c].color); b.style.gridColumn = `${a.d0 + 1} / ${a.d1 + 2}`; bars.append(b); });
+  ad.append(bars); week.append(ad);
+  const body = el("div", "body"); body.style.gridTemplateColumns = tmpl;
+  const height = (H1 - H0) * HH;
+  const hours = el("div", "hours"); hours.style.height = height + "px";
+  for (let h = H0 + 1; h < H1; h++) { const l = el("div", null, `${h}:00`); l.style.top = y(h) + "px"; hours.append(l); }
+  body.append(hours);
+  DAYS.forEach((_, i) => {
+    const day = el("div", `day ${i >= 5 ? "weekend" : ""}`); day.style.height = height + "px";
+    for (let h = H0 + 1; h < H1; h++) { const l = el("div", "hline"); l.style.top = y(h) + "px"; day.append(l); }
+    renderDay(day, i);
+    if (i === TODAY) { const n = el("div", "now"); n.style.top = y(NOW) + "px"; day.append(n); }
+    body.append(day);
+  });
+  week.append(body);
+  root.replaceChildren(week);
+  return week;
+}
+
+/* ---------- E: main lane + slivers ---------- */
+function renderE() {
+  const all = events();
+  grid(document.getElementById("e-week"), {
+    renderDay: (day, i) => {
+      const todays = all.filter((e) => e.d === i);
+      const main = todays.filter((e) => kind(e) === "full");
+      const side = todays.filter((e) => kind(e) !== "full");
+      const sideLayout = layout(side);
+      const sideCols = sideLayout.reduce((m, p) => Math.max(m, p.cols), 0);
+      const reserve = sideCols ? sideCols * 7 + 4 : 3;
+      layout(main).forEach(({ ev, col, cols }) => {
+        const conflict = main.some((o) => o !== ev && overlaps(o, ev));
+        const n = tile(ev, conflict ? "conflict" : "");
+        const w = 100 / cols;
+        place(n, ev, `calc((100% - ${reserve}px) * ${col * w / 100} + 2px)`, `calc((100% - ${reserve}px) * ${w / 100} - 4px)`);
+        const parallel = side.filter((o) => overlaps(o, ev)).length;
+        if (parallel && ev.e - ev.s > 0.5) n.append(el("span", "more", `+${parallel}`));
+        day.append(n);
+      });
+      sideLayout.forEach(({ ev, col }) => {
+        const s = el("div", `sliver ${kind(ev) === "full" ? "" : kind(ev)}`);
+        s.style.setProperty("--c", CAL[ev.c].color);
+        s.style.top = y(ev.s) + 2 + "px"; s.style.height = (ev.e - ev.s) * HH - 4 + "px";
+        s.style.right = 3 + (sideCols - 1 - col) * 7 + "px";
+        s.title = `${fmt(ev.s)}–${fmt(ev.e)} ${ev.t} · ${CAL[ev.c].name} · ${label(ev)}`;
+        day.append(s);
+      });
+    }
+  });
+}
+
+/* ---------- F: bundles + popover ---------- */
+function renderF() {
+  const all = events();
+  let anchor = null, anchorDay = 0, anchorCluster = null;
+  const week = grid(document.getElementById("f-week"), {
+    renderDay: (day, i) => {
+      clusters(all.filter((e) => e.d === i)).forEach((cl) => {
+        const live = cl.items.filter((e) => kind(e) !== "decl");
+        if (live.length < 3) {
+          layout(cl.items).forEach(({ ev, col, cols }) => { const w = 100 / cols; day.append(place(tile(ev), ev, `calc(${col * w}% + 2px)`, `calc(${w}% - 4px)`)); });
+          return;
+        }
+        const key = `${i}-${cl.s}`;
+        const items = [...cl.items].sort((a, b) => rank(b) - rank(a) || a.s - b.s);
+        const b = el("button", "bundle");
+        b.type = "button";
+        b.setAttribute("aria-expanded", key === openBundle);
+        b.title = `${live.length} Termine, ${fmt(cl.s)}–${fmt(cl.e)}`;
+        b.innerHTML = `<span class="bh">${live.length} Termine</span>` +
+          items.map((e, k) => `<span class="bl ${k === 0 && kind(e) === "full" ? "main" : ""} ${rank(e) < 2 ? "low" : ""}" style="--c:${CAL[e.c].color}"><i></i><span>${esc(e.t)}</span></span>`).join("");
+        b.style.top = y(cl.s) + 1 + "px"; b.style.height = Math.max((cl.e - cl.s) * HH - 2, 60) + "px";
+        b.style.left = "2px"; b.style.width = "calc(100% - 4px)"; b.style.zIndex = 4;
+        b.onclick = () => { openBundle = openBundle === key ? "" : key; renderF(); };
+        day.append(b);
+        if (key === openBundle) { anchor = b; anchorDay = i; anchorCluster = { ...cl, items }; }
+      });
+    }
+  });
+  if (!anchor) return;
+  const pop = el("div", "pop");
+  const c = anchorCluster;
+  const span = c.e - c.s;
+  pop.innerHTML = `<header><div><b>${DAYS[anchorDay][0]}, ${DAYS[anchorDay][1]}. Okt.</b><small>${fmt(c.s)}–${fmt(c.e)} · ${c.items.length} Termine</small></div><button type="button" class="x" aria-label="Schließen">×</button></header>`;
+  const slice = el("div", "slice");
+  c.items.forEach((e) => {
+    const k = kind(e);
+    const row = el("div", `prow ${k === "decl" ? "decl" : ""}`);
+    row.style.setProperty("--c", CAL[e.c].color);
+    row.innerHTML = `<span class="st"></span><div style="min-width:0"><div class="pt">${dots(e)}${e.online ? ICON.video : ""}<span>${esc(e.t)}</span></div><div class="ps">${fmt(e.s)}–${fmt(e.e)} · ${CAL[e.c].name}${e.loc ? " · " + esc(e.loc) : ""}</div>` +
+      `<div class="mini" aria-hidden="true"><i style="left:${((e.s - c.s) / span) * 100}%;width:${((e.e - e.s) / span) * 100}%"></i></div></div>` +
+      `<span class="rchip ${resp(e)}">${label(e)}</span>`;
+    const r = resp(e);
+    if (!CAL[e.c].shared && (r === "tent" || r === "none" || r === "decl" || answers.has(e.id))) {
+      const acts = el("div", "pacts");
+      [["acc", "Zusagen"], ["decl", "Absagen"]].forEach(([v, t]) => {
+        if (resp(e) === v) return;
+        const btn = el("button", null, t); btn.type = "button";
+        btn.onclick = () => { answers.set(e.id, v); renderAll(); };
+        acts.append(btn);
+      });
+      row.append(acts);
+    }
+    slice.append(row);
+  });
+  pop.append(slice);
+  pop.querySelector(".x").onclick = () => { openBundle = ""; renderF(); };
+  week.style.position = "relative";
+  week.append(pop);
+  const wr = week.getBoundingClientRect(), ar = anchor.getBoundingClientRect();
+  const left = anchorDay >= 4 ? ar.left - wr.left - 338 : ar.right - wr.left + 8;
+  pop.style.left = Math.max(4, left) + "px";
+  const bodyTop = week.querySelector(".body").getBoundingClientRect().top - wr.top;
+  pop.style.top = Math.max(bodyTop + 4, Math.min(ar.top - wr.top - 20, wr.height - pop.offsetHeight - 6)) + "px";
+}
+
+/* ---------- G: horizontal rows per calendar ---------- */
+function renderG() {
+  const all = events();
+  const xs = (h) => ((h - H0) / (H1 - H0)) * 100;
+  const tl = el("div", "tl");
+  const axis = el("div", "tl-axis");
+  axis.append(el("div"), el("div"));
+  const ticks = el("div", "tl-ticks");
+  for (let h = H0; h <= H1; h += 1) { if (h === H0 || h === H1) continue; const s = el("span", null, h); s.style.left = xs(h) + "%"; ticks.append(s); }
+  axis.append(ticks); tl.append(axis);
+  DAYS.forEach(([wd, n], i) => {
+    const todays = all.filter((e) => e.d === i);
+    const lanes = CAL_ORDER.filter((c) => todays.some((e) => e.c === c));
+    const row = el("div", `tl-day ${i >= 5 ? "weekend" : ""}`);
+    const lab = el("div", `tl-label ${i === TODAY ? "today" : ""}`, `<span class="wd">${wd}</span><span class="num">${n}</span>`);
+    ALLDAY.filter((a) => a.d0 <= i && i <= a.d1).forEach((a) => { const b = el("span", "ad", esc(a.t)); b.style.setProperty("--c", CAL[a.c].color); lab.append(b); });
+    const names = el("div", "tl-names");
+    const track = el("div", "tl-track");
+    if (!lanes.length) { names.append(el("div", null, "")); track.append(el("div", "tl-lane")); }
+    lanes.forEach((c) => {
+      const laneEvents = layout(todays.filter((e) => e.c === c));
+      const sub = laneEvents.reduce((m, p) => Math.max(m, p.cols), 1);
+      for (let k = 0; k < sub; k++) names.append(el("div", null, k === 0 ? `<i class="sw" style="background:${CAL[c].color}"></i>${CAL[c].name}` : ""));
+      const laneRows = Array.from({ length: sub }, () => { const l = el("div", "tl-lane"); track.append(l); return l; });
+      // The title may run on into the free time after an event, up to the
+      // next event in the same row, so a half-hour slot still names itself.
+      laneEvents.forEach(({ ev, col }) => {
+        const k = kind(ev);
+        const next = laneEvents.filter((o) => o.col === col && o.ev.s >= ev.e).reduce((m, o) => Math.min(m, o.ev.s), H1);
+        const item = el("div", `tl-item ${k === "full" ? "" : k}`);
+        item.style.setProperty("--c", CAL[c].color);
+        item.style.left = `calc(${xs(ev.s)}% + 1px)`; item.style.width = `calc(${xs(next) - xs(ev.s)}% - 3px)`;
+        const bar = el("div", `tl-ev ${k === "full" ? "" : k}`);
+        bar.style.width = `calc(${((ev.e - ev.s) / (next - ev.s)) * 100}% - ${next > ev.e ? 0 : 0}px)`;
+        item.append(bar, el("div", "tl-text", `${dots(ev)}${ev.online ? ICON.video : ""}<span>${esc(ev.t)}</span>`));
+        item.title = `${fmt(ev.s)}–${fmt(ev.e)} ${ev.t} · ${CAL[c].name} · ${label(ev)}`;
+        laneRows[col].append(item);
+      });
+    });
+    // Conflict bands: two commitments at once.
+    const full = todays.filter((e) => kind(e) === "full").sort((a, b) => a.s - b.s);
+    const bands = [];
+    full.forEach((a, k) => full.slice(k + 1).forEach((b) => { if (overlaps(a, b)) bands.push([Math.max(a.s, b.s), Math.min(a.e, b.e)]); }));
+    bands.forEach(([s, e]) => { const band = el("div", "tl-band"); band.title = "Zwei Zusagen gleichzeitig"; band.style.left = xs(s) + "%"; band.style.width = xs(e) - xs(s) + "%"; track.append(band); });
+    if (i === TODAY) { const now = el("div", "tl-now"); now.style.left = xs(NOW) + "%"; track.append(now); }
+    row.append(lab, names, track);
+    tl.append(row);
+  });
+  document.getElementById("g-week").replaceChildren(tl);
+}
+
+/* ---------- H: elastic days + day lens ---------- */
+let lensDay = 1;
+function renderH() {
+  const all = events();
+  const maxCols = DAYS.map((_, i) => layout(all.filter((e) => e.d === i)).reduce((m, p) => Math.max(m, p.cols), 0));
+  const lanesFor = (i) => CAL_ORDER.filter((c) => all.some((e) => e.d === i && e.c === c));
+  const cols = DAYS.map((_, i) => i === lensDay ? Math.max(2.6, lanesFor(i).length * 0.85) : maxCols[i] <= 1 ? 0.7 : 0.85 + 0.15 * maxCols[i]);
+  grid(document.getElementById("h-week"), {
+    cols,
+    head: (i, wd, n) => {
+      const b = el("button", `dayname ${i === TODAY ? "today" : ""}`, `<span class="wd">${wd}</span><span class="num">${n}</span>`);
+      b.type = "button"; b.setAttribute("aria-pressed", i === lensDay);
+      b.onclick = () => { lensDay = lensDay === i ? -1 : i; renderH(); };
+      return b;
+    },
+    sub: (i) => {
+      const s = el("div", "subhead");
+      if (i === lensDay) lanesFor(i).forEach((c) => { const t = el("span", null, CAL[c].name); t.style.setProperty("--lc", CAL[c].color); s.append(t); });
+      return s;
+    },
+    renderDay: (day, i) => {
+      const todays = all.filter((e) => e.d === i);
+      if (i !== lensDay) {
+        layout(todays).forEach(({ ev, col, cols }) => { const w = 100 / cols; day.append(place(tile(ev), ev, `calc(${col * w}% + 2px)`, `calc(${w}% - 4px)`)); });
+        return;
+      }
+      const lanes = lanesFor(i);
+      lanes.forEach((c, li) => {
+        const box = el("div", "lanebox"); box.style.left = (li * 100) / lanes.length + "%"; box.style.width = 100 / lanes.length + "%";
+        layout(todays.filter((e) => e.c === c)).forEach(({ ev, col, cols }) => { const w = 100 / cols; box.append(place(tile(ev), ev, `calc(${col * w}% + 2px)`, `calc(${w}% - 4px)`)); });
+        day.append(box);
+      });
+    }
+  });
+}
+
+function renderFunnel() {
+  const raw = RAW.filter((e) => e.d === 1 && e.s < 11.5 && e.e > 10);
+  const merged = events().filter((e) => e.d === 1 && e.s < 11.5 && e.e > 10);
+  const committed = merged.filter((e) => kind(e) === "full");
+  document.getElementById("funnel").innerHTML =
+    `<span>Di 10–11:30 Uhr:</span><b>${raw.length}</b><span>Termine</span><span class="arrow">→</span>` +
+    `<b>${merged.length}</b><span>zusammengeführt</span><span class="arrow">→</span><b>${committed.length}</b><span>zugesagt</span>`;
+}
+
+function renderAll() { renderFunnel(); renderE(); renderF(); renderG(); renderH(); }
+document.getElementById("legend").innerHTML = Object.values(CAL).map((c) => `<span><i class="sw" style="background:${c.color}"></i>${c.name} <small>(${c.acct})</small></span>`).join("");
+document.getElementById("merge").addEventListener("change", (ev) => { MERGE = ev.target.checked; renderAll(); });
+renderAll();
+window.addEventListener("resize", () => renderF());
+</script>
