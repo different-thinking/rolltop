@@ -511,7 +511,7 @@ export function CalendarView({
                         <span
                           key={calendarID}
                           title={calendar?.name}
-                          style={{ "--calendar-color": calendarColor(calendar) } as CSSProperties}
+                          style={{ borderBottomColor: calendarColor(calendar) }}
                         >
                           {calendar?.name || "Calendar"}
                         </span>

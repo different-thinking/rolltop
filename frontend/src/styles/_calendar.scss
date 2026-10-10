@@ -749,7 +749,9 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
     flex: 1 1 0;
     min-width: 0;
     padding: 3px 4px;
-    border-bottom: 2px solid var(--calendar-color);
+    // The lane's colour is set inline from its calendar; the token is what
+    // shows for a lane whose calendar has none.
+    border-bottom: 2px solid var(--border);
     font-size: 11px;
     color: var(--muted);
     text-align: center;
