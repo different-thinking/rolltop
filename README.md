@@ -272,6 +272,58 @@ published decides how often accounts have to be reconnected:
 Whichever state applies, an expired or revoked grant is detected and the
 connection is marked as needing reauthorization rather than failing silently.
 
+### Microsoft 365 calendars
+
+Connecting Microsoft 365 (work or school) and personal Microsoft accounts is
+optional as well and, for now, covers the calendar: its calendars are drawn in
+the week beside Google's, events can be created, edited and deleted with
+guests, invitations answered, new events made **Teams meetings**, and an event
+in any calendar can be kept in the second calendar as well — the second
+calendar may belong to the other provider.
+
+```sh
+export ROLLTOP_MICROSOFT_CLIENT_ID="00000000-0000-0000-0000-000000000000"
+export ROLLTOP_MICROSOFT_CLIENT_SECRET="client-secret-value"
+export ROLLTOP_MICROSOFT_REDIRECT_URLS="https://mail.example.com/api/microsoft/callback"
+export ROLLTOP_MICROSOFT_TENANT="common"   # optional
+export ROLLTOP_MICROSOFT_SCOPES=""         # optional
+```
+
+Register an app in the Microsoft Entra admin center (**App registrations → New
+registration**):
+
+1. *Supported account types*: "Accounts in any organizational directory and
+   personal Microsoft accounts" to allow both, or "this organizational
+   directory only" together with `ROLLTOP_MICROSOFT_TENANT` set to the tenant id
+   or domain.
+2. *Redirect URI*: platform **Web**, the same URLs as
+   `ROLLTOP_MICROSOFT_REDIRECT_URLS`. Every entry must end in
+   `/api/microsoft/callback`; several are allowed and chosen by request origin,
+   exactly as for Google.
+3. *Certificates & secrets*: a client secret, which is
+   `ROLLTOP_MICROSOFT_CLIENT_SECRET`. The *Application (client) ID* is
+   `ROLLTOP_MICROSOFT_CLIENT_ID`. Secrets expire; a new one has to be set
+   before the old one does.
+4. *API permissions*: Microsoft Graph, delegated: `Calendars.ReadWrite`,
+   `User.Read`, `offline_access`, `openid`, `email`, `profile`. Teams meetings
+   are created through the event itself and need nothing beyond
+   `Calendars.ReadWrite`. A tenant that does not let users consent to apps
+   needs an administrator to grant consent once.
+
+`ROLLTOP_MICROSOFT_TENANT` defaults to `common`. `ROLLTOP_MICROSOFT_SCOPES`
+replaces `openid email profile offline_access User.Read Calendars.ReadWrite`
+entirely. The settings are validated at startup like Google's, and the tokens
+are stored encrypted under `ROLLTOP_MASTER_KEY`.
+
+Calendars are polled every five minutes. Microsoft Graph offers no change
+cursor for calendars other than the primary one, so every poll reads the
+coming four months and the past fortnight, and the whole mirrored window — a
+year back, two years ahead — is read again every six hours. Microsoft has no
+endpoint that revokes one app's access for one user, so disconnecting removes
+the account from Rolltop and leaves the grant listed under *My Apps* (work or
+school) or *account.live.com/consent/Manage* (personal) until it is removed
+there.
+
 ### Gmail mailboxes
 
 Once an account is connected under Settings → Google, an IMAP server can select

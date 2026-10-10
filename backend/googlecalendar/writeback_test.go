@@ -355,7 +355,7 @@ func readOnly(ctx context.Context, db *store.Store, userID, calendarID int64) er
 	}
 	_, err = db.UpsertCalendar(ctx, userID, store.CalendarUpsert{
 		GoogleConnectionID: calendar.GoogleConnectionID,
-		GoogleCalendarID:   calendar.GoogleCalendarID,
+		RemoteCalendarID:   calendar.RemoteCalendarID,
 		Summary:            calendar.Summary,
 		AccessRole:         "reader",
 	})

@@ -102,7 +102,7 @@ func storedCalendar(t *testing.T, env *googleTestEnv, user store.User, connectio
 	t.Helper()
 	calendar, err := env.db.UpsertCalendar(context.Background(), user.ID, store.CalendarUpsert{
 		GoogleConnectionID: connectionID,
-		GoogleCalendarID:   "primary",
+		RemoteCalendarID:   "primary",
 		Summary:            "Work",
 		AccessRole:         accessRole,
 		IsPrimary:          true,
@@ -474,7 +474,7 @@ func secondCalendar(t *testing.T, env *googleTestEnv, user store.User, connectio
 	t.Helper()
 	calendar, err := env.db.UpsertCalendar(context.Background(), user.ID, store.CalendarUpsert{
 		GoogleConnectionID: connectionID,
-		GoogleCalendarID:   "family@group.calendar.google.com",
+		RemoteCalendarID:   "family@group.calendar.google.com",
 		Summary:            "Family",
 		AccessRole:         accessRole,
 		Selected:           true,

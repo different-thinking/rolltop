@@ -1,5 +1,5 @@
 // File overview: Tenant-scoped persistence for the event instances mirrored
-// from Google Calendar. Events are stored expanded -- one row per occurrence --
+// from Google Calendar and Microsoft 365. Events are stored expanded -- one row per occurrence --
 // so nothing here has to evaluate a recurrence rule.
 
 package store
@@ -46,7 +46,8 @@ const allDayRangePadding = 24 * time.Hour
 const calendarEventSelectColumns = `id, user_id, calendar_id, external_id, etag, ical_uid,
 	summary, description, location, status, start_at, end_at, all_day, time_zone,
 	recurring_event_id, organizer_email, organizer_name, attendees_json, my_response,
-	html_link, remote_updated_at, link_key, link_primary`
+	html_link, remote_updated_at, link_key, link_primary, online_meeting,
+	online_meeting_provider, online_meeting_url`
 
 // CalendarAttendee is one invitee as Google reports them. It is display data:
 // nothing queries against it, so the list is stored as JSON on the event.
@@ -102,6 +103,14 @@ type CalendarEvent struct {
 	// LinkPrimary marks the copy that was entered, as opposed to the one made
 	// in the second calendar. Only it carries the guest list.
 	LinkPrimary bool
+	// OnlineMeeting marks an event that is held online -- a Teams meeting for
+	// a Microsoft calendar. On a write it asks for one to be created; the
+	// provider and the join link are only ever read back from the provider.
+	OnlineMeeting         bool
+	OnlineMeetingProvider string
+	// OnlineMeetingURL is the link a participant follows to join, for an
+	// online meeting of either provider.
+	OnlineMeetingURL string
 }
 
 // Linked reports whether this event is one copy of a linked pair.
@@ -131,8 +140,9 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			(user_id, calendar_id, external_id, etag, ical_uid, summary, description,
 			 location, status, start_at, end_at, all_day, time_zone, recurring_event_id,
 			 organizer_email, organizer_name, attendees_json, my_response, html_link,
-			 remote_updated_at, link_key, link_primary, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 remote_updated_at, link_key, link_primary, online_meeting, online_meeting_provider,
+			 online_meeting_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, calendar_id, external_id) DO UPDATE SET
 			etag = excluded.etag,
 			ical_uid = excluded.ical_uid,
@@ -153,6 +163,9 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			remote_updated_at = excluded.remote_updated_at,
 			link_key = excluded.link_key,
 			link_primary = excluded.link_primary,
+			online_meeting = excluded.online_meeting,
+			online_meeting_provider = excluded.online_meeting_provider,
+			online_meeting_url = excluded.online_meeting_url,
 			updated_at = excluded.updated_at`,
 		userID, event.CalendarID, trimLimit(externalID, 300), trimLimit(event.ETag, 200),
 		trimLimit(event.ICalUID, 300), trimLimit(event.Summary, 500),
@@ -162,7 +175,9 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 		cleanEmail(event.OrganizerEmail), trimLimit(event.OrganizerName, 300),
 		encodeAttendees(event.Attendees), trimLimit(strings.TrimSpace(event.MyResponse), 40),
 		trimLimit(event.HTMLLink, 1000), timeUnix(event.RemoteUpdatedAt),
-		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary), ts, ts)
+		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary),
+		boolInt(event.OnlineMeeting), trimLimit(strings.TrimSpace(event.OnlineMeetingProvider), 60),
+		trimLimit(strings.TrimSpace(event.OnlineMeetingURL), 2000), ts, ts)
 	if err != nil {
 		return CalendarEvent{}, err
 	}
@@ -331,6 +346,50 @@ func (s *Store) ListCalendarEventRefs(ctx context.Context, userID, calendarID in
 	return out, rows.Err()
 }
 
+// ListCalendarEventRefsStartingIn returns the mirrored events of one calendar
+// whose start lies in [from, to), keyed by external id. A read of a window
+// that cannot report deletions -- Microsoft's calendarView, which only ever
+// says what is there -- concludes that a row it did not return is gone, and
+// this is the set it may conclude that about: rows the read would have
+// returned had they still existed.
+func (s *Store) ListCalendarEventRefsStartingIn(ctx context.Context, userID, calendarID int64, from, to time.Time) (map[string]CalendarEventRef, error) {
+	out := map[string]CalendarEventRef{}
+	if userID <= 0 || calendarID <= 0 || !to.After(from) {
+		return out, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx,
+		`SELECT id, external_id, etag FROM calendar_events
+			WHERE user_id = ? AND calendar_id = ? AND start_at >= ? AND start_at < ?`,
+		userID, calendarID, timeUnix(from), timeUnix(to))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref CalendarEventRef
+		if err := rows.Scan(&ref.EventID, &ref.ExternalID, &ref.ETag); err != nil {
+			return nil, err
+		}
+		out[ref.ExternalID] = ref
+	}
+	return out, rows.Err()
+}
+
+// DeleteCalendarEventsEndingBefore removes the rows of one calendar that ended
+// before a point, which is what falling out of the mirrored window means.
+func (s *Store) DeleteCalendarEventsEndingBefore(ctx context.Context, userID, calendarID int64, before time.Time) (int64, error) {
+	if userID <= 0 || calendarID <= 0 || before.IsZero() {
+		return 0, nil
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`DELETE FROM calendar_events WHERE user_id = ? AND calendar_id = ? AND end_at <= ?`,
+		userID, calendarID, timeUnix(before))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // encodeAttendees renders the attendee list for storage. An unencodable list
 // is stored as none rather than failing the event: the attendees are display
 // data, and losing them is a smaller fault than losing the appointment.
@@ -363,14 +422,16 @@ func decodeAttendees(raw string) []CalendarAttendee {
 func scanCalendarEvent(dest scanDest) (CalendarEvent, error) {
 	var event CalendarEvent
 	var attendees string
-	var allDay, startAt, endAt, remoteUpdated, linkPrimary int64
+	var allDay, startAt, endAt, remoteUpdated, linkPrimary, onlineMeeting int64
 	if err := dest.Scan(&event.ID, &event.UserID, &event.CalendarID, &event.ExternalID,
 		&event.ETag, &event.ICalUID, &event.Summary, &event.Description, &event.Location,
 		&event.Status, &startAt, &endAt, &allDay, &event.TimeZone, &event.RecurringEventID,
 		&event.OrganizerEmail, &event.OrganizerName, &attendees, &event.MyResponse,
-		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary); err != nil {
+		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary, &onlineMeeting,
+		&event.OnlineMeetingProvider, &event.OnlineMeetingURL); err != nil {
 		return CalendarEvent{}, err
 	}
+	event.OnlineMeeting = onlineMeeting != 0
 	event.LinkPrimary = linkPrimary != 0
 	event.StartAt = unixTime(startAt)
 	event.EndAt = unixTime(endAt)

@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"rolltop/backend/calendarlink"
 )
 
 // DefaultBaseURL is Google's Calendar API host. It is a field on the client
@@ -45,20 +47,20 @@ var (
 	ErrSyncTokenExpired = errors.New("google calendar sync token expired")
 	// ErrUnauthorized reports that Google rejected the access token. Refreshing
 	// it and retrying once is what the caller should do.
-	ErrUnauthorized = errors.New("google rejected the access token")
+	ErrUnauthorized = calendarlink.Sentinel("google rejected the access token", calendarlink.ErrUnauthorized)
 	// ErrForbidden reports a request the grant does not cover, which in practice
 	// means the connection was authorized before the calendar scope existed, or
 	// a write to a calendar shared read-only.
-	ErrForbidden = errors.New("google denied the request")
+	ErrForbidden = calendarlink.Sentinel("google denied the request", calendarlink.ErrForbidden)
 	// ErrConflict reports that the event changed at Google since the etag
 	// Rolltop holds. Google is the leading system, so the caller adopts the
 	// remote copy rather than forcing the write through.
-	ErrConflict = errors.New("google calendar event changed since it was last read")
+	ErrConflict = calendarlink.Sentinel("google calendar event changed since it was last read", calendarlink.ErrConflict)
 	// ErrNotFound reports an event or calendar Google no longer has.
-	ErrNotFound = errors.New("google calendar resource not found")
+	ErrNotFound = calendarlink.Sentinel("google calendar resource not found", calendarlink.ErrNotFound)
 	// ErrUpstream marks any other failure of the call itself, as opposed to a
 	// local one.
-	ErrUpstream = errors.New("google calendar request failed")
+	ErrUpstream = calendarlink.Sentinel("google calendar request failed", calendarlink.ErrUpstream)
 	// ErrServiceDisabled and ErrScopeInsufficient are the two 403s that need
 	// opposite answers, and Google tells them apart only in the machine-readable
 	// reason beside the status. An API switched off for the Cloud project behind

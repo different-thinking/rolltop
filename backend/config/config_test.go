@@ -372,3 +372,73 @@ func TestLoadReadsBreakInstanceLock(t *testing.T) {
 		t.Fatal("an unparsable override was accepted")
 	}
 }
+
+func clearMicrosoftEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"ROLLTOP_MICROSOFT_CLIENT_ID",
+		"ROLLTOP_MICROSOFT_CLIENT_SECRET",
+		"ROLLTOP_MICROSOFT_TENANT",
+		"ROLLTOP_MICROSOFT_REDIRECT_URLS",
+		"ROLLTOP_MICROSOFT_SCOPES",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+func TestLoadReadsMicrosoftSettings(t *testing.T) {
+	clearGoogleEnv(t)
+	clearMicrosoftEnv(t)
+	t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+	t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Microsoft.Configured() {
+		t.Fatalf("microsoft reported as configured without credentials: %+v", cfg.Microsoft)
+	}
+
+	t.Setenv("ROLLTOP_MICROSOFT_CLIENT_ID", "app-id")
+	t.Setenv("ROLLTOP_MICROSOFT_CLIENT_SECRET", "app-secret")
+	t.Setenv("ROLLTOP_MICROSOFT_TENANT", "contoso.onmicrosoft.com")
+	t.Setenv("ROLLTOP_MICROSOFT_REDIRECT_URLS", "https://rolltop.example.test/api/microsoft/callback")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Microsoft.Configured() || cfg.Microsoft.Tenant != "contoso.onmicrosoft.com" || len(cfg.Microsoft.RedirectURLs) != 1 {
+		t.Fatalf("microsoft config = %+v", cfg.Microsoft)
+	}
+}
+
+func TestLoadRejectsAnUnusableMicrosoftConfiguration(t *testing.T) {
+	clearGoogleEnv(t)
+	for name, values := range map[string]map[string]string{
+		"half a credential": {"ROLLTOP_MICROSOFT_CLIENT_ID": "app-id"},
+		"no redirect URL": {
+			"ROLLTOP_MICROSOFT_CLIENT_ID": "app-id", "ROLLTOP_MICROSOFT_CLIENT_SECRET": "secret",
+		},
+		"wrong callback path": {
+			"ROLLTOP_MICROSOFT_CLIENT_ID": "app-id", "ROLLTOP_MICROSOFT_CLIENT_SECRET": "secret",
+			"ROLLTOP_MICROSOFT_REDIRECT_URLS": "https://rolltop.example.test/api/google/callback",
+		},
+		"a tenant that is a URL": {
+			"ROLLTOP_MICROSOFT_CLIENT_ID": "app-id", "ROLLTOP_MICROSOFT_CLIENT_SECRET": "secret",
+			"ROLLTOP_MICROSOFT_REDIRECT_URLS": "https://rolltop.example.test/api/microsoft/callback",
+			"ROLLTOP_MICROSOFT_TENANT":        "https://login.microsoftonline.com/common",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearMicrosoftEnv(t)
+			t.Setenv("ROLLTOP_MASTER_KEY", testMasterKey)
+			t.Setenv("ROLLTOP_DATABASE_URL", testDatabaseURL)
+			for key, value := range values {
+				t.Setenv(key, value)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("the configuration was accepted")
+			}
+		})
+	}
+}

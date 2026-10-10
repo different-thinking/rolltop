@@ -14,11 +14,15 @@ import (
 // dateLayout is Google's plain-date format for all-day events.
 const dateLayout = "2006-01-02"
 
+// onlineMeetingProviderMeet names Google Meet in the event's online meeting
+// columns, beside Microsoft's own provider names.
+const onlineMeetingProviderMeet = "googleMeet"
+
 // ToCalendarUpsert turns one calendar-list entry into the row the store keeps.
 func ToCalendarUpsert(entry CalendarListEntry, connectionID int64) store.CalendarUpsert {
 	return store.CalendarUpsert{
 		GoogleConnectionID: connectionID,
-		GoogleCalendarID:   strings.TrimSpace(entry.ID),
+		RemoteCalendarID:   strings.TrimSpace(entry.ID),
 		Summary:            strings.TrimSpace(entry.Name()),
 		Description:        strings.TrimSpace(entry.Description),
 		TimeZone:           strings.TrimSpace(entry.TimeZone),
@@ -55,6 +59,11 @@ func ToEvent(event Event, calendarID int64) store.CalendarEvent {
 		OrganizerName:    strings.TrimSpace(event.Organizer.DisplayName),
 		HTMLLink:         strings.TrimSpace(event.HTMLLink),
 		RemoteUpdatedAt:  parseTimestamp(event.Updated),
+	}
+	if link := strings.TrimSpace(event.HangoutLink); link != "" {
+		out.OnlineMeeting = true
+		out.OnlineMeetingProvider = onlineMeetingProviderMeet
+		out.OnlineMeetingURL = link
 	}
 	out.Attendees, out.MyResponse = attendees(event.Attendees)
 	out.LinkKey, out.LinkPrimary = eventLink(event)

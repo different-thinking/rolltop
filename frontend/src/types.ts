@@ -1107,11 +1107,17 @@ export type Invoice = {
   messages: InvoiceMessage[];
 };
 
-/** CalendarSummary is one subscribed Google calendar. */
+/** CalendarProvider names where a calendar is mirrored from. */
+export type CalendarProvider = "google" | "microsoft";
+
+/** CalendarSummary is one subscribed calendar of a connected Google or
+ * Microsoft 365 account. */
 export type CalendarSummary = {
   id: number;
-  /** connection_id and connection_email name the Google account it came from,
-   * which is what tells two identically named calendars apart. */
+  provider: CalendarProvider;
+  /** connection_id and connection_email name the account it came from, which
+   * is what tells two identically named calendars apart. connection_id is an
+   * id within the provider's own connections. */
   connection_id: number;
   connection_email: string;
   name: string;
@@ -1126,6 +1132,9 @@ export type CalendarSummary = {
   /** copy_target marks the reader's second calendar: an event entered in any
    * other calendar can be kept in this one as well. At most one carries it. */
   copy_target: boolean;
+  /** online_meeting_providers lists the online meetings an event here can be
+   * made -- Teams for a Microsoft calendar. Empty means none. */
+  online_meeting_providers: string[];
   /** synced_from is the oldest point the mirror covers. An empty week before it
    * means "not synced", not "nothing scheduled". */
   synced_from: string;
@@ -1175,6 +1184,11 @@ export type CalendarEvent = {
    * draws a linked pair once; this is what says where else it lives, including
    * a calendar that is switched off. */
   also_in: CalendarEventCopy[];
+  /** online_meeting marks an event held online; online_meeting_url joins it
+   * (a Teams or Google Meet link). */
+  online_meeting: boolean;
+  online_meeting_provider: string;
+  online_meeting_url: string;
 };
 
 /** CalendarEventCopy is one other copy of a linked event. */
@@ -1197,6 +1211,9 @@ export type CalendarEventInput = {
   /** copy asks for the event to be kept in the second calendar as well (true)
    * or no longer (false). Left out, an edit keeps the copies it has. */
   copy?: boolean;
+  /** online_meeting asks for a Teams meeting. Once an event is online it
+   * stays so; false on an edit does not take it back. */
+  online_meeting?: boolean;
 };
 
 /** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */

@@ -1,6 +1,7 @@
-// File overview: Tenant-scoped persistence for subscribed Google calendars.
-// A calendar row carries its own delta cursor and the visibility switch the
-// week view reads; the events themselves live in calendar_events.go.
+// File overview: Tenant-scoped persistence for subscribed calendars, Google's
+// and Microsoft 365's alike. A calendar row says which provider it mirrors and
+// carries its own sync state and the visibility switch the week view reads;
+// the events themselves live in calendar_events.go.
 
 package store
 
@@ -26,20 +27,34 @@ const (
 	CalendarAccessRoleWriter = "writer"
 )
 
-const calendarSelectColumns = `id, user_id, google_connection_id, google_calendar_id,
+const (
+	// CalendarProviderGoogle marks a calendar mirrored from Google Calendar.
+	CalendarProviderGoogle = "google"
+	// CalendarProviderMicrosoft marks one mirrored from Microsoft 365 through
+	// Microsoft Graph.
+	CalendarProviderMicrosoft = "microsoft"
+)
+
+const calendarSelectColumns = `id, user_id, google_connection_id, remote_calendar_id,
 	summary, description, time_zone, color, access_role, is_primary, selected,
 	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail,
-	copy_target`
+	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers`
 
-// Calendar is one calendar of one connected Google account.
+// Calendar is one calendar of one connected account.
 type Calendar struct {
-	ID                 int64
-	UserID             int64
-	GoogleConnectionID int64
-	// GoogleCalendarID is Google's own identifier, which for a personal
-	// calendar is the account's mail address and for a shared one an opaque
-	// @group.calendar.google.com address.
-	GoogleCalendarID string
+	ID     int64
+	UserID int64
+	// Provider is CalendarProviderGoogle or CalendarProviderMicrosoft and
+	// decides which of the two connection ids below is meaningful; the other
+	// is zero.
+	Provider              string
+	GoogleConnectionID    int64
+	MicrosoftConnectionID int64
+	// RemoteCalendarID is the provider's own identifier. For Google that is
+	// the account's mail address for a personal calendar and an opaque
+	// @group.calendar.google.com address for a shared one; for Microsoft it is
+	// Graph's opaque calendar id.
+	RemoteCalendarID string
 	Summary          string
 	Description      string
 	TimeZone         string
@@ -59,8 +74,29 @@ type Calendar struct {
 	StatusDetail  string
 	// CopyTarget marks the reader's second calendar: the one an event entered
 	// in any other calendar can be copied into as well. At most one calendar of
-	// a user carries it.
+	// a user carries it. The second calendar may belong to the other provider.
 	CopyTarget bool
+	// FullReadAt is when the Microsoft sync last read the calendar's whole
+	// window rather than the near one. Google rows leave it zero.
+	FullReadAt time.Time
+	// OnlineMeetingProviders lists the online meeting kinds the provider
+	// offers for events in this calendar (Graph's teamsForBusiness and its
+	// relatives). Empty means none can be created here.
+	OnlineMeetingProviders []string
+}
+
+// IsMicrosoft reports whether the calendar is mirrored from Microsoft 365.
+func (c Calendar) IsMicrosoft() bool {
+	return c.Provider == CalendarProviderMicrosoft
+}
+
+// ConnectionID is the id of the connection the calendar came from, whichever
+// provider that is.
+func (c Calendar) ConnectionID() int64 {
+	if c.IsMicrosoft() {
+		return c.MicrosoftConnectionID
+	}
+	return c.GoogleConnectionID
 }
 
 // CanWrite reports whether Google would accept a write to this calendar. A
@@ -80,7 +116,7 @@ func (c Calendar) CanWrite() bool {
 // calendar's event sync and re-enable calendars the user had switched off.
 type CalendarUpsert struct {
 	GoogleConnectionID int64
-	GoogleCalendarID   string
+	RemoteCalendarID   string
 	Summary            string
 	Description        string
 	TimeZone           string
@@ -95,16 +131,17 @@ type CalendarUpsert struct {
 // UpsertCalendar records a calendar the list sync returned and answers with the
 // stored row.
 func (s *Store) UpsertCalendar(ctx context.Context, userID int64, in CalendarUpsert) (Calendar, error) {
-	googleID := strings.TrimSpace(in.GoogleCalendarID)
+	googleID := strings.TrimSpace(in.RemoteCalendarID)
 	if userID <= 0 || in.GoogleConnectionID <= 0 || googleID == "" {
 		return Calendar{}, ErrNotFound
 	}
 	ts := nowUnix()
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO calendars
-			(user_id, google_connection_id, google_calendar_id, summary, description,
-			 time_zone, color, access_role, is_primary, selected, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, google_connection_id, google_calendar_id) DO UPDATE SET
+			(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id,
+			 summary, description, time_zone, color, access_role, is_primary, selected,
+			 created_at, updated_at)
+		VALUES (?, 'google', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id) DO UPDATE SET
 			summary = excluded.summary,
 			description = excluded.description,
 			time_zone = excluded.time_zone,
@@ -143,14 +180,30 @@ func (s *Store) ListCalendars(ctx context.Context, userID int64) ([]Calendar, er
 	return calendars, rows.Err()
 }
 
-// ListCalendarsForConnection returns the calendars of one connected account.
+// ListCalendarsForConnection returns the calendars of one connected Google
+// account.
 func (s *Store) ListCalendarsForConnection(ctx context.Context, userID, connectionID int64) ([]Calendar, error) {
 	if userID <= 0 || connectionID <= 0 {
 		return nil, nil
 	}
-	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarSelectColumns+`
-		FROM calendars WHERE user_id = ? AND google_connection_id = ?
+	return s.queryCalendars(ctx, userID, `SELECT `+calendarSelectColumns+`
+		FROM calendars WHERE user_id = ? AND provider = 'google' AND google_connection_id = ?
 		ORDER BY is_primary DESC, summary ASC, id ASC`, userID, connectionID)
+}
+
+// ListCalendarsForMicrosoftConnection returns the calendars of one connected
+// Microsoft account.
+func (s *Store) ListCalendarsForMicrosoftConnection(ctx context.Context, userID, connectionID int64) ([]Calendar, error) {
+	if userID <= 0 || connectionID <= 0 {
+		return nil, nil
+	}
+	return s.queryCalendars(ctx, userID, `SELECT `+calendarSelectColumns+`
+		FROM calendars WHERE user_id = ? AND provider = 'microsoft' AND microsoft_connection_id = ?
+		ORDER BY is_primary DESC, summary ASC, id ASC`, userID, connectionID)
+}
+
+func (s *Store) queryCalendars(ctx context.Context, userID int64, query string, args ...any) ([]Calendar, error) {
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +236,96 @@ func (s *Store) CalendarByGoogleID(ctx context.Context, userID, connectionID int
 		return Calendar{}, ErrNotFound
 	}
 	return scanCalendar(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarSelectColumns+`
-		FROM calendars WHERE user_id = ? AND google_connection_id = ? AND google_calendar_id = ?`,
+		FROM calendars WHERE user_id = ? AND provider = 'google' AND google_connection_id = ? AND remote_calendar_id = ?`,
 		userID, connectionID, googleID))
+}
+
+// MicrosoftCalendarUpsert is what the Microsoft calendar-list sync knows about
+// a calendar. Like CalendarUpsert it leaves Rolltop's own state alone.
+type MicrosoftCalendarUpsert struct {
+	ConnectionID     int64
+	RemoteCalendarID string
+	Summary          string
+	Color            string
+	AccessRole       string
+	IsPrimary        bool
+	// OnlineMeetingProviders is what Graph allows in this calendar, in the
+	// order it listed them.
+	OnlineMeetingProviders []string
+	// Selected seeds the visibility of a calendar seen for the first time and
+	// is ignored afterwards.
+	Selected bool
+}
+
+// UpsertMicrosoftCalendar records a calendar the Microsoft list sync returned.
+func (s *Store) UpsertMicrosoftCalendar(ctx context.Context, userID int64, in MicrosoftCalendarUpsert) (Calendar, error) {
+	remoteID := strings.TrimSpace(in.RemoteCalendarID)
+	if userID <= 0 || in.ConnectionID <= 0 || remoteID == "" {
+		return Calendar{}, ErrNotFound
+	}
+	ts := nowUnix()
+	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO calendars
+			(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id,
+			 summary, description, time_zone, color, access_role, is_primary, selected,
+			 online_meeting_providers, created_at, updated_at)
+		VALUES (?, 'microsoft', 0, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id) DO UPDATE SET
+			summary = excluded.summary,
+			color = excluded.color,
+			access_role = excluded.access_role,
+			is_primary = excluded.is_primary,
+			online_meeting_providers = excluded.online_meeting_providers,
+			updated_at = excluded.updated_at`,
+		userID, in.ConnectionID, trimLimit(remoteID, 600), trimLimit(in.Summary, 300),
+		trimLimit(in.Color, 20), trimLimit(strings.ToLower(strings.TrimSpace(in.AccessRole)), 40),
+		boolInt(in.IsPrimary), boolInt(in.Selected),
+		trimLimit(strings.Join(cleanWords(in.OnlineMeetingProviders), " "), 300), ts, ts)
+	if err != nil {
+		return Calendar{}, err
+	}
+	return s.CalendarByMicrosoftID(ctx, userID, in.ConnectionID, remoteID)
+}
+
+// CalendarByMicrosoftID loads one calendar by the identifier Graph knows it
+// under.
+func (s *Store) CalendarByMicrosoftID(ctx context.Context, userID, connectionID int64, remoteCalendarID string) (Calendar, error) {
+	remoteID := strings.TrimSpace(remoteCalendarID)
+	if userID <= 0 || connectionID <= 0 || remoteID == "" {
+		return Calendar{}, ErrNotFound
+	}
+	return scanCalendar(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarSelectColumns+`
+		FROM calendars WHERE user_id = ? AND provider = 'microsoft' AND microsoft_connection_id = ? AND remote_calendar_id = ?`,
+		userID, connectionID, remoteID))
+}
+
+// MarkCalendarFullRead records that the whole window of a Microsoft calendar
+// was just read, which is what paces the next full read.
+func (s *Store) MarkCalendarFullRead(ctx context.Context, userID, calendarID int64, at time.Time) error {
+	if userID <= 0 || calendarID <= 0 {
+		return ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`UPDATE calendars SET full_read_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		timeUnix(at), nowUnix(), userID, calendarID)
+	if err != nil {
+		return err
+	}
+	return requireCalendarRow(res)
+}
+
+// cleanWords trims and drops empty entries and duplicates, keeping order.
+func cleanWords(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // SetCalendarSelected switches one calendar's visibility in the week view.
@@ -309,30 +450,48 @@ func (s *Store) DeleteCalendar(ctx context.Context, userID, calendarID int64) er
 	return tx.Commit()
 }
 
-// deleteCalendarsForConnection removes every calendar of one connection. It
-// takes an execer so the disconnect path can run it inside the same transaction
-// that removes the connection itself.
+// deleteCalendarsForConnection removes every calendar of one Google
+// connection. It takes an execer so the disconnect path can run it inside the
+// same transaction that removes the connection itself.
 func deleteCalendarsForConnection(ctx context.Context, db execer, userID, connectionID int64) error {
+	return deleteProviderCalendars(ctx, db, userID, `provider = 'google' AND google_connection_id = ?`, connectionID)
+}
+
+// deleteCalendarsForMicrosoftConnection is the Microsoft counterpart.
+func deleteCalendarsForMicrosoftConnection(ctx context.Context, db execer, userID, connectionID int64) error {
+	return deleteProviderCalendars(ctx, db, userID, `provider = 'microsoft' AND microsoft_connection_id = ?`, connectionID)
+}
+
+func deleteProviderCalendars(ctx context.Context, db execer, userID int64, predicate string, connectionID int64) error {
 	if _, err := db.ExecContext(ctx,
 		`DELETE FROM calendar_events WHERE user_id = ? AND calendar_id IN
-			(SELECT id FROM calendars WHERE user_id = ? AND google_connection_id = ?)`,
+			(SELECT id FROM calendars WHERE user_id = ? AND `+predicate+`)`,
 		userID, userID, connectionID); err != nil {
 		return err
 	}
 	_, err := db.ExecContext(ctx,
-		`DELETE FROM calendars WHERE user_id = ? AND google_connection_id = ?`, userID, connectionID)
+		`DELETE FROM calendars WHERE user_id = ? AND `+predicate, userID, connectionID)
 	return err
 }
 
-// CountCalendarsForConnection reports how many calendars one connection
+// CountCalendarsForConnection reports how many calendars one Google connection
 // currently mirrors, for the settings page.
 func (s *Store) CountCalendarsForConnection(ctx context.Context, userID, connectionID int64) (int, error) {
+	return s.countProviderCalendars(ctx, userID, `provider = 'google' AND google_connection_id = ?`, connectionID)
+}
+
+// CountCalendarsForMicrosoftConnection is the Microsoft counterpart.
+func (s *Store) CountCalendarsForMicrosoftConnection(ctx context.Context, userID, connectionID int64) (int, error) {
+	return s.countProviderCalendars(ctx, userID, `provider = 'microsoft' AND microsoft_connection_id = ?`, connectionID)
+}
+
+func (s *Store) countProviderCalendars(ctx context.Context, userID int64, predicate string, connectionID int64) (int, error) {
 	if userID <= 0 || connectionID <= 0 {
 		return 0, nil
 	}
 	var count int
 	err := s.mustDataDB(ctx, userID).QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM calendars WHERE user_id = ? AND google_connection_id = ?`,
+		`SELECT COUNT(*) FROM calendars WHERE user_id = ? AND `+predicate,
 		userID, connectionID).Scan(&count)
 	return count, err
 }
@@ -410,14 +569,18 @@ func requireCalendarRow(res sql.Result) error {
 func scanCalendar(dest scanDest) (Calendar, error) {
 	var calendar Calendar
 	var isPrimary, selected, copyTarget int64
-	var windowStart, lastSync, lastSuccess int64
+	var windowStart, lastSync, lastSuccess, fullRead int64
+	var meetingProviders string
 	if err := dest.Scan(&calendar.ID, &calendar.UserID, &calendar.GoogleConnectionID,
-		&calendar.GoogleCalendarID, &calendar.Summary, &calendar.Description,
+		&calendar.RemoteCalendarID, &calendar.Summary, &calendar.Description,
 		&calendar.TimeZone, &calendar.Color, &calendar.AccessRole, &isPrimary, &selected,
 		&calendar.SyncToken, &windowStart, &lastSync, &lastSuccess,
-		&calendar.Status, &calendar.StatusDetail, &copyTarget); err != nil {
+		&calendar.Status, &calendar.StatusDetail, &copyTarget,
+		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders); err != nil {
 		return Calendar{}, err
 	}
+	calendar.FullReadAt = unixTime(fullRead)
+	calendar.OnlineMeetingProviders = strings.Fields(meetingProviders)
 	calendar.IsPrimary = isPrimary != 0
 	calendar.Selected = selected != 0
 	calendar.CopyTarget = copyTarget != 0

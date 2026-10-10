@@ -1,7 +1,9 @@
 // File overview: The calendar surface: which calendars exist, which of them are
-// drawn, what happens in a range of time, and the writes that travel to Google.
-// The sync and the write-back live in backend/googlecalendar; this file only
-// decides who may ask for them and how a failure is described to the user.
+// drawn, what happens in a range of time, and the writes that travel to the
+// provider a calendar belongs to -- Google or Microsoft 365. The sync and the
+// write-back live in backend/googlecalendar and backend/m365calendar, and
+// calendarlink routes between them; this file only decides who may ask for
+// them and how a failure is described to the user.
 
 package web
 
@@ -15,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/calendarlink"
 	"rolltop/backend/googlecalendar"
+	"rolltop/backend/m365calendar"
 	"rolltop/backend/store"
 )
 
@@ -26,8 +30,11 @@ const maxEventRangeDays = 400
 
 type apiCalendar struct {
 	ID int64 `json:"id"`
-	// ConnectionID and ConnectionEmail name the Google account a calendar came
-	// from, which is what tells two identically named calendars apart.
+	// Provider is "google" or "microsoft". ConnectionID is an id within that
+	// provider's connections, so the two together name the account.
+	Provider string `json:"provider"`
+	// ConnectionID and ConnectionEmail name the account a calendar came from,
+	// which is what tells two identically named calendars apart.
 	ConnectionID    int64  `json:"connection_id"`
 	ConnectionEmail string `json:"connection_email"`
 	Name            string `json:"name"`
@@ -41,6 +48,9 @@ type apiCalendar struct {
 	// CopyTarget marks the reader's second calendar, the one a new event can
 	// be copied into as well.
 	CopyTarget bool `json:"copy_target"`
+	// OnlineMeetingProviders lists the online meeting kinds an event here can
+	// be made -- a Microsoft calendar's Teams. Empty means none.
+	OnlineMeetingProviders []string `json:"online_meeting_providers"`
 	// SyncedFrom is the oldest point the mirror covers. An empty week before it
 	// means "not synced", not "nothing scheduled".
 	SyncedFrom   string `json:"synced_from"`
@@ -88,6 +98,11 @@ type apiCalendarEvent struct {
 	// where else the appointment lives -- including a calendar that is
 	// switched off.
 	AlsoIn []apiCalendarEventCopy `json:"also_in"`
+	// OnlineMeeting marks an event held online; OnlineMeetingURL is the link
+	// that joins it (Teams, or Google Meet).
+	OnlineMeeting         bool   `json:"online_meeting"`
+	OnlineMeetingProvider string `json:"online_meeting_provider"`
+	OnlineMeetingURL      string `json:"online_meeting_url"`
 }
 
 // apiCalendarEventCopy is one other copy of a linked event.
@@ -111,23 +126,33 @@ type apiGoogleCalendarSync struct {
 }
 
 func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
+	providers := calendar.OnlineMeetingProviders
+	if providers == nil {
+		providers = []string{}
+	}
+	provider := calendar.Provider
+	if provider == "" {
+		provider = store.CalendarProviderGoogle
+	}
 	return apiCalendar{
-		ID:              calendar.ID,
-		ConnectionID:    calendar.GoogleConnectionID,
-		ConnectionEmail: email,
-		Name:            calendar.Summary,
-		Description:     calendar.Description,
-		TimeZone:        calendar.TimeZone,
-		Color:           calendar.Color,
-		AccessRole:      calendar.AccessRole,
-		CanWrite:        calendar.CanWrite(),
-		IsPrimary:       calendar.IsPrimary,
-		Selected:        calendar.Selected,
-		CopyTarget:      calendar.CopyTarget,
-		SyncedFrom:      timeString(calendar.WindowStartAt),
-		LastSyncAt:      timeString(calendar.LastSyncAt),
-		Status:          calendar.Status,
-		StatusDetail:    calendar.StatusDetail,
+		ID:                     calendar.ID,
+		Provider:               provider,
+		OnlineMeetingProviders: providers,
+		ConnectionID:           calendar.ConnectionID(),
+		ConnectionEmail:        email,
+		Name:                   calendar.Summary,
+		Description:            calendar.Description,
+		TimeZone:               calendar.TimeZone,
+		Color:                  calendar.Color,
+		AccessRole:             calendar.AccessRole,
+		CanWrite:               calendar.CanWrite(),
+		IsPrimary:              calendar.IsPrimary,
+		Selected:               calendar.Selected,
+		CopyTarget:             calendar.CopyTarget,
+		SyncedFrom:             timeString(calendar.WindowStartAt),
+		LastSyncAt:             timeString(calendar.LastSyncAt),
+		Status:                 calendar.Status,
+		StatusDetail:           calendar.StatusDetail,
 	}
 }
 
@@ -163,6 +188,10 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 		HTMLLink:         event.HTMLLink,
 		LinkPrimary:      event.Linked() && event.LinkPrimary,
 		AlsoIn:           []apiCalendarEventCopy{},
+
+		OnlineMeeting:         event.OnlineMeeting,
+		OnlineMeetingProvider: event.OnlineMeetingProvider,
+		OnlineMeetingURL:      event.OnlineMeetingURL,
 	}
 }
 
@@ -187,6 +216,25 @@ func apiCalendarEventWithCopies(event store.CalendarEvent, copies []store.Calend
 		out.AlsoIn = append(out.AlsoIn, apiCalendarEventCopy{CalendarID: copied.CalendarID, EventID: copied.ID})
 	}
 	return out
+}
+
+// calendarRouter hands every calendar write to the provider of the calendar it
+// concerns, which is what lets a week -- and one linked pair -- mix Google and
+// Microsoft 365 calendars. It is assembled per call from the server's current
+// backends; only a backend that exists is installed, because a nil pointer in
+// the interface would read as configured and fail at the first write.
+func (s *Server) calendarRouter() *calendarlink.Router {
+	router := &calendarlink.Router{}
+	if s.store != nil {
+		router.Calendars = s.store
+	}
+	if s.googleCalendar != nil {
+		router.Google = s.googleCalendar
+	}
+	if s.microsoftCalendar != nil {
+		router.Microsoft = s.microsoftCalendar
+	}
+	return router
 }
 
 // apiCalendarPath routes everything under /api/calendar/.
@@ -228,23 +276,37 @@ func (s *Server) apiCalendars(w http.ResponseWriter, r *http.Request, userID int
 	writeJSON(w, map[string]any{"calendars": s.presentCalendars(r.Context(), userID, calendars)})
 }
 
-// presentCalendars attaches the Google address each calendar came from. A
+// presentCalendars attaches the account address each calendar came from. A
 // failure to read the connections costs the labels, not the list: the week view
 // still has everything it needs to draw.
 func (s *Server) presentCalendars(ctx context.Context, userID int64, calendars []store.Calendar) []apiCalendar {
-	emails := map[int64]string{}
+	googleEmails := map[int64]string{}
 	if s.googleAuth != nil {
 		connections, err := s.googleAuth.List(ctx, userID)
 		if err != nil {
-			log.Printf("calendar list user_id=%d read connections: %v", userID, err)
+			log.Printf("calendar list user_id=%d read google connections: %v", userID, err)
 		}
 		for _, connection := range connections {
-			emails[connection.ID] = connection.GoogleEmail
+			googleEmails[connection.ID] = connection.GoogleEmail
+		}
+	}
+	microsoftEmails := map[int64]string{}
+	if s.microsoftAuth != nil {
+		connections, err := s.microsoftAuth.List(ctx, userID)
+		if err != nil {
+			log.Printf("calendar list user_id=%d read microsoft connections: %v", userID, err)
+		}
+		for _, connection := range connections {
+			microsoftEmails[connection.ID] = connection.Email
 		}
 	}
 	out := make([]apiCalendar, 0, len(calendars))
 	for _, calendar := range calendars {
-		out = append(out, apiCalendarFromStore(calendar, emails[calendar.GoogleConnectionID]))
+		email := googleEmails[calendar.GoogleConnectionID]
+		if calendar.IsMicrosoft() {
+			email = microsoftEmails[calendar.MicrosoftConnectionID]
+		}
+		out = append(out, apiCalendarFromStore(calendar, email))
 	}
 	return out
 }
@@ -307,8 +369,8 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	// waiting for the next poll would show the user an empty week they would
 	// read as "nothing scheduled". A sync failure is not fatal here: the
 	// visibility change itself succeeded and the poll will retry.
-	if in.Selected != nil && *in.Selected && calendar.LastSuccessAt.IsZero() && s.googleCalendar != nil {
-		if err := s.googleCalendar.SyncCalendar(r.Context(), userID, calendarID); err != nil {
+	if in.Selected != nil && *in.Selected && calendar.LastSuccessAt.IsZero() && s.calendarRouter().Available() {
+		if err := s.calendarRouter().SyncCalendar(r.Context(), userID, calendarID); err != nil {
 			log.Printf("calendar first sync user_id=%d calendar_id=%d: %v", userID, calendarID, err)
 		}
 		if refreshed, err := s.store.Calendar(r.Context(), userID, calendarID); err == nil {
@@ -316,7 +378,7 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		}
 	}
 	writeJSON(w, map[string]any{
-		"calendar": apiCalendarFromStore(calendar, s.connectionEmail(r.Context(), userID, calendar.GoogleConnectionID)),
+		"calendar": apiCalendarFromStore(calendar, s.calendarConnectionEmail(r.Context(), userID, calendar)),
 	})
 }
 
@@ -466,17 +528,21 @@ type calendarEventInput struct {
 	// well (true) or no longer (false). Left out, an edit keeps whatever
 	// copies the event has and a create makes none.
 	Copy *bool `json:"copy"`
+	// OnlineMeeting asks for the event to be held online -- a Teams meeting
+	// in a Microsoft calendar. Once a meeting is online it stays so; false on
+	// an edit does not take it back.
+	OnlineMeeting bool `json:"online_meeting"`
 }
 
 // copyChange reads what the submission asks of the second calendar's copy.
-func (in calendarEventInput) copyChange() googlecalendar.CopyChange {
+func (in calendarEventInput) copyChange() calendarlink.CopyChange {
 	switch {
 	case in.Copy == nil:
-		return googlecalendar.CopyKeep
+		return calendarlink.CopyKeep
 	case *in.Copy:
-		return googlecalendar.CopyAdd
+		return calendarlink.CopyAdd
 	default:
-		return googlecalendar.CopyRemove
+		return calendarlink.CopyRemove
 	}
 }
 
@@ -501,6 +567,8 @@ func (in calendarEventInput) toStoreEvent() (store.CalendarEvent, string) {
 		EndAt:       end,
 		AllDay:      in.AllDay,
 		TimeZone:    strings.TrimSpace(in.TimeZone),
+
+		OnlineMeeting: in.OnlineMeeting,
 	}
 	for _, attendee := range in.Attendees {
 		email := strings.TrimSpace(attendee.Email)
@@ -520,7 +588,7 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	if s.googleCalendar == nil {
+	if !s.calendarRouter().Available() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Calendar sync is not available on this server.")
 		return
 	}
@@ -538,14 +606,14 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	var copyCalendarID int64
-	if in.copyChange() == googlecalendar.CopyAdd {
+	if in.copyChange() == calendarlink.CopyAdd {
 		target, ok := s.copyTargetForWrite(w, r, userID)
 		if !ok {
 			return
 		}
 		copyCalendarID = target.ID
 	}
-	created, problems, err := s.googleCalendar.CreateRemoteEventWithCopy(r.Context(), userID, in.CalendarID, copyCalendarID, event)
+	created, problems, err := s.calendarRouter().CreateWithCopy(r.Context(), userID, in.CalendarID, copyCalendarID, event)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
@@ -580,7 +648,7 @@ func (s *Server) copyTargetForWrite(w http.ResponseWriter, r *http.Request, user
 // The write itself succeeded, so these travel beside its answer rather than as
 // an error. The reason is chosen from the error's kind, never its text, for
 // the same reason writeCalendarError never forwards Google's.
-func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, problems []googlecalendar.LinkedProblem) []string {
+func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, problems []calendarlink.LinkedProblem) []string {
 	out := []string{}
 	for _, problem := range problems {
 		log.Printf("calendar linked copy user_id=%d calendar_id=%d action=%s: %v",
@@ -591,9 +659,9 @@ func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, proble
 		}
 		var what string
 		switch problem.Action {
-		case googlecalendar.LinkedCreate:
+		case calendarlink.LinkedCreate:
 			what = "The event could not be copied to " + name
-		case googlecalendar.LinkedDelete:
+		case calendarlink.LinkedDelete:
 			what = "The copy in " + name + " could not be deleted"
 		default:
 			what = "The copy in " + name + " could not be updated"
@@ -604,22 +672,46 @@ func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, proble
 }
 
 func linkedProblemReason(err error) string {
+	provider := calendarProviderName(err)
 	switch {
-	case errors.Is(err, googlecalendar.ErrReadOnlyCalendar):
+	case errors.Is(err, calendarlink.ErrReadOnlyCalendar):
 		return "that calendar is shared read-only."
-	case errors.Is(err, googlecalendar.ErrRemoteDeleted):
-		return "it was deleted in Google."
-	case errors.Is(err, googlecalendar.ErrRemoteChanged), errors.Is(err, googlecalendar.ErrConflict):
-		return "it was changed in Google, and that version was kept."
-	case errors.Is(err, googlecalendar.ErrUnauthorized):
-		return "its Google account needs to be authorized again."
-	case errors.Is(err, googlecalendar.ErrScopeMissing), errors.Is(err, googlecalendar.ErrForbidden):
-		return "its Google account has not granted access to calendars."
-	case errors.Is(err, googlecalendar.ErrUpstream), errors.Is(err, context.DeadlineExceeded):
-		return "Google could not be reached."
+	case errors.Is(err, calendarlink.ErrRemoteDeleted):
+		return "it was deleted in " + provider + "."
+	case errors.Is(err, calendarlink.ErrRemoteChanged), errors.Is(err, calendarlink.ErrConflict):
+		return "it was changed in " + provider + ", and that version was kept."
+	case errors.Is(err, calendarlink.ErrUnauthorized):
+		return "its " + provider + " account needs to be authorized again."
+	case errors.Is(err, calendarlink.ErrScopeMissing), errors.Is(err, calendarlink.ErrForbidden):
+		return "its " + provider + " account has not granted access to calendars."
+	case errors.Is(err, calendarlink.ErrProviderUnavailable):
+		return "its provider is not available on this server."
+	case errors.Is(err, calendarlink.ErrUpstream), errors.Is(err, context.DeadlineExceeded):
+		return provider + " could not be reached."
 	default:
-		return "Google refused it."
+		return provider + " refused it."
 	}
+}
+
+// microsoftCalendarErrors are the Microsoft provider's own error values. A
+// failure carrying one of them is described as Microsoft's; anything else
+// keeps the Google wording every message had before there were two
+// providers.
+var microsoftCalendarErrors = []error{
+	m365calendar.ErrUnauthorized, m365calendar.ErrForbidden, m365calendar.ErrConflict,
+	m365calendar.ErrNotFound, m365calendar.ErrUpstream, m365calendar.ErrScopeMissing,
+	m365calendar.ErrRemoteChanged, m365calendar.ErrRemoteDeleted, m365calendar.ErrReadOnlyCalendar,
+	m365calendar.ErrNotAnInvitation, m365calendar.ErrNoOnlineMeeting,
+}
+
+// calendarProviderName names the provider a failure came from, for a message.
+func calendarProviderName(err error) string {
+	for _, own := range microsoftCalendarErrors {
+		if errors.Is(err, own) {
+			return "Microsoft 365"
+		}
+	}
+	return "Google"
 }
 
 // apiCalendarEventByID handles the per-event operations.
@@ -645,7 +737,7 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	if s.googleCalendar == nil {
+	if !s.calendarRouter().Available() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Calendar sync is not available on this server.")
 		return
 	}
@@ -675,13 +767,13 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	change := in.copyChange()
 	var copyCalendarID int64
 	switch change {
-	case googlecalendar.CopyAdd:
+	case calendarlink.CopyAdd:
 		target, ok := s.copyTargetForWrite(w, r, userID)
 		if !ok {
 			return
 		}
 		copyCalendarID = target.ID
-	case googlecalendar.CopyRemove:
+	case calendarlink.CopyRemove:
 		// Taking a copy away needs no write access to check up front: the
 		// delete itself is refused on a read-only calendar and says so.
 		if target, err := s.store.CopyTargetCalendar(r.Context(), userID); err == nil {
@@ -696,12 +788,13 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
-	updated, problems, err := s.googleCalendar.UpdateRemoteEventGroup(r.Context(), userID, existing, edited, copies, copyCalendarID, change)
-	if errors.Is(err, googlecalendar.ErrRemoteChanged) {
+	updated, problems, err := s.calendarRouter().UpdateGroup(r.Context(), userID, existing, edited, copies, copyCalendarID, change)
+	if errors.Is(err, calendarlink.ErrRemoteChanged) {
 		// The user's edit lost, and the version that won is what they need to
 		// see. 409 with the winning event is more useful than a bare error.
+		provider := calendarProviderName(err)
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
-			"error": "This event was changed in Google while you were editing it. The Google version is now shown.",
+			"error": "This event was changed in " + provider + " while you were editing it. The " + provider + " version is now shown.",
 			"event": s.presentCalendarEvent(r.Context(), userID, updated),
 		})
 		return
@@ -720,7 +813,7 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	if s.googleCalendar == nil {
+	if !s.calendarRouter().Available() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Calendar sync is not available on this server.")
 		return
 	}
@@ -740,7 +833,7 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 	}
 	// Already gone at Google is the end state the user asked for, and is
 	// absorbed inside the group delete so the copies still go with it.
-	problems, err := s.googleCalendar.DeleteRemoteEventGroup(r.Context(), userID, event, copies)
+	problems, err := s.calendarRouter().DeleteGroup(r.Context(), userID, event, copies)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
@@ -752,7 +845,7 @@ func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, us
 	if !s.verifyCSRF(w, r) {
 		return
 	}
-	if s.googleCalendar == nil {
+	if !s.calendarRouter().Available() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Calendar sync is not available on this server.")
 		return
 	}
@@ -771,10 +864,11 @@ func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, us
 		s.serverError(w, r, err)
 		return
 	}
-	answered, err := s.googleCalendar.RespondToRemoteEvent(r.Context(), userID, event, strings.TrimSpace(in.Response))
-	if errors.Is(err, googlecalendar.ErrRemoteChanged) {
+	answered, err := s.calendarRouter().RespondToRemoteEvent(r.Context(), userID, event, strings.TrimSpace(in.Response))
+	if errors.Is(err, calendarlink.ErrRemoteChanged) {
+		provider := calendarProviderName(err)
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
-			"error": "This event was changed in Google while you were answering it. The Google version is now shown.",
+			"error": "This event was changed in " + provider + " while you were answering it. The " + provider + " version is now shown.",
 			"event": s.presentCalendarEvent(r.Context(), userID, answered),
 		})
 		return
@@ -849,6 +943,8 @@ func (s *Server) googleCalendarSyncNow(w http.ResponseWriter, r *http.Request, u
 // message the user can act on. Upstream error text is never forwarded: on a
 // write it echoes the event's own title, notes and guest list back.
 func (s *Server) writeCalendarError(w http.ResponseWriter, r *http.Request, err error) {
+	provider := calendarProviderName(err)
+	microsoft := provider == "Microsoft 365"
 	switch {
 	// A disabled API is a server-configuration fault, not something the account
 	// holder can grant their way out of, so it must not be answered with the
@@ -856,46 +952,67 @@ func (s *Server) writeCalendarError(w http.ResponseWriter, r *http.Request, err 
 	case errors.Is(err, googlecalendar.ErrServiceDisabled):
 		writeAPIError(w, http.StatusConflict,
 			"The Google Calendar API is switched off for the Google Cloud project this connection's OAuth client belongs to. Enable it there; reconnecting does not help.")
-	case errors.Is(err, googlecalendar.ErrScopeMissing), errors.Is(err, googlecalendar.ErrForbidden):
+	case errors.Is(err, calendarlink.ErrProviderUnavailable):
+		writeAPIError(w, http.StatusServiceUnavailable,
+			"This calendar's provider is not configured on this server, so it cannot be changed here.")
+	case errors.Is(err, calendarlink.ErrNoOnlineMeeting):
+		writeAPIError(w, http.StatusBadRequest, "This calendar cannot hold Teams meetings.")
+	case microsoft && errors.Is(err, calendarlink.ErrScopeMissing):
+		writeAPIError(w, http.StatusConflict,
+			"This Microsoft account has not granted access to calendars. Sign in again in Microsoft 365 settings.")
+	case microsoft && errors.Is(err, calendarlink.ErrForbidden):
+		writeAPIError(w, http.StatusConflict,
+			"Microsoft 365 refused the request. Your organisation may not allow Rolltop to change this calendar.")
+	case errors.Is(err, calendarlink.ErrScopeMissing), errors.Is(err, calendarlink.ErrForbidden):
 		writeAPIError(w, http.StatusConflict,
 			"This Google account has not granted access to calendars. Reconnect it in Google settings.")
-	case errors.Is(err, googlecalendar.ErrReadOnlyCalendar):
+	case errors.Is(err, calendarlink.ErrReadOnlyCalendar):
 		writeAPIError(w, http.StatusForbidden, "This calendar is shared read-only.")
-	case errors.Is(err, googlecalendar.ErrNotAnInvitation):
+	case errors.Is(err, calendarlink.ErrNotAnInvitation):
 		writeAPIError(w, http.StatusBadRequest, "There is no invitation to answer on this event.")
-	case errors.Is(err, googlecalendar.ErrRemoteDeleted):
+	case errors.Is(err, calendarlink.ErrRemoteDeleted):
 		writeAPIError(w, http.StatusConflict,
-			"This event was deleted in Google while you were editing it, so the change was not saved.")
-	case errors.Is(err, googlecalendar.ErrRemoteChanged):
-		writeAPIError(w, http.StatusConflict, "This event was changed in Google while you were editing it.")
-	// A bare conflict is a write Google refused on a stale etag that no caller
+			"This event was deleted in "+provider+" while you were editing it, so the change was not saved.")
+	case errors.Is(err, calendarlink.ErrRemoteChanged):
+		writeAPIError(w, http.StatusConflict, "This event was changed in "+provider+" while you were editing it.")
+	// A bare conflict is a write refused on a stale version that no caller
 	// resolved into one of the two above -- a delete is the case that reaches
 	// here. Without this it would fall through to the server-error branch and
 	// be logged as an internal fault, which it is not: the event simply moved
 	// on since the last poll.
-	case errors.Is(err, googlecalendar.ErrConflict):
+	case errors.Is(err, calendarlink.ErrConflict):
 		writeAPIError(w, http.StatusConflict,
-			"This event was changed in Google since it was last synced. Reload the week and try again.")
-	case errors.Is(err, googlecalendar.ErrUnauthorized):
-		writeAPIError(w, http.StatusConflict, "This Google account needs to be authorized again.")
-	case errors.Is(err, googlecalendar.ErrNotFound), store.IsNotFound(err):
+			"This event was changed in "+provider+" since it was last synced. Reload the week and try again.")
+	case errors.Is(err, calendarlink.ErrUnauthorized):
+		writeAPIError(w, http.StatusConflict, "This "+provider+" account needs to be authorized again.")
+	case errors.Is(err, calendarlink.ErrNotFound), store.IsNotFound(err):
 		http.NotFound(w, r)
-	case errors.Is(err, googlecalendar.ErrUpstream), errors.Is(err, googlecalendar.ErrSyncTokenExpired):
-		writeAPIError(w, http.StatusBadGateway, "Google could not be reached.")
+	case errors.Is(err, calendarlink.ErrUpstream), errors.Is(err, googlecalendar.ErrSyncTokenExpired):
+		writeAPIError(w, http.StatusBadGateway, provider+" could not be reached.")
 	case errors.Is(err, context.DeadlineExceeded):
-		writeAPIError(w, http.StatusGatewayTimeout, "The Google request took too long.")
+		writeAPIError(w, http.StatusGatewayTimeout, "The "+provider+" request took too long.")
 	default:
 		s.serverError(w, r, err)
 	}
 }
 
-// connectionEmail labels one calendar with the account it came from. A lookup
-// failure costs the label, not the response.
-func (s *Server) connectionEmail(ctx context.Context, userID, connectionID int64) string {
-	if s.googleAuth == nil || connectionID <= 0 {
+// calendarConnectionEmail labels one calendar with the account it came from.
+// A lookup failure costs the label, not the response.
+func (s *Server) calendarConnectionEmail(ctx context.Context, userID int64, calendar store.Calendar) string {
+	if calendar.IsMicrosoft() {
+		if s.microsoftAuth == nil || calendar.MicrosoftConnectionID <= 0 {
+			return ""
+		}
+		connection, err := s.microsoftAuth.Get(ctx, userID, calendar.MicrosoftConnectionID)
+		if err != nil {
+			return ""
+		}
+		return connection.Email
+	}
+	if s.googleAuth == nil || calendar.GoogleConnectionID <= 0 {
 		return ""
 	}
-	connection, err := s.googleAuth.Get(ctx, userID, connectionID)
+	connection, err := s.googleAuth.Get(ctx, userID, calendar.GoogleConnectionID)
 	if err != nil {
 		return ""
 	}

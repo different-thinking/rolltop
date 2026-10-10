@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/calendarlink"
 	"rolltop/backend/googletoken"
 	"rolltop/backend/store"
 )
@@ -30,7 +31,7 @@ const DefaultWindow = 365 * 24 * time.Hour
 // ErrScopeMissing reports a connection authorized before calendar sync existed.
 // Its grant still covers mail and contacts, so this is a prompt to re-authorize
 // rather than a failure of the connection as a whole.
-var ErrScopeMissing = errors.New("this Google account has not granted access to calendars")
+var ErrScopeMissing = calendarlink.Sentinel("this Google account has not granted access to calendars", calendarlink.ErrScopeMissing)
 
 // Result summarizes one connection's sync for the caller and the log.
 type Result struct {
@@ -294,7 +295,7 @@ func (s *Syncer) pullCalendarList(ctx context.Context, userID, connectionID int6
 			return "", err
 		}
 		for _, calendar := range existing {
-			known[calendar.GoogleCalendarID] = calendar.ID
+			known[calendar.RemoteCalendarID] = calendar.ID
 		}
 	}
 
@@ -424,7 +425,7 @@ func (s *Syncer) pullEvents(ctx context.Context, userID int64, calendar store.Ca
 		err := s.withToken(ctx, userID, calendar.GoogleConnectionID, func(token string) error {
 			var callErr error
 			page, callErr = s.client().ListEvents(ctx, token, EventsRequest{
-				CalendarID: calendar.GoogleCalendarID,
+				CalendarID: calendar.RemoteCalendarID,
 				SyncToken:  syncToken,
 				PageToken:  pageToken,
 				TimeMin:    windowStart,

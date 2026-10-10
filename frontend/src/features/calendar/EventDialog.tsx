@@ -1,5 +1,6 @@
 // File overview: The create/edit dialog for one calendar event, plus the
-// invitation answer. Everything it submits travels to Google before the local
+// invitation answer and, in a Microsoft 365 calendar, the Teams meeting.
+// Everything it submits travels to the calendar's provider before the local
 // copy changes, so a rejected save leaves the dialog open with the reason.
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -7,7 +8,7 @@ import type { FormEvent } from "react";
 import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
 import { Icon } from "../../components/Icon";
-import { calendarColor } from "./weekModel";
+import { calendarColor, providerName } from "./weekModel";
 
 /** responseOptions are the answers an invitee can give. */
 const responseOptions: { value: string; label: string }[] = [
@@ -34,6 +35,8 @@ type DraftState = {
   /** copy is the "also add to the second calendar" box. It is only sent when
    * the box is shown, so an edit that never offered it keeps the copies. */
   copy: boolean;
+  /** onlineMeeting is the "Teams meeting" box. */
+  onlineMeeting: boolean;
 };
 
 function pad(value: number): string {
@@ -71,7 +74,8 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState 
       startTime: "09:00",
       endTime: "10:00",
       attendees: event.attendees || [],
-      copy
+      copy,
+      onlineMeeting: Boolean(event.online_meeting)
     };
   }
   return {
@@ -85,7 +89,8 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number): DraftState 
     startTime: localTimeValue(start),
     endTime: localTimeValue(end),
     attendees: event.attendees || [],
-    copy
+    copy,
+    onlineMeeting: Boolean(event.online_meeting)
   };
 }
 
@@ -105,7 +110,8 @@ function draftForNewEvent(day: Date, calendarID: number): DraftState {
     startTime: localTimeValue(start),
     endTime: localTimeValue(end),
     attendees: [],
-    copy: false
+    copy: false,
+    onlineMeeting: false
   };
 }
 
@@ -133,8 +139,11 @@ function toInput(draft: DraftState): { input: CalendarEventInput; problem: strin
         start_at: start.toISOString(),
         end_at: end.toISOString(),
         all_day: true,
-        time_zone: "",
-        attendees
+        // The dates are what count; the zone only tells Microsoft 365 which
+        // midnight to keep the day at. Google ignores it for an all-day event.
+        time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        attendees,
+        online_meeting: draft.onlineMeeting
       },
       problem: ""
     };
@@ -156,7 +165,8 @@ function toInput(draft: DraftState): { input: CalendarEventInput; problem: strin
       // The instant is already absolute; the zone only tells Google which one
       // to show the event in.
       time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-      attendees
+      attendees,
+      online_meeting: draft.onlineMeeting
     },
     problem: ""
   };
@@ -250,9 +260,13 @@ export function EventDialog({
   }, [onClose]);
 
   const calendar = calendars.find((item) => item.id === draft.calendarID);
+  const provider = providerName(calendar);
   // An event in a calendar shared read-only can still be answered, but nothing
-  // about it can be edited, so the form is shown as a read-only summary.
-  const editable = !event || Boolean(calendar?.can_write);
+  // about it can be edited, so the form is shown as a read-only summary. The
+  // same goes for a Microsoft 365 meeting somebody else organizes: only its
+  // organizer can change it, and the reader's part is the answer.
+  const invitedToMicrosoftMeeting = Boolean(event?.my_response) && calendar?.provider === "microsoft";
+  const editable = !event || (Boolean(calendar?.can_write) && !invitedToMicrosoftMeeting);
   const update = (patch: Partial<DraftState>) => setDraft((current) => ({ ...current, ...patch }));
   // The box is offered whenever the event lives anywhere but the second
   // calendar itself; an event already in it has nothing to copy.
@@ -266,6 +280,13 @@ export function EventDialog({
   // A copy carries no guests -- they were invited by the event that was
   // entered -- so a guest list edited here would invite them all a second time.
   const guestsElsewhere = Boolean(event) && alsoIn.length > 0 && !event?.link_primary;
+  // A Teams meeting is offered where the calendar can hold one, and never on
+  // the copy of an event: the meeting belongs to the event that was entered.
+  // Once a meeting is online it stays so -- Outlook keeps it whatever a later
+  // write says -- so the box cannot be unticked again.
+  const offerOnlineMeeting =
+    editable && (calendar?.online_meeting_providers || []).length > 0 && !guestsElsewhere;
+  const meetingLocked = Boolean(event?.online_meeting);
 
   const submit = (formEvent: FormEvent) => {
     formEvent.preventDefault();
@@ -279,7 +300,8 @@ export function EventDialog({
       return;
     }
     setLocalProblem("");
-    onSave(offerCopy ? { ...input, copy: draft.copy } : input);
+    const withMeeting = { ...input, online_meeting: offerOnlineMeeting && draft.onlineMeeting };
+    onSave(offerCopy ? { ...withMeeting, copy: draft.copy } : withMeeting);
   };
 
   const message = localProblem || problem;
@@ -434,6 +456,30 @@ export function EventDialog({
             </div>
           ) : null}
 
+          {offerOnlineMeeting ? (
+            <label className="calendar-checkbox">
+              <input
+                type="checkbox"
+                checked={draft.onlineMeeting}
+                disabled={saving || meetingLocked}
+                onChange={(changeEvent) => update({ onlineMeeting: changeEvent.target.checked })}
+              />
+              <Icon name="video" />
+              Teams meeting
+            </label>
+          ) : null}
+
+          {event?.online_meeting_url ? (
+            <p className="calendar-dialog-note calendar-join">
+              <a href={event.online_meeting_url} target="_blank" rel="noreferrer noopener">
+                <Icon name="video" />
+                {event.online_meeting_provider === "googleMeet" ? "Join Google Meet" : "Join Teams meeting"}
+              </a>
+            </p>
+          ) : event?.online_meeting ? (
+            <p className="calendar-dialog-note">The meeting link appears once {provider} has created it.</p>
+          ) : null}
+
           <div>
             <label htmlFor="calendar-event-location">Location</label>
             <input
@@ -469,13 +515,18 @@ export function EventDialog({
 
           {event && !editable ? (
             <p className="calendar-dialog-note">
-              This calendar is shared read-only, so the event cannot be changed here. Answering an invitation still works.
+              {invitedToMicrosoftMeeting
+                ? "Only the organizer can change this meeting. Answering the invitation still works."
+                : "This calendar is shared read-only, so the event cannot be changed here. Answering an invitation still works."}
             </p>
+          ) : null}
+          {event?.status === "cancelled" ? (
+            <p className="calendar-dialog-note">The organizer cancelled this meeting.</p>
           ) : null}
           {event?.html_link ? (
             <p className="calendar-dialog-note">
               <a href={event.html_link} target="_blank" rel="noreferrer noopener">
-                Open in Google Calendar
+                {calendar?.provider === "microsoft" ? "Open in Outlook" : "Open in Google Calendar"}
               </a>
             </p>
           ) : null}
@@ -488,8 +539,10 @@ export function EventDialog({
               <div className="calendar-dialog-confirm">
                 <span>
                   {alsoIn.length > 0
-                    ? `Delete this event in Google too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
-                    : "Delete this event in Google too?"}
+                    ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
+                    : event.attendees.length > 0 && !event.my_response
+                      ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
+                      : `Delete this event in ${provider} too?`}
                 </span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete

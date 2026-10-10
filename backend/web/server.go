@@ -29,7 +29,9 @@ import (
 	"rolltop/backend/googlecalendar"
 	"rolltop/backend/googlepeople"
 	"rolltop/backend/logging"
+	"rolltop/backend/m365calendar"
 	"rolltop/backend/mailparse"
+	"rolltop/backend/microsoftauth"
 	"rolltop/backend/plugins"
 	"rolltop/backend/remoteimages"
 	"rolltop/backend/search"
@@ -88,6 +90,12 @@ type Options struct {
 	GoogleContacts *googlepeople.Syncer
 	// GoogleCalendar syncs Google calendars, wired the same way.
 	GoogleCalendar *googlecalendar.Syncer
+	// Microsoft carries the validated Microsoft 365 app registration.
+	Microsoft config.MicrosoftConfig
+	// MicrosoftAuth overrides the manager built from Microsoft, for tests.
+	MicrosoftAuth *microsoftauth.Manager
+	// MicrosoftCalendar syncs Microsoft 365 calendars.
+	MicrosoftCalendar *m365calendar.Syncer
 	// DisableBackgroundWorkers is used by focused embeddings and tests that
 	// explicitly drive scheduler behavior themselves.
 	DisableBackgroundWorkers bool
@@ -132,6 +140,8 @@ type Server struct {
 	googleAuth                *googleauth.Manager
 	googleContacts            *googlepeople.Syncer
 	googleCalendar            *googlecalendar.Syncer
+	microsoftAuth             *microsoftauth.Manager
+	microsoftCalendar         *m365calendar.Syncer
 	events                    *eventHub
 	statusMu                  sync.Mutex
 	statusRefreshRunning      map[int64]bool
@@ -362,6 +372,15 @@ func New(opts Options) (*Server, error) {
 		opts.GoogleCalendar = googlecalendar.NewSyncer(
 			opts.Store, opts.GoogleAuth, opts.GoogleAuth, googleauth.ScopeCalendar)
 	}
+	if opts.MicrosoftAuth == nil && opts.Store != nil && len(opts.MasterKey) == 32 {
+		opts.MicrosoftAuth = microsoftauth.NewManager(
+			microsoftauth.New(opts.Microsoft.ClientID, opts.Microsoft.ClientSecret, opts.Microsoft.Tenant,
+				opts.Microsoft.RedirectURLs, opts.Microsoft.Scopes),
+			opts.Store, opts.MasterKey)
+	}
+	if opts.MicrosoftCalendar == nil && opts.MicrosoftAuth != nil && opts.Store != nil {
+		opts.MicrosoftCalendar = m365calendar.NewSyncer(opts.Store, opts.MicrosoftAuth, opts.MicrosoftAuth)
+	}
 	// Every failure from here on has to release the sync runner's context: it
 	// is this function's to own until the Server exists to own it, and a
 	// returned error would otherwise leave the runner's goroutine running
@@ -419,6 +438,8 @@ func New(opts Options) (*Server, error) {
 		googleAuth:            opts.GoogleAuth,
 		googleContacts:        opts.GoogleContacts,
 		googleCalendar:        opts.GoogleCalendar,
+		microsoftAuth:         opts.MicrosoftAuth,
+		microsoftCalendar:     opts.MicrosoftCalendar,
 		events:                events,
 
 		statusRefreshRunning:      map[int64]bool{},

@@ -250,6 +250,12 @@ export function calendarColor(calendar: CalendarSummary | undefined): string {
   return color && /^#[0-9a-f]{3,8}$/i.test(color) ? color : "var(--accent)";
 }
 
+/** providerName names the service a calendar is mirrored from, for the lines
+ * that say where a change was made. */
+export function providerName(calendar: CalendarSummary | undefined): string {
+  return calendar?.provider === "microsoft" ? "Microsoft 365" : "Google";
+}
+
 /** readableTextColor picks black or white text for a calendar colour. Google's
  * palette spans very light and very dark, and one fixed text colour is
  * unreadable on half of it. */

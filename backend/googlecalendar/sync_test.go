@@ -575,7 +575,7 @@ func TestSyncRemovesUnsubscribedCalendars(t *testing.T) {
 		t.Fatal(err)
 	}
 	remaining := onlyCalendar(t, db, user.ID)
-	if remaining.GoogleCalendarID != "primary" {
+	if remaining.RemoteCalendarID != "primary" {
 		t.Fatalf("remaining calendar = %+v, want the one still subscribed", remaining)
 	}
 }

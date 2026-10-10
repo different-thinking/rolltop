@@ -32,7 +32,9 @@ import (
 	"rolltop/backend/googlepeople"
 	"rolltop/backend/imapclient"
 	"rolltop/backend/logging"
+	"rolltop/backend/m365calendar"
 	"rolltop/backend/memlimit"
+	"rolltop/backend/microsoftauth"
 	"rolltop/backend/pgdsn"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
@@ -937,6 +939,15 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	// reachable HTTPS endpoint. Until that exists calendars are polled the same
 	// way, over the same manager.
 	googleCalendar := googlecalendar.NewSyncer(db, googleAuth, googleAuth, googleauth.ScopeCalendar)
+	// Microsoft 365 calendars get their own manager -- a different identity
+	// platform -- shared between the poll and the web routes for the same
+	// reason Google's is: Microsoft rotates refresh tokens, and two refreshes
+	// racing each other would store one that is already spent.
+	microsoftAuth := microsoftauth.NewManager(
+		microsoftauth.New(cfg.Microsoft.ClientID, cfg.Microsoft.ClientSecret, cfg.Microsoft.Tenant,
+			cfg.Microsoft.RedirectURLs, cfg.Microsoft.Scopes),
+		db, cfg.MasterKey)
+	microsoftCalendar := m365calendar.NewSyncer(db, microsoftAuth, microsoftAuth)
 	imapFetcher := &imapclient.Fetcher{MasterKey: cfg.MasterKey, Tokens: googleAuth}
 	// One recorder for the whole process: a forward sent by the syncer and a
 	// message sent from the browser use different senders, and the page that
@@ -955,27 +966,30 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	}
 	syncRunner := syncer.NewRunnerWithContext(ctx, syncSvc)
 	webServer, err := web.New(web.Options{
-		Store:            db,
-		Blobs:            blobStore,
-		Search:           searchSvc,
-		Syncer:           syncSvc,
-		SyncRunner:       syncRunner,
-		SMTPLog:          smtpTraffic,
-		MasterKey:        cfg.MasterKey,
-		DataDir:          cfg.DataDir,
-		DatabaseTarget:   pgdsn.Describe(cfg.DatabaseURL),
-		DatabaseMaxConns: db.MaxConns(),
-		IndexPath:        cfg.IndexPath,
-		PluginDir:        cfg.PluginDir,
-		SessionTTL:       cfg.SessionTTL,
-		CookieSecure:     cfg.CookieSecure,
-		PublicURL:        cfg.PublicURL,
-		WebhookToken:     cfg.WebhookToken,
-		Google:           cfg.Google,
-		GoogleAuth:       googleAuth,
-		GoogleContacts:   googleContacts,
-		GoogleCalendar:   googleCalendar,
-		Lifetime:         ctx,
+		Store:             db,
+		Blobs:             blobStore,
+		Search:            searchSvc,
+		Syncer:            syncSvc,
+		SyncRunner:        syncRunner,
+		SMTPLog:           smtpTraffic,
+		MasterKey:         cfg.MasterKey,
+		DataDir:           cfg.DataDir,
+		DatabaseTarget:    pgdsn.Describe(cfg.DatabaseURL),
+		DatabaseMaxConns:  db.MaxConns(),
+		IndexPath:         cfg.IndexPath,
+		PluginDir:         cfg.PluginDir,
+		SessionTTL:        cfg.SessionTTL,
+		CookieSecure:      cfg.CookieSecure,
+		PublicURL:         cfg.PublicURL,
+		WebhookToken:      cfg.WebhookToken,
+		Google:            cfg.Google,
+		GoogleAuth:        googleAuth,
+		GoogleContacts:    googleContacts,
+		GoogleCalendar:    googleCalendar,
+		Microsoft:         cfg.Microsoft,
+		MicrosoftAuth:     microsoftAuth,
+		MicrosoftCalendar: microsoftCalendar,
+		Lifetime:          ctx,
 	})
 	if err != nil {
 		return nil, err
@@ -1013,6 +1027,9 @@ func startApp(ctx context.Context, cfg config.Config, startup *startupState) (*a
 	if googleAuth.Configured() {
 		go googleContactPoll(ctx, db, googleContacts, googleContactPollInterval)
 		go googleCalendarPoll(ctx, db, googleCalendar, googleCalendarPollInterval)
+	}
+	if microsoftAuth.Configured() {
+		go microsoftCalendarPoll(ctx, db, microsoftCalendar, microsoftCalendarPollInterval)
 	}
 
 	cleanup = false
@@ -1410,6 +1427,40 @@ func syncEveryUsersCalendars(ctx context.Context, db *store.Store, calendars *go
 		// stop the others.
 		if _, err := calendars.SyncUser(ctx, user.ID); err != nil {
 			log.Printf("google calendar poll user_id=%d: %v", user.ID, err)
+		}
+	}
+}
+
+// microsoftCalendarPollInterval is how often Microsoft 365 calendars are read.
+// Every poll reads only the near window; the whole window is read on the
+// syncer's own, longer interval.
+const microsoftCalendarPollInterval = 5 * time.Minute
+
+// microsoftCalendarPoll syncs every user's Microsoft 365 calendars on a timer,
+// starting at once for the reason googleCalendarPoll does.
+func microsoftCalendarPoll(ctx context.Context, db *store.Store, calendars *m365calendar.Syncer, interval time.Duration) {
+	if db == nil || calendars == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		users, err := db.ServiceableUsers(ctx)
+		if err != nil {
+			log.Printf("microsoft calendar poll list users: %v", err)
+		}
+		for _, user := range users {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := calendars.SyncUser(ctx, user.ID); err != nil {
+				log.Printf("microsoft calendar poll user_id=%d: %v", user.ID, err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

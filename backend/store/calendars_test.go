@@ -33,7 +33,7 @@ func mustCalendar(t *testing.T, db *Store, ctx context.Context, userID, connecti
 	t.Helper()
 	calendar, err := db.UpsertCalendar(ctx, userID, CalendarUpsert{
 		GoogleConnectionID: connectionID,
-		GoogleCalendarID:   googleID,
+		RemoteCalendarID:   googleID,
 		Summary:            googleID,
 		AccessRole:         CalendarAccessRoleOwner,
 		Selected:           true,
@@ -123,7 +123,7 @@ func TestUpsertCalendarKeepsLocalStateOnRefresh(t *testing.T) {
 
 	refreshed, err := db.UpsertCalendar(ctx, user, CalendarUpsert{
 		GoogleConnectionID: 1,
-		GoogleCalendarID:   "primary",
+		RemoteCalendarID:   "primary",
 		Summary:            "Renamed at Google",
 		Color:              "#ff0000",
 		AccessRole:         CalendarAccessRoleOwner,

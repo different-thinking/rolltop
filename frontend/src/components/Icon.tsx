@@ -78,6 +78,7 @@ import {
   User,
   UserPlus,
   Users,
+  VideoCamera,
   X
 } from "@phosphor-icons/react";
 import type { Icon as PhosphorIcon, IconWeight } from "@phosphor-icons/react";
@@ -163,7 +164,8 @@ const iconMap: Record<string, PhosphorIcon> = {
   sort_descending: SortDescending,
   star: Star,
   sync: ArrowsClockwise,
-  travel: AirplaneTilt
+  travel: AirplaneTilt,
+  video: VideoCamera
 };
 
 const iconAliases: Record<string, string> = {
