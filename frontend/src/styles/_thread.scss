@@ -829,6 +829,12 @@
     background: color-mix(in srgb, var(--border-strong) 22%, transparent);
     color: var(--text);
   }
+
+  &.attachment-download-all {
+    border-style: dashed;
+    color: var(--accent-strong);
+    font-weight: 600;
+  }
 }
 
 .attachment {

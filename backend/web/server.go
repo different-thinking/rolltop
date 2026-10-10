@@ -539,6 +539,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/contacts/", s.handleContactOrApp)
 	mux.HandleFunc("/webhooks/sync", s.handleSyncWebhook)
 	mux.HandleFunc(attachmentRoutePrefix, s.handleAttachment)
+	mux.HandleFunc(attachmentArchiveRoutePrefix, s.handleAttachmentArchive)
 	mux.HandleFunc("/blobs/", s.handleBlob)
 	mux.HandleFunc(remoteimages.CachedURLPrefix, s.handleRemoteImage)
 	mux.HandleFunc("/brand-icons/", s.handleBrandIcon)
