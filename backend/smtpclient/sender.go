@@ -79,6 +79,16 @@ type Sender struct {
 	Log *smtplog.Recorder
 }
 
+// smtpConnectTimeout bounds opening the connection, separately from the idle
+// timeout that governs the conversation once it runs. A submission server
+// answers a connect in well under a second; one that answers nothing -- a
+// firewalled port, a host that drops outbound SMTP -- would otherwise hold the
+// send for the whole idle timeout, which is longer than the proxy in front of a
+// hosted instance waits for an answer. The browser then got a bare 502 and the
+// one sentence that names the cause, "connect to SMTP server ...: i/o timeout",
+// never reached anybody.
+const smtpConnectTimeout = 15 * time.Second
+
 // smtpHelloName is what Rolltop calls itself in EHLO. Submission servers
 // authenticate the client rather than trusting this name, and a made-up
 // hostname is likelier to be refused than the loopback name every client
@@ -278,7 +288,7 @@ func (s *Sender) dial(ctx context.Context, account store.MailAccount, trace *smt
 	}
 	addr := net.JoinHostPort(account.SMTPHost, fmt.Sprintf("%d", account.SMTPPort))
 	trace.Note("connecting to " + addr)
-	dialer := &net.Dialer{Timeout: timeout}
+	dialer := &net.Dialer{Timeout: min(timeout, smtpConnectTimeout)}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		trace.Note("connect failed: " + err.Error())

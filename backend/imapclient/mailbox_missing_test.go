@@ -40,6 +40,8 @@ func TestMailboxMissingReadsTheServerWording(t *testing.T) {
 	missing := []string{
 		"Mailbox doesn't exist: [Gmail]/Gesendet (0.002 + 0.000 secs).",
 		"Unknown Mailbox: [Gmail]/Sent Mail (Failure)",
+		// Gmail's wording for the same answer while it throttles the account.
+		"Invalid folder: Gesendet (Failure) [THROTTLED]",
 		"[NONEXISTENT] No such mailbox",
 		// The folder named between the two halves of the answer.
 		"Mailbox [Gmail]/Gesendet does not exist",

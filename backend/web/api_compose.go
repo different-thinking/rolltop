@@ -17,12 +17,20 @@ import (
 	"rolltop/backend/plugins"
 	"rolltop/backend/smtpclient"
 	"rolltop/backend/store"
+	"rolltop/backend/syncer"
 )
 
 const (
-	composeMaxUploadBytes            int64 = 80 << 20
-	composeMaxRequestBytes           int64 = 96 << 20
-	composeForegroundReservationWait       = 30 * time.Second
+	composeMaxUploadBytes  int64 = 80 << 20
+	composeMaxRequestBytes int64 = 96 << 20
+	// A send waits this long for background work to give up the tenant's
+	// turn, and it has to answer before the proxy in front of a hosted instance
+	// gives up on the request: past that, the browser gets a bare 502 instead of
+	// the sentence naming what the send was waiting on.
+	composeForegroundReservationWait = 20 * time.Second
+	// A send that takes longer than this is logged with its steps even when it
+	// succeeds, so a slow path can be told apart from a failing one.
+	composeSlowSendThreshold = 10 * time.Second
 	// The archive that follows a Send and archive runs on its own clock. The
 	// send has already succeeded, so this move may neither inherit the
 	// request's cancellation -- a proxy timing out must not kill the move
@@ -63,7 +71,8 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		sent, err := s.sendCompose(r.Context(), cu, form)
+		progress := newComposeSendProgress()
+		sent, err := s.sendComposeTracked(r.Context(), cu, form, progress)
 		var incomplete *composeSentIncompleteError
 		if err != nil && !errors.As(err, &incomplete) {
 			// A send failure otherwise exists only in the browser's console: the
@@ -71,8 +80,19 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 			// auth failure, which is exactly what is needed to tell a one-off blip
 			// from a host that is unreachable every time, but only if it is written
 			// down somewhere a user cannot lose by refreshing the page.
-			s.apiError(w, r, http.StatusBadRequest, err.Error(), fmt.Errorf("send compose user_id=%d: %w", cu.User.ID, err))
+			//
+			// It is logged whatever the error is. A send the proxy gave up on ends
+			// here with a cancelled context, which the generic handler log drops
+			// as an ordinary closed tab -- and that is how a send answered with
+			// 502 used to leave no line at all, with nothing to say which step it
+			// was stuck in.
+			log.Printf("send compose failed user_id=%d client_gone=%t %s: %v",
+				cu.User.ID, r.Context().Err() != nil, progress.summary(), err)
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if progress.elapsed() >= composeSlowSendThreshold {
+			log.Printf("send compose slow user_id=%d %s", cu.User.ID, progress.summary())
 		}
 		archived := s.archiveRepliedMessage(r.Context(), cu.User.ID, form)
 		s.notifyUserChanged(cu.User.ID)
@@ -81,7 +101,7 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 			// wrong after that. Answering this like a failed request would invite
 			// the client to retry sendCompose and hand the recipient a duplicate,
 			// so the response reports success and only warns about the local copy.
-			log.Printf("send compose incomplete after SMTP accepted user_id=%d: %v", cu.User.ID, incomplete.err)
+			log.Printf("send compose incomplete after SMTP accepted user_id=%d %s: %v", cu.User.ID, progress.summary(), incomplete.err)
 			writeJSON(w, map[string]any{"ok": true, "sent": true, "warning": incomplete.Error(), "archived_mailbox": archived})
 			return
 		}
@@ -451,6 +471,14 @@ func (s *Server) composeFormForRequest(r *http.Request) (composeForm, error) {
 }
 
 func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeForm) (store.MessageRecord, error) {
+	return s.sendComposeTracked(ctx, cu, form, nil)
+}
+
+// sendComposeTracked is sendCompose reporting which step it is in, so a send
+// that fails or drags can be logged with where its time went. A nil progress
+// tracks nothing.
+func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form composeForm, progress *composeSendProgress) (store.MessageRecord, error) {
+	progress.enter("prepare")
 	if s.sender == nil {
 		return store.MessageRecord{}, errors.New("SMTP sending is not configured")
 	}
@@ -511,9 +539,11 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 			msg.References = referencesForReply(reply)
 		}
 	}
+	progress.enter("wait_for_background_work")
 	finishForeground, err := s.beginComposeForegroundOperation(ctx, cu.User.ID)
 	if err != nil {
-		return store.MessageRecord{}, fmt.Errorf("message was not sent because delivery could not be scheduled safely: %w", err)
+		return store.MessageRecord{}, fmt.Errorf("message was not sent because delivery could not be scheduled safely%s: %w",
+			s.foregroundBlockersSuffix(cu.User.ID), err)
 	}
 	defer finishForeground()
 	// Before the send, not after: the provider files its own copy the moment it
@@ -523,6 +553,7 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 	if err := s.store.RecordOutgoingMessageID(ctx, cu.User.ID, imapAccount.ID, msg.MessageID); err != nil {
 		return store.MessageRecord{}, err
 	}
+	progress.enter("smtp")
 	raw, err := s.sender.Send(ctx, smtpEnvelopeForIdentity(identity, smtpAccount), msg)
 	if err != nil {
 		return store.MessageRecord{}, err
@@ -530,19 +561,106 @@ func (s *Server) sendCompose(ctx context.Context, cu currentUser, form composeFo
 	// The message has left through SMTP. Every error from here on describes a
 	// local bookkeeping failure, not a failed send, and must not be reported as
 	// one: the caller answers a request that already delivered the mail.
+	progress.enter("append_to_sent")
 	fetched, err := s.appendSentMessage(ctx, imapAccount, sentMailbox, raw, msg.MessageID, msg.Date)
 	if err != nil {
 		return store.MessageRecord{}, &composeSentIncompleteError{
 			err: fmt.Errorf("message sent through SMTP, but could not save it to %s: %w", sentMailbox.Name, err),
 		}
 	}
+	progress.enter("store_locally")
 	sentMsg, err := s.storeSentMessage(ctx, cu.User.ID, imapAccount, sentMailbox, msg, form, fetched)
 	if err != nil {
 		return store.MessageRecord{}, &composeSentIncompleteError{
 			err: fmt.Errorf("message sent through SMTP and saved to %s, but could not be recorded locally: %w", sentMailbox.Name, err),
 		}
 	}
+	progress.enter("done")
 	return sentMsg, nil
+}
+
+// composeSendProgress records the steps of one send and when each began. It
+// exists for the log line alone: a send that hangs is cut off by the proxy in
+// front of the app, and the step it was in is the only thing that says whether
+// it was waiting on background work, on the SMTP server, or on the IMAP copy.
+type composeSendProgress struct {
+	start time.Time
+	steps []composeSendStep
+}
+
+type composeSendStep struct {
+	name  string
+	began time.Time
+}
+
+func newComposeSendProgress() *composeSendProgress {
+	return &composeSendProgress{start: time.Now()}
+}
+
+func (p *composeSendProgress) enter(step string) {
+	if p == nil {
+		return
+	}
+	p.steps = append(p.steps, composeSendStep{name: step, began: time.Now()})
+}
+
+func (p *composeSendProgress) elapsed() time.Duration {
+	if p == nil {
+		return 0
+	}
+	return time.Since(p.start)
+}
+
+// summary names the step the send ended in and how long each step took, e.g.
+// "step=smtp elapsed=31s steps=prepare:40ms,wait_for_background_work:2ms,smtp:31s".
+func (p *composeSendProgress) summary() string {
+	if p == nil {
+		return ""
+	}
+	now := time.Now()
+	last := "none"
+	parts := make([]string, 0, len(p.steps))
+	for i, step := range p.steps {
+		end := now
+		if i+1 < len(p.steps) {
+			end = p.steps[i+1].began
+		}
+		last = step.name
+		if step.name == "done" {
+			continue
+		}
+		parts = append(parts, step.name+":"+end.Sub(step.began).Round(time.Millisecond).String())
+	}
+	return fmt.Sprintf("step=%s elapsed=%s steps=%s", last, now.Sub(p.start).Round(time.Millisecond), strings.Join(parts, ","))
+}
+
+// foregroundBlockersSuffix names the background work a send gave up waiting
+// for, in the words the Activity view uses, so the reader is told what to wait
+// out or stop there instead of only that something was in the way.
+func (s *Server) foregroundBlockersSuffix(userID int64) string {
+	if s.syncRunner == nil {
+		return ""
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, activity := range s.syncRunner.WorkerActivities(userID) {
+		if activity.Waiting {
+			continue
+		}
+		name := syncer.WorkerKindLabel(activity.Kind)
+		if activity.Mailbox != "" {
+			name += " (" + activity.Mailbox + ")"
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return " (still running: " + strings.Join(names, ", ") + ")"
 }
 
 // composeSentIncompleteError wraps a failure that happened only after SMTP

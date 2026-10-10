@@ -9,8 +9,10 @@ import "strings"
 // code -- but go-imap hands a tagged NO to the caller as errors.New(resp.Info),
 // so the code is parsed and dropped before this package can read it. The text is
 // therefore all there is, and each phrase below is one server's wording:
-// Dovecot's "Mailbox doesn't exist", Gmail's "Unknown Mailbox", and the
-// spellings other hosts use for the same answer.
+// Dovecot's "Mailbox doesn't exist", Gmail's "Unknown Mailbox" -- and, while it
+// is throttling the account, Gmail's "Invalid folder: Sent (Failure)
+// [THROTTLED]" for the same question -- and the spellings other hosts use for
+// the same answer.
 //
 // Matching text is a guess where a code would be a fact, so it may only decide
 // things that stay safe when the guess is wrong: a missed phrase reports the
@@ -26,6 +28,7 @@ var mailboxMissingPhrases = []string{
 	"folder doesn't exist",
 	"folder does not exist",
 	"no such folder",
+	"invalid folder",
 }
 
 // Servers that put the folder name between the two halves of the answer --
