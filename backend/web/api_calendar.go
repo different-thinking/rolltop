@@ -651,6 +651,18 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		writeAPIError(w, http.StatusBadRequest, "An event needs a calendar.")
 		return
 	}
+	// A hidden calendar is switched off and no longer synced, so an event
+	// created there would exist at the provider and never appear in the week.
+	// The picker only offers listed calendars; this is for a form a tab kept
+	// open while the calendar was hidden in another one. A calendar that is not
+	// found is left to the router, which answers for it as it always has.
+	if calendar, err := s.store.Calendar(r.Context(), userID, in.CalendarID); err == nil && !calendar.Listed {
+		writeAPIError(w, http.StatusBadRequest, "This calendar is hidden in the calendar view. Show it there first, or choose another calendar.")
+		return
+	} else if err != nil && !store.IsNotFound(err) {
+		s.serverError(w, r, err)
+		return
+	}
 	var copyCalendarID int64
 	if in.copyChange() == calendarlink.CopyAdd {
 		target, ok := s.copyTargetForWrite(w, r, userID)

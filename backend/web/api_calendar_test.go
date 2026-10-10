@@ -293,6 +293,42 @@ func TestCreateEventGoesThroughGoogle(t *testing.T) {
 	}
 }
 
+// A calendar hidden from the calendar view takes no new events: it is no longer
+// synced, so one created there would never appear in the week. The refusal
+// comes before anything reaches Google.
+func TestCreateEventRefusesAHiddenCalendar(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	calendar := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+	if err := env.db.SetCalendarListed(context.Background(), env.owner.ID, calendar.ID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	body := []byte(`{"calendar_id":` + strconv.FormatInt(calendar.ID, 10) +
+		`,"summary":"Planning","start_at":"` + start.Format(time.RFC3339) +
+		`","end_at":"` + start.Add(time.Hour).Format(time.RFC3339) + `"}`)
+	response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	created := fake.created
+	fake.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("Google was asked to create %d events in a hidden calendar", created)
+	}
+
+	if err := env.db.SetCalendarListed(context.Background(), env.owner.ID, calendar.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if again := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body); again.Code != http.StatusOK {
+		t.Fatalf("shown again: status=%d body=%s", again.Code, again.Body.String())
+	}
+}
+
 // An event without a title or with an end before its start is refused before
 // anything reaches Google.
 func TestCreateEventValidatesTheSubmission(t *testing.T) {

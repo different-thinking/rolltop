@@ -670,6 +670,22 @@ function CalendarPicker({
     };
   }, [open]);
 
+  // A link inside the menu closes it first, so the menu is not left open over
+  // the page it led to when the reader comes back.
+  const menuLink = (path: string, icon: "settings" | "add", label: string) => (
+    <a
+      href={path}
+      onClick={(clickEvent) => {
+        clickEvent.preventDefault();
+        if (menuRef.current) menuRef.current.open = false;
+        navigate(path);
+      }}
+    >
+      <Icon name={icon} />
+      {label}
+    </a>
+  );
+
   return (
     <details
       className="calendar-picker"
@@ -745,19 +761,21 @@ function CalendarPicker({
             {calendars.length === 0 ? (
               <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
             ) : null}
-            <a
-              href={calendarSettingsPath}
-              onClick={(clickEvent) => {
-                clickEvent.preventDefault();
-                if (menuRef.current) menuRef.current.open = false;
-                navigate(calendarSettingsPath);
-              }}
-            >
-              <Icon name="settings" />
-              {hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"}
-            </a>
+            {menuLink(
+              calendarSettingsPath,
+              "settings",
+              hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"
+            )}
           </div>
-        ) : null}
+        ) : (
+          // Nothing connected yet: an empty box would say nothing, so the menu
+          // says where calendars come from.
+          <div className="calendar-picker-empty">
+            <p>No calendars yet. Connect an account and allow calendar access.</p>
+            {menuLink("/settings/account/google", "add", "Connect a Google account")}
+            {menuLink("/settings/account/microsoft", "add", "Connect a Microsoft 365 account")}
+          </div>
+        )}
       </div>
     </details>
   );
