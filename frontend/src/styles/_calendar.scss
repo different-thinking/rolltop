@@ -1,15 +1,91 @@
 @use "mixins/components" as *;
 
+// The week takes the whole width: the calendar list is a menu in the header
+// (.calendar-picker), not a column beside the days.
 .calendar-shell {
   display: grid;
-  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.calendar-sidebar {
-  position: sticky;
-  top: 82px;
+.calendar-picker {
+  position: relative;
+
+  &[open] .calendar-picker-summary {
+    background: var(--accent-soft);
+    color: var(--text);
+
+    .icon:last-child {
+      transform: rotate(180deg);
+    }
+  }
+}
+
+.calendar-picker-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .icon {
+    flex: none;
+    width: 16px;
+    height: 16px;
+  }
+
+  .icon:last-child {
+    width: 14px;
+    height: 14px;
+    color: var(--muted);
+    transition: transform 0.16s ease;
+  }
+}
+
+// One dot per calendar being drawn, so the closed menu still says what the
+// week shows.
+.calendar-picker-dots {
+  display: inline-flex;
+  gap: 3px;
+
+  &:empty {
+    display: none;
+  }
+
+  span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+}
+
+.calendar-picker-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: min(300px, calc(100vw - 24px));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
   display: grid;
   gap: 14px;
   align-content: start;
@@ -17,6 +93,13 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calendar-picker-summary .icon:last-child {
+    transition: none;
+  }
 }
 
 .calendar-sidebar-group {
@@ -125,13 +208,16 @@
 }
 
 // The gutter width is shared by the day names, the all-day bar and the hour
-// column, so all three stay in one vertical line.
+// column, so all three stay in one vertical line. The day columns are one
+// custom property for the same reason: the day lens sets it once on
+// .calendar-main and all three grids widen the same day together.
 $calendar-gutter: 58px;
+$calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 
 .calendar-daynames,
 .calendar-allday {
   display: grid;
-  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  grid-template-columns: $calendar-gutter $calendar-day-columns;
   border-bottom: 1px solid var(--border);
 }
 
@@ -199,7 +285,7 @@ $calendar-gutter: 58px;
 .calendar-grid {
   position: relative;
   display: grid;
-  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  grid-template-columns: $calendar-gutter $calendar-day-columns;
   overflow-y: auto;
   // The grid is the only scrolling region, so the header and the all-day bar
   // stay put while a day is scrolled.
@@ -582,4 +668,126 @@ $calendar-gutter: 58px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+// The way to the settings page that decides which calendars are listed at all.
+.calendar-sidebar-manage {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--text);
+    }
+  }
+}
+
+// The day lens. The switch reads as pressed while it is on, the way the
+// sidebar's toggles do, rather than as a second primary button.
+.calendar-lens-toggle[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+// Under the lens every weekday is a button that opens it; the label keeps the
+// look it has when the lens is off, so turning the lens on moves nothing.
+.day-lens .calendar-dayname {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.calendar-dayname-button {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .lens-open & {
+    background: var(--accent-soft);
+  }
+}
+
+// One label per lane, above the lane it names: the lanes split the column
+// evenly and so do these.
+.calendar-lens-lanes {
+  display: flex;
+  min-width: 0;
+
+  span {
+    @include truncate;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 3px 4px;
+    // The lane's colour is set inline from its calendar; the token is what
+    // shows for a lane whose calendar has none.
+    border-bottom: 2px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+  }
+}
+
+.calendar-lens-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--border);
+  pointer-events: none;
+}
+
+// The menu with nothing connected: what to do instead of an empty box. The
+// links share the manage link's look, without its divider.
+.calendar-picker-empty {
+  display: grid;
+  gap: 8px;
+
+  p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--accent);
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
 }

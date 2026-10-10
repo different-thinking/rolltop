@@ -22,6 +22,7 @@ import { identitySecuritySettings } from "../../plugins/identitySecurity";
 import { AdminRemoteImageBlocklist } from "../../plugins/remoteImageBlocklist/AdminRemoteImageBlocklist";
 import { PluginTogglePanel } from "./admin/PluginTogglePanel";
 import { RetentionSettingsPanel } from "./RetentionSettings";
+import { CalendarSettingsPanel } from "./CalendarSettings";
 import { SMTPTrafficPanel } from "./SMTPTraffic";
 import { GoogleAccountsSettings } from "./GoogleAccounts";
 import { MicrosoftAccountsSettings } from "./MicrosoftAccounts";
@@ -456,7 +457,7 @@ function cloneMailIdentity(identity: MailIdentity): MailIdentity {
 }
 
 type SettingsRoute = {
-  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "microsoft" | "preferences" | "swipes" | "search" | "retention" | "plugins" | "unknown";
+  kind: "general" | "profile" | "display" | "storage" | "about" | "mail" | "imap" | "smtp" | "identities" | "google" | "microsoft" | "preferences" | "swipes" | "search" | "retention" | "calendars" | "plugins" | "unknown";
   id: number | null;
   isNew: boolean;
 };
@@ -479,6 +480,7 @@ function settingsRouteFromPath(path: string): SettingsRoute {
   if (path === "/settings/account/preferences/swipes") return { kind: "swipes", id: null, isNew: false };
   if (path === "/settings/account/preferences/search") return { kind: "search", id: null, isNew: false };
   if (path === "/settings/account/preferences/retention") return { kind: "retention", id: null, isNew: false };
+  if (path === "/settings/account/preferences/calendars") return { kind: "calendars", id: null, isNew: false };
   if (path === "/settings/account/plugins") return { kind: "plugins", id: null, isNew: false };
   if (path === "/settings/account/mail/identities" || path === "/settings/account/identities") return { kind: "identities", id: null, isNew: false };
   if (path === "/settings/account/mail/imap/new" || path === "/settings/account/imap/new") return { kind: "imap", id: null, isNew: true };
@@ -2851,7 +2853,7 @@ export function SettingsView({
     if (["mail", "imap", "smtp", "identities"].includes(route.kind)) return "mail";
     if (route.kind === "google") return "google";
     if (route.kind === "microsoft") return "microsoft";
-    if (["preferences", "swipes", "search", "retention"].includes(route.kind)) return "preferences";
+    if (["preferences", "swipes", "search", "retention", "calendars"].includes(route.kind)) return "preferences";
     return "general";
   };
 
@@ -3097,6 +3099,18 @@ export function SettingsView({
         <RetentionSettingsPanel csrf={csrf} categories={mailCategories} addToast={addToast} />
       </SettingsPage>
     );
+  } else if (route.kind === "calendars") {
+    page = (
+      <SettingsPage
+        title="Calendars"
+        description="Which calendars the calendar lists in its Calendars menu and offers as the second calendar."
+        backPath="/settings/account/preferences"
+        navigate={navigate}
+      >
+        {noticeNode}
+        <CalendarSettingsPanel csrf={csrf} addToast={addToast} />
+      </SettingsPage>
+    );
   } else if (route.kind === "mail") {
     page = (
       <SettingsPage title="Mail" description="Incoming servers, outgoing delivery, folders, and identities." navigate={navigate}>
@@ -3151,11 +3165,12 @@ export function SettingsView({
     );
   } else if (route.kind === "preferences") {
     page = (
-      <SettingsPage title="Preferences" description="Message gestures and search behavior." navigate={navigate}>
+      <SettingsPage title="Preferences" description="Message gestures, search behavior, retention, and calendars." navigate={navigate}>
         <SettingsIndex ariaLabel="Mail preferences">
           <SettingsIndexRow icon="arrow_back" title="Swipe actions" description="Configure left and right gestures, archive folders, and snooze timing." meta={`Left: ${swipeLabel(swipeDraft.left_action)} · Right: ${swipeLabel(swipeDraft.right_action)}`} path="/settings/account/preferences/swipes" navigate={navigate} />
           <SettingsIndexRow icon="search" title="Search tuning" description="Adjust ranking, typo matching, contacts, and attachment text." meta={profileForm.search_preset || "Balanced"} path="/settings/account/preferences/search" navigate={navigate} />
           <SettingsIndexRow icon="delete" title="Retention" description="Throw away old mail per category, and empty the Trash on a schedule." meta="Trash and categories" path="/settings/account/preferences/retention" navigate={navigate} />
+          <SettingsIndexRow icon="calendar" title="Calendars" description="Choose which calendars appear in the calendar's Calendars menu and as the second calendar." meta="Calendar view" path="/settings/account/preferences/calendars" navigate={navigate} />
         </SettingsIndex>
       </SettingsPage>
     );

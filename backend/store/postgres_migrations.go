@@ -590,6 +590,23 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE calendar_events ADD COLUMN online_meeting_url text COLLATE "C" NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// Which calendars the calendar view lists at all. With Microsoft 365
+		// beside Google a reader routinely has a dozen calendars -- holidays,
+		// birthdays, a colleague's shared one -- and the sidebar's visibility
+		// switches were the only way to quieten them, so every one of them
+		// stayed in the list and in the second-calendar choice. A calendar
+		// that is not listed is also switched off and is never the second
+		// calendar (Store.SetCalendarListed), so the existing visibility gate
+		// keeps meaning "drawn and synced" and nothing else has to ask.
+		//
+		// Every calendar that exists keeps being listed: hiding is the
+		// reader's choice, never an upgrade's.
+		Version: "0016-calendar-listed",
+		Statements: []string{
+			`ALTER TABLE calendars ADD COLUMN listed bigint NOT NULL DEFAULT 1`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

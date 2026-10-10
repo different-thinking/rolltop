@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rolltop Wochenansicht</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&display=swap">
+<style>
+/* Layout: a document of four stacked mockup frames, each an app-like week grid
+   with its rationale beside it; colours are Rolltop's own Classic tokens. */
+:root {
+  --bg: #f6f8fc;
+  --surface: #ffffff;
+  --surface-subtle: #f2f6fc;
+  --text: #1f1f1f;
+  --muted: #5f6368;
+  --border: #dadce0;
+  --separator: #e8eaed;
+  --accent: #0b57d0;
+  --accent-soft: #d3e3fd;
+  --danger: #b3261e;
+  --now: #d93025;
+  --hatch: rgba(95, 99, 104, .16);
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-brand: "Fraunces", Georgia, "Times New Roman", serif;
+  --cal-p: #1a73e8;
+  --cal-f: #188038;
+  --cal-w: #c2410c;
+  --cal-t: #8430ce;
+  --tint: 16%;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131314; --surface: #1e1f20; --surface-subtle: #28292a; --text: #e3e3e3; --muted: #a2a9b0;
+    --border: #444746; --separator: #333537; --accent: #a8c7fa; --accent-soft: #0842a0; --danger: #f2b8b5;
+    --now: #f28b82; --hatch: rgba(162, 169, 176, .18);
+    --cal-p: #6ea8fe; --cal-f: #5bb974; --cal-w: #f28b4b; --cal-t: #c58af9; --tint: 24%;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131314; --surface: #1e1f20; --surface-subtle: #28292a; --text: #e3e3e3; --muted: #a2a9b0;
+  --border: #444746; --separator: #333537; --accent: #a8c7fa; --accent-soft: #0842a0; --danger: #f2b8b5;
+  --now: #f28b82; --hatch: rgba(162, 169, 176, .18);
+  --cal-p: #6ea8fe; --cal-f: #5bb974; --cal-w: #f28b4b; --cal-t: #c58af9; --tint: 24%;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 14px; line-height: 1.45; }
+.page { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 64px; display: grid; gap: 36px; }
+
+header.intro { display: grid; gap: 10px; max-width: 760px; }
+header.intro h1 { font-family: var(--font-brand); font-weight: 650; font-size: clamp(26px, 4vw, 36px); line-height: 1.1; margin: 0; text-wrap: balance; }
+header.intro p { margin: 0; color: var(--muted); max-width: 66ch; }
+.eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+nav.jump { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.jump a { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); text-decoration: none; background: var(--surface); font-size: 13px; }
+nav.jump a:hover { border-color: var(--accent); }
+nav.jump a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+nav.jump b { font-family: var(--font-brand); font-weight: 650; color: var(--accent); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+
+section.mock { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; scroll-margin-top: 16px; }
+@media (max-width: 980px) { section.mock { grid-template-columns: minmax(0, 1fr); } }
+.mock-head { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.mock-head .letter { font-family: var(--font-brand); font-size: 30px; font-weight: 650; color: var(--accent); line-height: 1; }
+.mock-head h2 { font-family: var(--font-brand); font-weight: 500; font-size: 24px; margin: 0; text-wrap: balance; }
+
+.notes { display: grid; gap: 14px; font-size: 13px; min-width: 0; }
+.notes p { margin: 0; }
+.notes h3 { margin: 0 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.effort { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.effort i { width: 18px; height: 6px; border-radius: 3px; background: var(--separator); display: inline-block; }
+.effort i.on { background: var(--accent); }
+
+/* App frame */
+.frame { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; min-width: 0; }
+.frame-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.frame-bar .wk { font-size: 18px; font-weight: 500; margin-right: auto; }
+.chipbtn { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 999px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.chipbtn[aria-pressed="false"] { color: var(--muted); }
+.chipbtn[aria-pressed="false"] .sw { background: transparent !important; outline: 1.5px solid currentColor; outline-offset: -1.5px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; padding: 5px 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+.scroller { overflow-x: auto; }
+.week { min-width: 780px; }
+
+.row { display: grid; grid-template-columns: 52px repeat(7, minmax(0, 1fr)); }
+.dayname { padding: 8px 6px 6px; text-align: center; border-left: 1px solid var(--separator); }
+.dayname .wd { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.dayname .num { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; font-size: 17px; }
+.dayname.today .num { background: var(--accent); color: var(--surface); }
+.dayname.today .wd { color: var(--accent); font-weight: 600; }
+.gutter { font-size: 10px; color: var(--muted); text-align: right; padding-right: 6px; }
+.daymeta { font-size: 11px; color: var(--muted); text-align: center; padding: 0 4px 6px; border-left: 1px solid var(--separator); font-variant-numeric: tabular-nums; }
+
+.allday { position: relative; border-top: 1px solid var(--separator); border-bottom: 1px solid var(--border); padding: 4px 0; }
+.allday .lab { position: absolute; left: 0; top: 6px; width: 52px; }
+.span-bars { margin-left: 52px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px 0; padding: 0 2px; }
+.bar { font-size: 11px; padding: 2px 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0 2px; }
+
+.body { position: relative; display: grid; grid-template-columns: 52px repeat(7, minmax(0, 1fr)); }
+.hours { position: relative; }
+.hours div { position: absolute; right: 6px; transform: translateY(-50%); font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.day { position: relative; border-left: 1px solid var(--separator); }
+.day.weekend { background: var(--surface-subtle); }
+.hline { position: absolute; left: 0; right: 0; border-top: 1px solid var(--separator); }
+.now { position: absolute; left: -1px; right: 0; border-top: 2px solid var(--now); z-index: 5; }
+.now::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--now); }
+
+.ev { position: absolute; border-radius: 6px; padding: 3px 6px; font-size: 11px; line-height: 1.25; overflow: hidden; cursor: default; }
+.ev .t { font-weight: 600; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ev .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .s { color: inherit; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ev svg { width: 11px; height: 11px; flex: none; }
+.dots { display: inline-flex; gap: 2px; flex: none; }
+.dots i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1.5px var(--surface); }
+
+/* A: calm tiles */
+.ev.calm { background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); border-left: 3px solid var(--c); color: var(--text); box-shadow: 0 0 0 1.5px var(--surface); }
+.ev.calm .s { color: var(--muted); opacity: 1; }
+.ev.calm.short { display: flex; gap: 6px; align-items: center; padding-block: 1px; }
+
+/* B: lanes */
+.lanehead { display: grid; grid-template-columns: 1fr 1fr; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; border-left: 1px solid var(--separator); }
+.lanehead span { text-align: center; padding: 3px 0; border-bottom: 2px solid var(--lc); }
+.lane { position: absolute; top: 0; bottom: 0; }
+.lane + .lane { border-left: 1px dashed var(--separator); }
+.ev.lane-ev { background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); border-top: 2px solid var(--c); color: var(--text); box-shadow: 0 0 0 1px var(--surface); }
+.ev.lane-ev .s { color: var(--muted); opacity: 1; }
+
+/* C: focus */
+.ev.solid { background: var(--c); color: #fff; box-shadow: 0 0 0 1.5px var(--surface); }
+.ev.busy { background: repeating-linear-gradient(135deg, var(--hatch) 0 5px, transparent 5px 10px); border: 1px dashed color-mix(in srgb, var(--c) 55%, var(--border)); color: var(--muted); box-shadow: none; }
+.ev.busy .t { font-weight: 500; }
+.ev.conflict { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3px var(--danger); }
+.ev.declined { background: transparent; border: 1px solid var(--c); color: var(--text); }
+
+/* D: agenda */
+.agenda { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-width: 780px; }
+.acol { border-left: 1px solid var(--separator); display: grid; align-content: start; gap: 6px; padding: 8px 6px 14px; min-height: 420px; }
+.acol:first-child { border-left: 0; }
+.acol.weekend { background: var(--surface-subtle); }
+.acol .dayname { border: 0; padding: 0 0 2px; }
+.density { position: relative; height: 8px; border-radius: 4px; background: var(--separator); overflow: hidden; }
+.density i { position: absolute; top: 0; bottom: 0; opacity: .85; }
+.density-scale { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: -3px; }
+.abadge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--c) var(--tint), var(--surface)); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arow { display: grid; grid-template-columns: 38px 3px minmax(0, 1fr); gap: 6px; font-size: 12px; line-height: 1.3; padding: 4px 4px; border-radius: 6px; }
+.arow:hover { background: var(--surface-subtle); }
+.arow .tm { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; padding-top: 1px; }
+.arow .tm b { display: block; color: var(--text); font-weight: 600; font-size: 12px; }
+.arow .stripe { background: var(--c); border-radius: 2px; }
+.arow .ti { font-weight: 600; display: flex; gap: 4px; align-items: center; min-width: 0; }
+.arow .ti span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arow .sub { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arow .warn { color: var(--danger); font-size: 11px; display: flex; gap: 4px; align-items: center; }
+.arow .warn svg, .arow .ti svg { width: 11px; height: 11px; flex: none; }
+.gap { font-size: 11px; color: var(--muted); text-align: center; border: 1px dashed var(--separator); border-radius: 6px; padding: 2px 0; }
+.empty { font-size: 12px; color: var(--muted); padding: 6px 4px; }
+
+.verdict { border-top: 1px solid var(--border); padding-top: 22px; display: grid; gap: 12px; max-width: 900px; }
+.verdict h2 { font-family: var(--font-brand); font-weight: 500; font-size: 24px; margin: 0; }
+.verdict p { margin: 0; max-width: 72ch; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; min-width: 620px; width: 100%; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--separator); vertical-align: top; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+td:first-child { font-family: var(--font-brand); font-weight: 650; color: var(--accent); }
+
+@media (prefers-reduced-motion: no-preference) { .ev { transition: opacity .15s; } }
+</style>
+
+<div class="page">
+  <header class="intro">
+    <span class="eyebrow">Rolltop · Kalender · Entwurf</span>
+    <h1>Vier Wege zu einer ruhigeren Wochenansicht</h1>
+    <p>Dieselbe Woche in vier Varianten: zwei Google-Kalender und zwei Microsoft-365-Kalender, mit Überschneidungen, mehrtägigen Urlauben und einem Termin, der in zwei Kalendern liegt. Alle Daten sind Beispiele.</p>
+    <div class="legend" id="legend"></div>
+  </header>
+
+  <nav class="jump" aria-label="Mockups">
+    <a href="#a"><b>A</b> Ruhige Kacheln</a>
+    <a href="#b"><b>B</b> Spuren pro Konto</a>
+    <a href="#c"><b>C</b> Fokus-Kalender</a>
+    <a href="#d"><b>D</b> Agenda-Woche</a>
+  </nav>
+
+  <section class="mock" id="a">
+    <div class="mock-head"><span class="letter">A</span><h2>Ruhige Kacheln</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span id="a-chips" style="display:flex;gap:6px;flex-wrap:wrap"></span></div>
+      <div class="scroller"><div class="week" id="a-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Die Kalenderfarbe wird zum Akzent statt zur Fläche: helle Tönung, farbige Kante links, Titel zuerst. Überlappende Termine fächern sich versetzt auf, statt sich die Spalte in schmale Streifen zu teilen. Mehrtägige Ganztagstermine werden ein durchgehender Balken.</p></div>
+      <div><h3>Was es löst</h3><ul><li>Vier Volltonfarben nebeneinander erzeugen kein Farbrauschen mehr.</li><li>Titel bleiben bei Überschneidungen lesbar.</li><li>Kalender lassen sich direkt in der Kopfzeile aus- und einblenden.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Zwei sehr ähnliche Kalenderfarben unterscheiden sich als Tönung schlechter als als Vollfläche.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i></i><i></i> klein, nur CSS und Layout</span>
+    </div>
+  </section>
+
+  <section class="mock" id="b">
+    <div class="mock-head"><span class="letter">B</span><h2>Spuren pro Konto</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="legend"><span><i class="sw" style="background:var(--cal-p)"></i>Spur links: Google</span><span><i class="sw" style="background:var(--cal-w)"></i>Spur rechts: Microsoft 365</span></span></div>
+      <div class="scroller"><div class="week" id="b-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Jeder Tag bekommt eine feste Spur pro Konto: links privat (Google), rechts Arbeit (Microsoft 365). Ein Termin steht immer an derselben Stelle, egal was sonst an dem Tag passiert.</p></div>
+      <div><h3>Was es löst</h3><ul><li>Das Auge lernt die Position: Arbeit ist immer rechts.</li><li>Konflikte zwischen Privat und Arbeit liegen direkt nebeneinander und fallen sofort auf.</li><li>Termine eines Kontos zerteilen nie den Platz des anderen.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Jede Spur ist nur halb so breit. Ab drei Konten wird es eng; dann wäre „Spur pro Kalendergruppe“ mit frei wählbarer Zuordnung nötig.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, neues Layout im weekModel</span>
+    </div>
+  </section>
+
+  <section class="mock" id="c">
+    <div class="mock-head"><span class="letter">C</span><h2>Fokus-Kalender</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="seg" role="group" aria-label="Fokus" id="c-seg"></span></div>
+      <div class="scroller"><div class="week" id="c-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Ein Schalter wählt, wessen Woche gerade zählt. Die Termine im Fokus werden voll gezeichnet, alle anderen nur als schraffierte „belegt“-Fläche. Unter jedem Tag steht, wie viel Zeit zwischen 8 und 18 Uhr noch frei ist. Ein roter Ring markiert Fokus-Termine, die mit etwas anderem kollidieren.</p></div>
+      <div><h3>Was es löst</h3><ul><li>Planen im Arbeitskontext, ohne private Termine zu übersehen.</li><li>Freie Zeit ist eine Zahl statt einer Suche.</li><li>Konflikte sind markiert statt versteckt.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Ein zusätzlicher Zustand, den man kennen muss. „Alle“ fällt auf die heutige Darstellung zurück.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, Fokus pro Nutzer speichern</span>
+    </div>
+  </section>
+
+  <section class="mock" id="d">
+    <div class="mock-head"><span class="letter">D</span><h2>Agenda-Woche</h2></div>
+    <div class="frame">
+      <div class="frame-bar"><span class="wk">5. – 11. Okt. 2026</span><span class="legend"><span>Balken je Tag: Belegung 7 – 20 Uhr</span></span></div>
+      <div class="scroller"><div id="d-week"></div></div>
+    </div>
+    <div class="notes">
+      <div><h3>Idee</h3><p>Keine Stundenraster, sondern pro Tag eine Liste: Uhrzeit, Farbstreifen, Titel, Ort. Ein schmaler Belegungsbalken über jedem Tag zeigt auf einen Blick, wann der Tag voll ist. Überschneidungen stehen als Hinweis direkt am Termin, längere freie Blöcke als Lücke dazwischen.</p></div>
+      <div><h3>Was es löst</h3><ul><li>Alles ist ohne Scrollen sichtbar, auch der Abend.</li><li>Titel stehen in voller Breite, nie abgeschnitten.</li><li>Funktioniert auch auf dem Handy als Liste.</li></ul></div>
+      <div><h3>Kompromiss</h3><p>Dauer und Lage im Tag liest man aus Zahlen statt aus der Fläche. Als eigene Ansicht neben der Woche gedacht, nicht als Ersatz.</p></div>
+      <span class="effort">Aufwand <i class="on"></i><i class="on"></i><i></i> mittel, zweite Ansicht mit Umschalter</span>
+    </div>
+  </section>
+
+  <section class="verdict">
+    <h2>Vergleich</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Variante</th><th>Stärke</th><th>Schwäche</th><th>Passt, wenn …</th></tr></thead>
+        <tbody>
+          <tr><td>A</td><td>Sofort ruhiger, ändert keine Gewohnheit</td><td>Konflikte bleiben eine Fläche unter vielen</td><td>die Woche nur aufgeräumter wirken soll</td></tr>
+          <tr><td>B</td><td>Feste Position je Konto, Konflikte nebeneinander</td><td>Halbe Breite je Termin</td><td>Privat und Arbeit klar getrennt gelesen werden</td></tr>
+          <tr><td>C</td><td>Ein Kontext im Vordergrund, freie Zeit als Zahl</td><td>Zusätzlicher Schalter</td><td>meist aus einem Kontext heraus geplant wird</td></tr>
+          <tr><td>D</td><td>Höchste Lesbarkeit, auch mobil</td><td>Keine räumliche Zeitachse</td><td>es um „was steht an“ statt „wann ist Platz“ geht</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Die Varianten schließen sich nicht aus. A ist als Grundlage für alle anderen geeignet; C ließe sich als Schalter auf A setzen, und D als zweite Ansicht neben der Woche.</p>
+  </section>
+</div>
+
+<script>
+const H0 = 7, H1 = 20, HH = 34; // visible hours and pixels per hour
+const DAYS = [["Mo", 5], ["Di", 6], ["Mi", 7], ["Do", 8], ["Fr", 9], ["Sa", 10], ["So", 11]];
+const TODAY = 5, NOW = 11.33;
+const CAL = {
+  p: { name: "Privat", acct: "Google", color: "var(--cal-p)" },
+  f: { name: "Familie", acct: "Google", color: "var(--cal-f)" },
+  w: { name: "Arbeit", acct: "Microsoft 365", color: "var(--cal-w)" },
+  t: { name: "Team-Urlaube", acct: "Microsoft 365", color: "var(--cal-t)" }
+};
+const EV = [
+  { d: 0, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", online: 1 },
+  { d: 0, s: 9, e: 10.5, c: "w", t: "Kundentermin Weber GmbH", loc: "Vor Ort, Mainz" },
+  { d: 0, s: 9.5, e: 10, c: "p", t: "Zahnarzt", loc: "Praxis Dr. Lang" },
+  { d: 0, s: 13, e: 14, c: "w", t: "Angebot Review" },
+  { d: 0, s: 15, e: 16, c: "w", t: "Ticket-Review", also: ["p"] },
+  { d: 0, s: 17.5, e: 18.5, c: "f", t: "Elternabend", loc: "Grundschule" },
+  { d: 1, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", online: 1 },
+  { d: 1, s: 10, e: 12, c: "w", t: "Onboarding Techniker" },
+  { d: 1, s: 12.5, e: 13.5, c: "p", t: "Mittag mit Jan", loc: "Bistro am Markt" },
+  { d: 1, s: 14, e: 15, c: "w", t: "Sales-Call Nordlicht", online: 1 },
+  { d: 1, s: 14.5, e: 15.5, c: "w", t: "Partner-Webinar", online: 1, declined: 1 },
+  { d: 1, s: 18, e: 19, c: "f", t: "Fußballtraining Kinder" },
+  { d: 2, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", online: 1 },
+  { d: 2, s: 11, e: 12, c: "w", t: "Jour fixe Vertrieb" },
+  { d: 2, s: 11.5, e: 12, c: "p", t: "Auto in die Werkstatt" },
+  { d: 2, s: 16, e: 17, c: "w", t: "Lieferant: Lizenzen", online: 1 },
+  { d: 3, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", online: 1 },
+  { d: 3, s: 9, e: 10, c: "w", t: "1:1 mit Sabine" },
+  { d: 3, s: 10, e: 11.5, c: "w", t: "Workshop Ticketsystem" },
+  { d: 3, s: 13, e: 14, c: "w", t: "Bewerbungsgespräch", online: 1 },
+  { d: 3, s: 16, e: 17, c: "f", t: "Kinderarzt", loc: "Dr. Brandt" },
+  { d: 4, s: 8.5, e: 9, c: "w", t: "Daily Stand-up", online: 1 },
+  { d: 4, s: 10, e: 11, c: "w", t: "Monatsabschluss" },
+  { d: 4, s: 15, e: 16, c: "p", t: "Steuerberater", loc: "Kanzlei Roth" },
+  { d: 4, s: 19, e: 20, c: "f", t: "Geburtstag Oma" },
+  { d: 5, s: 10, e: 12, c: "f", t: "Flohmarkt Schule" },
+  { d: 5, s: 14, e: 15, c: "p", t: "Laufen" },
+  { d: 6, s: 12, e: 14, c: "f", t: "Familienessen" }
+];
+const ALLDAY = [
+  { d0: 0, d1: 2, c: "t", t: "Anna – Urlaub" },
+  { d0: 3, d1: 4, c: "t", t: "Max – Urlaub" },
+  { d0: 4, d1: 4, c: "p", t: "Frist Steuererklärung" },
+  { d0: 5, d1: 6, c: "f", t: "Herbstferien beginnen" }
+];
+
+const ICON = {
+  video: '<svg viewBox="0 0 16 16" fill="currentColor" aria-label="Online"><path d="M1 4.5A1.5 1.5 0 0 1 2.5 3h7A1.5 1.5 0 0 1 11 4.5v1.2l3.2-2A.5.5 0 0 1 15 4.1v7.8a.5.5 0 0 1-.8.4L11 10.3v1.2A1.5 1.5 0 0 1 9.5 13h-7A1.5 1.5 0 0 1 1 11.5z"/></svg>',
+  warn: '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5 15 14H1zM7.3 6v4h1.4V6zm0 5.2v1.4h1.4v-1.4z"/></svg>'
+};
+
+const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const y = (h) => (Math.max(H0, Math.min(H1, h)) - H0) * HH;
+const fmt = (h) => `${String(Math.floor(h)).padStart(2, "0")}:${String(Math.round((h % 1) * 60)).padStart(2, "0")}`;
+const overlaps = (a, b) => a.s < b.e && b.s < a.e;
+const esc = (s) => s.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+
+// layout: greedy column assignment per overlapping cluster, as weekModel does.
+function layout(list) {
+  const sorted = [...list].sort((a, b) => a.s - b.s || b.e - a.e);
+  const out = []; let cluster = [], cols = [], clusterEnd = -1;
+  const flush = () => { cluster.forEach((p) => (p.cols = cols.length)); out.push(...cluster); cluster = []; cols = []; };
+  for (const ev of sorted) {
+    if (ev.s >= clusterEnd && cluster.length) flush();
+    let col = cols.findIndex((end) => end <= ev.s);
+    if (col < 0) { col = cols.length; cols.push(ev.e); } else cols[col] = ev.e;
+    cluster.push({ ev, col }); clusterEnd = Math.max(clusterEnd, ev.e);
+  }
+  if (cluster.length) flush();
+  return out;
+}
+
+function dots(ev) {
+  if (!ev.also) return "";
+  return `<span class="dots" title="auch in ${ev.also.map((c) => CAL[c].name).join(", ")}">${ev.also.map((c) => `<i style="background:${CAL[c].color}"></i>`).join("")}</span>`;
+}
+
+function grid(root, { meta, sub, allday, renderDay }) {
+  const week = el("div");
+  const head = el("div", "row");
+  head.append(el("div", "gutter"));
+  DAYS.forEach(([wd, n], i) => head.append(el("div", `dayname ${i === TODAY ? "today" : ""}`, `<span class="wd">${wd}</span><span class="num">${n}</span>`)));
+  week.append(head);
+  if (meta) { const r = el("div", "row"); r.append(el("div", "gutter")); DAYS.forEach((_, i) => r.append(meta(i))); week.append(r); }
+  if (sub) { const r = el("div", "row"); r.append(el("div", "gutter")); DAYS.forEach((_, i) => r.append(sub(i))); week.append(r); }
+  const ad = el("div", "allday");
+  ad.append(el("div", "gutter lab", "Ganztägig"));
+  const bars = el("div", "span-bars");
+  ALLDAY.forEach((a) => { const b = allday(a); if (b) { b.style.gridColumn = `${a.d0 + 1} / ${a.d1 + 2}`; bars.append(b); } });
+  ad.append(bars); week.append(ad);
+  const body = el("div", "body");
+  const height = (H1 - H0) * HH;
+  const hours = el("div", "hours"); hours.style.height = height + "px";
+  for (let h = H0 + 1; h < H1; h++) { const l = el("div", null, `${h}:00`); l.style.top = y(h) + "px"; hours.append(l); }
+  body.append(hours);
+  DAYS.forEach((_, i) => {
+    const day = el("div", `day ${i >= 5 ? "weekend" : ""}`); day.style.height = height + "px";
+    for (let h = H0 + 1; h < H1; h++) { const l = el("div", "hline"); l.style.top = y(h) + "px"; day.append(l); }
+    renderDay(day, i);
+    if (i === TODAY) { const n = el("div", "now"); n.style.top = y(NOW) + "px"; day.append(n); }
+    body.append(day);
+  });
+  week.append(body);
+  root.replaceChildren(week);
+}
+
+function tileHTML(ev) {
+  const short = ev.e - ev.s <= 0.5;
+  const title = `<span class="t">${dots(ev)}${ev.online ? ICON.video : ""}<span>${esc(ev.t)}</span></span>`;
+  const sub = `<span class="s">${fmt(ev.s)}${short ? "" : "–" + fmt(ev.e)}${ev.loc && !short ? " · " + esc(ev.loc) : ""}</span>`;
+  return short ? title + sub : title + sub;
+}
+
+document.getElementById("legend").innerHTML = Object.values(CAL).map((c) => `<span><i class="sw" style="background:${c.color}"></i>${c.name} <small>(${c.acct})</small></span>`).join("");
+
+/* ---------- A: calm tiles with cascade ---------- */
+const aShown = new Set(Object.keys(CAL));
+function renderA() {
+  const chips = document.getElementById("a-chips");
+  chips.replaceChildren(...Object.entries(CAL).map(([k, c]) => {
+    const b = el("button", "chipbtn", `<i class="sw" style="background:${c.color}"></i>${c.name}`);
+    b.type = "button"; b.setAttribute("aria-pressed", aShown.has(k));
+    b.onclick = () => { aShown.has(k) ? aShown.delete(k) : aShown.add(k); renderA(); };
+    return b;
+  }));
+  grid(document.getElementById("a-week"), {
+    allday: (a) => aShown.has(a.c) ? Object.assign(el("div", "bar", esc(a.t)), { style: `background:color-mix(in srgb, ${CAL[a.c].color} var(--tint), var(--surface));border-left:3px solid ${CAL[a.c].color}` }) : null,
+    renderDay: (day, i) => {
+      layout(EV.filter((e) => e.d === i && aShown.has(e.c))).forEach(({ ev, col, cols }) => {
+        const n = el("div", `ev calm ${ev.e - ev.s <= 0.5 ? "short" : ""}`, tileHTML(ev));
+        const step = cols > 1 ? 62 / cols : 0;
+        n.style.cssText = `--c:${CAL[ev.c].color};top:${y(ev.s) + 1}px;height:${(ev.e - ev.s) * HH - 2}px;left:calc(${col * step}% + 2px);right:3px;z-index:${col + 1};${ev.declined ? "opacity:.55;border-left-style:dashed;" : ""}`;
+        n.title = `${ev.t} · ${CAL[ev.c].name}`;
+        day.append(n);
+      });
+    }
+  });
+}
+renderA();
+
+/* ---------- B: lanes per account ---------- */
+const LANES = [{ cals: ["p", "f"], label: "Privat", lc: "var(--cal-p)" }, { cals: ["w", "t"], label: "Arbeit", lc: "var(--cal-w)" }];
+grid(document.getElementById("b-week"), {
+  sub: () => { const h = el("div", "lanehead"); LANES.forEach((l) => { const s = el("span", null, l.label); s.style.setProperty("--lc", l.lc); h.append(s); }); return h; },
+  allday: (a) => Object.assign(el("div", "bar", esc(a.t)), { style: `background:color-mix(in srgb, ${CAL[a.c].color} var(--tint), var(--surface));border-top:2px solid ${CAL[a.c].color};${LANES[0].cals.includes(a.c) ? "margin-right:50%" : "margin-left:50%"}` }),
+  renderDay: (day, i) => {
+    LANES.forEach((lane, li) => {
+      const l = el("div", "lane"); l.style.left = li * 50 + "%"; l.style.width = "50%"; day.append(l);
+      layout(EV.filter((e) => e.d === i && lane.cals.includes(e.c))).forEach(({ ev, col, cols }) => {
+        const n = el("div", "ev lane-ev", tileHTML(ev));
+        const w = 100 / cols;
+        n.style.cssText = `--c:${CAL[ev.c].color};top:${y(ev.s) + 1}px;height:${(ev.e - ev.s) * HH - 2}px;left:calc(${col * w}% + 2px);width:calc(${w}% - 4px);${ev.declined ? "opacity:.55;" : ""}`;
+        n.title = `${ev.t} · ${CAL[ev.c].name}`;
+        l.append(n);
+      });
+    });
+  }
+});
+
+/* ---------- C: focus calendar ---------- */
+const FOCI = [{ key: "work", label: "Arbeit", cals: ["w", "t"] }, { key: "home", label: "Privat & Familie", cals: ["p", "f"] }, { key: "all", label: "Alle", cals: ["p", "f", "w", "t"] }];
+let focus = "work";
+function freeHours(i) {
+  const busy = EV.filter((e) => e.d === i && !e.declined).map((e) => [Math.max(8, e.s), Math.min(18, e.e)]).filter(([s, e]) => e > s).sort((a, b) => a[0] - b[0]);
+  let used = 0, cur = 8;
+  busy.forEach(([s, e]) => { if (e > cur) { used += e - Math.max(s, cur); cur = e; } });
+  return 10 - used;
+}
+function renderC() {
+  const f = FOCI.find((x) => x.key === focus);
+  const seg = document.getElementById("c-seg");
+  seg.replaceChildren(...FOCI.map((x) => { const b = el("button", null, x.label); b.type = "button"; b.setAttribute("aria-pressed", x.key === focus); b.onclick = () => { focus = x.key; renderC(); }; return b; }));
+  grid(document.getElementById("c-week"), {
+    meta: (i) => { const h = freeHours(i); return el("div", "daymeta", i >= 5 ? "Wochenende" : `${h.toLocaleString("de-DE")} h frei`); },
+    allday: (a) => {
+      const on = f.cals.includes(a.c);
+      const b = el("div", "bar", esc(a.t));
+      b.style.cssText = on ? `background:${CAL[a.c].color};color:#fff` : `background:repeating-linear-gradient(135deg,var(--hatch) 0 5px,transparent 5px 10px);color:var(--muted)`;
+      return b;
+    },
+    renderDay: (day, i) => {
+      const todays = EV.filter((e) => e.d === i);
+      layout(todays).forEach(({ ev, col, cols }) => {
+        const on = f.cals.includes(ev.c);
+        const conflict = on && focus !== "all" && !ev.declined && todays.some((o) => o !== ev && !f.cals.includes(o.c) && overlaps(o, ev));
+        const cls = on ? (ev.declined ? "declined" : "solid") : "busy";
+        const html = on ? tileHTML(ev) : `<span class="t"><span>${CAL[ev.c].name} · belegt</span></span>`;
+        const n = el("div", `ev ${cls} ${conflict ? "conflict" : ""}`, html);
+        const w = 100 / cols;
+        n.style.cssText = `--c:${CAL[ev.c].color};top:${y(ev.s) + 1}px;height:${(ev.e - ev.s) * HH - 2}px;left:calc(${col * w}% + 2px);width:calc(${w}% - 4px);z-index:${on ? 2 : 1}`;
+        n.title = on ? `${ev.t}${conflict ? " · überschneidet sich" : ""}` : `${CAL[ev.c].name}: ${ev.t}`;
+        day.append(n);
+      });
+    }
+  });
+}
+renderC();
+
+/* ---------- D: agenda week with density ---------- */
+(function renderD() {
+  const wrap = el("div", "agenda");
+  DAYS.forEach(([wd, n], i) => {
+    const col = el("div", `acol ${i >= 5 ? "weekend" : ""}`);
+    col.append(el("div", `dayname ${i === TODAY ? "today" : ""}`, `<span class="wd">${wd}</span><span class="num">${n}</span>`));
+    const todays = EV.filter((e) => e.d === i).sort((a, b) => a.s - b.s);
+    const dens = el("div", "density");
+    todays.forEach((e) => { const s = el("i"); s.style.cssText = `left:${((e.s - H0) / (H1 - H0)) * 100}%;width:${((e.e - e.s) / (H1 - H0)) * 100}%;background:${CAL[e.c].color}`; dens.append(s); });
+    col.append(dens, el("div", "density-scale", "<span>7</span><span>13</span><span>20</span>"));
+    ALLDAY.filter((a) => a.d0 <= i && i <= a.d1).forEach((a) => { const b = el("div", "abadge", esc(a.t)); b.style.setProperty("--c", CAL[a.c].color); col.append(b); });
+    if (!todays.length) col.append(el("div", "empty", "Keine Termine"));
+    let prevEnd = null;
+    todays.forEach((ev) => {
+      if (prevEnd !== null && ev.s - prevEnd >= 2) col.append(el("div", "gap", `${(ev.s - prevEnd).toLocaleString("de-DE")} h frei`));
+      const clash = todays.find((o) => o !== ev && !o.declined && !ev.declined && overlaps(o, ev));
+      const row = el("div", "arow",
+        `<div class="tm"><b>${fmt(ev.s)}</b>${fmt(ev.e)}</div><div class="stripe"></div>` +
+        `<div style="min-width:0"><div class="ti">${dots(ev)}${ev.online ? ICON.video : ""}<span ${ev.declined ? 'style="text-decoration:line-through;color:var(--muted)"' : ""}>${esc(ev.t)}</span></div>` +
+        `${ev.loc ? `<div class="sub">${esc(ev.loc)}</div>` : `<div class="sub">${CAL[ev.c].name}</div>`}` +
+        `${clash ? `<div class="warn">${ICON.warn}<span>überschneidet „${esc(clash.t)}“</span></div>` : ""}</div>`);
+      row.style.setProperty("--c", CAL[ev.c].color);
+      col.append(row);
+      prevEnd = Math.max(prevEnd ?? 0, ev.e);
+    });
+    wrap.append(col);
+  });
+  document.getElementById("d-week").replaceChildren(wrap);
+})();
+</script>

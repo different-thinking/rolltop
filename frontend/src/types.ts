@@ -1132,6 +1132,10 @@ export type CalendarSummary = {
   /** copy_target marks the reader's second calendar: an event entered in any
    * other calendar can be kept in this one as well. At most one carries it. */
   copy_target: boolean;
+  /** listed says whether the calendar view lists the calendar at all (chosen
+   * under Settings -> Preferences -> Calendars). One that is not listed is
+   * never selected and never the second calendar. */
+  listed: boolean;
   /** online_meeting_providers lists the online meetings an event here can be
    * made -- Teams for a Microsoft calendar. Empty means none. */
   online_meeting_providers: string[];

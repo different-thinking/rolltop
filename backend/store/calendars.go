@@ -8,9 +8,16 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 )
+
+// ErrCalendarHidden refuses to switch on, or make the second calendar, a
+// calendar the reader hid from the calendar view. The store answers it rather
+// than the route alone, so a hide racing a switch-on cannot leave a hidden
+// calendar drawn or carrying the copy mark.
+var ErrCalendarHidden = errors.New("calendar is hidden in the calendar view")
 
 const (
 	// CalendarSyncStatusOK marks a calendar whose last event sync completed.
@@ -38,7 +45,7 @@ const (
 const calendarSelectColumns = `id, user_id, google_connection_id, remote_calendar_id,
 	summary, description, time_zone, color, access_role, is_primary, selected,
 	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail,
-	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers`
+	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers, listed`
 
 // Calendar is one calendar of one connected account.
 type Calendar struct {
@@ -76,6 +83,11 @@ type Calendar struct {
 	// in any other calendar can be copied into as well. At most one calendar of
 	// a user carries it. The second calendar may belong to the other provider.
 	CopyTarget bool
+	// Listed says whether the calendar view lists the calendar at all. A
+	// calendar that is not listed is never Selected and never the CopyTarget:
+	// SetCalendarListed takes both away with the listing, and the API refuses
+	// to give either back while it is hidden.
+	Listed bool
 	// FullReadAt is when the Microsoft sync last read the calendar's whole
 	// window rather than the near one. Google rows leave it zero.
 	FullReadAt time.Time
@@ -328,14 +340,61 @@ func cleanWords(values []string) []string {
 	return out
 }
 
-// SetCalendarSelected switches one calendar's visibility in the week view.
+// SetCalendarSelected switches one calendar's visibility in the week view. A
+// hidden calendar cannot be switched on (ErrCalendarHidden).
 func (s *Store) SetCalendarSelected(ctx context.Context, userID, calendarID int64, selected bool) error {
 	if userID <= 0 || calendarID <= 0 {
 		return ErrNotFound
 	}
-	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
-		`UPDATE calendars SET selected = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
-		boolInt(selected), nowUnix(), userID, calendarID)
+	db := s.mustDataDB(ctx, userID)
+	query := `UPDATE calendars SET selected = ?, updated_at = ? WHERE user_id = ? AND id = ?`
+	if selected {
+		query += ` AND listed = 1`
+	}
+	res, err := db.ExecContext(ctx, query, boolInt(selected), nowUnix(), userID, calendarID)
+	if err != nil {
+		return err
+	}
+	if err := requireCalendarRow(res); err != nil {
+		if selected && IsNotFound(err) {
+			return calendarHiddenOrMissing(ctx, db, userID, calendarID)
+		}
+		return err
+	}
+	return nil
+}
+
+// calendarHiddenOrMissing explains an update guarded by `listed = 1` that
+// matched no row: the calendar is hidden, or it is not this user's at all.
+func calendarHiddenOrMissing(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, userID, calendarID int64) error {
+	var listed int64
+	if err := q.QueryRowContext(ctx, `SELECT listed FROM calendars WHERE user_id = ? AND id = ?`,
+		userID, calendarID).Scan(&listed); err != nil {
+		return err
+	}
+	if listed == 0 {
+		return ErrCalendarHidden
+	}
+	return ErrNotFound
+}
+
+// SetCalendarListed shows or hides one calendar in the calendar view. Hiding
+// also switches it off and takes the second-calendar mark off it, in one
+// transaction: a calendar the reader cannot see in the list can neither be
+// switched back off there nor chosen as the second calendar, so leaving either
+// set would be a state nothing on screen could undo. Showing it again lists it
+// switched off; drawing it is the sidebar's switch, as it is for any calendar.
+func (s *Store) SetCalendarListed(ctx context.Context, userID, calendarID int64, listed bool) error {
+	if userID <= 0 || calendarID <= 0 {
+		return ErrNotFound
+	}
+	query := `UPDATE calendars SET listed = 1, updated_at = ? WHERE user_id = ? AND id = ?`
+	if !listed {
+		query = `UPDATE calendars SET listed = 0, selected = 0, copy_target = 0, updated_at = ? WHERE user_id = ? AND id = ?`
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx, query, nowUnix(), userID, calendarID)
 	if err != nil {
 		return err
 	}
@@ -345,7 +404,8 @@ func (s *Store) SetCalendarSelected(ctx context.Context, userID, calendarID int6
 // SetCalendarCopyTarget makes one calendar the reader's second calendar, or
 // stops it being one. Choosing a calendar takes the mark off whichever calendar
 // carried it before, in the same transaction, so there is never a moment with
-// two -- the unique index would refuse it anyway.
+// two -- the unique index would refuse it anyway. A hidden calendar cannot be
+// chosen (ErrCalendarHidden).
 func (s *Store) SetCalendarCopyTarget(ctx context.Context, userID, calendarID int64, on bool) error {
 	if userID <= 0 || calendarID <= 0 {
 		return ErrNotFound
@@ -367,13 +427,18 @@ func (s *Store) SetCalendarCopyTarget(ctx context.Context, userID, calendarID in
 			return err
 		}
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE calendars SET copy_target = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
-		boolInt(on), ts, userID, calendarID)
+	query := `UPDATE calendars SET copy_target = ?, updated_at = ? WHERE user_id = ? AND id = ?`
+	if on {
+		query += ` AND listed = 1`
+	}
+	res, err := tx.ExecContext(ctx, query, boolInt(on), ts, userID, calendarID)
 	if err != nil {
 		return err
 	}
 	if err := requireCalendarRow(res); err != nil {
+		if on && IsNotFound(err) {
+			return calendarHiddenOrMissing(ctx, tx, userID, calendarID)
+		}
 		return err
 	}
 	return tx.Commit()
@@ -568,7 +633,7 @@ func requireCalendarRow(res sql.Result) error {
 
 func scanCalendar(dest scanDest) (Calendar, error) {
 	var calendar Calendar
-	var isPrimary, selected, copyTarget int64
+	var isPrimary, selected, copyTarget, listed int64
 	var windowStart, lastSync, lastSuccess, fullRead int64
 	var meetingProviders string
 	if err := dest.Scan(&calendar.ID, &calendar.UserID, &calendar.GoogleConnectionID,
@@ -576,7 +641,7 @@ func scanCalendar(dest scanDest) (Calendar, error) {
 		&calendar.TimeZone, &calendar.Color, &calendar.AccessRole, &isPrimary, &selected,
 		&calendar.SyncToken, &windowStart, &lastSync, &lastSuccess,
 		&calendar.Status, &calendar.StatusDetail, &copyTarget,
-		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders); err != nil {
+		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders, &listed); err != nil {
 		return Calendar{}, err
 	}
 	calendar.FullReadAt = unixTime(fullRead)
@@ -584,6 +649,7 @@ func scanCalendar(dest scanDest) (Calendar, error) {
 	calendar.IsPrimary = isPrimary != 0
 	calendar.Selected = selected != 0
 	calendar.CopyTarget = copyTarget != 0
+	calendar.Listed = listed != 0
 	calendar.WindowStartAt = unixTime(windowStart)
 	calendar.LastSyncAt = unixTime(lastSync)
 	calendar.LastSuccessAt = unixTime(lastSuccess)

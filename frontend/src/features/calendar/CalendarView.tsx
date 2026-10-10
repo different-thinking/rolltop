@@ -5,6 +5,7 @@
 // first.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
 import type { AddToast, LocationState } from "../../appTypes";
@@ -14,12 +15,16 @@ import { EventDialog } from "./EventDialog";
 import {
   addDays,
   allDayEventsForDay,
+  busiestColumns,
+  calendarAccountGroups,
   calendarColor,
   calendarRouteDate,
   calendarURL,
+  dayColumnWeights,
   dayHeight,
   hourHeight,
   layoutDayEvents,
+  lensLaneCalendarIDs,
   localDateKey,
   minutesIntoDay,
   providerName,
@@ -29,10 +34,29 @@ import {
   timedEventTouchesDay,
   weekDays
 } from "./weekModel";
+import type { PositionedEvent } from "./weekModel";
 
 /** nowLineInterval keeps the current-time marker roughly honest without
  * re-rendering the whole week every second. */
 const nowLineInterval = 60_000;
+
+/** calendarSettingsPath is where the reader chooses which calendars the view
+ * lists. */
+const calendarSettingsPath = "/settings/account/preferences/calendars";
+
+/** dayLensKey remembers per browser whether the day lens is on. It is a way
+ * of looking at the week, not a setting: a narrow laptop and a wide desk
+ * screen want different answers, and losing it to cleared site data costs one
+ * click. */
+const dayLensKey = "rolltop.calendar.dayLens";
+
+function storedDayLens(): boolean {
+  try {
+    return window.localStorage.getItem(dayLensKey) === "on";
+  } catch {
+    return false;
+  }
+}
 
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
@@ -70,6 +94,11 @@ export function CalendarView({
   const [dialogProblem, setDialogProblem] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
   const [now, setNow] = useState(() => new Date());
+  const [dayLens, setDayLens] = useState(storedDayLens);
+  // The day the lens is open on, as a date key. null leaves the choice to
+  // resolveLensIndex; "" is the reader having closed it, which holds until
+  // they open a day again.
+  const [lensDayKey, setLensDayKey] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
 
@@ -283,18 +312,96 @@ export function CalendarView({
       setDialog({ event: data.event, day: dialog.day, formKey: dialog.formKey });
     });
 
-  const writableCalendars = calendars.filter((calendar) => calendar.can_write);
+  // Only the calendars the reader chose to list take part in the view; the
+  // rest are still loaded so a copy mark can name the calendar it stands for.
+  const listedCalendars = useMemo(() => calendars.filter((calendar) => calendar.listed), [calendars]);
+  const writableCalendars = listedCalendars.filter((calendar) => calendar.can_write);
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
+  // The day lens: one day opened up with a lane per calendar, every other day
+  // sized by how much it has at once. Lanes follow the Calendars menu's order.
+  // Every day is laid out to size it, so the result is kept until the week,
+  // its events or the lens change rather than redone on every render (the
+  // now-line ticks once a minute).
+  const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
+    const index = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+    const lanes =
+      index >= 0
+        ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
+        : [];
+    const columns = dayLens
+      ? dayColumnWeights(events, days, index, lanes.length)
+          .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
+          .join(" ")
+      : undefined;
+    return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
+  }, [dayLens, lensDayKey, days, events, todayKey, listedCalendars]);
+
+  const toggleDayLens = () => {
+    const next = !dayLens;
+    setDayLens(next);
+    setLensDayKey(null);
+    try {
+      window.localStorage.setItem(dayLensKey, next ? "on" : "off");
+    } catch {
+      // Remembering the choice is a convenience; the switch itself still works.
+    }
+  };
+
+  const openEvent = (event: CalendarEvent, day: Date) => {
+    setDialogProblem("");
+    setDialog({ event, day, formKey: `event-${event.id}` });
+  };
+
+  // One timed entry, placed in a share of its day column: the whole column
+  // normally, one calendar's lane of it under the day lens.
+  const renderTimedEvent = (placed: PositionedEvent, day: Date, lane: number, lanes: number) => {
+    const calendar = calendarsByID.get(placed.event.calendar_id);
+    const color = calendarColor(calendar);
+    const laneWidth = 100 / lanes;
+    const width = laneWidth / placed.columns;
+    const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
+    return (
+      <button
+        key={placed.event.id}
+        type="button"
+        className={`calendar-event ${declined ? "declined" : ""} ${
+          placed.event.status === "cancelled" ? "cancelled" : ""
+        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""}`}
+        style={{
+          top: placed.top,
+          height: placed.height,
+          left: `${lane * laneWidth + placed.column * width}%`,
+          width: `calc(${width}% - 3px)`,
+          background: declined ? "transparent" : color,
+          borderColor: color,
+          color: declined ? "var(--text)" : readableTextColor(color)
+        }}
+        title={eventTooltip(placed.event, calendar, calendarsByID)}
+        onClick={() => openEvent(placed.event, day)}
+      >
+        <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
+        <span className="calendar-event-title">
+          <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+          {placed.event.online_meeting ? (
+            <span className="calendar-event-online" title="Online meeting">
+              <Icon name="video" />
+            </span>
+          ) : null}
+          {placed.event.summary || "(No title)"}
+        </span>
+        {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
+      </button>
+    );
+  };
+
   return (
     <div className="calendar-shell">
-      <CalendarSidebar
-        calendars={calendars}
-        onToggle={toggleCalendar}
-        onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
-      />
-      <section className="calendar-main">
+      <section
+        className={`calendar-main ${dayLens ? "day-lens" : ""}`}
+        style={dayColumns ? ({ "--calendar-day-columns": dayColumns } as CSSProperties) : undefined}
+      >
         <header className="content-head calendar-head">
           <div className="calendar-nav">
             <button
@@ -319,6 +426,27 @@ export function CalendarView({
             <h1>{weekLabel}</h1>
           </div>
           <div className="calendar-head-actions">
+            <CalendarPicker
+              calendars={listedCalendars}
+              hiddenCount={calendars.length - listedCalendars.length}
+              onToggle={toggleCalendar}
+              onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+              navigate={navigate}
+            />
+            <button
+              type="button"
+              className="ghost calendar-lens-toggle"
+              aria-pressed={dayLens}
+              title={
+                dayLens
+                  ? "Turn the day lens off and give every day the same width"
+                  : "Open one day with a column per calendar; click a weekday to choose which"
+              }
+              onClick={toggleDayLens}
+            >
+              <Icon name="search" />
+              Day lens
+            </button>
             <button type="button" className="ghost" disabled={syncing || calendars.length === 0} onClick={() => void syncNow()}>
               <Icon name="sync" />
               {syncing ? "Syncing…" : "Sync now"}
@@ -348,12 +476,52 @@ export function CalendarView({
 
         <div className="calendar-daynames">
           <div className="calendar-gutter" />
-          {days.map((day) => (
-            <div key={day.toISOString()} className={`calendar-dayname ${localDateKey(day) === todayKey ? "today" : ""}`}>
-              <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
-              <span className="calendar-dayname-number">{day.getDate()}</span>
-            </div>
-          ))}
+          {days.map((day, index) => {
+            const today = localDateKey(day) === todayKey ? "today" : "";
+            const label = (
+              <>
+                <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
+                <span className="calendar-dayname-number">{day.getDate()}</span>
+              </>
+            );
+            if (!dayLens) {
+              return (
+                <div key={day.toISOString()} className={`calendar-dayname ${today}`}>
+                  {label}
+                </div>
+              );
+            }
+            const open = index === lensIndex;
+            return (
+              <div key={day.toISOString()} className={`calendar-dayname ${today} ${open ? "lens-open" : ""}`}>
+                <button
+                  type="button"
+                  className="calendar-dayname-button"
+                  aria-pressed={open}
+                  title={open ? "Close this day" : "Open this day with a column per calendar"}
+                  onClick={() => setLensDayKey(open ? "" : localDateKey(day))}
+                >
+                  {label}
+                </button>
+                {open && lensLanes.length > 0 ? (
+                  <div className="calendar-lens-lanes">
+                    {lensLanes.map((calendarID) => {
+                      const calendar = calendarsByID.get(calendarID);
+                      return (
+                        <span
+                          key={calendarID}
+                          title={calendar?.name}
+                          style={{ borderBottomColor: calendarColor(calendar) }}
+                        >
+                          {calendar?.name || "Calendar"}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
 
         <div className="calendar-allday">
@@ -391,9 +559,10 @@ export function CalendarView({
               </div>
             ))}
           </div>
-          {days.map((day) => {
+          {days.map((day, index) => {
             const isToday = localDateKey(day) === todayKey;
             const dayEvents = events.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
+            const lanes = index === lensIndex ? lensLanes : [];
             return (
               <div
                 key={day.toISOString()}
@@ -409,51 +578,21 @@ export function CalendarView({
                 {Array.from({ length: 24 }, (_, hour) => (
                   <div key={hour} className="calendar-slot" style={{ top: hour * hourHeight, height: hourHeight }} />
                 ))}
-                {layoutDayEvents(dayEvents, day).map((placed) => {
-                  const calendar = calendarsByID.get(placed.event.calendar_id);
-                  const color = calendarColor(calendar);
-                  const width = 100 / placed.columns;
-                  const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
-                  return (
-                    <button
-                      key={placed.event.id}
-                      type="button"
-                      className={`calendar-event ${declined ? "declined" : ""} ${
-                        placed.event.status === "cancelled" ? "cancelled" : ""
-                      } ${
-                        placed.continuesBefore ? "continues-before" : ""
-                      } ${placed.continuesAfter ? "continues-after" : ""}`}
-                      style={{
-                        top: placed.top,
-                        height: placed.height,
-                        left: `${placed.column * width}%`,
-                        width: `calc(${width}% - 3px)`,
-                        background: declined ? "transparent" : color,
-                        borderColor: color,
-                        color: declined ? "var(--text)" : readableTextColor(color)
-                      }}
-                      title={eventTooltip(placed.event, calendar, calendarsByID)}
-                      onClick={() => {
-                        setDialogProblem("");
-                        setDialog({ event: placed.event, day, formKey: `event-${placed.event.id}` });
-                      }}
-                    >
-                      <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
-                      <span className="calendar-event-title">
-                        <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
-                        {placed.event.online_meeting ? (
-                          <span className="calendar-event-online" title="Online meeting">
-                            <Icon name="video" />
-                          </span>
-                        ) : null}
-                        {placed.event.summary || "(No title)"}
-                      </span>
-                      {placed.event.location ? (
-                        <span className="calendar-event-location">{placed.event.location}</span>
-                      ) : null}
-                    </button>
-                  );
-                })}
+                {lanes.length > 1
+                  ? lanes.flatMap((calendarID, lane) => [
+                      lane > 0 ? (
+                        <div
+                          key={`divider-${calendarID}`}
+                          className="calendar-lens-divider"
+                          style={{ left: `${(lane * 100) / lanes.length}%` }}
+                        />
+                      ) : null,
+                      ...layoutDayEvents(
+                        dayEvents.filter((event) => event.calendar_id === calendarID),
+                        day
+                      ).map((placed) => renderTimedEvent(placed, day, lane, lanes.length))
+                    ])
+                  : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, 0, 1))}
                 {isToday ? <div className="calendar-now" style={{ top: (minutesIntoDay(now) / 60) * hourHeight }} /> : null}
               </div>
             );
@@ -479,85 +618,166 @@ export function CalendarView({
   );
 }
 
-/** CalendarSidebar lists every calendar grouped by the account it came from,
- * because two accounts routinely have a calendar called the same thing. */
-function CalendarSidebar({
+/** CalendarPicker is the menu in the calendar header that lists the calendars
+ * the reader chose to list, grouped by the account they came from, because two
+ * accounts routinely have a calendar called the same thing. It used to be a
+ * column of its own beside the week, which with four calendars took a sixth of
+ * the screen from the days that needed it; folded into the header it costs one
+ * button, and the button's dots still say which calendars are drawn. The
+ * second-calendar choice is made among the same calendars: one hidden under
+ * settings is never offered there. */
+function CalendarPicker({
   calendars,
+  hiddenCount,
   onToggle,
-  onChooseCopyTarget
+  onChooseCopyTarget,
+  navigate
 }: {
   calendars: CalendarSummary[];
+  hiddenCount: number;
   onToggle: (calendar: CalendarSummary) => Promise<void>;
   onChooseCopyTarget: (calendarID: number) => void;
+  navigate: (url: string) => void;
 }) {
   const writable = calendars.filter((calendar) => calendar.can_write);
   const copyTarget = calendars.find((calendar) => calendar.copy_target);
   // A chosen calendar that has since become read-only stays listed, or the
   // select would read "None" while the choice is still stored.
   const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
-  const groups = useMemo(() => {
-    const byAccount = new Map<string, CalendarSummary[]>();
-    for (const calendar of calendars) {
-      const key = calendar.connection_email || providerName(calendar);
-      const list = byAccount.get(key) || [];
-      list.push(calendar);
-      byAccount.set(key, list);
-    }
-    return Array.from(byAccount.entries());
-  }, [calendars]);
+  const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
+  const shown = calendars.filter((calendar) => calendar.selected);
+  const menuRef = useRef<HTMLDetailsElement | null>(null);
+  const [open, setOpen] = useState(false);
+
+  // A click anywhere else or Escape closes the menu. Toggling calendars inside
+  // it does not: switching three of them on in a row is the ordinary use.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => {
+      if (menuRef.current) menuRef.current.open = false;
+    };
+    const onPointerDown = (pointerEvent: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(pointerEvent.target as Node)) close();
+    };
+    const onKeyDown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  // A link inside the menu closes it first, so the menu is not left open over
+  // the page it led to when the reader comes back.
+  const menuLink = (path: string, icon: "settings" | "add", label: string) => (
+    <a
+      href={path}
+      onClick={(clickEvent) => {
+        clickEvent.preventDefault();
+        if (menuRef.current) menuRef.current.open = false;
+        navigate(path);
+      }}
+    >
+      <Icon name={icon} />
+      {label}
+    </a>
+  );
 
   return (
-    <aside className="calendar-sidebar">
-      {groups.map(([account, items]) => (
-        <div key={account} className="calendar-sidebar-group">
-          <div className="calendar-sidebar-account">{account}</div>
-          {items.map((calendar) => {
-            const color = calendarColor(calendar);
-            return (
-              <label key={calendar.id} className="calendar-toggle">
-                <input
-                  type="checkbox"
-                  checked={calendar.selected}
-                  onChange={() => void onToggle(calendar)}
-                />
-                <span className="calendar-swatch" style={{ background: color }} />
-                <span className="calendar-toggle-name">{calendar.name}</span>
-                {calendar.status === "error" ? (
-                  <span className="calendar-toggle-problem" title={calendar.status_detail}>
-                    <Icon name="report" />
-                  </span>
-                ) : null}
-                {!calendar.can_write ? <span className="calendar-toggle-tag">read-only</span> : null}
-              </label>
-            );
-          })}
-        </div>
-      ))}
-      {writable.length > 1 ? (
-        <div className="calendar-sidebar-group calendar-copy-target">
-          <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
-            Second calendar
-          </label>
-          <select
-            id="calendar-copy-target"
-            value={copyTarget?.id || 0}
-            onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
-          >
-            <option value={0}>None</option>
-            {copyOptions.map((calendar) => (
-              <option key={calendar.id} value={calendar.id}>
-                {calendar.name}
-                {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
-              </option>
-            ))}
-          </select>
-          <p className="calendar-copy-target-hint">
-            An event in any other calendar can be added here as well. It is shown once, marked with the other
-            calendar's colour.
-          </p>
-        </div>
-      ) : null}
-    </aside>
+    <details
+      className="calendar-picker"
+      ref={menuRef}
+      onToggle={(toggleEvent) => setOpen((toggleEvent.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary
+        className="calendar-picker-summary"
+        aria-label={`Calendars, ${shown.length} of ${calendars.length} shown`}
+        title={shown.length > 0 ? `Shown: ${shown.map((calendar) => calendar.name).join(", ")}` : "No calendar shown"}
+      >
+        <Icon name="calendar" />
+        Calendars
+        <span className="calendar-picker-dots" aria-hidden="true">
+          {shown.map((calendar) => (
+            <span key={calendar.id} style={{ background: calendarColor(calendar) }} />
+          ))}
+        </span>
+        <Icon name="expand_more" />
+      </summary>
+      <div className="calendar-picker-panel">
+        {groups.map(([account, items]) => (
+          <div key={account} className="calendar-sidebar-group">
+            <div className="calendar-sidebar-account">{account}</div>
+            {items.map((calendar) => {
+              const color = calendarColor(calendar);
+              return (
+                <label key={calendar.id} className="calendar-toggle">
+                  <input
+                    type="checkbox"
+                    checked={calendar.selected}
+                    onChange={() => void onToggle(calendar)}
+                  />
+                  <span className="calendar-swatch" style={{ background: color }} />
+                  <span className="calendar-toggle-name">{calendar.name}</span>
+                  {calendar.status === "error" ? (
+                    <span className="calendar-toggle-problem" title={calendar.status_detail}>
+                      <Icon name="report" />
+                    </span>
+                  ) : null}
+                  {!calendar.can_write ? <span className="calendar-toggle-tag">read-only</span> : null}
+                </label>
+              );
+            })}
+          </div>
+        ))}
+        {writable.length > 1 ? (
+          <div className="calendar-sidebar-group calendar-copy-target">
+            <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
+              Second calendar
+            </label>
+            <select
+              id="calendar-copy-target"
+              value={copyTarget?.id || 0}
+              onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
+            >
+              <option value={0}>None</option>
+              {copyOptions.map((calendar) => (
+                <option key={calendar.id} value={calendar.id}>
+                  {calendar.name}
+                  {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
+                </option>
+              ))}
+            </select>
+            <p className="calendar-copy-target-hint">
+              An event in any other calendar can be added here as well. It is shown once, marked with the other
+              calendar's colour.
+            </p>
+          </div>
+        ) : null}
+        {calendars.length > 0 || hiddenCount > 0 ? (
+          <div className="calendar-sidebar-manage">
+            {calendars.length === 0 ? (
+              <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
+            ) : null}
+            {menuLink(
+              calendarSettingsPath,
+              "settings",
+              hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"
+            )}
+          </div>
+        ) : (
+          // Nothing connected yet: an empty box would say nothing, so the menu
+          // says where calendars come from.
+          <div className="calendar-picker-empty">
+            <p>No calendars yet. Connect an account and allow calendar access.</p>
+            {menuLink("/settings/account/google", "add", "Connect a Google account")}
+            {menuLink("/settings/account/microsoft", "add", "Connect a Microsoft 365 account")}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -583,6 +803,26 @@ function CopyMarks({
       ))}
     </span>
   );
+}
+
+/** resolveLensIndex picks the day the lens opens on: the one the reader chose
+ * when it is in this week, otherwise today when today has anything timed,
+ * otherwise the day with the most at once -- the day the lens exists for. */
+function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: string | null, todayKey: string): number {
+  const chosen = chosenKey ? days.findIndex((day) => localDateKey(day) === chosenKey) : -1;
+  if (chosen >= 0) return chosen;
+  const today = days.findIndex((day) => localDateKey(day) === todayKey);
+  if (today >= 0 && busiestColumns(events, days[today]) > 0) return today;
+  let busiest = 0;
+  let most = -1;
+  days.forEach((day, index) => {
+    const columns = busiestColumns(events, day);
+    if (columns > most) {
+      most = columns;
+      busiest = index;
+    }
+  });
+  return busiest;
 }
 
 /** dayAtOffset turns a double-click in a day column into the hour it landed on,

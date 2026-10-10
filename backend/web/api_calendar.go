@@ -48,6 +48,9 @@ type apiCalendar struct {
 	// CopyTarget marks the reader's second calendar, the one a new event can
 	// be copied into as well.
 	CopyTarget bool `json:"copy_target"`
+	// Listed says whether the calendar view lists the calendar at all. One
+	// that is not listed is never selected and never the second calendar.
+	Listed bool `json:"listed"`
 	// OnlineMeetingProviders lists the online meeting kinds an event here can
 	// be made -- a Microsoft calendar's Teams. Empty means none.
 	OnlineMeetingProviders []string `json:"online_meeting_providers"`
@@ -149,6 +152,7 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 		IsPrimary:              calendar.IsPrimary,
 		Selected:               calendar.Selected,
 		CopyTarget:             calendar.CopyTarget,
+		Listed:                 calendar.Listed,
 		SyncedFrom:             timeString(calendar.WindowStartAt),
 		LastSyncAt:             timeString(calendar.LastSyncAt),
 		Status:                 calendar.Status,
@@ -311,9 +315,10 @@ func (s *Server) presentCalendars(ctx context.Context, userID int64, calendars [
 	return out
 }
 
-// apiCalendarByID switches one calendar's visibility, or makes it the reader's
-// second calendar. Either field may be left out; a request naming neither
-// changes nothing and answers with the calendar as it is.
+// apiCalendarByID switches one calendar's visibility, lists or hides it in the
+// calendar view, or makes it the reader's second calendar. Every field may be
+// left out; a request naming none changes nothing and answers with the
+// calendar as it is.
 func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID int64, rest string) {
 	calendarID, ok := parsePositiveID(w, rest)
 	if !ok {
@@ -329,6 +334,7 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	var in struct {
 		Selected   *bool `json:"selected"`
 		CopyTarget *bool `json:"copy_target"`
+		Listed     *bool `json:"listed"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -342,21 +348,44 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		s.serverError(w, r, err)
 		return
 	}
-	if in.CopyTarget != nil {
-		// A copy is a write, so a calendar shared read-only would turn every
-		// event entered with a copy into a copy Google refuses.
-		if *in.CopyTarget && !calendar.CanWrite() {
-			writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
+	// Only a listed calendar may be drawn or be the second calendar: the
+	// calendar view offers both only for the calendars it lists, and a hidden
+	// one carrying either would be a state nothing on screen could undo.
+	listed := calendar.Listed
+	if in.Listed != nil {
+		listed = *in.Listed
+	}
+	if !listed && ((in.Selected != nil && *in.Selected) || (in.CopyTarget != nil && *in.CopyTarget)) {
+		writeAPIError(w, http.StatusBadRequest, calendarHiddenMessage)
+		return
+	}
+	// A copy is a write, so a calendar shared read-only would turn every event
+	// entered with a copy into a copy Google refuses. Refused before anything
+	// is written, so a request that also lists the calendar changes nothing.
+	if in.CopyTarget != nil && *in.CopyTarget && !calendar.CanWrite() {
+		writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
+		return
+	}
+	// The listing goes first, because hiding a calendar also switches it off
+	// and clears the second-calendar mark; a request that hides it and names
+	// either of those as false asks for nothing more.
+	if in.Listed != nil {
+		if err := s.store.SetCalendarListed(r.Context(), userID, calendarID, *in.Listed); err != nil {
+			s.serverError(w, r, err)
 			return
 		}
+	}
+	// The store refuses either for a calendar hidden since it was read above,
+	// which is the same answer the check above gives.
+	if in.CopyTarget != nil {
 		if err := s.store.SetCalendarCopyTarget(r.Context(), userID, calendarID, *in.CopyTarget); err != nil {
-			s.serverError(w, r, err)
+			s.writeCalendarSwitchError(w, r, err)
 			return
 		}
 	}
 	if in.Selected != nil {
 		if err := s.store.SetCalendarSelected(r.Context(), userID, calendarID, *in.Selected); err != nil {
-			s.serverError(w, r, err)
+			s.writeCalendarSwitchError(w, r, err)
 			return
 		}
 	}
@@ -380,6 +409,23 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	writeJSON(w, map[string]any{
 		"calendar": apiCalendarFromStore(calendar, s.calendarConnectionEmail(r.Context(), userID, calendar)),
 	})
+}
+
+// calendarHiddenMessage refuses to draw a hidden calendar or make it the
+// second calendar.
+const calendarHiddenMessage = "This calendar is hidden in the calendar view. Show it there first."
+
+// writeCalendarSwitchError answers a failed visibility or second-calendar
+// write.
+func (s *Server) writeCalendarSwitchError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrCalendarHidden):
+		writeAPIError(w, http.StatusBadRequest, calendarHiddenMessage)
+	case store.IsNotFound(err):
+		http.NotFound(w, r)
+	default:
+		s.serverError(w, r, err)
+	}
 }
 
 // apiCalendarEvents answers a range query and creates events.
@@ -603,6 +649,18 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 	}
 	if in.CalendarID <= 0 {
 		writeAPIError(w, http.StatusBadRequest, "An event needs a calendar.")
+		return
+	}
+	// A hidden calendar is switched off and no longer synced, so an event
+	// created there would exist at the provider and never appear in the week.
+	// The picker only offers listed calendars; this is for a form a tab kept
+	// open while the calendar was hidden in another one. A calendar that is not
+	// found is left to the router, which answers for it as it always has.
+	if calendar, err := s.store.Calendar(r.Context(), userID, in.CalendarID); err == nil && !calendar.Listed {
+		writeAPIError(w, http.StatusBadRequest, "This calendar is hidden in the calendar view. Show it there first, or choose another calendar.")
+		return
+	} else if err != nil && !store.IsNotFound(err) {
+		s.serverError(w, r, err)
 		return
 	}
 	var copyCalendarID int64

@@ -645,6 +645,37 @@ site and in review.
 - A calendar the user has switched off is not synced. Switching one on triggers
   its own first sync, because an unsynced week renders as an empty one and reads
   as "nothing scheduled".
+- **A calendar the reader hid is out of the calendar view entirely, and hiding
+  is what says so -- not a second gate.** `calendars.listed` (Settings ->
+  Preferences -> Calendars) decides which calendars the calendar's Calendars menu lists, and
+  the second-calendar choice and a new event's calendar are offered only among
+  those. `Store.SetCalendarListed` switches a hidden calendar off and takes the
+  second-calendar mark off it in the same write, and the API refuses to give
+  either back while it is hidden, so `selected` keeps meaning "drawn and synced"
+  and the sync loops and the range query need not ask about the listing. The
+  store enforces both refusals itself (`ErrCalendarHidden`), so a hide racing
+  a switch-on from another tab cannot leave a hidden calendar drawn, and the
+  create route refuses a hidden calendar too: it is no longer synced, so an
+  event created there would exist at the provider and never appear in the
+  week. Showing it again lists it switched off. Every calendar an upgrade finds stays
+  listed: hiding is the reader's choice.
+- **The day lens changes how the week is drawn, never what it holds.** With it
+  on (a per-browser switch in `localStorage`, off by default), one day opens up
+  with a lane per calendar and every other day is sized by how much it has at
+  once (`dayColumnWeights`); with it off the week is exactly the equal-column
+  grid. The widths are one custom property, `--calendar-day-columns`, set on
+  `.calendar-main` and read by the day names, the all-day bar and the grid
+  alike -- set it on one of them only and the columns stop lining up. Lanes
+  follow `calendarAccountGroups`, the one order the Calendars menu and the calendar
+  settings use, and a calendar the order does not know still gets a lane
+  (`lensLaneCalendarIDs`): drawing an event in an unnamed lane is recoverable,
+  dropping it is not.
+- **The calendar list is a menu in the calendar header, not a column.**
+  `CalendarPicker` holds the visibility switches, the second-calendar choice
+  and the way to the calendar settings; the week takes the whole width beside
+  the app's own folder sidebar, which the top bar already hides. Toggling a
+  calendar leaves the menu open (switching three on is the ordinary use), and
+  the closed button still shows a dot per calendar being drawn.
 - **An event kept in two calendars is two Google events and one appointment.**
   A reader picks one second calendar (`calendars.copy_target`, unique per user)
   and an event entered anywhere else can be copied into it

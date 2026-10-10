@@ -293,6 +293,42 @@ func TestCreateEventGoesThroughGoogle(t *testing.T) {
 	}
 }
 
+// A calendar hidden from the calendar view takes no new events: it is no longer
+// synced, so one created there would never appear in the week. The refusal
+// comes before anything reaches Google.
+func TestCreateEventRefusesAHiddenCalendar(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	calendar := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+	if err := env.db.SetCalendarListed(context.Background(), env.owner.ID, calendar.ID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	body := []byte(`{"calendar_id":` + strconv.FormatInt(calendar.ID, 10) +
+		`,"summary":"Planning","start_at":"` + start.Format(time.RFC3339) +
+		`","end_at":"` + start.Add(time.Hour).Format(time.RFC3339) + `"}`)
+	response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	created := fake.created
+	fake.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("Google was asked to create %d events in a hidden calendar", created)
+	}
+
+	if err := env.db.SetCalendarListed(context.Background(), env.owner.ID, calendar.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if again := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body); again.Code != http.StatusOK {
+		t.Fatalf("shown again: status=%d body=%s", again.Code, again.Body.String())
+	}
+}
+
 // An event without a title or with an end before its start is refused before
 // anything reaches Google.
 func TestCreateEventValidatesTheSubmission(t *testing.T) {
@@ -591,6 +627,81 @@ func TestCalendarCopyTargetIsProtected(t *testing.T) {
 	// Leaving out "selected" must not switch the calendar off.
 	if !payload.Calendar.CopyTarget || !payload.Calendar.Selected {
 		t.Fatalf("calendar = %+v, want it chosen and still visible", payload.Calendar)
+	}
+}
+
+// Hiding a calendar from the calendar view is a protected write that also
+// switches it off and drops it as the second calendar, and a hidden calendar
+// can be neither switched on nor chosen until it is shown again.
+func TestCalendarListingIsProtected(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	withCalendarSync(t, env, &fakeCalendarAPI{}, true)
+	path := "/api/calendar/calendars/" + strconv.FormatInt(work.ID, 10)
+	if response := env.send(t, env.owner, http.MethodPut, path, []byte(`{"copy_target":true}`)); response.Code != http.StatusOK {
+		t.Fatalf("choose status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	if other := env.send(t, env.other, http.MethodPut, path, []byte(`{"listed":false}`)); other.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant hide status=%d, want 404", other.Code)
+	}
+	response := env.send(t, env.owner, http.MethodPut, path, []byte(`{"listed":false}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("hide status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Calendar apiCalendar `json:"calendar"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Calendar.Listed || payload.Calendar.Selected || payload.Calendar.CopyTarget {
+		t.Fatalf("calendar = %+v, want it hidden, switched off and not the second calendar", payload.Calendar)
+	}
+
+	for _, body := range []string{`{"selected":true}`, `{"copy_target":true}`} {
+		if refused := env.send(t, env.owner, http.MethodPut, path, []byte(body)); refused.Code != http.StatusBadRequest {
+			t.Fatalf("%s on a hidden calendar status=%d body=%s, want 400", body, refused.Code, refused.Body.String())
+		}
+	}
+	stored, err := env.db.Calendar(context.Background(), env.owner.ID, work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Selected || stored.CopyTarget {
+		t.Fatalf("calendar = %+v, a refused request changed it anyway", stored)
+	}
+
+	// Showing it and switching it on in one request is allowed.
+	if ok := env.send(t, env.owner, http.MethodPut, path, []byte(`{"listed":true,"selected":true}`)); ok.Code != http.StatusOK {
+		t.Fatalf("show status=%d body=%s", ok.Code, ok.Body.String())
+	}
+	stored, err = env.db.Calendar(context.Background(), env.owner.ID, work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Listed || !stored.Selected {
+		t.Fatalf("calendar = %+v, want it listed and drawn again", stored)
+	}
+
+	// A request refused for one of its fields writes none of them: showing a
+	// read-only calendar and choosing it as the second calendar leaves it
+	// hidden.
+	shared := secondCalendar(t, env, env.owner, connection.ID, "reader")
+	sharedPath := "/api/calendar/calendars/" + strconv.FormatInt(shared.ID, 10)
+	if response := env.send(t, env.owner, http.MethodPut, sharedPath, []byte(`{"listed":false}`)); response.Code != http.StatusOK {
+		t.Fatalf("hide shared status=%d body=%s", response.Code, response.Body.String())
+	}
+	if refused := env.send(t, env.owner, http.MethodPut, sharedPath, []byte(`{"listed":true,"copy_target":true}`)); refused.Code != http.StatusBadRequest {
+		t.Fatalf("show and choose read-only status=%d body=%s, want 400", refused.Code, refused.Body.String())
+	}
+	stored, err = env.db.Calendar(context.Background(), env.owner.ID, shared.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Listed || stored.CopyTarget {
+		t.Fatalf("calendar = %+v, a refused request listed it anyway", stored)
 	}
 }
 
