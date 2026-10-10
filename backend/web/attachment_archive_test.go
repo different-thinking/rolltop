@@ -171,3 +171,41 @@ func TestAttachmentArchiveFilenameStaysInOneDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachmentArchiveDispositionKeepsTheWholeSubject(t *testing.T) {
+	for subject, want := range map[string]string{
+		"Invoice 2024/05":   `attachment; filename="Invoice 2024_05.zip"`,
+		`Re: a\b`:           `attachment; filename="Re_ a_b.zip"`,
+		"":                  `attachment; filename=attachments.zip`,
+		"Quarterly: report": `attachment; filename="Quarterly_ report.zip"`,
+	} {
+		if got := attachmentArchiveDisposition(subject); got != want {
+			t.Errorf("attachmentArchiveDisposition(%q) = %q, want %q", subject, got, want)
+		}
+	}
+}
+
+func TestAttachmentArchiveNamesUnnamedPartsByUsualExtension(t *testing.T) {
+	names := attachmentArchiveNames{}
+	for contentType, want := range map[string]string{
+		"text/plain; charset=utf-8": "attachment.txt",
+		"image/jpeg":                "attachment.jpg",
+		"application/pdf":           "attachment.pdf",
+		"application/octet-stream":  "attachment",
+	} {
+		if got := names.next(store.Attachment{ContentType: contentType}); got != want {
+			t.Errorf("unnamed %s = %q, want %q", contentType, got, want)
+		}
+	}
+}
+
+func TestAttachmentArchiveModifiedStaysInZIPDateRange(t *testing.T) {
+	now := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
+	internal := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	if got := attachmentArchiveModified(time.Unix(0, 0).UTC(), internal, now); !got.Equal(internal) {
+		t.Errorf("1970 Date header = %v, want the internal date %v", got, internal)
+	}
+	if got := attachmentArchiveModified(time.Time{}, time.Time{}, now); !got.Equal(now) {
+		t.Errorf("no dates = %v, want %v", got, now)
+	}
+}

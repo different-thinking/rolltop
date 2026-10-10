@@ -909,30 +909,41 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 // matchingAttachment reconciles stored attachment metadata with freshly parsed MIME
 // parts. Content-ID wins for inline media, then filename/size, then type/size.
 func matchingAttachment(target store.Attachment, files []mailparse.Attachment) (mailparse.Attachment, bool) {
+	i := matchingAttachmentIndex(target, files)
+	if i < 0 {
+		return mailparse.Attachment{}, false
+	}
+	return files[i], true
+}
+
+// matchingAttachmentIndex is matchingAttachment answering with the position of
+// the part, so a caller resolving several rows against one parse can take each
+// part only once.
+func matchingAttachmentIndex(target store.Attachment, files []mailparse.Attachment) int {
 	targetName := strings.TrimSpace(target.Filename)
 	targetCID := strings.Trim(target.ContentID, "<>")
 	targetType := strings.TrimSpace(strings.ToLower(target.ContentType))
-	for _, file := range files {
+	for i, file := range files {
 		if targetCID != "" && strings.EqualFold(strings.Trim(file.ContentID, "<>"), targetCID) {
-			return file, true
+			return i
 		}
 	}
-	for _, file := range files {
+	for i, file := range files {
 		if targetName != "" && strings.EqualFold(strings.TrimSpace(file.Filename), targetName) {
 			if target.Size <= 0 || int64(len(file.Data)) == target.Size {
-				return file, true
+				return i
 			}
 		}
 	}
-	for _, file := range files {
+	for i, file := range files {
 		if targetName != "" && strings.EqualFold(strings.TrimSpace(file.Filename), targetName) {
-			return file, true
+			return i
 		}
 		if targetType != "" && strings.EqualFold(strings.TrimSpace(file.ContentType), targetType) && target.Size > 0 && int64(len(file.Data)) == target.Size {
-			return file, true
+			return i
 		}
 	}
-	return mailparse.Attachment{}, false
+	return -1
 }
 
 // loadMailboxChrome assembles the shared folder/sync state used by API presenters

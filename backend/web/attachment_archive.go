@@ -30,9 +30,10 @@ const attachmentArchiveRoutePrefix = "/attachments/message/"
 // that cannot be produced has to be found while a clear error is still
 // possible.
 type attachmentArchiveEntry struct {
-	name string
-	file io.ReadCloser
-	data []byte
+	name        string
+	contentType string
+	file        io.ReadCloser
+	data        []byte
 }
 
 // handleAttachmentArchive serves the attachments the message view lists - the
@@ -86,8 +87,12 @@ func (s *Server) handleAttachmentArchive(w http.ResponseWriter, r *http.Request)
 	}()
 	names := attachmentArchiveNames{}
 	var parsed *mailparse.ParsedMessage
+	// The parts not yet handed to a row. Two rows with the same filename and
+	// size would otherwise both resolve to the first such part, and the
+	// archive would carry one file twice and the other not at all.
+	var unclaimed []mailparse.Attachment
 	for _, att := range attachments {
-		entry := attachmentArchiveEntry{name: names.next(att)}
+		entry := attachmentArchiveEntry{name: names.next(att), contentType: att.ContentType}
 		if strings.TrimSpace(att.BlobPath) != "" && s.blobs != nil {
 			file, err := s.blobs.OpenUserBlob(cu.User.ID, att.BlobPath)
 			if err == nil {
@@ -109,28 +114,28 @@ func (s *Server) handleAttachmentArchive(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			parsed = &message
+			unclaimed = append([]mailparse.Attachment(nil), parsed.Files...)
 		}
-		file, ok := matchingAttachment(att, parsed.Files)
-		if !ok {
+		index := matchingAttachmentIndex(att, unclaimed)
+		if index < 0 {
 			attachmentUnavailable(w, cu.User.ID, att.ID, fmt.Sprintf("archive: no matching part in the raw message (content_id=%q filename=%q content_type=%q parts=%d)", att.ContentID, att.Filename, att.ContentType, len(parsed.Files)))
 			return
 		}
+		file := unclaimed[index]
+		unclaimed = append(unclaimed[:index], unclaimed[index+1:]...)
 		entry.data = file.Data
+		if strings.TrimSpace(file.ContentType) != "" {
+			entry.contentType = file.ContentType
+		}
 		entries = append(entries, entry)
 	}
 
-	modified := msg.Date
-	if modified.IsZero() {
-		modified = msg.InternalDate
-	}
-	if modified.IsZero() {
-		modified = time.Now()
-	}
+	modified := attachmentArchiveModified(msg.Date, msg.InternalDate, time.Now())
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", attachmentArchiveDisposition(msg.Subject))
 	zw := zip.NewWriter(w)
 	for _, entry := range entries {
-		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate, Modified: modified}
+		header := &zip.FileHeader{Name: entry.name, Method: attachmentArchiveMethod(entry.contentType), Modified: modified}
 		dst, err := zw.CreateHeader(header)
 		if err != nil {
 			log.Printf("attachment archive write failed user_id=%d message_id=%d: %v", cu.User.ID, msg.ID, err)
@@ -162,10 +167,7 @@ type attachmentArchiveNames map[string]bool
 func (n attachmentArchiveNames) next(att store.Attachment) string {
 	base := attachmentArchiveFilename(att.Filename)
 	if base == "" {
-		base = "attachment"
-		if exts, _ := mime.ExtensionsByType(att.ContentType); len(exts) > 0 {
-			base += exts[0]
-		}
+		base = "attachment" + attachmentArchiveExtension(att.ContentType)
 	}
 	name := base
 	ext := path.Ext(base)
@@ -201,7 +203,9 @@ func attachmentArchiveFilename(filename string) string {
 // mime.FormatMediaType writes a non-ASCII subject as an RFC 2231 filename*,
 // which every current browser reads.
 func attachmentArchiveDisposition(subject string) string {
-	name := attachmentArchiveFilename(subject)
+	// A subject is not a path: "Invoice 2024/05" names the whole archive, not
+	// "05", so its separators are replaced rather than resolved.
+	name := attachmentArchiveFilename(strings.NewReplacer("/", "_", "\\", "_").Replace(subject))
 	if runes := []rune(name); len(runes) > 80 {
 		name = strings.TrimSpace(string(runes[:80]))
 	}
@@ -213,4 +217,69 @@ func attachmentArchiveDisposition(subject string) string {
 		return `attachment; filename="attachments.zip"`
 	}
 	return disposition
+}
+
+// attachmentArchiveExtension names an unnamed part by its type. The mime
+// table lists every extension for a type in alphabetical order, which makes
+// text/plain ".asc" and image/jpeg ".jfif", so the usual ones are named first.
+func attachmentArchiveExtension(contentType string) string {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(contentType))
+	}
+	switch mediaType {
+	case "text/plain":
+		return ".txt"
+	case "text/html":
+		return ".html"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/tiff":
+		return ".tif"
+	case "text/calendar":
+		return ".ics"
+	case "message/rfc822":
+		return ".eml"
+	}
+	if exts, _ := mime.ExtensionsByType(mediaType); len(exts) > 0 {
+		return exts[0]
+	}
+	return ""
+}
+
+// attachmentArchiveMethod stores what is already compressed instead of
+// deflating it a second time for nothing.
+func attachmentArchiveMethod(contentType string) uint16 {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(contentType))
+	}
+	switch {
+	case strings.HasPrefix(mediaType, "video/"), strings.HasPrefix(mediaType, "audio/"):
+		return zip.Store
+	case strings.HasPrefix(mediaType, "application/vnd.openxmlformats-"),
+		strings.HasPrefix(mediaType, "application/vnd.oasis.opendocument."):
+		return zip.Store
+	}
+	switch mediaType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/avif",
+		"application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip",
+		"application/x-7z-compressed", "application/x-rar-compressed", "application/vnd.rar",
+		"application/x-bzip2", "application/x-xz", "application/zstd":
+		return zip.Store
+	}
+	return zip.Deflate
+}
+
+// attachmentArchiveModified dates the entries by the message. The Date header
+// is the sender's to write, and a ZIP entry carries an MS-DOS date that cannot
+// say anything before 1980 or after 2107 - outside that range it wraps into a
+// nonsense date - so a date it cannot hold falls back to the next one.
+func attachmentArchiveModified(candidates ...time.Time) time.Time {
+	for _, t := range candidates {
+		if year := t.Year(); !t.IsZero() && year >= 1980 && year <= 2107 {
+			return t
+		}
+	}
+	return time.Now()
 }
