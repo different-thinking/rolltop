@@ -648,6 +648,25 @@ func TestCalendarListingIsProtected(t *testing.T) {
 	if !stored.Listed || !stored.Selected {
 		t.Fatalf("calendar = %+v, want it listed and drawn again", stored)
 	}
+
+	// A request refused for one of its fields writes none of them: showing a
+	// read-only calendar and choosing it as the second calendar leaves it
+	// hidden.
+	shared := secondCalendar(t, env, env.owner, connection.ID, "reader")
+	sharedPath := "/api/calendar/calendars/" + strconv.FormatInt(shared.ID, 10)
+	if response := env.send(t, env.owner, http.MethodPut, sharedPath, []byte(`{"listed":false}`)); response.Code != http.StatusOK {
+		t.Fatalf("hide shared status=%d body=%s", response.Code, response.Body.String())
+	}
+	if refused := env.send(t, env.owner, http.MethodPut, sharedPath, []byte(`{"listed":true,"copy_target":true}`)); refused.Code != http.StatusBadRequest {
+		t.Fatalf("show and choose read-only status=%d body=%s, want 400", refused.Code, refused.Body.String())
+	}
+	stored, err = env.db.Calendar(context.Background(), env.owner.ID, shared.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Listed || stored.CopyTarget {
+		t.Fatalf("calendar = %+v, a refused request listed it anyway", stored)
+	}
 }
 
 // Asked for a copy, the route creates the event and its copy at Google and

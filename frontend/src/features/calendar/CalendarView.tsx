@@ -96,7 +96,7 @@ export function CalendarView({
   const [now, setNow] = useState(() => new Date());
   const [dayLens, setDayLens] = useState(storedDayLens);
   // The day the lens is open on, as a date key. null leaves the choice to
-  // lensDefaultIndex; "" is the reader having closed it, which holds until
+  // resolveLensIndex; "" is the reader having closed it, which holds until
   // they open a day again.
   const [lensDayKey, setLensDayKey] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -314,23 +314,29 @@ export function CalendarView({
 
   // Only the calendars the reader chose to list take part in the view; the
   // rest are still loaded so a copy mark can name the calendar it stands for.
-  const listedCalendars = calendars.filter((calendar) => calendar.listed);
+  const listedCalendars = useMemo(() => calendars.filter((calendar) => calendar.listed), [calendars]);
   const writableCalendars = listedCalendars.filter((calendar) => calendar.can_write);
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
   // The day lens: one day opened up with a lane per calendar, every other day
   // sized by how much it has at once. Lanes follow the Calendars menu's order.
-  const lensIndex = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
-  const lensLanes =
-    lensIndex >= 0
-      ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[lensIndex])
-      : [];
-  const dayColumns = dayLens
-    ? dayColumnWeights(events, days, lensIndex, lensLanes.length)
-        .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
-        .join(" ")
-    : undefined;
+  // Every day is laid out to size it, so the result is kept until the week,
+  // its events or the lens change rather than redone on every render (the
+  // now-line ticks once a minute).
+  const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
+    const index = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+    const lanes =
+      index >= 0
+        ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
+        : [];
+    const columns = dayLens
+      ? dayColumnWeights(events, days, index, lanes.length)
+          .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
+          .join(" ")
+      : undefined;
+    return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
+  }, [dayLens, lensDayKey, days, events, todayKey, listedCalendars]);
 
   const toggleDayLens = () => {
     const next = !dayLens;

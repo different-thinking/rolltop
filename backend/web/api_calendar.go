@@ -356,7 +356,14 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		listed = *in.Listed
 	}
 	if !listed && ((in.Selected != nil && *in.Selected) || (in.CopyTarget != nil && *in.CopyTarget)) {
-		writeAPIError(w, http.StatusBadRequest, "This calendar is hidden in the calendar view. Show it there first.")
+		writeAPIError(w, http.StatusBadRequest, calendarHiddenMessage)
+		return
+	}
+	// A copy is a write, so a calendar shared read-only would turn every event
+	// entered with a copy into a copy Google refuses. Refused before anything
+	// is written, so a request that also lists the calendar changes nothing.
+	if in.CopyTarget != nil && *in.CopyTarget && !calendar.CanWrite() {
+		writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
 		return
 	}
 	// The listing goes first, because hiding a calendar also switches it off
@@ -368,21 +375,17 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 			return
 		}
 	}
+	// The store refuses either for a calendar hidden since it was read above,
+	// which is the same answer the check above gives.
 	if in.CopyTarget != nil {
-		// A copy is a write, so a calendar shared read-only would turn every
-		// event entered with a copy into a copy Google refuses.
-		if *in.CopyTarget && !calendar.CanWrite() {
-			writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
-			return
-		}
 		if err := s.store.SetCalendarCopyTarget(r.Context(), userID, calendarID, *in.CopyTarget); err != nil {
-			s.serverError(w, r, err)
+			s.writeCalendarSwitchError(w, r, err)
 			return
 		}
 	}
 	if in.Selected != nil {
 		if err := s.store.SetCalendarSelected(r.Context(), userID, calendarID, *in.Selected); err != nil {
-			s.serverError(w, r, err)
+			s.writeCalendarSwitchError(w, r, err)
 			return
 		}
 	}
@@ -406,6 +409,23 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	writeJSON(w, map[string]any{
 		"calendar": apiCalendarFromStore(calendar, s.calendarConnectionEmail(r.Context(), userID, calendar)),
 	})
+}
+
+// calendarHiddenMessage refuses to draw a hidden calendar or make it the
+// second calendar.
+const calendarHiddenMessage = "This calendar is hidden in the calendar view. Show it there first."
+
+// writeCalendarSwitchError answers a failed visibility or second-calendar
+// write.
+func (s *Server) writeCalendarSwitchError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrCalendarHidden):
+		writeAPIError(w, http.StatusBadRequest, calendarHiddenMessage)
+	case store.IsNotFound(err):
+		http.NotFound(w, r)
+	default:
+		s.serverError(w, r, err)
+	}
 }
 
 // apiCalendarEvents answers a range query and creates events.

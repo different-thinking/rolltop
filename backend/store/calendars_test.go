@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -453,6 +454,17 @@ func TestSetCalendarListedClearsVisibilityAndCopyTarget(t *testing.T) {
 	}
 	if _, err := db.CopyTargetCalendar(ctx, user); !IsNotFound(err) {
 		t.Fatalf("copy target err = %v, want none left", err)
+	}
+	// The store itself refuses to switch a hidden calendar on or make it the
+	// second calendar, so a hide racing either cannot leave it set.
+	if err := db.SetCalendarSelected(ctx, user, calendar.ID, true); !errors.Is(err, ErrCalendarHidden) {
+		t.Fatalf("select hidden err = %v, want ErrCalendarHidden", err)
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, calendar.ID, true); !errors.Is(err, ErrCalendarHidden) {
+		t.Fatalf("copy target hidden err = %v, want ErrCalendarHidden", err)
+	}
+	if err := db.SetCalendarSelected(ctx, other, calendar.ID, true); !IsNotFound(err) {
+		t.Fatalf("cross-tenant select err = %v, want not found", err)
 	}
 
 	if err := db.SetCalendarListed(ctx, user, calendar.ID, true); err != nil {

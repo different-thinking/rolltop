@@ -2212,7 +2212,7 @@
 }
 
 // Which calendars the calendar view lists. One row per calendar, grouped by
-// the account it came from, as the calendar's own left column groups them.
+// the account it came from, as the calendar's Calendars menu groups them.
 .calendar-settings {
   display: grid;
   gap: 12px;
@@ -2260,11 +2260,8 @@
 }
 
 .calendar-settings-name {
+  @include truncate;
   flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .calendar-settings-tags {
