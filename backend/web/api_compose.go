@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
 	"rolltop/backend/smtpclient"
 	"rolltop/backend/store"
@@ -86,7 +87,9 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 			// as an ordinary closed tab -- and that is how a send answered with
 			// 502 used to leave no line at all, with nothing to say which step it
 			// was stuck in.
-			log.Printf("send compose failed user_id=%d client_gone=%t %s: %v",
+			// Through logging.Errorf, as apiError did: the admin log tail flags
+			// a line as an error by its prefix, and an SMTP reply spans lines.
+			logging.Errorf("send compose failed user_id=%d client_gone=%t %s: %v",
 				cu.User.ID, r.Context().Err() != nil, progress.summary(), err)
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
@@ -546,6 +549,7 @@ func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form co
 			s.foregroundBlockersSuffix(cu.User.ID), err)
 	}
 	defer finishForeground()
+	progress.enter("record_outgoing_id")
 	// Before the send, not after: the provider files its own copy the moment it
 	// accepts the message, and a sync that reaches that copy first would mirror
 	// it as ordinary incoming mail. An id recorded for a send that then fails
