@@ -194,12 +194,16 @@ func (s *Syncer) UpdateRemoteEventGroup(ctx context.Context, userID int64, exist
 		return updated, nil, err
 	}
 
+	// The copies follow what Google accepted, not what was submitted, for the
+	// reason CreateRemoteEventWithCopy gives: a pair is its key and its start,
+	// and a start Google normalized on the event would otherwise leave every
+	// copy behind on the old one.
 	var problems []LinkedProblem
 	for _, copied := range copies {
 		if removeCopy && copied.ID == inTarget.ID {
 			continue
 		}
-		follow := edited
+		follow := updated
 		follow.ID = copied.ID
 		follow.CalendarID = copied.CalendarID
 		follow.ExternalID = copied.ExternalID
@@ -217,7 +221,9 @@ func (s *Syncer) UpdateRemoteEventGroup(ctx context.Context, userID int64, exist
 		}
 	}
 	if addCopy {
-		if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copyFor(edited, copyCalendarID)); err != nil {
+		copied := copyFor(updated, copyCalendarID)
+		copied.LinkKey = edited.LinkKey
+		if _, err := s.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err})
 		}
 	}
