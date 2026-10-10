@@ -954,6 +954,16 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
+	// A placeholder belongs to the event it stands for, as the second
+	// calendar's copy does: it goes when that event drops its busy copy or is
+	// deleted, never on its own -- deleting it would delete the event and
+	// cancel it for its guests from a calendar that shows none of it. One
+	// whose event is gone has no copies left and is deleted like any event.
+	if event.Linked() && event.LinkMasked && len(copies) > 0 {
+		writeAPIError(w, http.StatusBadRequest,
+			"This is a placeholder for an event in another calendar. Untick “Block the time” on that event to remove it.")
+		return
+	}
 	// Already gone at Google is the end state the user asked for, and is
 	// absorbed inside the group delete so the copies still go with it.
 	problems, err := s.calendarRouter().DeleteGroup(r.Context(), userID, event, copies)

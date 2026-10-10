@@ -905,3 +905,52 @@ func TestCreateEventWithAPlaceholderInTheBusyCalendar(t *testing.T) {
 		t.Fatalf("drawn = %+v, want the event naming its placeholder", events[0])
 	}
 }
+
+// A placeholder cannot be deleted on its own while its event exists: the
+// route refuses and nothing reaches Google. Once its event is gone it is an
+// ordinary event and deletes like one.
+func TestPlaceholderIsNotDeletedOnItsOwn(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	ctx := context.Background()
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	busy := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	primary, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: work.ID, ExternalID: "p1", Summary: "Dentist",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkPrimary: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeholder, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, store.CalendarEvent{
+		CalendarID: busy.ID, ExternalID: "b1", Summary: "Busy",
+		StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k1", LinkMasked: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+
+	target := "/api/calendar/events/" + strconv.FormatInt(placeholder.ID, 10)
+	if response := env.send(t, env.owner, http.MethodDelete, target, nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("delete placeholder status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	deleted := len(fake.deleted)
+	fake.mu.Unlock()
+	if deleted != 0 {
+		t.Fatalf("Google was asked to delete %d events for a refused request", deleted)
+	}
+	if _, err := env.db.CalendarEvent(ctx, env.owner.ID, primary.ID); err != nil {
+		t.Fatalf("event after refused delete: %v", err)
+	}
+
+	if err := env.db.DeleteCalendarEvent(ctx, env.owner.ID, primary.ID); err != nil {
+		t.Fatal(err)
+	}
+	if response := env.send(t, env.owner, http.MethodDelete, target, nil); response.Code != http.StatusOK {
+		t.Fatalf("delete orphaned placeholder status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}

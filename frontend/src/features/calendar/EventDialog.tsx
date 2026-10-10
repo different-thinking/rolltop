@@ -285,6 +285,11 @@ export function EventDialog({
   // A placeholder is the time of an event entered elsewhere and nothing more,
   // so nothing can be copied from it; it moves when that event does.
   const placeholder = Boolean(event?.link_masked);
+  // A placeholder cannot be deleted while its event exists, just as the copy
+  // in the second calendar is the event's and not a thing of its own: it goes
+  // when the box on the event is unticked or the event is deleted. One whose
+  // event is gone is an ordinary event and can be deleted like one.
+  const placeholderOfEvent = placeholder && (event?.also_in || []).length > 0;
   const offerCopy = editable && !placeholder && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
   const offerBusyCopy = editable && !placeholder && Boolean(busyTarget) && busyTarget?.id !== draft.calendarID;
   const alsoIn = (event?.also_in || [])
@@ -480,6 +485,9 @@ export function EventDialog({
             <p className="calendar-dialog-note">
               This is a placeholder: it shows only the time of an event in another calendar. Moving it moves that
               event too; its title, notes and guests stay there.
+              {placeholderOfEvent
+                ? " To remove it, untick “Block the time” on that event, or delete the event itself."
+                : ""}
             </p>
           ) : null}
 
@@ -576,13 +584,11 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-footer">
-          {event && editable ? (
+          {event && editable && !placeholderOfEvent ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
                 <span>
-                  {placeholder && alsoIn.length > 0
-                    ? `This placeholder stands for an event in ${alsoIn.map((item) => item.name).join(", ")}. Deleting it deletes that event too, and any guests are told it is cancelled.`
-                    : alsoIn.length > 0
+                  {alsoIn.length > 0
                       ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
                       : event.attendees.length > 0 && !event.my_response
                         ? `Delete this event in ${provider} too? The guests are told it is cancelled.`

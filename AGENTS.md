@@ -738,7 +738,12 @@ site and in review.
   later stopped using as the busy one. An edit made *through* a placeholder
   moves the other copies' time and nothing else, and never adds a copy --
   there is nothing in it to copy. The week draws a placeholder only when no
-  other copy of its event is visible.
+  other copy of its event is visible. A placeholder is never deleted on its
+  own while its event exists (`calendarEventDelete` refuses, the dialog offers
+  no Delete): it leaves when the box on the event is unticked or the event is
+  deleted, because a group delete started from it would cancel the event for
+  its guests from a calendar that shows none of it. One whose event is gone
+  has no copies left and deletes like any event.
 - **Microsoft 365 is read in windows, not deltas.** Graph v1.0 has a delta
   cursor only for the primary calendar's view, and a delta cannot `$expand` the
   extended property the link lives in. So `m365calendar` reads the near window
