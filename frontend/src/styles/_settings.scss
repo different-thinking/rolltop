@@ -2210,3 +2210,65 @@
 .smtp-traffic-arrow {
   color: var(--muted);
 }
+
+// Which calendars the calendar view lists. One row per calendar, grouped by
+// the account it came from, as the calendar's own left column groups them.
+.calendar-settings {
+  display: grid;
+  gap: 12px;
+
+  p {
+    margin: 0;
+  }
+}
+
+.calendar-settings-group {
+  display: grid;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+
+  h3 {
+    margin: 0 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+}
+
+.calendar-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+
+  &:hover {
+    background: var(--active);
+  }
+
+  input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+    flex: none;
+  }
+}
+
+.calendar-settings-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-settings-tags {
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+}

@@ -422,3 +422,47 @@ func TestListCalendarEventCopiesMatchesKeyAndStart(t *testing.T) {
 		t.Fatalf("other tenant's linked events = %+v, want only their own", linked)
 	}
 }
+
+// Hiding a calendar from the calendar view also switches it off and takes the
+// second-calendar mark off it, and showing it again does not bring either
+// back by itself.
+func TestSetCalendarListedClearsVisibilityAndCopyTarget(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "calendar-listed@example.test")
+	other := mustUser(t, db, ctx, "calendar-listed-other@example.test")
+	calendar := mustCalendar(t, db, ctx, user, 1, "primary")
+	if !calendar.Listed {
+		t.Fatal("a new calendar is not listed")
+	}
+	if err := db.SetCalendarCopyTarget(ctx, user, calendar.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.SetCalendarListed(ctx, other, calendar.ID, false); !IsNotFound(err) {
+		t.Fatalf("cross-tenant hide err = %v, want not found", err)
+	}
+	if err := db.SetCalendarListed(ctx, user, calendar.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := db.Calendar(ctx, user, calendar.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden.Listed || hidden.Selected || hidden.CopyTarget {
+		t.Fatalf("calendar = %+v, want it hidden, switched off and no longer the second calendar", hidden)
+	}
+	if _, err := db.CopyTargetCalendar(ctx, user); !IsNotFound(err) {
+		t.Fatalf("copy target err = %v, want none left", err)
+	}
+
+	if err := db.SetCalendarListed(ctx, user, calendar.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	shown, err := db.Calendar(ctx, user, calendar.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shown.Listed || shown.Selected || shown.CopyTarget {
+		t.Fatalf("calendar = %+v, want it listed again and still switched off", shown)
+	}
+}

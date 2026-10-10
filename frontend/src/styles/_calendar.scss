@@ -583,3 +583,24 @@ $calendar-gutter: 58px;
   align-items: center;
   gap: 6px;
 }
+
+// The way to the settings page that decides which calendars are listed at all.
+.calendar-sidebar-manage {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--text);
+    }
+  }
+}

@@ -48,6 +48,9 @@ type apiCalendar struct {
 	// CopyTarget marks the reader's second calendar, the one a new event can
 	// be copied into as well.
 	CopyTarget bool `json:"copy_target"`
+	// Listed says whether the calendar view lists the calendar at all. One
+	// that is not listed is never selected and never the second calendar.
+	Listed bool `json:"listed"`
 	// OnlineMeetingProviders lists the online meeting kinds an event here can
 	// be made -- a Microsoft calendar's Teams. Empty means none.
 	OnlineMeetingProviders []string `json:"online_meeting_providers"`
@@ -149,6 +152,7 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 		IsPrimary:              calendar.IsPrimary,
 		Selected:               calendar.Selected,
 		CopyTarget:             calendar.CopyTarget,
+		Listed:                 calendar.Listed,
 		SyncedFrom:             timeString(calendar.WindowStartAt),
 		LastSyncAt:             timeString(calendar.LastSyncAt),
 		Status:                 calendar.Status,
@@ -311,9 +315,10 @@ func (s *Server) presentCalendars(ctx context.Context, userID int64, calendars [
 	return out
 }
 
-// apiCalendarByID switches one calendar's visibility, or makes it the reader's
-// second calendar. Either field may be left out; a request naming neither
-// changes nothing and answers with the calendar as it is.
+// apiCalendarByID switches one calendar's visibility, lists or hides it in the
+// calendar view, or makes it the reader's second calendar. Every field may be
+// left out; a request naming none changes nothing and answers with the
+// calendar as it is.
 func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID int64, rest string) {
 	calendarID, ok := parsePositiveID(w, rest)
 	if !ok {
@@ -329,6 +334,7 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	var in struct {
 		Selected   *bool `json:"selected"`
 		CopyTarget *bool `json:"copy_target"`
+		Listed     *bool `json:"listed"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -341,6 +347,26 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		}
 		s.serverError(w, r, err)
 		return
+	}
+	// Only a listed calendar may be drawn or be the second calendar: the
+	// calendar view offers both only for the calendars it lists, and a hidden
+	// one carrying either would be a state nothing on screen could undo.
+	listed := calendar.Listed
+	if in.Listed != nil {
+		listed = *in.Listed
+	}
+	if !listed && ((in.Selected != nil && *in.Selected) || (in.CopyTarget != nil && *in.CopyTarget)) {
+		writeAPIError(w, http.StatusBadRequest, "This calendar is hidden in the calendar view. Show it there first.")
+		return
+	}
+	// The listing goes first, because hiding a calendar also switches it off
+	// and clears the second-calendar mark; a request that hides it and names
+	// either of those as false asks for nothing more.
+	if in.Listed != nil {
+		if err := s.store.SetCalendarListed(r.Context(), userID, calendarID, *in.Listed); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	if in.CopyTarget != nil {
 		// A copy is a write, so a calendar shared read-only would turn every

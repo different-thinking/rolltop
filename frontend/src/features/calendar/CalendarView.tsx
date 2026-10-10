@@ -34,6 +34,10 @@ import {
  * re-rendering the whole week every second. */
 const nowLineInterval = 60_000;
 
+/** calendarSettingsPath is where the reader chooses which calendars the view
+ * lists. */
+const calendarSettingsPath = "/settings/account/preferences/calendars";
+
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
 const initialScrollHour = 7;
@@ -283,16 +287,21 @@ export function CalendarView({
       setDialog({ event: data.event, day: dialog.day, formKey: dialog.formKey });
     });
 
-  const writableCalendars = calendars.filter((calendar) => calendar.can_write);
+  // Only the calendars the reader chose to list take part in the view; the
+  // rest are still loaded so a copy mark can name the calendar it stands for.
+  const listedCalendars = calendars.filter((calendar) => calendar.listed);
+  const writableCalendars = listedCalendars.filter((calendar) => calendar.can_write);
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
   return (
     <div className="calendar-shell">
       <CalendarSidebar
-        calendars={calendars}
+        calendars={listedCalendars}
+        hiddenCount={calendars.length - listedCalendars.length}
         onToggle={toggleCalendar}
         onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+        navigate={navigate}
       />
       <section className="calendar-main">
         <header className="content-head calendar-head">
@@ -479,16 +488,22 @@ export function CalendarView({
   );
 }
 
-/** CalendarSidebar lists every calendar grouped by the account it came from,
- * because two accounts routinely have a calendar called the same thing. */
+/** CalendarSidebar lists the calendars the reader chose to list, grouped by
+ * the account they came from, because two accounts routinely have a calendar
+ * called the same thing. The second-calendar choice is made among the same
+ * calendars: one hidden under settings is never offered there. */
 function CalendarSidebar({
   calendars,
+  hiddenCount,
   onToggle,
-  onChooseCopyTarget
+  onChooseCopyTarget,
+  navigate
 }: {
   calendars: CalendarSummary[];
+  hiddenCount: number;
   onToggle: (calendar: CalendarSummary) => Promise<void>;
   onChooseCopyTarget: (calendarID: number) => void;
+  navigate: (url: string) => void;
 }) {
   const writable = calendars.filter((calendar) => calendar.can_write);
   const copyTarget = calendars.find((calendar) => calendar.copy_target);
@@ -555,6 +570,23 @@ function CalendarSidebar({
             An event in any other calendar can be added here as well. It is shown once, marked with the other
             calendar's colour.
           </p>
+        </div>
+      ) : null}
+      {calendars.length > 0 || hiddenCount > 0 ? (
+        <div className="calendar-sidebar-manage">
+          {calendars.length === 0 ? (
+            <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
+          ) : null}
+          <a
+            href={calendarSettingsPath}
+            onClick={(clickEvent) => {
+              clickEvent.preventDefault();
+              navigate(calendarSettingsPath);
+            }}
+          >
+            <Icon name="settings" />
+            {hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"}
+          </a>
         </div>
       ) : null}
     </aside>

@@ -767,6 +767,10 @@ export const api = {
   // calendar that had it.
   setCalendarCopyTarget: (csrf: string, id: number, copyTarget: boolean) =>
     putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { copy_target: copyTarget }),
+  // Hiding a calendar from the calendar view also switches it off and stops it
+  // being the second calendar; the answer carries all three.
+  setCalendarListed: (csrf: string, id: number, listed: boolean) =>
+    putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { listed }),
   // The range is sent as absolute instants; which calendars are drawn is stored
   // server-side, so the client never has to keep a second copy of that choice.
   calendarEvents: (from: Date, to: Date) =>

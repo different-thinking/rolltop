@@ -645,6 +645,16 @@ site and in review.
 - A calendar the user has switched off is not synced. Switching one on triggers
   its own first sync, because an unsynced week renders as an empty one and reads
   as "nothing scheduled".
+- **A calendar the reader hid is out of the calendar view entirely, and hiding
+  is what says so -- not a second gate.** `calendars.listed` (Settings ->
+  Preferences -> Calendars) decides which calendars the left column lists, and
+  the second-calendar choice and a new event's calendar are offered only among
+  those. `Store.SetCalendarListed` switches a hidden calendar off and takes the
+  second-calendar mark off it in the same write, and the API refuses to give
+  either back while it is hidden, so `selected` keeps meaning "drawn and synced"
+  and the sync loops and the range query need not ask about the listing.
+  Showing it again lists it switched off. Every calendar an upgrade finds stays
+  listed: hiding is the reader's choice.
 - **An event kept in two calendars is two Google events and one appointment.**
   A reader picks one second calendar (`calendars.copy_target`, unique per user)
   and an event entered anywhere else can be copied into it

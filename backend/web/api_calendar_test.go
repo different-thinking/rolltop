@@ -594,6 +594,62 @@ func TestCalendarCopyTargetIsProtected(t *testing.T) {
 	}
 }
 
+// Hiding a calendar from the calendar view is a protected write that also
+// switches it off and drops it as the second calendar, and a hidden calendar
+// can be neither switched on nor chosen until it is shown again.
+func TestCalendarListingIsProtected(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	withCalendarSync(t, env, &fakeCalendarAPI{}, true)
+	path := "/api/calendar/calendars/" + strconv.FormatInt(work.ID, 10)
+	if response := env.send(t, env.owner, http.MethodPut, path, []byte(`{"copy_target":true}`)); response.Code != http.StatusOK {
+		t.Fatalf("choose status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	if other := env.send(t, env.other, http.MethodPut, path, []byte(`{"listed":false}`)); other.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant hide status=%d, want 404", other.Code)
+	}
+	response := env.send(t, env.owner, http.MethodPut, path, []byte(`{"listed":false}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("hide status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Calendar apiCalendar `json:"calendar"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Calendar.Listed || payload.Calendar.Selected || payload.Calendar.CopyTarget {
+		t.Fatalf("calendar = %+v, want it hidden, switched off and not the second calendar", payload.Calendar)
+	}
+
+	for _, body := range []string{`{"selected":true}`, `{"copy_target":true}`} {
+		if refused := env.send(t, env.owner, http.MethodPut, path, []byte(body)); refused.Code != http.StatusBadRequest {
+			t.Fatalf("%s on a hidden calendar status=%d body=%s, want 400", body, refused.Code, refused.Body.String())
+		}
+	}
+	stored, err := env.db.Calendar(context.Background(), env.owner.ID, work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Selected || stored.CopyTarget {
+		t.Fatalf("calendar = %+v, a refused request changed it anyway", stored)
+	}
+
+	// Showing it and switching it on in one request is allowed.
+	if ok := env.send(t, env.owner, http.MethodPut, path, []byte(`{"listed":true,"selected":true}`)); ok.Code != http.StatusOK {
+		t.Fatalf("show status=%d body=%s", ok.Code, ok.Body.String())
+	}
+	stored, err = env.db.Calendar(context.Background(), env.owner.ID, work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Listed || !stored.Selected {
+		t.Fatalf("calendar = %+v, want it listed and drawn again", stored)
+	}
+}
+
 // Asked for a copy, the route creates the event and its copy at Google and
 // answers with the event naming where the copy went. Deleting the event takes
 // the copy with it.

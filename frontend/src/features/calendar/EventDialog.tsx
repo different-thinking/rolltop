@@ -234,7 +234,9 @@ export function EventDialog({
   onRespond: (response: string) => void;
   onClose: () => void;
 }) {
-  const writable = useMemo(() => calendars.filter((calendar) => calendar.can_write), [calendars]);
+  // A new event goes only into a calendar the calendar view lists: one hidden
+  // under settings is one the reader has said they do not use here.
+  const writable = useMemo(() => calendars.filter((calendar) => calendar.can_write && calendar.listed), [calendars]);
   // Seeded once, on mount. The dialog is remounted by its caller whenever the
   // form should start over, so there is deliberately no effect resetting the
   // draft here: the calendar list is reloaded on a poll, after a sync and after
