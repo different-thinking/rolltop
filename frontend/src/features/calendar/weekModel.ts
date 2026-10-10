@@ -269,3 +269,58 @@ export function readableTextColor(color: string): string {
   // Rec. 601 luma, which is the cheap approximation of perceived brightness.
   return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? "#1b1b1b" : "#fff";
 }
+
+/** calendarAccountGroups groups calendars by the account they came from, in
+ * the order the accounts first appear, because two accounts routinely have a
+ * calendar called the same thing. The sidebar, the day lens's lanes and the
+ * calendar settings all read this one order, so a calendar sits in the same
+ * place in each. */
+export function calendarAccountGroups(calendars: CalendarSummary[]): [string, CalendarSummary[]][] {
+  const byAccount = new Map<string, CalendarSummary[]>();
+  for (const calendar of calendars) {
+    const key = calendar.connection_email || providerName(calendar);
+    const list = byAccount.get(key) || [];
+    list.push(calendar);
+    byAccount.set(key, list);
+  }
+  return Array.from(byAccount.entries());
+}
+
+/**
+ * lensLaneCalendarIDs names the calendars that get a lane of their own in the
+ * day lens: those with a timed event on that day, in the order given (the
+ * sidebar's). A calendar the order does not know -- a linked copy's calendar
+ * hidden since -- still gets a lane, after the known ones: drawing an event in
+ * an unnamed lane is recoverable, dropping it is not.
+ */
+export function lensLaneCalendarIDs(events: CalendarEvent[], calendars: CalendarSummary[], day: Date): number[] {
+  const present = new Set(
+    events.filter((event) => !event.all_day && timedEventTouchesDay(event, day)).map((event) => event.calendar_id)
+  );
+  const ordered = calendars.map((calendar) => calendar.id).filter((id) => present.has(id));
+  for (const id of present) if (!ordered.includes(id)) ordered.push(id);
+  return ordered;
+}
+
+/** busiestColumns is the most appointments a day has at one moment. */
+export function busiestColumns(events: CalendarEvent[], day: Date): number {
+  const timed = events.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
+  return layoutDayEvents(timed, day).reduce((most, placed) => Math.max(most, placed.columns), 0);
+}
+
+/**
+ * dayColumnWeights sizes the seven day columns while the day lens is on.
+ *
+ * The lens day is the one to be read in full, so it gets a share wide enough
+ * for a lane per calendar. Every other day gets a little more width for each
+ * appointment it has at once, up to four, and a day with nothing overlapping
+ * gives some of its width away -- an empty Sunday does not need what a Tuesday
+ * with four meetings at ten does. lensIndex is -1 when no day is open.
+ */
+export function dayColumnWeights(events: CalendarEvent[], days: Date[], lensIndex: number, lensLanes: number): number[] {
+  return days.map((day, index) => {
+    if (index === lensIndex) return Math.max(3, lensLanes * 1.25);
+    const busiest = busiestColumns(events, day);
+    return busiest <= 1 ? 0.7 : 0.85 + 0.15 * Math.min(busiest, 4);
+  });
+}

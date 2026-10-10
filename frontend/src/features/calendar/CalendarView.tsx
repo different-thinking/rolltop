@@ -5,6 +5,7 @@
 // first.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
 import type { AddToast, LocationState } from "../../appTypes";
@@ -14,12 +15,16 @@ import { EventDialog } from "./EventDialog";
 import {
   addDays,
   allDayEventsForDay,
+  busiestColumns,
+  calendarAccountGroups,
   calendarColor,
   calendarRouteDate,
   calendarURL,
+  dayColumnWeights,
   dayHeight,
   hourHeight,
   layoutDayEvents,
+  lensLaneCalendarIDs,
   localDateKey,
   minutesIntoDay,
   providerName,
@@ -29,6 +34,7 @@ import {
   timedEventTouchesDay,
   weekDays
 } from "./weekModel";
+import type { PositionedEvent } from "./weekModel";
 
 /** nowLineInterval keeps the current-time marker roughly honest without
  * re-rendering the whole week every second. */
@@ -37,6 +43,20 @@ const nowLineInterval = 60_000;
 /** calendarSettingsPath is where the reader chooses which calendars the view
  * lists. */
 const calendarSettingsPath = "/settings/account/preferences/calendars";
+
+/** dayLensKey remembers per browser whether the day lens is on. It is a way
+ * of looking at the week, not a setting: a narrow laptop and a wide desk
+ * screen want different answers, and losing it to cleared site data costs one
+ * click. */
+const dayLensKey = "rolltop.calendar.dayLens";
+
+function storedDayLens(): boolean {
+  try {
+    return window.localStorage.getItem(dayLensKey) === "on";
+  } catch {
+    return false;
+  }
+}
 
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
@@ -74,6 +94,11 @@ export function CalendarView({
   const [dialogProblem, setDialogProblem] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
   const [now, setNow] = useState(() => new Date());
+  const [dayLens, setDayLens] = useState(storedDayLens);
+  // The day the lens is open on, as a date key. null leaves the choice to
+  // lensDefaultIndex; "" is the reader having closed it, which holds until
+  // they open a day again.
+  const [lensDayKey, setLensDayKey] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
 
@@ -294,6 +319,77 @@ export function CalendarView({
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
+  // The day lens: one day opened up with a lane per calendar, every other day
+  // sized by how much it has at once. Lanes follow the sidebar's order.
+  const lensIndex = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+  const lensLanes =
+    lensIndex >= 0
+      ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[lensIndex])
+      : [];
+  const dayColumns = dayLens
+    ? dayColumnWeights(events, days, lensIndex, lensLanes.length)
+        .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
+        .join(" ")
+    : undefined;
+
+  const toggleDayLens = () => {
+    const next = !dayLens;
+    setDayLens(next);
+    setLensDayKey(null);
+    try {
+      window.localStorage.setItem(dayLensKey, next ? "on" : "off");
+    } catch {
+      // Remembering the choice is a convenience; the switch itself still works.
+    }
+  };
+
+  const openEvent = (event: CalendarEvent, day: Date) => {
+    setDialogProblem("");
+    setDialog({ event, day, formKey: `event-${event.id}` });
+  };
+
+  // One timed entry, placed in a share of its day column: the whole column
+  // normally, one calendar's lane of it under the day lens.
+  const renderTimedEvent = (placed: PositionedEvent, day: Date, lane: number, lanes: number) => {
+    const calendar = calendarsByID.get(placed.event.calendar_id);
+    const color = calendarColor(calendar);
+    const laneWidth = 100 / lanes;
+    const width = laneWidth / placed.columns;
+    const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
+    return (
+      <button
+        key={placed.event.id}
+        type="button"
+        className={`calendar-event ${declined ? "declined" : ""} ${
+          placed.event.status === "cancelled" ? "cancelled" : ""
+        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""}`}
+        style={{
+          top: placed.top,
+          height: placed.height,
+          left: `${lane * laneWidth + placed.column * width}%`,
+          width: `calc(${width}% - 3px)`,
+          background: declined ? "transparent" : color,
+          borderColor: color,
+          color: declined ? "var(--text)" : readableTextColor(color)
+        }}
+        title={eventTooltip(placed.event, calendar, calendarsByID)}
+        onClick={() => openEvent(placed.event, day)}
+      >
+        <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
+        <span className="calendar-event-title">
+          <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+          {placed.event.online_meeting ? (
+            <span className="calendar-event-online" title="Online meeting">
+              <Icon name="video" />
+            </span>
+          ) : null}
+          {placed.event.summary || "(No title)"}
+        </span>
+        {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
+      </button>
+    );
+  };
+
   return (
     <div className="calendar-shell">
       <CalendarSidebar
@@ -303,7 +399,10 @@ export function CalendarView({
         onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
         navigate={navigate}
       />
-      <section className="calendar-main">
+      <section
+        className={`calendar-main ${dayLens ? "day-lens" : ""}`}
+        style={dayColumns ? ({ "--calendar-day-columns": dayColumns } as CSSProperties) : undefined}
+      >
         <header className="content-head calendar-head">
           <div className="calendar-nav">
             <button
@@ -328,6 +427,20 @@ export function CalendarView({
             <h1>{weekLabel}</h1>
           </div>
           <div className="calendar-head-actions">
+            <button
+              type="button"
+              className="ghost calendar-lens-toggle"
+              aria-pressed={dayLens}
+              title={
+                dayLens
+                  ? "Turn the day lens off and give every day the same width"
+                  : "Open one day with a column per calendar; click a weekday to choose which"
+              }
+              onClick={toggleDayLens}
+            >
+              <Icon name="search" />
+              Day lens
+            </button>
             <button type="button" className="ghost" disabled={syncing || calendars.length === 0} onClick={() => void syncNow()}>
               <Icon name="sync" />
               {syncing ? "Syncing…" : "Sync now"}
@@ -357,12 +470,52 @@ export function CalendarView({
 
         <div className="calendar-daynames">
           <div className="calendar-gutter" />
-          {days.map((day) => (
-            <div key={day.toISOString()} className={`calendar-dayname ${localDateKey(day) === todayKey ? "today" : ""}`}>
-              <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
-              <span className="calendar-dayname-number">{day.getDate()}</span>
-            </div>
-          ))}
+          {days.map((day, index) => {
+            const today = localDateKey(day) === todayKey ? "today" : "";
+            const label = (
+              <>
+                <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
+                <span className="calendar-dayname-number">{day.getDate()}</span>
+              </>
+            );
+            if (!dayLens) {
+              return (
+                <div key={day.toISOString()} className={`calendar-dayname ${today}`}>
+                  {label}
+                </div>
+              );
+            }
+            const open = index === lensIndex;
+            return (
+              <div key={day.toISOString()} className={`calendar-dayname ${today} ${open ? "lens-open" : ""}`}>
+                <button
+                  type="button"
+                  className="calendar-dayname-button"
+                  aria-pressed={open}
+                  title={open ? "Close this day" : "Open this day with a column per calendar"}
+                  onClick={() => setLensDayKey(open ? "" : localDateKey(day))}
+                >
+                  {label}
+                </button>
+                {open && lensLanes.length > 0 ? (
+                  <div className="calendar-lens-lanes">
+                    {lensLanes.map((calendarID) => {
+                      const calendar = calendarsByID.get(calendarID);
+                      return (
+                        <span
+                          key={calendarID}
+                          title={calendar?.name}
+                          style={{ "--calendar-color": calendarColor(calendar) } as CSSProperties}
+                        >
+                          {calendar?.name || "Calendar"}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
 
         <div className="calendar-allday">
@@ -400,9 +553,10 @@ export function CalendarView({
               </div>
             ))}
           </div>
-          {days.map((day) => {
+          {days.map((day, index) => {
             const isToday = localDateKey(day) === todayKey;
             const dayEvents = events.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
+            const lanes = index === lensIndex ? lensLanes : [];
             return (
               <div
                 key={day.toISOString()}
@@ -418,51 +572,21 @@ export function CalendarView({
                 {Array.from({ length: 24 }, (_, hour) => (
                   <div key={hour} className="calendar-slot" style={{ top: hour * hourHeight, height: hourHeight }} />
                 ))}
-                {layoutDayEvents(dayEvents, day).map((placed) => {
-                  const calendar = calendarsByID.get(placed.event.calendar_id);
-                  const color = calendarColor(calendar);
-                  const width = 100 / placed.columns;
-                  const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
-                  return (
-                    <button
-                      key={placed.event.id}
-                      type="button"
-                      className={`calendar-event ${declined ? "declined" : ""} ${
-                        placed.event.status === "cancelled" ? "cancelled" : ""
-                      } ${
-                        placed.continuesBefore ? "continues-before" : ""
-                      } ${placed.continuesAfter ? "continues-after" : ""}`}
-                      style={{
-                        top: placed.top,
-                        height: placed.height,
-                        left: `${placed.column * width}%`,
-                        width: `calc(${width}% - 3px)`,
-                        background: declined ? "transparent" : color,
-                        borderColor: color,
-                        color: declined ? "var(--text)" : readableTextColor(color)
-                      }}
-                      title={eventTooltip(placed.event, calendar, calendarsByID)}
-                      onClick={() => {
-                        setDialogProblem("");
-                        setDialog({ event: placed.event, day, formKey: `event-${placed.event.id}` });
-                      }}
-                    >
-                      <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
-                      <span className="calendar-event-title">
-                        <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
-                        {placed.event.online_meeting ? (
-                          <span className="calendar-event-online" title="Online meeting">
-                            <Icon name="video" />
-                          </span>
-                        ) : null}
-                        {placed.event.summary || "(No title)"}
-                      </span>
-                      {placed.event.location ? (
-                        <span className="calendar-event-location">{placed.event.location}</span>
-                      ) : null}
-                    </button>
-                  );
-                })}
+                {lanes.length > 1
+                  ? lanes.flatMap((calendarID, lane) => [
+                      lane > 0 ? (
+                        <div
+                          key={`divider-${calendarID}`}
+                          className="calendar-lens-divider"
+                          style={{ left: `${(lane * 100) / lanes.length}%` }}
+                        />
+                      ) : null,
+                      ...layoutDayEvents(
+                        dayEvents.filter((event) => event.calendar_id === calendarID),
+                        day
+                      ).map((placed) => renderTimedEvent(placed, day, lane, lanes.length))
+                    ])
+                  : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, 0, 1))}
                 {isToday ? <div className="calendar-now" style={{ top: (minutesIntoDay(now) / 60) * hourHeight }} /> : null}
               </div>
             );
@@ -510,16 +634,7 @@ function CalendarSidebar({
   // A chosen calendar that has since become read-only stays listed, or the
   // select would read "None" while the choice is still stored.
   const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
-  const groups = useMemo(() => {
-    const byAccount = new Map<string, CalendarSummary[]>();
-    for (const calendar of calendars) {
-      const key = calendar.connection_email || providerName(calendar);
-      const list = byAccount.get(key) || [];
-      list.push(calendar);
-      byAccount.set(key, list);
-    }
-    return Array.from(byAccount.entries());
-  }, [calendars]);
+  const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
 
   return (
     <aside className="calendar-sidebar">
@@ -615,6 +730,26 @@ function CopyMarks({
       ))}
     </span>
   );
+}
+
+/** resolveLensIndex picks the day the lens opens on: the one the reader chose
+ * when it is in this week, otherwise today when today has anything timed,
+ * otherwise the day with the most at once -- the day the lens exists for. */
+function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: string | null, todayKey: string): number {
+  const chosen = chosenKey ? days.findIndex((day) => localDateKey(day) === chosenKey) : -1;
+  if (chosen >= 0) return chosen;
+  const today = days.findIndex((day) => localDateKey(day) === todayKey);
+  if (today >= 0 && busiestColumns(events, days[today]) > 0) return today;
+  let busiest = 0;
+  let most = -1;
+  days.forEach((day, index) => {
+    const columns = busiestColumns(events, day);
+    if (columns > most) {
+      most = columns;
+      busiest = index;
+    }
+  });
+  return busiest;
 }
 
 /** dayAtOffset turns a double-click in a day column into the hour it landed on,

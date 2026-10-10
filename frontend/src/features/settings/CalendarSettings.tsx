@@ -8,7 +8,7 @@ import { api } from "../../api";
 import type { Toast } from "../../appTypes";
 import type { CalendarSummary } from "../../types";
 import { messageFromError } from "../../lib/errors";
-import { calendarColor, providerName } from "../calendar/weekModel";
+import { calendarAccountGroups, calendarColor } from "../calendar/weekModel";
 
 /**
  * CalendarSettingsPanel switches calendars in and out of the calendar view.
@@ -45,16 +45,7 @@ export function CalendarSettingsPanel({
     void load();
   }, [load]);
 
-  const groups = useMemo(() => {
-    const byAccount = new Map<string, CalendarSummary[]>();
-    for (const calendar of calendars) {
-      const key = calendar.connection_email || providerName(calendar);
-      const list = byAccount.get(key) || [];
-      list.push(calendar);
-      byAccount.set(key, list);
-    }
-    return Array.from(byAccount.entries());
-  }, [calendars]);
+  const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
 
   const setListed = async (calendar: CalendarSummary, listed: boolean) => {
     if (!listed && calendar.copy_target) {

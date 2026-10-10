@@ -125,13 +125,16 @@
 }
 
 // The gutter width is shared by the day names, the all-day bar and the hour
-// column, so all three stay in one vertical line.
+// column, so all three stay in one vertical line. The day columns are one
+// custom property for the same reason: the day lens sets it once on
+// .calendar-main and all three grids widen the same day together.
 $calendar-gutter: 58px;
+$calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 
 .calendar-daynames,
 .calendar-allday {
   display: grid;
-  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  grid-template-columns: $calendar-gutter $calendar-day-columns;
   border-bottom: 1px solid var(--border);
 }
 
@@ -199,7 +202,7 @@ $calendar-gutter: 58px;
 .calendar-grid {
   position: relative;
   display: grid;
-  grid-template-columns: $calendar-gutter repeat(7, minmax(0, 1fr));
+  grid-template-columns: $calendar-gutter $calendar-day-columns;
   overflow-y: auto;
   // The grid is the only scrolling region, so the header and the all-day bar
   // stay put while a day is scrolled.
@@ -603,4 +606,77 @@ $calendar-gutter: 58px;
       color: var(--text);
     }
   }
+}
+
+// The day lens. The switch reads as pressed while it is on, the way the
+// sidebar's toggles do, rather than as a second primary button.
+.calendar-lens-toggle[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+// Under the lens every weekday is a button that opens it; the label keeps the
+// look it has when the lens is off, so turning the lens on moves nothing.
+.day-lens .calendar-dayname {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.calendar-dayname-button {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .lens-open & {
+    background: var(--accent-soft);
+  }
+}
+
+// One label per lane, above the lane it names: the lanes split the column
+// evenly and so do these.
+.calendar-lens-lanes {
+  display: flex;
+  min-width: 0;
+
+  span {
+    @include truncate;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 3px 4px;
+    border-bottom: 2px solid var(--calendar-color);
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+  }
+}
+
+.calendar-lens-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--border);
+  pointer-events: none;
 }
