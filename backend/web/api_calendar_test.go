@@ -27,6 +27,8 @@ type fakeCalendarAPI struct {
 	mu      sync.Mutex
 	listed  int
 	created int
+	// writes are the bodies of the creates, in order.
+	writes  []map[string]any
 	deleted []string
 	// event is what a read of an event answers with.
 	event map[string]any
@@ -51,6 +53,11 @@ func (f *fakeCalendarAPI) handler() http.Handler {
 			f.created++
 			var write map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&write)
+			copied := map[string]any{}
+			for key, value := range write {
+				copied[key] = value
+			}
+			f.writes = append(f.writes, copied)
 			write["id"] = "created-1"
 			write["etag"] = "etag-created"
 			write["status"] = "confirmed"
@@ -822,5 +829,79 @@ func TestEventAnswersNameTheirCopies(t *testing.T) {
 	}
 	if payload.Event.MyResponse != "accepted" || len(payload.Event.AlsoIn) != 1 || payload.Event.AlsoIn[0].CalendarID != family.ID {
 		t.Fatalf("event = %+v, want the answer and the copy named", payload.Event)
+	}
+}
+
+// The busy calendar is chosen and titled through the calendar route, can never
+// be the second calendar at the same time, and an event asked to block its
+// time there is written as a placeholder: the title the reader chose and none
+// of the event's details. The week draws the event once, naming the busy
+// calendar among its copies.
+func TestCreateEventWithAPlaceholderInTheBusyCalendar(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	busy := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+	start := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	body := []byte(`{"calendar_id":` + strconv.FormatInt(work.ID, 10) +
+		`,"summary":"Dentist","description":"Root canal","location":"Hauptstraße 1","busy_copy":true,"start_at":"` +
+		start.Format(time.RFC3339) + `","end_at":"` + start.Add(time.Hour).Format(time.RFC3339) + `"}`)
+
+	if response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body); response.Code != http.StatusBadRequest {
+		t.Fatalf("placeholder without a busy calendar status=%d body=%s, want 400", response.Code, response.Body.String())
+	}
+
+	calendarPath := "/api/calendar/calendars/" + strconv.FormatInt(busy.ID, 10)
+	if response := env.send(t, env.owner, http.MethodPut, calendarPath, []byte(`{"copy_target":true,"busy_target":true}`)); response.Code != http.StatusBadRequest {
+		t.Fatalf("both roles at once status=%d, want 400", response.Code)
+	}
+	response := env.send(t, env.owner, http.MethodPut, calendarPath, []byte(`{"busy_target":true,"busy_label":"Abwesend"}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("choose busy calendar status=%d body=%s", response.Code, response.Body.String())
+	}
+	var chosen struct {
+		Calendar apiCalendar `json:"calendar"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&chosen); err != nil {
+		t.Fatal(err)
+	}
+	if !chosen.Calendar.BusyTarget || chosen.Calendar.BusyTitle != "Abwesend" || chosen.Calendar.CopyTarget {
+		t.Fatalf("calendar = %+v", chosen.Calendar)
+	}
+	if response := env.send(t, env.other, http.MethodPut, calendarPath, []byte(`{"busy_label":"x"}`)); response.Code != http.StatusNotFound {
+		t.Fatalf("another tenant labelling the calendar status=%d, want 404", response.Code)
+	}
+
+	response = env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	writes := fake.writes
+	fake.mu.Unlock()
+	if len(writes) != 2 {
+		t.Fatalf("Google was asked to create %d events, want the event and its placeholder", len(writes))
+	}
+	placeholder := writes[1]
+	if placeholder["summary"] != "Abwesend" || placeholder["description"] != "" || placeholder["location"] != "" {
+		t.Fatalf("placeholder written = %+v", placeholder)
+	}
+	if attendees, ok := placeholder["attendees"].([]any); ok && len(attendees) != 0 {
+		t.Fatalf("placeholder invited %v", attendees)
+	}
+	properties, _ := placeholder["extendedProperties"].(map[string]any)
+	private, _ := properties["private"].(map[string]any)
+	if private["rolltopLinkRole"] != "busy" {
+		t.Fatalf("placeholder properties = %+v", properties)
+	}
+
+	events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
+	if len(events) != 1 {
+		t.Fatalf("week = %+v, want the event drawn once", events)
+	}
+	if events[0].Summary != "Dentist" || events[0].LinkMasked || len(events[0].AlsoIn) != 1 || events[0].AlsoIn[0].CalendarID != busy.ID {
+		t.Fatalf("drawn = %+v, want the event naming its placeholder", events[0])
 	}
 }

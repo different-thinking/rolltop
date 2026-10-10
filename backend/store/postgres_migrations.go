@@ -607,6 +607,28 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE calendars ADD COLUMN listed bigint NOT NULL DEFAULT 1`,
 		},
 	},
+	{
+		// A busy calendar beside the second calendar: one more calendar an
+		// event can be copied into, where the copy carries the time and a
+		// placeholder title (busy_label, "Busy" when empty) and nothing else --
+		// no notes, no place, no guests. It is for a calendar other people
+		// can read, a work calendar that should show an afternoon blocked
+		// without saying by what.
+		//
+		// busy_target follows copy_target exactly, one per user through the
+		// partial unique index. link_masked mirrors the role a copy carries
+		// at its provider ("busy" beside "primary" and "copy"), so an edit
+		// renders that copy as a placeholder whichever role its calendar has
+		// by then: deciding it from the calendar's current role would write an
+		// event's full text into a calendar that stopped being the busy one.
+		Version: "0017-calendar-busy-copies",
+		Statements: []string{
+			`ALTER TABLE calendars ADD COLUMN busy_target bigint NOT NULL DEFAULT 0`,
+			`CREATE UNIQUE INDEX idx_calendars_busy_target ON calendars (user_id) WHERE busy_target = 1`,
+			`ALTER TABLE calendars ADD COLUMN busy_label text COLLATE "C" NOT NULL DEFAULT ''`,
+			`ALTER TABLE calendar_events ADD COLUMN link_masked bigint NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

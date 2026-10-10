@@ -8,9 +8,14 @@
 // event does, so a copy the provider refuses is reported on its own instead of
 // failing the copy that succeeded.
 //
+// A reader may also keep a busy calendar, and an event copied there arrives as
+// a placeholder: its time under a stand-in title such as "Busy" or "Away", and
+// none of its content. A placeholder is a member of the same group and moves
+// with every edit, but never takes on anything but the time.
+//
 // Nothing here knows how a provider stores the link. A Writer does: it writes
-// event.LinkKey and event.LinkPrimary along with everything else and reads
-// them back on every sync.
+// event.LinkKey, event.LinkPrimary and event.LinkMasked along with everything
+// else and reads them back on every sync.
 
 package calendarlink
 
@@ -19,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 
 	"rolltop/backend/store"
 )
@@ -50,7 +56,8 @@ type LinkedProblem struct {
 	Err        error
 }
 
-// CopyChange is what an edit asks of the copy in the reader's second calendar.
+// CopyChange is what an edit asks of the copy in one of the reader's target
+// calendars -- the second calendar or the busy calendar.
 type CopyChange int
 
 const (
@@ -96,61 +103,161 @@ func CopyFor(event store.CalendarEvent, calendarID int64) store.CalendarEvent {
 	}
 }
 
-// CreateWithCopy creates an event and its copy in the second calendar. The
-// event comes first and decides the outcome: a refused copy leaves the event in
-// place and is returned as a problem, because the reader asked for the
-// appointment above all and it now exists.
+// MaskedCopyFor renders the busy calendar's placeholder of an event: its time
+// under the given title, and nothing else. No notes, no place, no guests and
+// no meeting -- the busy calendar is the one other people read, and what it is
+// for is saying that the time is taken without saying by what.
+func MaskedCopyFor(event store.CalendarEvent, calendarID int64, title string) store.CalendarEvent {
+	if title == "" {
+		title = store.DefaultBusyLabel
+	}
+	return store.CalendarEvent{
+		CalendarID:  calendarID,
+		Summary:     title,
+		StartAt:     event.StartAt,
+		EndAt:       event.EndAt,
+		AllDay:      event.AllDay,
+		TimeZone:    event.TimeZone,
+		LinkKey:     event.LinkKey,
+		LinkPrimary: false,
+		LinkMasked:  true,
+	}
+}
+
+// Target is one calendar an event may be copied into, and what a write asks of
+// the copy there.
+type Target struct {
+	CalendarID int64
+	// Masked makes the copy a placeholder (MaskedCopyFor) titled Title.
+	Masked bool
+	Title  string
+	// Change is what the write wants of the copy. A create only acts on
+	// CopyAdd.
+	Change CopyChange
+}
+
+// render is the copy a target receives of an event.
+func (t Target) render(event store.CalendarEvent) store.CalendarEvent {
+	if t.Masked {
+		return MaskedCopyFor(event, t.CalendarID, t.Title)
+	}
+	return CopyFor(event, t.CalendarID)
+}
+
+// CreateWithCopy creates an event and its copy in the second calendar. See
+// CreateWithCopies.
 func CreateWithCopy(ctx context.Context, w Writer, userID, calendarID, copyCalendarID int64, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
-	if copyCalendarID <= 0 || copyCalendarID == calendarID {
+	return CreateWithCopies(ctx, w, userID, calendarID, []Target{{CalendarID: copyCalendarID, Change: CopyAdd}}, event)
+}
+
+// CreateWithCopies creates an event and a copy of it in every target that asks
+// for one. The event comes first and decides the outcome: a refused copy leaves
+// the event in place and is returned as a problem, because the reader asked for
+// the appointment above all and it now exists.
+func CreateWithCopies(ctx context.Context, w Writer, userID, calendarID int64, targets []Target, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
+	wanted := make([]Target, 0, len(targets))
+	seen := map[int64]bool{calendarID: true}
+	for _, target := range targets {
+		if target.Change != CopyAdd || target.CalendarID <= 0 || seen[target.CalendarID] {
+			continue
+		}
+		seen[target.CalendarID] = true
+		wanted = append(wanted, target)
+	}
+	if len(wanted) == 0 {
 		created, err := w.CreateRemoteEvent(ctx, userID, calendarID, event)
 		return created, nil, err
 	}
 	event.LinkKey = NewLinkKey()
 	event.LinkPrimary = true
+	event.LinkMasked = false
 	created, err := w.CreateRemoteEvent(ctx, userID, calendarID, event)
 	if err != nil {
 		return store.CalendarEvent{}, nil, err
 	}
-	// The copy is rendered from what the provider accepted, not from what was
-	// submitted: a pair is its key and its start, and a start the provider
+	// The copies are rendered from what the provider accepted, not from what
+	// was submitted: a pair is its key and its start, and a start the provider
 	// normalized on the event would otherwise leave the copy unmatched.
-	copied := CopyFor(created, copyCalendarID)
-	copied.LinkKey = event.LinkKey
-	if _, err := w.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
-		return created, []LinkedProblem{{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err}}, nil
+	var problems []LinkedProblem
+	for _, target := range wanted {
+		copied := target.render(created)
+		copied.LinkKey = event.LinkKey
+		if _, err := w.CreateRemoteEvent(ctx, userID, target.CalendarID, copied); err != nil {
+			problems = append(problems, LinkedProblem{CalendarID: target.CalendarID, Action: LinkedCreate, Err: err})
+		}
 	}
-	return created, nil, nil
+	return created, problems, nil
 }
 
-// UpdateGroup applies an edit to an event and carries it to the event's
-// copies. copies are the other members of its pair as they stood before the
-// edit (store.ListCalendarEventCopies); copyCalendarID is the reader's second
-// calendar and change says what the edit wants of it.
+// UpdateGroup applies an edit and carries it to the event's copies, with one
+// target: the reader's second calendar. See UpdateGroupTargets.
+func UpdateGroup(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, copyCalendarID int64, change CopyChange) (store.CalendarEvent, []LinkedProblem, error) {
+	var targets []Target
+	if copyCalendarID > 0 {
+		targets = []Target{{CalendarID: copyCalendarID, Change: change}}
+	}
+	return UpdateGroupTargets(ctx, w, userID, existing, edited, copies, targets)
+}
+
+// UpdateGroupTargets applies an edit to an event and carries it to the event's
+// copies. copies are the other members of its group as they stood before the
+// edit (store.ListCalendarEventCopies); targets are the reader's second and
+// busy calendars and what the edit wants of each.
 //
 // The edited event is written first and alone decides the error: a conflict or
 // a deletion there is reported exactly as it is for an unlinked event, and
 // nothing is carried to a copy of an edit the provider refused. Each copy keeps
-// its own guest list -- the copy has none, and an edit made through the copy
-// must not wipe the primary's -- and its own online meeting, for the reason
-// CopyFor gives.
-func UpdateGroup(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, copyCalendarID int64, change CopyChange) (store.CalendarEvent, []LinkedProblem, error) {
-	var inTarget *store.CalendarEvent
-	for i := range copies {
-		if copyCalendarID > 0 && copies[i].CalendarID == copyCalendarID {
-			inTarget = &copies[i]
-			break
-		}
+// its own guest list -- a copy has none, and an edit made through a copy must
+// not wipe the primary's -- and its own online meeting, for the reason CopyFor
+// gives. A placeholder follows as a placeholder, whatever its calendar is now,
+// and an edit made through a placeholder moves the other copies' time and
+// nothing else: its title is not the event's.
+func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target) (store.CalendarEvent, []LinkedProblem, error) {
+	throughPlaceholder := existing.Linked() && existing.LinkMasked
+	type plan struct {
+		target Target
+		add    bool
+		remove *store.CalendarEvent
 	}
-	addCopy := change == CopyAdd && copyCalendarID > 0 && copyCalendarID != existing.CalendarID && inTarget == nil
-	// Only a copy is ever removed. The second calendar can be changed after a
-	// pair was made, so the member it holds may be the event that was entered
-	// -- the one carrying the guest list -- and deleting that would cancel the
-	// meeting for every guest when the reader only unticked a box on the copy.
-	removeCopy := change == CopyRemove && inTarget != nil && !inTarget.LinkPrimary
+	var plans []plan
+	seen := map[int64]bool{existing.CalendarID: true}
+	for _, target := range targets {
+		if target.CalendarID <= 0 || seen[target.CalendarID] {
+			continue
+		}
+		seen[target.CalendarID] = true
+		var held *store.CalendarEvent
+		for i := range copies {
+			if copies[i].CalendarID == target.CalendarID {
+				held = &copies[i]
+				break
+			}
+		}
+		change := target.Change
+		if throughPlaceholder {
+			// A placeholder has nothing to copy from: a copy made from it
+			// would carry its stand-in title as the event's.
+			change = CopyKeep
+		}
+		p := plan{target: target, add: change == CopyAdd && held == nil}
+		// Only a copy is ever removed. A calendar's role can be changed after
+		// a group was made, so the member it holds may be the event that was
+		// entered -- the one carrying the guest list -- and deleting that
+		// would cancel the meeting for every guest when the reader only
+		// unticked a box on the copy.
+		if change == CopyRemove && held != nil && !held.LinkPrimary {
+			p.remove = held
+		}
+		plans = append(plans, p)
+	}
 
 	edited.LinkKey = existing.LinkKey
 	edited.LinkPrimary = existing.LinkPrimary
-	if existing.Linked() && !existing.LinkPrimary {
+	edited.LinkMasked = existing.LinkMasked
+	if throughPlaceholder {
+		edited.Attendees = existing.Attendees
+		edited.OnlineMeeting = existing.OnlineMeeting
+	} else if existing.Linked() && !existing.LinkPrimary {
 		for _, copied := range copies {
 			if copied.LinkPrimary {
 				// The guests were invited by the entered event; a list written
@@ -162,10 +269,14 @@ func UpdateGroup(ctx context.Context, w Writer, userID int64, existing, edited s
 			}
 		}
 	}
-	if addCopy && edited.LinkKey == "" {
+	adding := false
+	for _, p := range plans {
+		adding = adding || p.add
+	}
+	if adding && edited.LinkKey == "" {
 		// An event entered before it had a copy becomes the primary of a new
-		// pair. The link travels in the same write as the edit, so there is no
-		// state in which the copy exists and the event does not know it.
+		// group. The link travels in the same write as the edit, so there is
+		// no state in which the copy exists and the event does not know it.
 		edited.LinkKey = NewLinkKey()
 		edited.LinkPrimary = true
 	}
@@ -174,41 +285,90 @@ func UpdateGroup(ctx context.Context, w Writer, userID int64, existing, edited s
 		return updated, nil, err
 	}
 
+	removing := map[int64]bool{}
+	for _, p := range plans {
+		if p.remove != nil {
+			removing[p.remove.ID] = true
+		}
+	}
 	// The copies follow what the provider accepted, not what was submitted,
-	// for the reason CreateWithCopy gives.
+	// for the reason CreateWithCopies gives.
 	var problems []LinkedProblem
 	for _, copied := range copies {
-		if removeCopy && copied.ID == inTarget.ID {
+		if removing[copied.ID] {
 			continue
 		}
-		follow := updated
-		follow.ID = copied.ID
-		follow.CalendarID = copied.CalendarID
-		follow.ExternalID = copied.ExternalID
-		follow.ETag = copied.ETag
-		follow.Attendees = copied.Attendees
-		follow.LinkKey = copied.LinkKey
-		follow.LinkPrimary = copied.LinkPrimary
-		follow.OnlineMeeting = copied.OnlineMeeting
-		follow.OnlineMeetingProvider = copied.OnlineMeetingProvider
-		follow.OnlineMeetingURL = copied.OnlineMeetingURL
+		follow := followCopy(updated, copied, throughPlaceholder, placeholderTitle(copied, targets))
 		if _, err := w.UpdateRemoteEvent(ctx, userID, copied, follow); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: copied.CalendarID, Action: LinkedUpdate, Err: err})
 		}
 	}
-	if removeCopy {
-		if err := w.DeleteRemoteEvent(ctx, userID, *inTarget); err != nil {
-			problems = append(problems, LinkedProblem{CalendarID: inTarget.CalendarID, Action: LinkedDelete, Err: err})
+	for _, p := range plans {
+		if p.remove == nil {
+			continue
+		}
+		if err := w.DeleteRemoteEvent(ctx, userID, *p.remove); err != nil {
+			problems = append(problems, LinkedProblem{CalendarID: p.remove.CalendarID, Action: LinkedDelete, Err: err})
 		}
 	}
-	if addCopy {
-		copied := CopyFor(updated, copyCalendarID)
+	for _, p := range plans {
+		if !p.add {
+			continue
+		}
+		copied := p.target.render(updated)
 		copied.LinkKey = edited.LinkKey
-		if _, err := w.CreateRemoteEvent(ctx, userID, copyCalendarID, copied); err != nil {
-			problems = append(problems, LinkedProblem{CalendarID: copyCalendarID, Action: LinkedCreate, Err: err})
+		if _, err := w.CreateRemoteEvent(ctx, userID, p.target.CalendarID, copied); err != nil {
+			problems = append(problems, LinkedProblem{CalendarID: p.target.CalendarID, Action: LinkedCreate, Err: err})
 		}
 	}
 	return updated, problems, nil
+}
+
+// followCopy renders what one copy becomes after its group's event was edited
+// to updated. A placeholder is rendered afresh from the new time; a full copy
+// follows a placeholder's edit in its time only; any other copy takes the edit
+// whole, keeping its own guests and meeting.
+func followCopy(updated, copied store.CalendarEvent, throughPlaceholder bool, title string) store.CalendarEvent {
+	var follow store.CalendarEvent
+	switch {
+	case copied.LinkMasked:
+		follow = MaskedCopyFor(updated, copied.CalendarID, title)
+	case throughPlaceholder:
+		follow = copied
+		follow.StartAt = updated.StartAt
+		follow.EndAt = updated.EndAt
+		follow.AllDay = updated.AllDay
+		follow.TimeZone = updated.TimeZone
+	default:
+		follow = updated
+	}
+	follow.ID = copied.ID
+	follow.CalendarID = copied.CalendarID
+	follow.ExternalID = copied.ExternalID
+	follow.ETag = copied.ETag
+	follow.Attendees = copied.Attendees
+	follow.LinkKey = copied.LinkKey
+	follow.LinkPrimary = copied.LinkPrimary
+	follow.LinkMasked = copied.LinkMasked
+	follow.OnlineMeeting = copied.OnlineMeeting
+	follow.OnlineMeetingProvider = copied.OnlineMeetingProvider
+	follow.OnlineMeetingURL = copied.OnlineMeetingURL
+	return follow
+}
+
+// placeholderTitle is the title a placeholder keeps through an edit: its busy
+// calendar's current one while that calendar is still a busy target, and the
+// one it already carries otherwise.
+func placeholderTitle(copied store.CalendarEvent, targets []Target) string {
+	for _, target := range targets {
+		if target.Masked && target.CalendarID == copied.CalendarID && target.Title != "" {
+			return target.Title
+		}
+	}
+	if title := strings.TrimSpace(copied.Summary); title != "" {
+		return title
+	}
+	return store.DefaultBusyLabel
 }
 
 // DeleteGroup deletes an event and every copy of it. The reader saw one

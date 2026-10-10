@@ -47,7 +47,7 @@ const calendarEventSelectColumns = `id, user_id, calendar_id, external_id, etag,
 	summary, description, location, status, start_at, end_at, all_day, time_zone,
 	recurring_event_id, organizer_email, organizer_name, attendees_json, my_response,
 	html_link, remote_updated_at, link_key, link_primary, online_meeting,
-	online_meeting_provider, online_meeting_url`
+	online_meeting_provider, online_meeting_url, link_masked`
 
 // CalendarAttendee is one invitee as Google reports them. It is display data:
 // nothing queries against it, so the list is stored as JSON on the event.
@@ -103,6 +103,11 @@ type CalendarEvent struct {
 	// LinkPrimary marks the copy that was entered, as opposed to the one made
 	// in the second calendar. Only it carries the guest list.
 	LinkPrimary bool
+	// LinkMasked marks a placeholder copy: one made in the reader's busy
+	// calendar, carrying the event's time and a stand-in title and nothing
+	// else. Like the key it is read from the provider, so an edit keeps
+	// rendering the copy as a placeholder whatever its calendar is by then.
+	LinkMasked bool
 	// OnlineMeeting marks an event that is held online -- a Teams meeting for
 	// a Microsoft calendar. On a write it asks for one to be created; the
 	// provider and the join link are only ever read back from the provider.
@@ -141,8 +146,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			 location, status, start_at, end_at, all_day, time_zone, recurring_event_id,
 			 organizer_email, organizer_name, attendees_json, my_response, html_link,
 			 remote_updated_at, link_key, link_primary, online_meeting, online_meeting_provider,
-			 online_meeting_url, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 online_meeting_url, link_masked, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, calendar_id, external_id) DO UPDATE SET
 			etag = excluded.etag,
 			ical_uid = excluded.ical_uid,
@@ -166,6 +171,7 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			online_meeting = excluded.online_meeting,
 			online_meeting_provider = excluded.online_meeting_provider,
 			online_meeting_url = excluded.online_meeting_url,
+			link_masked = excluded.link_masked,
 			updated_at = excluded.updated_at`,
 		userID, event.CalendarID, trimLimit(externalID, 300), trimLimit(event.ETag, 200),
 		trimLimit(event.ICalUID, 300), trimLimit(event.Summary, 500),
@@ -177,7 +183,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 		trimLimit(event.HTMLLink, 1000), timeUnix(event.RemoteUpdatedAt),
 		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary),
 		boolInt(event.OnlineMeeting), trimLimit(strings.TrimSpace(event.OnlineMeetingProvider), 60),
-		trimLimit(strings.TrimSpace(event.OnlineMeetingURL), 2000), ts, ts)
+		trimLimit(strings.TrimSpace(event.OnlineMeetingURL), 2000),
+		boolInt(event.Linked() && event.LinkMasked), ts, ts)
 	if err != nil {
 		return CalendarEvent{}, err
 	}
@@ -422,17 +429,18 @@ func decodeAttendees(raw string) []CalendarAttendee {
 func scanCalendarEvent(dest scanDest) (CalendarEvent, error) {
 	var event CalendarEvent
 	var attendees string
-	var allDay, startAt, endAt, remoteUpdated, linkPrimary, onlineMeeting int64
+	var allDay, startAt, endAt, remoteUpdated, linkPrimary, onlineMeeting, linkMasked int64
 	if err := dest.Scan(&event.ID, &event.UserID, &event.CalendarID, &event.ExternalID,
 		&event.ETag, &event.ICalUID, &event.Summary, &event.Description, &event.Location,
 		&event.Status, &startAt, &endAt, &allDay, &event.TimeZone, &event.RecurringEventID,
 		&event.OrganizerEmail, &event.OrganizerName, &attendees, &event.MyResponse,
 		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary, &onlineMeeting,
-		&event.OnlineMeetingProvider, &event.OnlineMeetingURL); err != nil {
+		&event.OnlineMeetingProvider, &event.OnlineMeetingURL, &linkMasked); err != nil {
 		return CalendarEvent{}, err
 	}
 	event.OnlineMeeting = onlineMeeting != 0
 	event.LinkPrimary = linkPrimary != 0
+	event.LinkMasked = linkMasked != 0
 	event.StartAt = unixTime(startAt)
 	event.EndAt = unixTime(endAt)
 	event.AllDay = allDay != 0

@@ -1,7 +1,7 @@
 // File overview: Which calendars the calendar view lists at all. With Google
 // and Microsoft 365 side by side a reader routinely has a dozen calendars, most
 // of which they never want to see; hiding one here takes it out of the calendar menu,
-// out of the week and out of the second-calendar choice in one step.
+// out of the week and out of the second- and busy-calendar choices in one step.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
@@ -48,9 +48,10 @@ export function CalendarSettingsPanel({
   const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
 
   const setListed = async (calendar: CalendarSummary, listed: boolean) => {
-    if (!listed && calendar.copy_target) {
+    if (!listed && (calendar.copy_target || calendar.busy_target)) {
+      const role = calendar.copy_target ? "second calendar" : "busy calendar";
       const ok = window.confirm(
-        `${calendar.name} is your second calendar.\n\nHiding it also stops new events from being copied into it. Copies that already exist stay where they are.`
+        `${calendar.name} is your ${role}.\n\nHiding it also stops new events from being copied into it. Copies that already exist stay where they are.`
       );
       if (!ok) return;
     }
@@ -110,6 +111,7 @@ export function CalendarSettingsPanel({
                   <span className="calendar-settings-tags">
                     {calendar.is_primary ? <span className="settings-badge">Primary</span> : null}
                     {calendar.copy_target ? <span className="settings-badge">Second calendar</span> : null}
+                    {calendar.busy_target ? <span className="settings-badge">Busy calendar</span> : null}
                     {!calendar.can_write ? <span className="settings-badge">Read-only</span> : null}
                   </span>
                 </label>

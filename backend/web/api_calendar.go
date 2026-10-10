@@ -48,6 +48,12 @@ type apiCalendar struct {
 	// CopyTarget marks the reader's second calendar, the one a new event can
 	// be copied into as well.
 	CopyTarget bool `json:"copy_target"`
+	// BusyTarget marks the reader's busy calendar, the one a new event can be
+	// copied into as a placeholder; BusyLabel is the placeholder's title as
+	// the reader set it, empty for the default (BusyTitle).
+	BusyTarget bool   `json:"busy_target"`
+	BusyLabel  string `json:"busy_label"`
+	BusyTitle  string `json:"busy_title"`
 	// Listed says whether the calendar view lists the calendar at all. One
 	// that is not listed is never selected and never the second calendar.
 	Listed bool `json:"listed"`
@@ -96,6 +102,9 @@ type apiCalendarEvent struct {
 	// LinkPrimary marks the copy of a linked pair that was entered, and the
 	// one that carries its guest list.
 	LinkPrimary bool `json:"link_primary"`
+	// LinkMasked marks a placeholder in the busy calendar: the time of an
+	// event entered elsewhere under a stand-in title.
+	LinkMasked bool `json:"link_masked"`
 	// AlsoIn lists the other calendars holding a copy of this event. The week
 	// view draws a linked pair once, and this is how the entry it draws says
 	// where else the appointment lives -- including a calendar that is
@@ -152,6 +161,9 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 		IsPrimary:              calendar.IsPrimary,
 		Selected:               calendar.Selected,
 		CopyTarget:             calendar.CopyTarget,
+		BusyTarget:             calendar.BusyTarget,
+		BusyLabel:              calendar.BusyLabel,
+		BusyTitle:              calendar.PlaceholderTitle(),
 		Listed:                 calendar.Listed,
 		SyncedFrom:             timeString(calendar.WindowStartAt),
 		LastSyncAt:             timeString(calendar.LastSyncAt),
@@ -191,6 +203,7 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 		MyResponse:       event.MyResponse,
 		HTMLLink:         event.HTMLLink,
 		LinkPrimary:      event.Linked() && event.LinkPrimary,
+		LinkMasked:       event.Linked() && event.LinkMasked,
 		AlsoIn:           []apiCalendarEventCopy{},
 
 		OnlineMeeting:         event.OnlineMeeting,
@@ -316,9 +329,9 @@ func (s *Server) presentCalendars(ctx context.Context, userID int64, calendars [
 }
 
 // apiCalendarByID switches one calendar's visibility, lists or hides it in the
-// calendar view, or makes it the reader's second calendar. Every field may be
-// left out; a request naming none changes nothing and answers with the
-// calendar as it is.
+// calendar view, makes it the reader's second or busy calendar, or sets the
+// title its placeholders carry. Every field may be left out; a request naming
+// none changes nothing and answers with the calendar as it is.
 func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID int64, rest string) {
 	calendarID, ok := parsePositiveID(w, rest)
 	if !ok {
@@ -332,9 +345,11 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		return
 	}
 	var in struct {
-		Selected   *bool `json:"selected"`
-		CopyTarget *bool `json:"copy_target"`
-		Listed     *bool `json:"listed"`
+		Selected   *bool   `json:"selected"`
+		CopyTarget *bool   `json:"copy_target"`
+		BusyTarget *bool   `json:"busy_target"`
+		BusyLabel  *string `json:"busy_label"`
+		Listed     *bool   `json:"listed"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -355,14 +370,26 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	if in.Listed != nil {
 		listed = *in.Listed
 	}
-	if !listed && ((in.Selected != nil && *in.Selected) || (in.CopyTarget != nil && *in.CopyTarget)) {
+	if !listed && ((in.Selected != nil && *in.Selected) || (in.CopyTarget != nil && *in.CopyTarget) ||
+		(in.BusyTarget != nil && *in.BusyTarget)) {
 		writeAPIError(w, http.StatusBadRequest, calendarHiddenMessage)
+		return
+	}
+	// One calendar holds an event either in full or as a placeholder, never
+	// both; choosing it for one role takes the other away, and a request
+	// asking for both at once is asking for neither.
+	if in.CopyTarget != nil && *in.CopyTarget && in.BusyTarget != nil && *in.BusyTarget {
+		writeAPIError(w, http.StatusBadRequest, "A calendar can be the second calendar or the busy calendar, not both.")
+		return
+	}
+	if in.BusyLabel != nil && len([]rune(strings.TrimSpace(*in.BusyLabel))) > maxBusyLabelRunes {
+		writeAPIError(w, http.StatusBadRequest, "That placeholder title is too long.")
 		return
 	}
 	// A copy is a write, so a calendar shared read-only would turn every event
 	// entered with a copy into a copy Google refuses. Refused before anything
 	// is written, so a request that also lists the calendar changes nothing.
-	if in.CopyTarget != nil && *in.CopyTarget && !calendar.CanWrite() {
+	if ((in.CopyTarget != nil && *in.CopyTarget) || (in.BusyTarget != nil && *in.BusyTarget)) && !calendar.CanWrite() {
 		writeAPIError(w, http.StatusBadRequest, "This calendar is shared read-only, so events cannot be copied into it.")
 		return
 	}
@@ -379,6 +406,18 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 	// which is the same answer the check above gives.
 	if in.CopyTarget != nil {
 		if err := s.store.SetCalendarCopyTarget(r.Context(), userID, calendarID, *in.CopyTarget); err != nil {
+			s.writeCalendarSwitchError(w, r, err)
+			return
+		}
+	}
+	if in.BusyTarget != nil {
+		if err := s.store.SetCalendarBusyTarget(r.Context(), userID, calendarID, *in.BusyTarget); err != nil {
+			s.writeCalendarSwitchError(w, r, err)
+			return
+		}
+	}
+	if in.BusyLabel != nil {
+		if err := s.store.SetCalendarBusyLabel(r.Context(), userID, calendarID, *in.BusyLabel); err != nil {
 			s.writeCalendarSwitchError(w, r, err)
 			return
 		}
@@ -410,6 +449,10 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 		"calendar": apiCalendarFromStore(calendar, s.calendarConnectionEmail(r.Context(), userID, calendar)),
 	})
 }
+
+// maxBusyLabelRunes bounds a placeholder title. It is a word or two; refusing
+// a longer one says so instead of letting the store cut it.
+const maxBusyLabelRunes = 60
 
 // calendarHiddenMessage refuses to draw a hidden calendar or make it the
 // second calendar.
@@ -496,7 +539,8 @@ func linkedGroupKey(event store.CalendarEvent) string {
 //
 // The entry drawn is the copy that was entered when its calendar is switched
 // on -- it carries the guest list and the invitation answer -- and otherwise
-// the copy in the first visible calendar. Folding never hides an event whose
+// the copy in the first visible calendar, a busy calendar's placeholder only
+// when no other copy is visible. Folding never hides an event whose
 // group it cannot find: drawing a copy twice is recoverable, hiding the only
 // one is not.
 func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Calendar) []apiCalendarEvent {
@@ -516,6 +560,11 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 			a, b := members[i], members[j]
 			if visible[a.CalendarID] != visible[b.CalendarID] {
 				return visible[a.CalendarID]
+			}
+			// A placeholder stands for the event only when nothing else
+			// of it is drawn: it carries none of what the dialog shows.
+			if a.LinkMasked != b.LinkMasked {
+				return !a.LinkMasked
 			}
 			if a.LinkPrimary != b.LinkPrimary {
 				return a.LinkPrimary
@@ -574,18 +623,20 @@ type calendarEventInput struct {
 	// well (true) or no longer (false). Left out, an edit keeps whatever
 	// copies the event has and a create makes none.
 	Copy *bool `json:"copy"`
+	// BusyCopy asks the same of the placeholder in the reader's busy calendar.
+	BusyCopy *bool `json:"busy_copy"`
 	// OnlineMeeting asks for the event to be held online -- a Teams meeting
 	// in a Microsoft calendar. Once a meeting is online it stays so; false on
 	// an edit does not take it back.
 	OnlineMeeting bool `json:"online_meeting"`
 }
 
-// copyChange reads what the submission asks of the second calendar's copy.
-func (in calendarEventInput) copyChange() calendarlink.CopyChange {
+// copyChange reads what one of the submission's copy fields asks.
+func copyChange(asked *bool) calendarlink.CopyChange {
 	switch {
-	case in.Copy == nil:
+	case asked == nil:
 		return calendarlink.CopyKeep
-	case *in.Copy:
+	case *asked:
 		return calendarlink.CopyAdd
 	default:
 		return calendarlink.CopyRemove
@@ -663,15 +714,11 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
-	var copyCalendarID int64
-	if in.copyChange() == calendarlink.CopyAdd {
-		target, ok := s.copyTargetForWrite(w, r, userID)
-		if !ok {
-			return
-		}
-		copyCalendarID = target.ID
+	targets, ok := s.copyTargetsForWrite(w, r, userID, in)
+	if !ok {
+		return
 	}
-	created, problems, err := s.calendarRouter().CreateWithCopy(r.Context(), userID, in.CalendarID, copyCalendarID, event)
+	created, problems, err := s.calendarRouter().CreateWithCopies(r.Context(), userID, in.CalendarID, targets, event)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
@@ -682,24 +729,67 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 	})
 }
 
-// copyTargetForWrite resolves the reader's second calendar for a request that
-// asked for a copy. Asking for one with no second calendar chosen is a stale
+// copyTargetsForWrite resolves what a submission asks of the reader's second
+// and busy calendars. Asking for a copy with no such calendar chosen is a stale
 // form, not something to ignore: the reader would believe the copy was made.
-func (s *Server) copyTargetForWrite(w http.ResponseWriter, r *http.Request, userID int64) (store.Calendar, bool) {
-	target, err := s.store.CopyTargetCalendar(r.Context(), userID)
-	if store.IsNotFound(err) {
-		writeAPIError(w, http.StatusBadRequest, "No second calendar is chosen to copy events into.")
-		return store.Calendar{}, false
+// Taking a copy away needs no write access to check up front: the delete
+// itself is refused on a read-only calendar and says so.
+func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, userID int64, in calendarEventInput) ([]calendarlink.Target, bool) {
+	kinds := []struct {
+		change  calendarlink.CopyChange
+		masked  bool
+		lookup  func(context.Context, int64) (store.Calendar, error)
+		missing string
+		shared  string
+	}{
+		{copyChange(in.Copy), false, s.store.CopyTargetCalendar,
+			"No second calendar is chosen to copy events into.",
+			"Your second calendar is shared read-only, so nothing can be copied into it."},
+		{copyChange(in.BusyCopy), true, s.store.BusyTargetCalendar,
+			"No busy calendar is chosen to block time in.",
+			"Your busy calendar is shared read-only, so no time can be blocked in it."},
 	}
-	if err != nil {
-		s.serverError(w, r, err)
-		return store.Calendar{}, false
+	targets := []calendarlink.Target{}
+	for _, kind := range kinds {
+		if kind.change == calendarlink.CopyKeep {
+			continue
+		}
+		calendar, err := kind.lookup(r.Context(), userID)
+		if store.IsNotFound(err) {
+			if kind.change == calendarlink.CopyAdd {
+				writeAPIError(w, http.StatusBadRequest, kind.missing)
+				return nil, false
+			}
+			continue
+		}
+		if err != nil {
+			s.serverError(w, r, err)
+			return nil, false
+		}
+		if kind.change == calendarlink.CopyAdd && !calendar.CanWrite() {
+			writeAPIError(w, http.StatusBadRequest, kind.shared)
+			return nil, false
+		}
+		target := calendarlink.Target{CalendarID: calendar.ID, Masked: kind.masked, Change: kind.change}
+		if kind.masked {
+			target.Title = calendar.PlaceholderTitle()
+		}
+		targets = append(targets, target)
 	}
-	if !target.CanWrite() {
-		writeAPIError(w, http.StatusBadRequest, "Your second calendar is shared read-only, so nothing can be copied into it.")
-		return store.Calendar{}, false
+	// A placeholder that is merely carried along keeps its busy calendar's
+	// current title, so that calendar is named even when nothing is asked of
+	// it.
+	if copyChange(in.BusyCopy) == calendarlink.CopyKeep {
+		if busy, err := s.store.BusyTargetCalendar(r.Context(), userID); err == nil {
+			targets = append(targets, calendarlink.Target{
+				CalendarID: busy.ID, Masked: true, Title: busy.PlaceholderTitle(), Change: calendarlink.CopyKeep,
+			})
+		} else if !store.IsNotFound(err) {
+			s.serverError(w, r, err)
+			return nil, false
+		}
 	}
-	return target, true
+	return targets, true
 }
 
 // linkedProblemMessages describes the copies a write could not bring along.
@@ -811,31 +901,16 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	// the request claims.
 	edited.CalendarID = existing.CalendarID
 	edited.ExternalID = existing.ExternalID
-	change := in.copyChange()
-	var copyCalendarID int64
-	switch change {
-	case calendarlink.CopyAdd:
-		target, ok := s.copyTargetForWrite(w, r, userID)
-		if !ok {
-			return
-		}
-		copyCalendarID = target.ID
-	case calendarlink.CopyRemove:
-		// Taking a copy away needs no write access to check up front: the
-		// delete itself is refused on a read-only calendar and says so.
-		if target, err := s.store.CopyTargetCalendar(r.Context(), userID); err == nil {
-			copyCalendarID = target.ID
-		} else if !store.IsNotFound(err) {
-			s.serverError(w, r, err)
-			return
-		}
+	targets, ok := s.copyTargetsForWrite(w, r, userID, in)
+	if !ok {
+		return
 	}
 	copies, err := s.store.ListCalendarEventCopies(r.Context(), userID, existing)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	updated, problems, err := s.calendarRouter().UpdateGroup(r.Context(), userID, existing, edited, copies, copyCalendarID, change)
+	updated, problems, err := s.calendarRouter().UpdateGroupTargets(r.Context(), userID, existing, edited, copies, targets)
 	if errors.Is(err, calendarlink.ErrRemoteChanged) {
 		// The user's edit lost, and the version that won is what they need to
 		// see. 409 with the winning event is more useful than a bare error.

@@ -20,10 +20,13 @@ const (
 	// link_key column mirrors it on every sync.
 	linkKeyProperty = "rolltopLink"
 	// linkRoleProperty says which side of the pair an event is. The copy that
-	// was entered is the primary and is the one carrying the guest list.
+	// was entered is the primary and is the one carrying the guest list; a
+	// busy copy is a placeholder in the reader's busy calendar, whose edits
+	// carry the time and nothing else.
 	linkRoleProperty = "rolltopLinkRole"
 	linkRolePrimary  = "primary"
 	linkRoleCopy     = "copy"
+	linkRoleBusy     = "busy"
 )
 
 // The pair logic is shared with Microsoft 365 and lives in calendarlink; these
@@ -48,16 +51,19 @@ func NewLinkKey() string {
 	return calendarlink.NewLinkKey()
 }
 
-// eventLink reads the pair an event belongs to off its extended properties.
-func eventLink(event Event) (string, bool) {
+// eventLink reads the pair an event belongs to off its extended properties:
+// the key, whether this is the copy that was entered, and whether it is a
+// placeholder.
+func eventLink(event Event) (key string, primary, masked bool) {
 	if event.ExtendedProperties == nil {
-		return "", false
+		return "", false, false
 	}
-	key := strings.TrimSpace(event.ExtendedProperties.Private[linkKeyProperty])
+	key = strings.TrimSpace(event.ExtendedProperties.Private[linkKeyProperty])
 	if key == "" {
-		return "", false
+		return "", false, false
 	}
-	return key, event.ExtendedProperties.Private[linkRoleProperty] == linkRolePrimary
+	role := event.ExtendedProperties.Private[linkRoleProperty]
+	return key, role == linkRolePrimary, role == linkRoleBusy
 }
 
 // linkProperties renders an event's link for a write, or nothing for an event
@@ -68,8 +74,11 @@ func linkProperties(event store.CalendarEvent) *EventExtendedProperties {
 		return nil
 	}
 	role := linkRoleCopy
-	if event.LinkPrimary {
+	switch {
+	case event.LinkPrimary:
 		role = linkRolePrimary
+	case event.LinkMasked:
+		role = linkRoleBusy
 	}
 	return &EventExtendedProperties{Private: map[string]string{
 		linkKeyProperty:  key,

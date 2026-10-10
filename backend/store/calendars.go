@@ -45,7 +45,8 @@ const (
 const calendarSelectColumns = `id, user_id, google_connection_id, remote_calendar_id,
 	summary, description, time_zone, color, access_role, is_primary, selected,
 	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail,
-	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers, listed`
+	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers, listed,
+	busy_target, busy_label`
 
 // Calendar is one calendar of one connected account.
 type Calendar struct {
@@ -83,10 +84,18 @@ type Calendar struct {
 	// in any other calendar can be copied into as well. At most one calendar of
 	// a user carries it. The second calendar may belong to the other provider.
 	CopyTarget bool
+	// BusyTarget marks the reader's busy calendar: the one an event entered
+	// in any other calendar can be copied into as a placeholder -- its time
+	// and BusyLabel, nothing else. At most one calendar of a user carries it,
+	// and never the one that is the second calendar.
+	BusyTarget bool
+	// BusyLabel is the title the busy calendar's placeholders carry. Empty
+	// means DefaultBusyLabel; read it through PlaceholderTitle.
+	BusyLabel string
 	// Listed says whether the calendar view lists the calendar at all. A
-	// calendar that is not listed is never Selected and never the CopyTarget:
-	// SetCalendarListed takes both away with the listing, and the API refuses
-	// to give either back while it is hidden.
+	// calendar that is not listed is never Selected, the CopyTarget or the
+	// BusyTarget: SetCalendarListed takes them away with the listing, and the
+	// API refuses to give any of them back while it is hidden.
 	Listed bool
 	// FullReadAt is when the Microsoft sync last read the calendar's whole
 	// window rather than the near one. Google rows leave it zero.
@@ -95,6 +104,24 @@ type Calendar struct {
 	// offers for events in this calendar (Graph's teamsForBusiness and its
 	// relatives). Empty means none can be created here.
 	OnlineMeetingProviders []string
+}
+
+// DefaultBusyLabel titles a placeholder in a busy calendar whose reader never
+// chose a title of their own.
+const DefaultBusyLabel = "Busy"
+
+// maxBusyLabelLength bounds the placeholder title in bytes. It is a word or
+// two -- "Busy", "Away", "Blocked" -- and the API refuses one over 60
+// characters; this leaves room for those 60 in any script, so the byte cut
+// below never lands inside a character.
+const maxBusyLabelLength = 240
+
+// PlaceholderTitle is the title a placeholder in this calendar carries.
+func (c Calendar) PlaceholderTitle() string {
+	if label := strings.TrimSpace(c.BusyLabel); label != "" {
+		return label
+	}
+	return DefaultBusyLabel
 }
 
 // IsMicrosoft reports whether the calendar is mirrored from Microsoft 365.
@@ -381,10 +408,11 @@ func calendarHiddenOrMissing(ctx context.Context, q interface {
 }
 
 // SetCalendarListed shows or hides one calendar in the calendar view. Hiding
-// also switches it off and takes the second-calendar mark off it, in one
-// transaction: a calendar the reader cannot see in the list can neither be
-// switched back off there nor chosen as the second calendar, so leaving either
-// set would be a state nothing on screen could undo. Showing it again lists it
+// also switches it off and takes the second-calendar and busy-calendar marks
+// off it, in one transaction: a calendar the reader cannot see in the list can
+// neither be switched back off there nor chosen as the second or busy
+// calendar, so leaving any of them set would be a state nothing on screen
+// could undo. Showing it again lists it
 // switched off; drawing it is the sidebar's switch, as it is for any calendar.
 func (s *Store) SetCalendarListed(ctx context.Context, userID, calendarID int64, listed bool) error {
 	if userID <= 0 || calendarID <= 0 {
@@ -392,7 +420,7 @@ func (s *Store) SetCalendarListed(ctx context.Context, userID, calendarID int64,
 	}
 	query := `UPDATE calendars SET listed = 1, updated_at = ? WHERE user_id = ? AND id = ?`
 	if !listed {
-		query = `UPDATE calendars SET listed = 0, selected = 0, copy_target = 0, updated_at = ? WHERE user_id = ? AND id = ?`
+		query = `UPDATE calendars SET listed = 0, selected = 0, copy_target = 0, busy_target = 0, updated_at = ? WHERE user_id = ? AND id = ?`
 	}
 	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx, query, nowUnix(), userID, calendarID)
 	if err != nil {
@@ -405,8 +433,24 @@ func (s *Store) SetCalendarListed(ctx context.Context, userID, calendarID int64,
 // stops it being one. Choosing a calendar takes the mark off whichever calendar
 // carried it before, in the same transaction, so there is never a moment with
 // two -- the unique index would refuse it anyway. A hidden calendar cannot be
-// chosen (ErrCalendarHidden).
+// chosen (ErrCalendarHidden). A calendar chosen as the second calendar stops
+// being the busy calendar: one calendar cannot hold an event both in full and
+// as a placeholder.
 func (s *Store) SetCalendarCopyTarget(ctx context.Context, userID, calendarID int64, on bool) error {
+	return s.setCalendarTarget(ctx, userID, calendarID, on, "copy_target", "busy_target")
+}
+
+// SetCalendarBusyTarget makes one calendar the reader's busy calendar, or stops
+// it being one, exactly as SetCalendarCopyTarget does for the second calendar
+// and with the two roles exchanged.
+func (s *Store) SetCalendarBusyTarget(ctx context.Context, userID, calendarID int64, on bool) error {
+	return s.setCalendarTarget(ctx, userID, calendarID, on, "busy_target", "copy_target")
+}
+
+// setCalendarTarget sets one of the two per-user marks, column, and clears
+// other on the same calendar when it is set. Both names are constants of this
+// file, never input.
+func (s *Store) setCalendarTarget(ctx context.Context, userID, calendarID int64, on bool, column, other string) error {
 	if userID <= 0 || calendarID <= 0 {
 		return ErrNotFound
 	}
@@ -422,14 +466,15 @@ func (s *Store) SetCalendarCopyTarget(ctx context.Context, userID, calendarID in
 	ts := nowUnix()
 	if on {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE calendars SET copy_target = 0, updated_at = ? WHERE user_id = ? AND copy_target = 1 AND id <> ?`,
+			`UPDATE calendars SET `+column+` = 0, updated_at = ? WHERE user_id = ? AND `+column+` = 1 AND id <> ?`,
 			ts, userID, calendarID); err != nil {
 			return err
 		}
 	}
-	query := `UPDATE calendars SET copy_target = ?, updated_at = ? WHERE user_id = ? AND id = ?`
+	query := `UPDATE calendars SET ` + column + ` = ?, updated_at = ? WHERE user_id = ? AND id = ?`
 	if on {
-		query += ` AND listed = 1`
+		query = `UPDATE calendars SET ` + column + ` = ?, ` + other + ` = 0, updated_at = ?
+			WHERE user_id = ? AND id = ? AND listed = 1`
 	}
 	res, err := tx.ExecContext(ctx, query, boolInt(on), ts, userID, calendarID)
 	if err != nil {
@@ -452,6 +497,33 @@ func (s *Store) CopyTargetCalendar(ctx context.Context, userID int64) (Calendar,
 	}
 	return scanCalendar(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarSelectColumns+`
 		FROM calendars WHERE user_id = ? AND copy_target = 1`, userID))
+}
+
+// BusyTargetCalendar returns the reader's busy calendar, or ErrNotFound for a
+// reader who never chose one.
+func (s *Store) BusyTargetCalendar(ctx context.Context, userID int64) (Calendar, error) {
+	if userID <= 0 {
+		return Calendar{}, ErrNotFound
+	}
+	return scanCalendar(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarSelectColumns+`
+		FROM calendars WHERE user_id = ? AND busy_target = 1`, userID))
+}
+
+// SetCalendarBusyLabel stores the title placeholders in this calendar carry.
+// It is kept on the calendar rather than on the reader, and an empty one
+// means DefaultBusyLabel. Placeholders already written keep the title they
+// were written with until their event is next edited.
+func (s *Store) SetCalendarBusyLabel(ctx context.Context, userID, calendarID int64, label string) error {
+	if userID <= 0 || calendarID <= 0 {
+		return ErrNotFound
+	}
+	res, err := s.mustDataDB(ctx, userID).ExecContext(ctx,
+		`UPDATE calendars SET busy_label = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		trimLimit(strings.TrimSpace(label), maxBusyLabelLength), nowUnix(), userID, calendarID)
+	if err != nil {
+		return err
+	}
+	return requireCalendarRow(res)
 }
 
 // CalendarSyncState is the outcome of one calendar's event sync.
@@ -633,7 +705,7 @@ func requireCalendarRow(res sql.Result) error {
 
 func scanCalendar(dest scanDest) (Calendar, error) {
 	var calendar Calendar
-	var isPrimary, selected, copyTarget, listed int64
+	var isPrimary, selected, copyTarget, listed, busyTarget int64
 	var windowStart, lastSync, lastSuccess, fullRead int64
 	var meetingProviders string
 	if err := dest.Scan(&calendar.ID, &calendar.UserID, &calendar.GoogleConnectionID,
@@ -641,7 +713,8 @@ func scanCalendar(dest scanDest) (Calendar, error) {
 		&calendar.TimeZone, &calendar.Color, &calendar.AccessRole, &isPrimary, &selected,
 		&calendar.SyncToken, &windowStart, &lastSync, &lastSuccess,
 		&calendar.Status, &calendar.StatusDetail, &copyTarget,
-		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders, &listed); err != nil {
+		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders, &listed,
+		&busyTarget, &calendar.BusyLabel); err != nil {
 		return Calendar{}, err
 	}
 	calendar.FullReadAt = unixTime(fullRead)
@@ -650,6 +723,7 @@ func scanCalendar(dest scanDest) (Calendar, error) {
 	calendar.Selected = selected != 0
 	calendar.CopyTarget = copyTarget != 0
 	calendar.Listed = listed != 0
+	calendar.BusyTarget = busyTarget != 0
 	calendar.WindowStartAt = unixTime(windowStart)
 	calendar.LastSyncAt = unixTime(lastSync)
 	calendar.LastSuccessAt = unixTime(lastSuccess)

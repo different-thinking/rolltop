@@ -230,7 +230,7 @@ func (s *Syncer) RespondToRemoteEvent(ctx context.Context, userID int64, event s
 func (s *Syncer) storeWritten(ctx context.Context, userID int64, calendar store.Calendar, connection store.MicrosoftConnection, written Event, submitted store.CalendarEvent) (store.CalendarEvent, error) {
 	row := ToEvent(written, calendar.ID, connection.Email)
 	if row.LinkKey == "" {
-		row.LinkKey, row.LinkPrimary = submitted.LinkKey, submitted.LinkPrimary
+		row.LinkKey, row.LinkPrimary, row.LinkMasked = submitted.LinkKey, submitted.LinkPrimary, submitted.LinkMasked
 	}
 	return s.Store.UpsertCalendarEvent(ctx, userID, row)
 }

@@ -198,6 +198,40 @@ export function CalendarView({
     }
   };
 
+  // The busy calendar moves the same way, and takes its placeholder title
+  // along: the title is stored on the calendar, and moving the role should not
+  // quietly reset what the reader chose to call their blocked time. Becoming
+  // the busy calendar also stops a calendar being the second one.
+  const chooseBusyTarget = async (calendarID: number) => {
+    const previous = calendars.find((calendar) => calendar.busy_target);
+    if ((previous?.id || 0) === calendarID) return;
+    try {
+      const data = calendarID
+        ? await api.setCalendarBusyTarget(csrf, calendarID, {
+            busy_target: true,
+            ...(previous ? { busy_label: previous.busy_label } : {})
+          })
+        : previous
+          ? await api.setCalendarBusyTarget(csrf, previous.id, { busy_target: false })
+          : null;
+      if (!data) return;
+      setCalendars((current) =>
+        current.map((item) => (item.id === data.calendar.id ? data.calendar : { ...item, busy_target: false }))
+      );
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
+  const setBusyLabel = async (calendarID: number, label: string) => {
+    try {
+      const data = await api.setCalendarBusyTarget(csrf, calendarID, { busy_label: label });
+      setCalendars((current) => current.map((item) => (item.id === data.calendar.id ? data.calendar : item)));
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
   // A write whose copies did not all follow still saved the event itself, so
   // what went wrong with a copy is told after the dialog closes, not in it.
   const reportWarnings = (warnings: string[] | undefined) => {
@@ -431,6 +465,8 @@ export function CalendarView({
               hiddenCount={calendars.length - listedCalendars.length}
               onToggle={toggleCalendar}
               onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+              onChooseBusyTarget={(calendarID) => void chooseBusyTarget(calendarID)}
+              onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
               navigate={navigate}
             />
             <button
@@ -631,12 +667,16 @@ function CalendarPicker({
   hiddenCount,
   onToggle,
   onChooseCopyTarget,
+  onChooseBusyTarget,
+  onSetBusyLabel,
   navigate
 }: {
   calendars: CalendarSummary[];
   hiddenCount: number;
   onToggle: (calendar: CalendarSummary) => Promise<void>;
   onChooseCopyTarget: (calendarID: number) => void;
+  onChooseBusyTarget: (calendarID: number) => void;
+  onSetBusyLabel: (calendarID: number, label: string) => void;
   navigate: (url: string) => void;
 }) {
   const writable = calendars.filter((calendar) => calendar.can_write);
@@ -644,6 +684,19 @@ function CalendarPicker({
   // A chosen calendar that has since become read-only stays listed, or the
   // select would read "None" while the choice is still stored.
   const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
+  const busyTarget = calendars.find((calendar) => calendar.busy_target);
+  const busyOptions = calendars.filter((calendar) => calendar.can_write || calendar.busy_target);
+  // The title is edited in place and saved when the field is left, so typing
+  // does not send a request per key. It is reseeded whenever the stored title
+  // or the busy calendar changes underneath it.
+  const [busyLabel, setBusyLabelDraft] = useState(busyTarget?.busy_label || "");
+  useEffect(() => {
+    setBusyLabelDraft(busyTarget?.busy_label || "");
+  }, [busyTarget?.id, busyTarget?.busy_label]);
+  const saveBusyLabel = () => {
+    if (!busyTarget || busyLabel.trim() === busyTarget.busy_label) return;
+    onSetBusyLabel(busyTarget.id, busyLabel.trim());
+  };
   const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
   const shown = calendars.filter((calendar) => calendar.selected);
   const menuRef = useRef<HTMLDetailsElement | null>(null);
@@ -753,6 +806,49 @@ function CalendarPicker({
             <p className="calendar-copy-target-hint">
               An event in any other calendar can be added here as well. It is shown once, marked with the other
               calendar's colour.
+            </p>
+          </div>
+        ) : null}
+        {writable.length > 1 ? (
+          <div className="calendar-sidebar-group calendar-copy-target">
+            <label className="calendar-sidebar-account" htmlFor="calendar-busy-target">
+              Busy calendar
+            </label>
+            <select
+              id="calendar-busy-target"
+              value={busyTarget?.id || 0}
+              onChange={(changeEvent) => onChooseBusyTarget(Number(changeEvent.target.value))}
+            >
+              <option value={0}>None</option>
+              {busyOptions.map((calendar) => (
+                <option key={calendar.id} value={calendar.id}>
+                  {calendar.name}
+                  {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
+                  {calendar.copy_target ? " (second calendar)" : ""}
+                </option>
+              ))}
+            </select>
+            {busyTarget ? (
+              <input
+                aria-label="Placeholder title"
+                className="calendar-busy-label"
+                value={busyLabel}
+                maxLength={60}
+                placeholder="Busy"
+                onChange={(changeEvent) => setBusyLabelDraft(changeEvent.target.value)}
+                onBlur={saveBusyLabel}
+                onKeyDown={(keyEvent) => {
+                  if (keyEvent.key === "Enter") {
+                    keyEvent.preventDefault();
+                    saveBusyLabel();
+                  }
+                }}
+              />
+            ) : null}
+            <p className="calendar-copy-target-hint">
+              {busyTarget
+                ? `An event in any other calendar can block its time here as “${busyTarget.busy_title}” — no title, notes, place or guests.`
+                : "An event in any other calendar can block its time here without any of its details, titled “Busy” or “Away”."}
             </p>
           </div>
         ) : null}

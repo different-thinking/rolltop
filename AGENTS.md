@@ -723,6 +723,22 @@ site and in review.
   reach the copy in the notes, where Microsoft wrote them. Once an event is
   online it stays so -- Outlook ignores a later `isOnlineMeeting: false` -- so
   the write-back only ever asks to turn a meeting on, never off.
+- **A busy calendar holds placeholders, and a placeholder never takes on
+  content.** Beside the second calendar a reader may choose one busy calendar
+  (`calendars.busy_target`, unique per user, never the same calendar as
+  `copy_target` -- choosing one role takes the other off it). An event copied
+  there is rendered by `calendarlink.MaskedCopyFor`: its time under the
+  calendar's placeholder title (`busy_label`, `store.DefaultBusyLabel` when
+  empty) and no notes, place, guests or meeting. It is a member of the same
+  linked group, marked at the provider with the role `busy` beside `primary`
+  and `copy`, and `calendar_events.link_masked` only mirrors that. The role is
+  what keeps it empty: every edit re-renders a `link_masked` copy as a
+  placeholder whatever its calendar's role is by then, because deciding it
+  from the calendar would write the full event into a calendar the reader
+  later stopped using as the busy one. An edit made *through* a placeholder
+  moves the other copies' time and nothing else, and never adds a copy --
+  there is nothing in it to copy. The week draws a placeholder only when no
+  other copy of its event is visible.
 - **Microsoft 365 is read in windows, not deltas.** Graph v1.0 has a delta
   cursor only for the primary calendar's view, and a delta cannot `$expand` the
   extended property the link lives in. So `m365calendar` reads the near window

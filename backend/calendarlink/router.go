@@ -114,6 +114,18 @@ func (r *Router) CreateWithCopy(ctx context.Context, userID, calendarID, copyCal
 	return CreateWithCopy(ctx, r, userID, calendarID, copyCalendarID, event)
 }
 
+// CreateWithCopies creates an event and a copy in every target that asks for
+// one, each in its own provider.
+func (r *Router) CreateWithCopies(ctx context.Context, userID, calendarID int64, targets []Target, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
+	return CreateWithCopies(ctx, r, userID, calendarID, targets, event)
+}
+
+// UpdateGroupTargets edits an event and carries the edit to its copies, adding
+// or removing the copy each target asks for.
+func (r *Router) UpdateGroupTargets(ctx context.Context, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target) (store.CalendarEvent, []LinkedProblem, error) {
+	return UpdateGroupTargets(ctx, r, userID, existing, edited, copies, targets)
+}
+
 // UpdateGroup edits an event and carries the edit to its copies.
 func (r *Router) UpdateGroup(ctx context.Context, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, copyCalendarID int64, change CopyChange) (store.CalendarEvent, []LinkedProblem, error) {
 	return UpdateGroup(ctx, r, userID, existing, edited, copies, copyCalendarID, change)
