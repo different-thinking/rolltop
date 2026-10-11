@@ -1144,7 +1144,7 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   border-radius: 4px;
   font-size: 11px;
   line-height: 1.25;
-  box-shadow: 0 4px 14px rgb(0 0 0 / 0.22);
+  box-shadow: var(--shadow);
   pointer-events: none;
 
   // A drawn event does not exist yet, and looks it.
