@@ -817,7 +817,7 @@ function WeekPicker({
             className={`calendar-week-picker-grid ${direction ? `slide-${direction}` : ""}`}
           >
             <div className="calendar-week-picker-week calendar-week-picker-weekdays" aria-hidden="true">
-              <span className="calendar-week-picker-number" />
+              <span />
               {weeks[0].map((day) => (
                 <span key={day.getDay()}>{day.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
               ))}

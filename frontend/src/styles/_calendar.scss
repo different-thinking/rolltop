@@ -360,11 +360,7 @@
   font-variant-numeric: tabular-nums;
   cursor: pointer;
 
-  &:is(span) {
-    height: auto;
-  }
-
-  &:is(button):hover {
+  &:hover {
     background: var(--hover);
     color: var(--text);
   }

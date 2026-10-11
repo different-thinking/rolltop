@@ -181,7 +181,17 @@ describe("isoWeekNumber", () => {
   });
 
   it("is not thrown by a daylight saving change inside the year", () => {
-    expect(isoWeekNumber(new Date(2026, 2, 30))).toBe(14);
-    expect(isoWeekNumber(new Date(2026, 9, 26))).toBe(44);
+    // Pinned to a zone with DST: in UTC, where CI runs, there is no change to
+    // be thrown by. 2 April 2026 is day 91 of the year, a whole number of
+    // weeks that the spring change leaves an hour short.
+    const previousTZ = process.env.TZ;
+    process.env.TZ = "Europe/Berlin";
+    try {
+      expect(isoWeekNumber(new Date(2026, 2, 30))).toBe(14);
+      expect(isoWeekNumber(new Date(2026, 9, 26))).toBe(44);
+    } finally {
+      if (previousTZ === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTZ;
+    }
   });
 });
