@@ -243,6 +243,9 @@ type threadMessageView struct {
 	// included, and is empty unless a label view's copy was hidden behind it.
 	// Marking the drawn message unread has to reach all of them.
 	CopyIDs []int64
+	// HasCalendar says the message carries a calendar object -- an invitation
+	// -- which the client reads from /api/messages/:id/calendar.
+	HasCalendar bool
 }
 
 type conversationView struct {

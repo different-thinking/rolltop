@@ -46,6 +46,10 @@ func (s *Server) apiMessagePath(w http.ResponseWriter, r *http.Request, rest str
 		s.apiMessageLoadStatus(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "calendar" {
+		s.apiMessageCalendar(w, r, id)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "original" {
 		s.apiMessageOriginal(w, r, id)
 		return
@@ -1490,6 +1494,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 			Expanded:                 expanded,
 			CanReplyAll:              canReplyAll(threadMsg, threadMessages, own),
 			CopyIDs:                  collapse.CopyIDs[threadMsg.ID],
+			HasCalendar:              s.messageCarriesCalendar(ctx, cu.User.ID, threadMsg, allAttachments, expanded),
 		})
 		previousBodies = append(previousBodies, sourceText)
 		if threadMsg.ID == msg.ID {

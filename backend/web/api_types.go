@@ -334,6 +334,9 @@ type apiThreadMessage struct {
 	// included. It is absent unless a mirrored label view's copy was hidden
 	// behind it, and marking the message unread has to reach all of them.
 	CopyIDs []int64 `json:"copy_ids,omitempty"`
+	// HasCalendar says the message carries a calendar object, such as an
+	// invitation; the client reads it from /api/messages/:id/calendar.
+	HasCalendar bool `json:"has_calendar,omitempty"`
 }
 
 type apiMessageSecurityIndicators struct {

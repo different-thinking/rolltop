@@ -319,6 +319,57 @@ export type ThreadMessage = {
    * changes have to reach all of them.
    */
   copy_ids?: number[];
+  /**
+   * has_calendar says the message carries a calendar object -- an invitation
+   * or a shared event -- which is read on demand from /api/messages/:id/calendar.
+   */
+  has_calendar?: boolean;
+};
+
+/** MessageCalendarPerson is an organizer or guest as the invitation names them. */
+export type MessageCalendarPerson = {
+  name?: string;
+  email?: string;
+};
+
+/** MessageCalendarMatch is a copy of the invited event a calendar already holds. */
+export type MessageCalendarMatch = {
+  event_id: number;
+  calendar_id: number;
+  calendar_name: string;
+  start_at: string;
+  my_response?: string;
+};
+
+/** MessageCalendarEvent is one event of a calendar object carried by a message. */
+export type MessageCalendarEvent = {
+  uid?: string;
+  summary: string;
+  description?: string;
+  location?: string;
+  url?: string;
+  /** start_at and end_at are instants; for an all-day event the UTC midnights
+   * the calendar stores one with (end exclusive), and for a floating event a
+   * wall-clock time without offset, read in the viewer's own zone. */
+  start_at: string;
+  end_at: string;
+  all_day: boolean;
+  floating?: boolean;
+  time_zone?: string;
+  status?: string;
+  recurring?: boolean;
+  organizer?: MessageCalendarPerson;
+  attendees: MessageCalendarPerson[];
+  in_calendars: MessageCalendarMatch[];
+};
+
+/** MessageCalendar is what a message's calendar attachment says. */
+export type MessageCalendar = {
+  /** method is REQUEST for an invitation, CANCEL for a cancellation. */
+  method?: string;
+  events: MessageCalendarEvent[];
+  /** can_add says the reader has a calendar a new event could be entered in. */
+  can_add: boolean;
 };
 
 
