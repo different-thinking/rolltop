@@ -242,6 +242,12 @@ describe("movedEventTimes", () => {
     expect(clock(moved.start)).toBe(`${localDateKey(days[3])} 00:00`);
   });
 
+  it("keeps a late start off the grid where it was when moved to another day", () => {
+    const late = event(1, at(tuesday, 23, 50), at(tuesday, 23, 55));
+    const moved = movedEventTimes(late, tuesday, 23 * 60 + 52, days[3], 23 * 60 + 52);
+    expect(clock(moved.start)).toBe(`${localDateKey(days[3])} 23:50`);
+  });
+
   it("keeps the wall-clock time across a daylight saving change", () => {
     withZone("Europe/Berlin", () => {
       // Friday 23 October 2026, carried to Monday 26th, after the clocks went

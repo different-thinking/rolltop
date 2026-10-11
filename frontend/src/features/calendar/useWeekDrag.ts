@@ -49,6 +49,10 @@ type Session = {
   clientY: number;
   copyKey: boolean;
   started: boolean;
+  /** abandoned marks a drag Escape called off while the button was still
+   * held: nothing moves any more, and the release that ends it is swallowed
+   * rather than opening the event it lands on. */
+  abandoned: boolean;
   /** preview turns where the pointer is into the drag to draw, or null while
    * it is somewhere that means nothing (outside every column). */
   preview: (clientX: number, clientY: number, copy: boolean) => WeekDrag | null;
@@ -142,7 +146,7 @@ export function useWeekDrag({
 
   const refresh = useCallback(() => {
     const session = sessionRef.current;
-    if (!session || !session.started) return;
+    if (!session || !session.started || session.abandoned) return;
     show(session.preview(session.clientX, session.clientY, session.copyKey));
   }, []);
 
@@ -152,7 +156,7 @@ export function useWeekDrag({
     frameRef.current = 0;
     const session = sessionRef.current;
     const grid = gridRef.current;
-    if (!session || !session.started || !session.timed || !grid) return;
+    if (!session || !session.started || session.abandoned || !session.timed || !grid) return;
     const bounds = grid.getBoundingClientRect();
     let step = 0;
     if (session.clientY < bounds.top + autoScrollEdge) {
@@ -172,6 +176,14 @@ export function useWeekDrag({
     const onMove = (pointerEvent: PointerEvent) => {
       const session = sessionRef.current;
       if (!session || pointerEvent.pointerId !== session.pointerID) return;
+      // A release the window never saw -- a Ctrl-click's context menu on a Mac
+      // takes it -- would otherwise leave the drag following a pointer whose
+      // button is up, to be dropped wherever the next click happens to land.
+      if ((pointerEvent.buttons & 1) === 0) {
+        stop();
+        return;
+      }
+      if (session.abandoned) return;
       session.clientX = pointerEvent.clientX;
       session.clientY = pointerEvent.clientY;
       session.copyKey = copyModifier(pointerEvent);
@@ -189,16 +201,17 @@ export function useWeekDrag({
     const onUp = (pointerEvent: PointerEvent) => {
       const session = sessionRef.current;
       if (!session || pointerEvent.pointerId !== session.pointerID) return;
-      const finished = session.started ? dragRef.current : null;
+      const finished = session.started && !session.abandoned ? dragRef.current : null;
+      const abandoned = session.abandoned;
       stop();
-      if (!finished) return;
+      if (!finished && !abandoned) return;
       suppressClickRef.current = true;
       // Released over nothing that clicks, there is no click to swallow, and
       // the flag must not wait around for the next real one.
       window.setTimeout(() => {
         suppressClickRef.current = false;
       }, 0);
-      onDropRef.current(finished);
+      if (finished) onDropRef.current(finished);
     };
     const onCancel = (pointerEvent: PointerEvent) => {
       if (sessionRef.current && pointerEvent.pointerId === sessionRef.current.pointerID) stop();
@@ -209,9 +222,13 @@ export function useWeekDrag({
     const onKey = (keyEvent: KeyboardEvent) => {
       const session = sessionRef.current;
       if (!session) return;
+      if (session.abandoned) return;
       if (keyEvent.key === "Escape" && keyEvent.type === "keydown") {
         keyEvent.preventDefault();
-        stop();
+        session.abandoned = true;
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = 0;
+        show(null);
         return;
       }
       const copy = copyModifier(keyEvent);
@@ -225,12 +242,16 @@ export function useWeekDrag({
     const onBlur = () => {
       if (sessionRef.current) stop();
     };
+    const onContextMenu = () => {
+      if (sessionRef.current) stop();
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
     window.addEventListener("blur", onBlur);
+    window.addEventListener("contextmenu", onContextMenu);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
@@ -238,6 +259,7 @@ export function useWeekDrag({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKey);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("contextmenu", onContextMenu);
       window.cancelAnimationFrame(frameRef.current);
     };
   }, [autoScroll, refresh, stop]);
@@ -264,6 +286,7 @@ export function useWeekDrag({
       clientY: pointerEvent.clientY,
       copyKey: copyModifier(pointerEvent),
       started: false,
+      abandoned: false,
       preview,
       timed
     };

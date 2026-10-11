@@ -139,13 +139,7 @@ export function calendarRouteDate(path: string): Date {
  * everyone west of wherever the event was created.
  */
 export function allDayCoversDay(event: CalendarEvent, day: Date): boolean {
-  const dayKey = localDateKey(day);
-  const startKey = utcDateKey(new Date(event.start_at));
-  const endKey = utcDateKey(new Date(event.end_at));
-  // Google's end date is exclusive. A degenerate pair where it is not after the
-  // start still describes one day rather than none.
-  if (endKey <= startKey) return dayKey === startKey;
-  return dayKey >= startKey && dayKey < endKey;
+  return allDayRangeCoversDay({ start: new Date(event.start_at), end: new Date(event.end_at) }, day);
 }
 
 /** timedEventTouchesDay reports whether a timed event overlaps a local day. */
@@ -429,8 +423,11 @@ export function movedEventTimes(
   const length = Math.max(new Date(event.end_at).getTime() - start.getTime(), 0);
   const startMinutes = minutesFromDayStart(grabDay, start);
   const shifted = startMinutes + snapMinutes(dropMinutes - grabMinutes);
+  // Both bounds give way to where the event already starts, so a block that
+  // begins off the grid near either end of the day is never moved by a drop
+  // that did not travel that far.
   const earliest = Math.min(0, startMinutes);
-  const latest = minutesPerDay - dragSnapMinutes;
+  const latest = Math.max(minutesPerDay - dragSnapMinutes, startMinutes);
   const newStart = atMinutes(dropDay, Math.min(Math.max(shifted, earliest), latest));
   return { start: newStart, end: new Date(newStart.getTime() + length) };
 }
@@ -481,12 +478,15 @@ export function allDayRangeFromLocalDays(first: Date, last: Date): TimeRange {
   return { start: utcMidnight(from), end };
 }
 
-/** allDayRangeCoversDay is allDayCoversDay for a range that is not an event
- * yet: the preview of an all-day event being dragged. */
+/** allDayRangeCoversDay reports whether an all-day range covers a local day.
+ * allDayCoversDay asks it of a stored event; the week's drag asks it of the
+ * preview of one being dragged, which is not an event yet. */
 export function allDayRangeCoversDay(range: TimeRange, day: Date): boolean {
   const dayKey = localDateKey(day);
   const startKey = utcDateKey(range.start);
   const endKey = utcDateKey(range.end);
+  // Google's end date is exclusive. A degenerate pair where it is not after the
+  // start still describes one day rather than none.
   if (endKey <= startKey) return dayKey === startKey;
   return dayKey >= startKey && dayKey < endKey;
 }

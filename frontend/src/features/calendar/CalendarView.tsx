@@ -1480,9 +1480,11 @@ function weekRangeLabel(first: Date, last: Date): string {
 
 /** eventDraggable says whether a block in the week can be dragged: the reader
  * may change the event, the way the dialog would let them, and the organizer
- * has not cancelled it -- moving a cancelled meeting reschedules nothing. */
+ * has not cancelled it -- moving a cancelled meeting reschedules nothing. An
+ * event without a title is one the dialog refuses to save and the server
+ * refuses to write, so a drag of it could only bounce back. */
 function eventDraggable(event: CalendarEvent, calendar: CalendarSummary | undefined): boolean {
-  return event.status !== "cancelled" && eventEditable(event, calendar);
+  return event.status !== "cancelled" && (event.summary || "").trim() !== "" && eventEditable(event, calendar);
 }
 
 /** eventCopyable says whether the copy key may copy a dragged event. A

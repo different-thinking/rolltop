@@ -151,7 +151,10 @@ function draftFromPrefill(prefill: EventPrefill, calendarID: number): DraftState
     location: prefill.location || "",
     description: prefill.description || "",
     // Only who is invited carries over; their answers were to the other event.
-    attendees: (prefill.attendees || []).map((attendee) => ({ ...attendee, response: "", organizer: false, self: false })),
+    // The reader is the organizer of the new one, not a guest at it.
+    attendees: (prefill.attendees || [])
+      .filter((attendee) => !attendee.self)
+      .map((attendee) => ({ ...attendee, response: "", organizer: false, self: false })),
     copy: Boolean(prefill.copy),
     busyCopy: Boolean(prefill.busyCopy),
     onlineMeeting: Boolean(prefill.onlineMeeting)
@@ -162,7 +165,12 @@ function draftFromPrefill(prefill: EventPrefill, calendarID: number): DraftState
       ...filled,
       allDay: true,
       startDate: utcDateValue(prefill.start),
-      endDate: utcDateValue(inclusiveEnd >= prefill.start ? inclusiveEnd : prefill.start)
+      endDate: utcDateValue(inclusiveEnd >= prefill.start ? inclusiveEnd : prefill.start),
+      // The bounds are UTC midnights, which read in the viewer's zone are some
+      // other hour; unticking All day starts from the same hours an existing
+      // all-day event offers.
+      startTime: "09:00",
+      endTime: "10:00"
     };
   }
   return {
