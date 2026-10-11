@@ -50,6 +50,10 @@ func (s *Server) apiMessagePath(w http.ResponseWriter, r *http.Request, rest str
 		s.apiMessageCalendar(w, r, id)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "calendar" && parts[2] == "reply" {
+		s.apiMessageCalendarReply(w, r, id)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "original" {
 		s.apiMessageOriginal(w, r, id)
 		return

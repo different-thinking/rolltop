@@ -1305,3 +1305,8 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   font-size: 13px;
   color: var(--text-soft);
 }
+
+.message-calendar-rsvp {
+  margin-top: 10px;
+  background: var(--surface);
+}

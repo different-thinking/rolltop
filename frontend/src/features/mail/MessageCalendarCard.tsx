@@ -17,7 +17,7 @@ import type { AddToast, DatePrefs } from "../../appTypes";
 import type { CalendarEventInput, CalendarSummary, MessageCalendar, MessageCalendarEvent, MessageCalendarPerson } from "../../types";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
-import { EventDialog } from "../calendar/EventDialog";
+import { EventDialog, responseOptions } from "../calendar/EventDialog";
 import type { EventPrefill } from "../calendar/EventDialog";
 import { calendarURL, startOfDay } from "../calendar/weekModel";
 
@@ -92,6 +92,14 @@ export function prefillFor(event: MessageCalendarEvent): EventPrefill {
 
 type Added = { calendarName: string; start: string };
 
+/** answerWords says an attendee's answer as the card reads it. */
+const answerWords: Record<string, string> = {
+  accepted: "accepted",
+  tentative: "said maybe",
+  declined: "declined",
+  needsAction: "has not answered"
+};
+
 export function MessageCalendarCard({
   messageID,
   csrf,
@@ -117,6 +125,10 @@ export function MessageCalendarCard({
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
   const [added, setAdded] = useState<Record<number, Added>>({});
+  /** answers holds what the reader answered here, by event; an answer given
+   * through the calendar also updates the copy that calendar holds. */
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [answering, setAnswering] = useState<number | null>(null);
   const locale = datePrefs?.date_locale?.trim() || undefined;
   const dialogOpen = dialogFor !== null;
 
@@ -131,6 +143,7 @@ export function MessageCalendarCard({
     setCalendar(null);
     setFailed("");
     setAdded({});
+    setAnswers({});
     api
       .messageCalendar(messageID)
       .then((data) => {
@@ -156,6 +169,35 @@ export function MessageCalendarCard({
 
   const cancellation = calendar.method === "CANCEL";
   const invitation = calendar.method === "REQUEST";
+  const reply = calendar.method === "REPLY";
+
+  // An event a connected calendar holds with the reader as a guest is answered
+  // there: the provider tells the organizer and the calendar shows the answer.
+  // Anything else is answered by mail to the organizer, from the account the
+  // invitation arrived through.
+  const respond = async (index: number, event: MessageCalendarEvent, response: string) => {
+    const held = event.in_calendars[0];
+    setAnswering(index);
+    try {
+      if (held?.my_response) {
+        await api.respondToCalendarEvent(csrf, held.event_id, response);
+        addToast(`Answer sent. ${held.calendar_name || "Your calendar"} shows it too.`, "success");
+      } else {
+        const data = await api.messageCalendarReply(csrf, messageID, {
+          event_index: index,
+          uid: event.uid || "",
+          response
+        });
+        addToast(`Answer sent to ${data.sent_to}.`, "success");
+        if (data.warning) addToast(data.warning, "error");
+      }
+      setAnswers((current) => ({ ...current, [index]: response }));
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setAnswering(null);
+    }
+  };
 
   const openDialog = async (index: number) => {
     setProblem("");
@@ -206,12 +248,14 @@ export function MessageCalendarCard({
         const done = added[index];
         const held = event.in_calendars[0];
         const guests = event.attendees.length;
+        const answerable = !cancelled && !reply && (Boolean(held?.my_response) || Boolean(event.can_reply));
+        const answer = answers[index] || held?.my_response || "";
         return (
           <div className="message-calendar-event" key={`${event.uid || ""}-${event.start_at}-${index}`}>
             <div className="message-calendar-head">
               <Icon name="calendar" weight="fill" />
               <span className="message-calendar-kind">
-                {cancelled ? "Cancelled" : invitation ? "Invitation" : "Event"}
+                {cancelled ? "Cancelled" : reply ? "Answer" : invitation ? "Invitation" : "Event"}
               </span>
               <span className={`message-calendar-title ${cancelled ? "struck" : ""}`}>{event.summary || "(no title)"}</span>
             </div>
@@ -234,7 +278,17 @@ export function MessageCalendarCard({
                   <dd>{personLabel(event.organizer)}</dd>
                 </>
               ) : null}
-              {guests > 0 ? (
+              {reply && guests > 0 ? (
+                <>
+                  <dt>Answer</dt>
+                  <dd>
+                    {event.attendees
+                      .map((person) => `${person.name || person.email || "A guest"} ${answerWords[person.status || ""] || "answered"}`)
+                      .join(", ")}
+                  </dd>
+                </>
+              ) : null}
+              {!reply && guests > 0 ? (
                 <>
                   <dt>Guests</dt>
                   <dd title={event.attendees.map(personLabel).join("\n")}>
@@ -243,8 +297,27 @@ export function MessageCalendarCard({
                 </>
               ) : null}
             </dl>
-            {event.recurring && !cancelled && !held && !done && calendar.can_add ? (
+            {event.recurring && !cancelled && !reply && !held && !done && calendar.can_add ? (
               <p className="message-calendar-hint">This event repeats. Adding it enters the first date only.</p>
+            ) : null}
+            {answerable ? (
+              <div className="calendar-rsvp message-calendar-rsvp">
+                <span className="calendar-rsvp-label">Are you going?</span>
+                <div className="calendar-rsvp-actions">
+                  {responseOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`ghost ${answer === option.value ? "active" : ""}`}
+                      disabled={answering !== null}
+                      aria-pressed={answer === option.value}
+                      onClick={() => void respond(index, event, option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : null}
             <div className="message-calendar-actions">
               {held || done ? (
@@ -263,7 +336,7 @@ export function MessageCalendarCard({
                   </button>
                 </>
               ) : null}
-              {!cancelled && !held && !done && calendar.can_add ? (
+              {!cancelled && !reply && !held && !done && calendar.can_add ? (
                 <button className="secondary" type="button" onClick={() => void openDialog(index)}>
                   <Icon name="add" />
                   Add to calendar

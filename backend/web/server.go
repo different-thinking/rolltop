@@ -304,6 +304,10 @@ type composeForm struct {
 	// wants the conversation gone from the list on one reply and kept in front
 	// of them on the next.
 	ArchiveAfterSend bool `json:"archive_after_send,omitempty"`
+	// calendarReply is the iCalendar answer to an invitation, sent beside the
+	// text body as its text/calendar alternative. Only the invitation card's
+	// route sets it; nothing a browser posts can.
+	calendarReply []byte
 }
 
 type composeExistingAttachment struct {

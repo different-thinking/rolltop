@@ -27,6 +27,7 @@ import type {
   MailIdentity,
   MessageSnooze,
   MessageCalendar,
+  MessageCalendarReplyResult,
   MessageOriginalSource,
   PluginSetting,
   RetentionSettings,
@@ -593,6 +594,8 @@ export const api = {
     }>(`/api/messages/${id}/load-status`),
   messageOriginal: (id: number) => getJSON<MessageOriginalSource>(`/api/messages/${id}/original`),
   messageCalendar: (id: number) => getJSON<MessageCalendar>(`/api/messages/${id}/calendar`),
+  messageCalendarReply: (csrf: string, id: number, answer: { event_index: number; uid: string; response: string }) =>
+    postJSON<MessageCalendarReplyResult>(`/api/messages/${id}/calendar/reply`, csrf, answer),
   searchExplanation: (id: number, query: string, hitID = 0) => {
     const params = new URLSearchParams();
     params.set("q", query.trim());

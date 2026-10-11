@@ -34,6 +34,9 @@ var ErrNoCalendar = errors.New("icalendar: no calendar object")
 type Person struct {
 	Name  string
 	Email string
+	// PartStat is the attendee's answer as the object states it --
+	// ACCEPTED, TENTATIVE, DECLINED or NEEDS-ACTION -- upper case, or empty.
+	PartStat string
 }
 
 // Event is one VEVENT, resolved to absolute instants.
@@ -65,6 +68,9 @@ type Event struct {
 	// (RECURRENCE-ID) rather than describing the series.
 	Occurrence bool
 	Sequence   int
+	// recurrenceID is the RECURRENCE-ID, resolved the way DTSTART is, carried
+	// into a reply so the answer names the occurrence it was asked about.
+	recurrenceID *resolvedTime
 }
 
 // Calendar is one VCALENDAR object.
@@ -328,7 +334,12 @@ func readEvent(c *component, zones map[string]*vtimezone) (Event, bool) {
 	_, hasRule := c.first("RRULE")
 	_, hasDates := c.first("RDATE")
 	event.Recurring = hasRule || hasDates
-	_, event.Occurrence = c.first("RECURRENCE-ID")
+	if recurrence, ok := c.first("RECURRENCE-ID"); ok {
+		event.Occurrence = true
+		if at, ok := readDateTime(recurrence, zones); ok {
+			event.recurrenceID = &at
+		}
+	}
 
 	if endProp, ok := c.first("DTEND"); ok {
 		if end, ok := readDateTime(endProp, zones); ok && end.date == start.date {
@@ -388,7 +399,11 @@ func readPerson(prop property) Person {
 	if strings.EqualFold(name, email) {
 		name = ""
 	}
-	return Person{Name: clip(name, maxShortBytes), Email: clip(strings.TrimSpace(email), 320)}
+	return Person{
+		Name:     clip(name, maxShortBytes),
+		Email:    clip(strings.TrimSpace(email), 320),
+		PartStat: strings.ToUpper(strings.TrimSpace(prop.param("PARTSTAT"))),
+	}
 }
 
 type resolvedTime struct {

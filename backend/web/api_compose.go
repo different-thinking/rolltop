@@ -518,7 +518,7 @@ func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form co
 		attachments = append(attachments, attachment)
 	}
 	bodyHTML, bodyText := form.BodyHTML, form.Body
-	if !form.SecurityEncrypted && !form.SecuritySigned {
+	if !form.SecurityEncrypted && !form.SecuritySigned && form.calendarReply == nil {
 		bodyHTML, bodyText = appendIdentitySignature(form.BodyHTML, form.Body, identity.Signature)
 	}
 	msg := smtpclient.Message{
@@ -532,6 +532,9 @@ func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form co
 		MessageID:   smtpclient.NewMessageID(identity.Email),
 		Date:        time.Now(),
 		Attachments: attachments,
+	}
+	if form.calendarReply != nil {
+		msg.MIMEBodyOverride = calendarReplyMIMEBody(msg.MessageID, bodyText, form.calendarReply)
 	}
 	if err := s.applyPluginMIMEBodyOverride(ctx, cu.User.ID, &msg, identity, form); err != nil {
 		return store.MessageRecord{}, err

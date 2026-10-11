@@ -330,6 +330,9 @@ export type ThreadMessage = {
 export type MessageCalendarPerson = {
   name?: string;
   email?: string;
+  /** status is the answer the calendar object states for this attendee:
+   * accepted, tentative, declined or needsAction. */
+  status?: string;
 };
 
 /** MessageCalendarMatch is a copy of the invited event a calendar already holds. */
@@ -361,6 +364,18 @@ export type MessageCalendarEvent = {
   organizer?: MessageCalendarPerson;
   attendees: MessageCalendarPerson[];
   in_calendars: MessageCalendarMatch[];
+  /** can_reply says the invitation can be answered by mail to its organizer. */
+  can_reply?: boolean;
+};
+
+/** MessageCalendarReplyResult is what answering an invitation by mail reports. */
+export type MessageCalendarReplyResult = {
+  ok: boolean;
+  response: string;
+  sent_from: string;
+  sent_to: string;
+  /** warning says the answer went out but its copy in Sent could not be kept. */
+  warning?: string;
 };
 
 /** MessageCalendar is what a message's calendar attachment says. */

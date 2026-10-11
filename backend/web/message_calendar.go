@@ -61,6 +61,18 @@ func (s *Server) messageCarriesCalendar(ctx context.Context, userID int64, msg s
 type apiMessageCalendarPerson struct {
 	Name  string `json:"name,omitempty"`
 	Email string `json:"email,omitempty"`
+	// Status is the attendee's answer as the object states it: accepted,
+	// tentative, declined or needsAction -- the words the calendar uses.
+	Status string `json:"status,omitempty"`
+}
+
+// calendarPartStatResponses maps iCalendar participation statuses to the
+// answers the calendar API already speaks.
+var calendarPartStatResponses = map[string]string{
+	icalendar.PartStatAccepted:  store.CalendarResponseAccepted,
+	icalendar.PartStatTentative: store.CalendarResponseTentative,
+	icalendar.PartStatDeclined:  store.CalendarResponseDeclined,
+	"NEEDS-ACTION":              store.CalendarResponseNeedsAction,
 }
 
 // apiMessageCalendarMatch is a copy of the invited event a calendar of the
@@ -92,6 +104,10 @@ type apiMessageCalendarEvent struct {
 	Organizer   *apiMessageCalendarPerson  `json:"organizer,omitempty"`
 	Attendees   []apiMessageCalendarPerson `json:"attendees"`
 	InCalendars []apiMessageCalendarMatch  `json:"in_calendars"`
+	// CanReply says the invitation asks for an answer the reader can give by
+	// mail (POST /api/messages/:id/calendar/reply). An event a calendar
+	// already holds is answered there instead, through its provider.
+	CanReply bool `json:"can_reply,omitempty"`
 }
 
 type apiMessageCalendar struct {
@@ -162,8 +178,11 @@ func (s *Server) apiMessageCalendar(w http.ResponseWriter, r *http.Request, id i
 		s.serverError(w, r, err)
 		return
 	}
+	own := s.ownAddresses(r.Context(), cu.User)
 	for _, event := range events {
-		out.Events = append(out.Events, presentMessageCalendarEvent(event, held, names))
+		presented := presentMessageCalendarEvent(event, held, names)
+		presented.CanReply = s.sender != nil && invitationAnswerable(out.Method, event, own)
+		out.Events = append(out.Events, presented)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, out)
@@ -216,7 +235,11 @@ func presentMessageCalendarEvent(event icalendar.Event, held []store.CalendarEve
 		out.Organizer = &apiMessageCalendarPerson{Name: event.Organizer.Name, Email: event.Organizer.Email}
 	}
 	for _, attendee := range event.Attendees {
-		out.Attendees = append(out.Attendees, apiMessageCalendarPerson{Name: attendee.Name, Email: attendee.Email})
+		out.Attendees = append(out.Attendees, apiMessageCalendarPerson{
+			Name:   attendee.Name,
+			Email:  attendee.Email,
+			Status: calendarPartStatResponses[attendee.PartStat],
+		})
 	}
 	if event.UID == "" {
 		return out
