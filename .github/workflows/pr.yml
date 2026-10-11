@@ -338,6 +338,12 @@ jobs:
 
       - name: Set Up Android SDK
         uses: android-actions/setup-android@v3
+        # The action's default list still names the legacy `tools` package,
+        # which current cmdline-tools no longer carry, so the step fails before
+        # Gradle runs. The Android Gradle Plugin fetches the platform and
+        # build-tools it needs itself once the licenses are accepted.
+        with:
+          packages: platform-tools
 
       - name: Set Up Gradle
         uses: gradle/actions/setup-gradle@v5
