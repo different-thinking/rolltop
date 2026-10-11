@@ -395,8 +395,13 @@ export function EventDialog({
   // when the box on the event is unticked or the event is deleted. One whose
   // event is gone is an ordinary event and can be deleted like one.
   const placeholderOfEvent = placeholder && (event?.also_in || []).length > 0;
-  const offerCopy = editable && !placeholder && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
-  const offerBusyCopy = editable && !placeholder && Boolean(busyTarget) && busyTarget?.id !== draft.calendarID;
+  // A travel block standing alone is the reader's journey, never an
+  // appointment to keep in another calendar: the server refuses to copy it.
+  const travelBlock = Boolean(event?.travel);
+  const offerCopy =
+    editable && !placeholder && !travelBlock && Boolean(copyTarget) && copyTarget?.id !== draft.calendarID;
+  const offerBusyCopy =
+    editable && !placeholder && !travelBlock && Boolean(busyTarget) && busyTarget?.id !== draft.calendarID;
   const alsoIn = (event?.also_in || [])
     .map((item) => calendars.find((option) => option.id === item.calendar_id))
     .filter((item): item is CalendarSummary => Boolean(item));
@@ -418,7 +423,7 @@ export function EventDialog({
   // Travel is the reader's own time around an appointment with a time of day.
   // A placeholder has no journey of its own -- it moves the event's -- and a
   // travel block standing alone is a journey, not something to travel to.
-  const offerTravel = editable && !placeholder && !event?.travel && !draft.allDay;
+  const offerTravel = editable && !placeholder && !travelBlock && !draft.allDay;
   const travelTimes = useMemo(() => {
     if (draft.allDay) return { leave: "", back: "" };
     const start = parseLocalDateTime(draft.startDate, draft.startTime);
@@ -703,8 +708,9 @@ export function EventDialog({
           ) : null}
           {event?.travel ? (
             <p className="calendar-dialog-note">
-              This is travel time Rolltop blocked for an event that is no longer next to it — it was moved or deleted
-              somewhere else. Delete it if you no longer need it.
+              This is travel time Rolltop blocked for an event that is not shown next to it — the event is in another
+              week, in a calendar that is switched off, or was moved or deleted somewhere else. Delete it only if you no
+              longer need it.
             </p>
           ) : null}
 

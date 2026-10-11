@@ -632,6 +632,15 @@ func TestListCalendarEventTravelMatchesKeyAndTouch(t *testing.T) {
 	}); err != nil || len(copies) != 0 {
 		t.Fatalf("copies at the journey's start = %+v err=%v, want none", copies, err)
 	}
+	// Nor does a block have copies of its own: the copy of a back-to-back
+	// occurrence starts where the journey back does, under the same key.
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c2", Summary: "Visit",
+		StartAt: end, EndAt: end.Add(90 * time.Minute), LinkKey: "k1",
+	})
+	if copies, err := db.ListCalendarEventCopies(ctx, user, after); err != nil || len(copies) != 0 {
+		t.Fatalf("copies of the journey back = %+v err=%v, want none", copies, err)
+	}
 	// An unlinked row cannot claim a travel role.
 	plain := mustEvent(t, db, ctx, user, CalendarEvent{
 		CalendarID: work.ID, ExternalID: "plain", StartAt: start, EndAt: end, LinkTravel: CalendarTravelBefore,

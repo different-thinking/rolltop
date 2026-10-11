@@ -4,7 +4,7 @@
 // leading system, so every write here goes through the API that reaches it
 // first.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
@@ -593,62 +593,65 @@ export function CalendarView({
           ) : null}
         </div>
       ) : null;
-    return [
-      travel("before", placed.travelBefore),
-      <button
-        key={placed.event.id}
-        type="button"
-        className={`calendar-event ${declined ? "declined" : ""} ${
-          placed.event.status === "cancelled" ? "cancelled" : ""
-        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
-          draggable ? "draggable" : ""
-        } ${source ? "drag-source" : ""} ${placed.travelBefore > 0 ? "travel-before" : ""} ${
-          placed.travelAfter > 0 ? "travel-after" : ""
-        } ${placed.event.travel ? "travel-block" : ""}`}
-        style={
-          {
-            top: placed.top,
-            height: placed.height,
-            left,
-            width: blockWidth,
-            // A travel block standing alone is drawn hatched, as the journey
-            // it is, by its class rather than in its calendar's solid colour.
-            background: declined ? "transparent" : placed.event.travel ? undefined : color,
-            borderColor: color,
-            color: declined || placed.event.travel ? "var(--text)" : readableTextColor(color),
-            "--travel-color": color
-          } as CSSProperties
-        }
-        title={tooltip}
-        onPointerDown={press}
-        onClick={() => openEvent(placed.event, day)}
-      >
-        <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
-        <span className="calendar-event-title">
-          <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
-          {placed.event.online_meeting ? (
-            <span className="calendar-event-online" title="Online meeting">
-              <Icon name="video" />
-            </span>
+    // One keyed fragment per entry, so React keeps matching the block and its
+    // journey by event rather than by position when the day reorders.
+    return (
+      <Fragment key={placed.event.id}>
+        {travel("before", placed.travelBefore)}
+        <button
+          type="button"
+          className={`calendar-event ${declined ? "declined" : ""} ${
+            placed.event.status === "cancelled" ? "cancelled" : ""
+          } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
+            draggable ? "draggable" : ""
+          } ${source ? "drag-source" : ""} ${placed.travelBefore > 0 ? "travel-before" : ""} ${
+            placed.travelAfter > 0 ? "travel-after" : ""
+          } ${placed.event.travel ? "travel-block" : ""}`}
+          style={
+            {
+              top: placed.top,
+              height: placed.height,
+              left,
+              width: blockWidth,
+              // A travel block standing alone is drawn hatched, as the journey
+              // it is, by its class rather than in its calendar's solid colour.
+              background: declined ? "transparent" : placed.event.travel ? undefined : color,
+              borderColor: color,
+              color: declined || placed.event.travel ? "var(--text)" : readableTextColor(color),
+              "--travel-color": color
+            } as CSSProperties
+          }
+          title={tooltip}
+          onPointerDown={press}
+          onClick={() => openEvent(placed.event, day)}
+        >
+          <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
+          <span className="calendar-event-title">
+            <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+            {placed.event.online_meeting ? (
+              <span className="calendar-event-online" title="Online meeting">
+                <Icon name="video" />
+              </span>
+            ) : null}
+            {placed.event.summary || "(No title)"}
+          </span>
+          {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
+          {draggable && !placed.continuesAfter ? (
+            // The end of an event is pulled to change how long it lasts. Only
+            // where the end is drawn: a block cut off by midnight ends elsewhere.
+            <span
+              className="calendar-event-resize"
+              aria-hidden="true"
+              onPointerDown={(pointerEvent) => {
+                pointerEvent.stopPropagation();
+                beginResize(pointerEvent, placed.event);
+              }}
+            />
           ) : null}
-          {placed.event.summary || "(No title)"}
-        </span>
-        {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
-        {draggable && !placed.continuesAfter ? (
-          // The end of an event is pulled to change how long it lasts. Only
-          // where the end is drawn: a block cut off by midnight ends elsewhere.
-          <span
-            className="calendar-event-resize"
-            aria-hidden="true"
-            onPointerDown={(pointerEvent) => {
-              pointerEvent.stopPropagation();
-              beginResize(pointerEvent, placed.event);
-            }}
-          />
-        ) : null}
-      </button>,
-      travel("after", placed.travelAfter)
-    ];
+        </button>
+        {travel("after", placed.travelAfter)}
+      </Fragment>
+    );
   };
 
   // Where a drag would leave an appointment, drawn over the day it reaches:

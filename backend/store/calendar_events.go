@@ -262,9 +262,14 @@ func (s *Store) ListLinkedCalendarEventsInRange(ctx context.Context, userID int6
 // event's own calendar is never a copy of it either: the pair lives in two
 // calendars, and an event duplicated at Google carries its private properties
 // along without being the same appointment.
+//
+// A travel block has no copies, whichever way it is asked: it carries its
+// event's key, and the journey back starts where a back-to-back occurrence of
+// a series does, so matching its start would hand a delete or an edit of the
+// block the copies of an appointment it is not.
 func (s *Store) ListCalendarEventCopies(ctx context.Context, userID int64, event CalendarEvent) ([]CalendarEvent, error) {
 	key := strings.TrimSpace(event.LinkKey)
-	if userID <= 0 || key == "" {
+	if userID <= 0 || key == "" || event.LinkTravel != "" {
 		return []CalendarEvent{}, nil
 	}
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`

@@ -212,9 +212,33 @@ func TestRefusedTravelIsReportedBesideTheEvent(t *testing.T) {
 
 func TestTravelMinutesReadsTheBlocks(t *testing.T) {
 	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
-	event, travel := travelFixture(start)
-	before, after := TravelMinutes(event, travel)
+	_, travel := travelFixture(start)
+	before, after := TravelMinutes(travel)
 	if before != 30 || after != 15 {
 		t.Fatalf("minutes = %d/%d, want 30/15", before, after)
+	}
+}
+
+// A travel block standing on its own is never copied: a copy rendered from it
+// would lose the travel role and stand in the other calendar as an
+// appointment of its own.
+func TestTravelBlockIsNeverCopied(t *testing.T) {
+	router, google, microsoft := newRouter()
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	_, travel := travelFixture(start)
+	block := travel[0]
+	edited := block
+	edited.Summary = "Anfahrt: Visit (renamed)"
+	_, problems, err := UpdateGroupWithTravel(context.Background(), router, 7, block, edited, nil,
+		[]Target{{CalendarID: microsoftCalendarID, Change: CopyAdd}}, nil, TravelRequest{})
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("update: %v %v", err, problems)
+	}
+	if len(google.updates) != 1 || len(google.creates) != 0 || len(microsoft.creates) != 0 {
+		t.Fatalf("updates=%d creates=%d/%d, want the block written and nothing copied",
+			len(google.updates), len(google.creates), len(microsoft.creates))
+	}
+	if google.updates[0].LinkTravel != store.CalendarTravelBefore {
+		t.Fatalf("block lost its role: %+v", google.updates[0])
 	}
 }

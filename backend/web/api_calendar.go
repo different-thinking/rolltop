@@ -241,7 +241,7 @@ func (s *Server) presentCalendarEvent(ctx context.Context, userID int64, event s
 		log.Printf("calendar event travel user_id=%d event_id=%d: %v", userID, event.ID, err)
 	}
 	out := apiCalendarEventWithCopies(event, copies)
-	out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(event, travel)
+	out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(travel)
 	return out
 }
 
@@ -625,7 +625,7 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 				claimed[block.ID] = true
 			}
 		}
-		out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(event, blocks)
+		out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(blocks)
 		return out
 	}
 	drawn := make([]apiCalendarEvent, 0, len(events))

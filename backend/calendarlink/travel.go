@@ -53,7 +53,7 @@ func (p travelPlan) minutes(side string) int {
 // TravelMinutes reads how long the travel blocks of an event are on either
 // side, from the blocks themselves. It is what the dialog is filled from and
 // what an edit that does not mention travel keeps.
-func TravelMinutes(event store.CalendarEvent, travel []store.CalendarEvent) (before, after int) {
+func TravelMinutes(travel []store.CalendarEvent) (before, after int) {
 	for _, block := range travel {
 		switch block.LinkTravel {
 		case store.CalendarTravelBefore:
@@ -73,7 +73,7 @@ func TravelMinutes(event store.CalendarEvent, travel []store.CalendarEvent) (bef
 // given blocks. An all-day event has no instant to travel to, so it keeps none,
 // and a travel block has no journey of its own.
 func (r TravelRequest) resolve(event store.CalendarEvent, travel []store.CalendarEvent) travelPlan {
-	before, after := TravelMinutes(event, travel)
+	before, after := TravelMinutes(travel)
 	if r.Before != nil {
 		before = clampTravel(*r.Before)
 	}
@@ -167,8 +167,15 @@ func CreateWithTravel(ctx context.Context, w Writer, userID, calendarID int64, t
 // the blocks and changes nothing else about them: there is no journey in a
 // placeholder to edit.
 func UpdateGroupWithTravel(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target, travel []store.CalendarEvent, request TravelRequest) (store.CalendarEvent, []LinkedProblem, error) {
-	if existing.Linked() && existing.LinkMasked {
+	timesOnly := existing.Linked() && existing.LinkMasked
+	if timesOnly {
 		request = TravelRequest{}
+	}
+	if existing.LinkTravel != "" {
+		// A travel block is never a member of a copy group, so it is never
+		// copied either: a copy rendered from it would drop the travel role
+		// and stand in the other calendar as an appointment of its own.
+		targets = nil
 	}
 	resolveFor := edited
 	resolveFor.LinkTravel = existing.LinkTravel
@@ -184,7 +191,6 @@ func UpdateGroupWithTravel(ctx context.Context, w Writer, userID int64, existing
 	if err != nil {
 		return updated, nil, err
 	}
-	timesOnly := existing.Linked() && existing.LinkMasked
 	problems = append(problems, syncTravel(ctx, w, userID, updated, travel, plan, timesOnly)...)
 	return updated, problems, nil
 }
