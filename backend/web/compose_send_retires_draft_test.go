@@ -1,11 +1,13 @@
 // File overview: Sending a message composed from a saved draft retires that
-// draft, so it does not stay in Drafts looking like mail still waiting to go.
+// draft once the response is out, so it does not stay in Drafts looking like
+// mail still waiting to go.
 
 package web
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"rolltop/backend/blob"
 	"rolltop/backend/store"
@@ -90,6 +92,16 @@ func TestSendComposeRetiresTheDraftItWasComposedFrom(t *testing.T) {
 	}
 	if sentMsg.MailboxID != sent.ID {
 		t.Fatalf("sent copy mailbox_id = %d, want Sent (%d)", sentMsg.MailboxID, sent.ID)
+	}
+	// The draft goes after the response, not inside the send: the send itself
+	// must leave it alone, so nothing lengthens a request whose mail is gone.
+	if still, err := db.GetMessageForUser(ctx, user.ID, draft.ID); err != nil || still.MailboxID != drafts.ID {
+		t.Fatalf("draft right after the send = %+v, %v; want it still in Drafts until the response is out", still, err)
+	}
+	select {
+	case <-server.retireSentDraftAfterResponse(user.ID, draft.ID):
+	case <-time.After(10 * time.Second):
+		t.Fatal("retiring the sent draft did not finish")
 	}
 	if _, err := db.GetMessageForUser(ctx, user.ID, draft.ID); !store.IsNotFound(err) {
 		t.Fatalf("draft lookup err = %v, want not found: a sent draft must not stay in Drafts", err)

@@ -99,6 +99,11 @@ func (s *Server) apiCompose(w http.ResponseWriter, r *http.Request) {
 		}
 		archived := s.archiveRepliedMessage(r.Context(), cu.User.ID, form)
 		s.notifyUserChanged(cu.User.ID)
+		// The draft the message was composed from goes once the reader has
+		// their answer, not before: by now the mail is delivered, and anything
+		// that lengthens this request risks the proxy answering 502 for a send
+		// that succeeded -- which is a send the reader then presses again.
+		defer s.retireSentDraftAfterResponse(cu.User.ID, form.DraftMessageID)
 		if incomplete != nil {
 			// SMTP already accepted the message: the mail is gone, whatever went
 			// wrong after that. Answering this like a failed request would invite
@@ -565,22 +570,6 @@ func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form co
 	// The message has left through SMTP. Every error from here on describes a
 	// local bookkeeping failure, not a failed send, and must not be reported as
 	// one: the caller answers a request that already delivered the mail.
-	if form.DraftMessageID > 0 {
-		// A message composed from a saved draft is sent now, so the draft goes,
-		// whatever happens to the Sent copy below: left behind, it sat in Drafts
-		// looking like mail still waiting to go out. Deferred so it runs after
-		// the Sent copy is filed and while the foreground turn is still held,
-		// which the move needs. supersedeDraft only ever moves a row that is
-		// still in a Drafts folder, and moves it to Trash, so a stale id from a
-		// compose tab cannot touch other mail. It runs on its own clock for the
-		// same reason the draft save's cleanup does: the mail is already gone,
-		// and a client that leaves right away must not cancel the move.
-		defer func() {
-			retireCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), draftSupersedeTimeout)
-			defer cancel()
-			s.supersedeDraft(retireCtx, cu.User.ID, form.DraftMessageID)
-		}()
-	}
 	progress.enter("append_to_sent")
 	fetched, err := s.appendSentMessage(ctx, imapAccount, sentMailbox, raw, msg.MessageID, msg.Date)
 	if err != nil {
@@ -681,6 +670,41 @@ func (s *Server) foregroundBlockersSuffix(userID int64) string {
 		return ""
 	}
 	return " (still running: " + strings.Join(names, ", ") + ")"
+}
+
+// sentDraftRetireTimeout bounds retiring a sent message's draft, including the
+// wait for the tenant's foreground turn. Nobody is waiting on it, so it can
+// stand behind other mail actions as long as an ordinary mail write would.
+const sentDraftRetireTimeout = mailForegroundReservationWait
+
+// retireSentDraftAfterResponse moves the draft a sent message was composed
+// from to Trash, in the background. Left behind, the draft sat in Drafts
+// looking like mail still waiting to go out. It runs whatever happened to the
+// Sent copy, because the message itself has left either way. supersedeDraft
+// only moves a row that is still in a Drafts folder, so a stale id from a
+// compose tab cannot touch other mail; and the move takes its own foreground
+// turn, as the archive after a send does. The returned channel closes when the
+// work is done, for tests.
+func (s *Server) retireSentDraftAfterResponse(userID, draftID int64) <-chan struct{} {
+	done := make(chan struct{})
+	if draftID <= 0 || s.syncer == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(s.Lifetime(), sentDraftRetireTimeout)
+		defer cancel()
+		finishForeground, err := s.beginComposeForegroundOperationWithin(ctx, userID, sentDraftRetireTimeout)
+		if err != nil {
+			log.Printf("retire sent draft user_id=%d draft_id=%d: %v", userID, draftID, err)
+			return
+		}
+		defer finishForeground()
+		s.supersedeDraft(ctx, userID, draftID)
+		s.notifyUserChanged(userID)
+	}()
+	return done
 }
 
 // composeSentIncompleteError wraps a failure that happened only after SMTP
