@@ -329,7 +329,7 @@ export function busiestColumns(events: CalendarEvent[], day: Date): number {
 }
 
 /**
- * dayColumnWeights sizes the seven day columns while the day lens is on.
+ * dayColumnWeights sizes the seven day columns of the week.
  *
  * The lens day is the one to be read in full, so it gets a share wide enough
  * for a lane per calendar. Every other day gets a little more width for each

@@ -610,14 +610,6 @@ export function CalendarView({
   );
 }
 
-/** CalendarPicker is the menu in the calendar header that lists the calendars
- * the reader chose to list, grouped by the account they came from, because two
- * accounts routinely have a calendar called the same thing. It used to be a
- * column of its own beside the week, which with four calendars took a sixth of
- * the screen from the days that needed it; folded into the header it costs one
- * button, and the button's dots still say which calendars are drawn. The
- * second-calendar choice is made among the same calendars: one hidden under
- * settings is never offered there. */
 /** swipeThreshold is how far, in pixels, a horizontal drag across the week
  * picker has to travel before it turns the month. Shorter, and a tap that
  * wobbles turns it; a day cell is about this wide. */
@@ -627,6 +619,12 @@ const swipeThreshold = 40;
  * once. A trackpad reports a gesture as dozens of small deltas, so they are
  * added up rather than each one turning a month. */
 const wheelThreshold = 60;
+
+/** wheelGestureGap is how long, in milliseconds, the wheel has to be quiet
+ * before scrolling counts as a new gesture. A trackpad flick keeps reporting
+ * deltas through its momentum for hundreds of pixels; without a gap that whole
+ * flick would turn a month per threshold rather than once. */
+const wheelGestureGap = 200;
 
 /**
  * WeekPicker is the week's date range in the header, and the way to any other
@@ -650,16 +648,18 @@ function WeekPicker({
   // Which way the last turn went, so the new month slides in from that side.
   const [direction, setDirection] = useState<"next" | "previous" | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const swipeRef = useRef<{ x: number; y: number; pointer: number } | null>(null);
   // A swipe ends on a day button more often than not; the click that follows
   // it is the end of the gesture, not a choice of week.
   const swipedRef = useRef(false);
-  const wheelRef = useRef(0);
+  // The scroll gathered towards a turn, when the wheel last moved, and whether
+  // the current gesture has already turned the month.
+  const wheelRef = useRef({ total: 0, last: 0, turned: false });
 
   const weeks = useMemo(() => monthPickerWeeks(month), [month]);
   const anchorKey = localDateKey(anchor);
-  const weekdays = useMemo(() => weekDays(anchor), [anchor]);
 
   const turn = useCallback((months: number) => {
     setDirection(months > 0 ? "next" : "previous");
@@ -685,7 +685,11 @@ function WeekPicker({
       if (rootRef.current && !rootRef.current.contains(pointerEvent.target as Node)) setOpen(false);
     };
     const onKeyDown = (keyEvent: KeyboardEvent) => {
-      if (keyEvent.key === "Escape") setOpen(false);
+      if (keyEvent.key === "Escape") {
+        setOpen(false);
+        // Focus inside the panel would otherwise fall back to the page.
+        if (rootRef.current?.contains(document.activeElement)) buttonRef.current?.focus();
+      }
       if (keyEvent.key === "PageUp" || keyEvent.key === "PageDown") {
         keyEvent.preventDefault();
         turn(keyEvent.key === "PageDown" ? 1 : -1);
@@ -704,25 +708,39 @@ function WeekPicker({
   useEffect(() => {
     const panel = panelRef.current;
     if (!open || !panel) return;
-    wheelRef.current = 0;
+    wheelRef.current = { total: 0, last: 0, turned: false };
     const onWheel = (wheelEvent: WheelEvent) => {
       wheelEvent.preventDefault();
+      const wheel = wheelRef.current;
+      // A pause ends the gesture: what was gathered before it is dropped, so
+      // stray deltas a minute apart never add up to a turn.
+      if (wheelEvent.timeStamp - wheel.last > wheelGestureGap) {
+        wheel.total = 0;
+        wheel.turned = false;
+      }
+      wheel.last = wheelEvent.timeStamp;
+      // One gesture turns one month; the rest of it is momentum.
+      if (wheel.turned) return;
       const delta = Math.abs(wheelEvent.deltaX) > Math.abs(wheelEvent.deltaY) ? wheelEvent.deltaX : wheelEvent.deltaY;
       // A mouse wheel in line mode reports a few lines, not pixels.
-      wheelRef.current += wheelEvent.deltaMode === 0 ? delta : delta * 20;
-      if (Math.abs(wheelRef.current) < wheelThreshold) return;
-      turn(wheelRef.current > 0 ? 1 : -1);
-      wheelRef.current = 0;
+      wheel.total += wheelEvent.deltaMode === 0 ? delta : delta * 20;
+      if (Math.abs(wheel.total) < wheelThreshold) return;
+      turn(wheel.total > 0 ? 1 : -1);
+      wheel.total = 0;
+      wheel.turned = true;
     };
     panel.addEventListener("wheel", onWheel, { passive: false });
     return () => panel.removeEventListener("wheel", onWheel);
   }, [open, turn]);
 
-  const choose = (day: Date) => {
-    if (swipedRef.current) {
-      swipedRef.current = false;
-      return;
-    }
+  const choose = (day: Date, clickDetail: number) => {
+    // The flag is spent by the first click after a swipe whatever it was. A
+    // touch swipe or a drag across days usually produces no click at all, and
+    // a flag left standing would swallow the next choice made from the
+    // keyboard (a click with no pointer behind it, detail 0).
+    const swiped = swipedRef.current;
+    swipedRef.current = false;
+    if (swiped && clickDetail !== 0) return;
     setOpen(false);
     navigate(calendarURL(day));
   };
@@ -734,6 +752,7 @@ function WeekPicker({
       <h1>
         <button
           type="button"
+          ref={buttonRef}
           className="calendar-week-picker-button"
           aria-expanded={open}
           aria-haspopup="dialog"
@@ -786,7 +805,7 @@ function WeekPicker({
             className={`calendar-week-picker-grid ${direction ? `slide-${direction}` : ""}`}
           >
             <div className="calendar-week-picker-week calendar-week-picker-weekdays" aria-hidden="true">
-              {weekdays.map((day) => (
+              {weeks[0].map((day) => (
                 <span key={day.getDay()}>{day.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
               ))}
             </div>
@@ -806,7 +825,7 @@ function WeekPicker({
                         }`}
                         aria-current={shown ? "date" : undefined}
                         aria-label={day.toLocaleDateString(undefined, { dateStyle: "full" })}
-                        onClick={() => choose(day)}
+                        onClick={(clickEvent) => choose(day, clickEvent.detail)}
                       >
                         {day.getDate()}
                       </button>
@@ -822,6 +841,14 @@ function WeekPicker({
   );
 }
 
+/** CalendarPicker is the menu in the calendar header that lists the calendars
+ * the reader chose to list, grouped by the account they came from, because two
+ * accounts routinely have a calendar called the same thing. It used to be a
+ * column of its own beside the week, which with four calendars took a sixth of
+ * the screen from the days that needed it; folded into the header it costs one
+ * button, and the button's dots still say which calendars are drawn. The
+ * second-calendar choice is made among the same calendars: one hidden under
+ * settings is never offered there. */
 function CalendarPicker({
   calendars,
   hiddenCount,
@@ -1065,7 +1092,10 @@ function CopyMarks({
 
 /** resolveLensIndex picks the day the lens opens on: the one the reader chose
  * when it is in this week, otherwise today when today has anything timed,
- * otherwise the day with the most at once -- the day the lens exists for. */
+ * otherwise the day with the most at once -- the day the lens exists for. A
+ * week with nothing timed in it has no such day and opens none (-1), rather
+ * than widening Monday around an empty column -- which is also what the week
+ * looks like while its events are still loading. */
 function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: string | null, todayKey: string): number {
   const chosen = chosenKey ? days.findIndex((day) => localDateKey(day) === chosenKey) : -1;
   if (chosen >= 0) return chosen;
@@ -1080,7 +1110,7 @@ function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: stri
       busiest = index;
     }
   });
-  return busiest;
+  return most > 0 ? busiest : -1;
 }
 
 /** dayAtOffset turns a double-click in a day column into the hour it landed on,

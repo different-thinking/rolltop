@@ -664,7 +664,8 @@ site and in review.
   opens up with a lane per calendar and every other day is sized by how much it
   has at once (`dayColumnWeights`). Clicking the open day's name closes it,
   which leaves the days sized by their load with no lanes; clicking any other
-  day opens it there. The widths are one custom property, `--calendar-day-columns`, set on
+  day opens it there. A week with nothing timed in it opens no day on its own
+  (`resolveLensIndex`), rather than widening Monday around an empty column. The widths are one custom property, `--calendar-day-columns`, set on
   `.calendar-main` and read by the day names, the all-day bar and the grid
   alike -- set it on one of them only and the columns stop lining up. Lanes
   follow `calendarAccountGroups`, the one order the Calendars menu and the calendar
