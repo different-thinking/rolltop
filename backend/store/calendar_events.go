@@ -345,6 +345,40 @@ func (s *Store) CalendarEvent(ctx context.Context, userID, eventID int64) (Calen
 		FROM calendar_events WHERE user_id = ? AND id = ?`, userID, eventID))
 }
 
+// ListCalendarEventsByICalUID returns the reader's events that carry one of
+// the given iCalendar UIDs: the meeting a mailed invitation names, as the
+// calendars it already reached hold it. A series holds one row per
+// occurrence, so the rows come earliest first and bounded.
+func (s *Store) ListCalendarEventsByICalUID(ctx context.Context, userID int64, uids []string) ([]CalendarEvent, error) {
+	clean := make([]string, 0, len(uids))
+	seen := map[string]bool{}
+	for _, uid := range uids {
+		uid = strings.TrimSpace(uid)
+		if uid == "" || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		clean = append(clean, uid)
+	}
+	if userID <= 0 || len(clean) == 0 {
+		return []CalendarEvent{}, nil
+	}
+	args := make([]any, 0, len(clean)+1)
+	args = append(args, userID)
+	for _, uid := range clean {
+		args = append(args, uid)
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+		FROM calendar_events
+		WHERE user_id = ? AND link_travel = '' AND ical_uid IN (`+sqlPlaceholders(len(clean))+`)
+		ORDER BY start_at ASC, id ASC
+		LIMIT 500`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return collectCalendarEvents(rows)
+}
+
 // CalendarEventByExternalID loads the mirror of one Google event.
 func (s *Store) CalendarEventByExternalID(ctx context.Context, userID, calendarID int64, externalID string) (CalendarEvent, error) {
 	externalID = strings.TrimSpace(externalID)

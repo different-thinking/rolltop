@@ -37,6 +37,7 @@ import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip, ShipmentDetails } from "../deliveries/ShipmentChip";
 import { InvoiceChip, InvoiceDetails } from "../invoices/InvoiceChip";
 import { SnoozeControl } from "./SnoozeControl";
+import { MessageCalendarCard } from "./MessageCalendarCard";
 
 type MessageLoadStatus = {
   conversation: number;
@@ -955,6 +956,7 @@ export function ThreadView({
   const [pendingReply, setPendingReply] = useState<number>(0);
   const [unsubscribingID, setUnsubscribingID] = useState<number | null>(null);
   const [pendingUnsubscribe, setPendingUnsubscribe] = useState<ThreadMessage | null>(null);
+  const [calendarDialogOpen, setCalendarDialogOpen] = useState(false);
   const [originalSource, setOriginalSource] = useState<OriginalSourceState | null>(null);
   const [messagePluginPanel, setMessagePluginPanel] = useState<MessagePluginPanelState | null>(null);
   const [pgpBodies, setPGPBodies] = useState<Record<number, PGPBodyState>>({});
@@ -1789,7 +1791,7 @@ export function ThreadView({
         }
         return;
       }
-      if (inlineReply || originalSource || messagePluginPanel || pendingUnsubscribe) return;
+      if (inlineReply || originalSource || messagePluginPanel || pendingUnsubscribe || calendarDialogOpen) return;
       const key = event.key.toLowerCase();
       if (key === "u" || key === "escape") {
         event.preventDefault();
@@ -1806,7 +1808,7 @@ export function ThreadView({
     }
     window.addEventListener("keydown", handleThreadShortcut);
     return () => window.removeEventListener("keydown", handleThreadShortcut);
-  }, [backURL, currentMessageID, inlineReply, loading, messagePluginPanel, originalSource, pendingReply, pendingUnsubscribe, thread]);
+  }, [backURL, calendarDialogOpen, currentMessageID, inlineReply, loading, messagePluginPanel, originalSource, pendingReply, pendingUnsubscribe, thread]);
 
   const displaySubject = pgpBodies[currentMessageID]?.protectedSubject || subject;
 
@@ -2387,6 +2389,23 @@ export function ThreadView({
                       for. */}
                   {item.message.shipment ? <ShipmentDetails shipment={item.message.shipment} navigate={navigate} /> : null}
                   {item.message.invoice ? <InvoiceDetails invoice={item.message.invoice} navigate={navigate} /> : null}
+                  {/* An invitation is read for its time and place, which its
+                      body spells out in whatever layout the sender's client
+                      chose, if at all; the card says it the same way every
+                      time and leads into the reader's calendar. A collapsed
+                      card still mounts its body (hidden by CSS), so the card
+                      is drawn for expanded messages only: reading the
+                      calendar may cost an IMAP fetch per message. */}
+                  {item.has_calendar && isExpanded ? (
+                    <MessageCalendarCard
+                      messageID={item.message.id}
+                      csrf={csrf}
+                      datePrefs={datePrefs}
+                      navigate={navigate}
+                      addToast={addToast}
+                      onDialogOpenChange={setCalendarDialogOpen}
+                    />
+                  ) : null}
                   {item.body_preview_only ? (
                     <div className="body-notice">
                       <Icon name="report" />

@@ -444,6 +444,7 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 			CanReplyAll:        view.CanReplyAll,
 			HasAutocryptHeader: autocryptHeaderErr != nil || autocryptHeaders[view.Message.ID],
 			CopyIDs:            view.CopyIDs,
+			HasCalendar:        view.HasCalendar,
 		})
 	}
 	// The parcel a message named is attached after the loop for the same reason

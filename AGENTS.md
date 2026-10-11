@@ -684,6 +684,35 @@ site and in review.
   the wrist. What moves is the distance travelled, snapped to the quarter hour,
   not the start snapped to the grid, and all-day events shift in UTC dates.
   Drawing a new event only opens the dialog. Touch is left to scrolling.
+- **A mailed invitation is shown, and adding it is the dialog's Save.** A
+  message carrying a calendar object -- an `.ics` attachment, or the
+  `text/calendar` alternative Outlook and Exchange send instead, which never
+  becomes an attachment row -- gets a card above its body
+  (`MessageCalendarCard`, read from `/api/messages/:id/calendar`, parsed by
+  `backend/icalendar`). Three properties keep it honest. Adding opens the
+  event dialog seeded with the event and **without its guests**: they are the
+  organizer's guests, and an event entered with them would invite every one of
+  them again from the reader's account. The thread view only looks inside the
+  message being read, and only in the local copy
+  (`messageCarriesCalendar`); an attachment row answers for everything else,
+  because asking IMAP for every drawn message to find out would cost a fetch
+  per message. And "already in your calendar" is the provider's `iCalUID`
+  matched against `calendar_events.ical_uid`, never a guess from title and
+  time.
+- **An invitation is answered where the event lives.** When a connected
+  calendar holds the event with the reader as a guest (`my_response` on the
+  match), the card answers through `/api/calendar/events/:id/respond`, so the
+  provider tells the organizer and the calendar shows the answer. Otherwise it
+  mails an iTIP REPLY (`icalendar.BuildReply`, `apiMessageCalendarReply`) to
+  the organizer: through `sendCompose`, so it leaves from the account the
+  invitation arrived through (`replyFromIdentityID`), records its Message-ID
+  and is kept in Sent like any send. Three properties keep it honest. A reply
+  names **only the attendee answering** -- restating the guest list would
+  speak for people who did not answer. It is offered only for `METHOD:REQUEST`
+  that the reader did not organize themselves (`invitationAnswerable`), so a
+  cancellation, a shared event or one's own invitation is never answered. And
+  the request names the event by index **and** UID, so a page showing a stale
+  message cannot answer an event it never showed.
 - **The calendar list is a menu in the calendar header, not a column.**
   `CalendarPicker` holds the visibility switches, the second-calendar choice
   and the way to the calendar settings; the week takes the whole width beside

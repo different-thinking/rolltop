@@ -1197,3 +1197,116 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
     cursor: copy !important;
   }
 }
+
+// The event a message carries, drawn above the message the way an invoice or a
+// parcel is: the facts first, then the way into the calendar.
+.message-calendar {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+
+  dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 12px;
+    margin: 8px 0 0;
+    font-size: 13px;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.message-calendar-failed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.message-calendar-event + .message-calendar-event {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.message-calendar-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--text-soft);
+}
+
+.message-calendar-kind {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+  font-size: 12px;
+
+  .message-calendar.cancelled & {
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    color: var(--danger);
+  }
+}
+
+.message-calendar-title {
+  font-weight: 600;
+
+  &.struck {
+    text-decoration: line-through;
+  }
+}
+
+.message-calendar-note {
+  color: var(--muted);
+}
+
+.message-calendar-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.message-calendar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+
+  &:empty {
+    display: none;
+  }
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+  }
+}
+
+.message-calendar-held {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.message-calendar-rsvp {
+  margin-top: 10px;
+  background: var(--surface);
+}

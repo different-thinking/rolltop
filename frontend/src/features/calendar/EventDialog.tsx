@@ -11,7 +11,7 @@ import { Icon } from "../../components/Icon";
 import { calendarColor, eventEditable, providerName } from "./weekModel";
 
 /** responseOptions are the answers an invitee can give. */
-const responseOptions: { value: string; label: string }[] = [
+export const responseOptions: { value: string; label: string }[] = [
   { value: "accepted", label: "Yes" },
   { value: "tentative", label: "Maybe" },
   { value: "declined", label: "No" }

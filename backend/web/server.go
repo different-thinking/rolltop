@@ -243,6 +243,9 @@ type threadMessageView struct {
 	// included, and is empty unless a label view's copy was hidden behind it.
 	// Marking the drawn message unread has to reach all of them.
 	CopyIDs []int64
+	// HasCalendar says the message carries a calendar object -- an invitation
+	// -- which the client reads from /api/messages/:id/calendar.
+	HasCalendar bool
 }
 
 type conversationView struct {
@@ -301,6 +304,10 @@ type composeForm struct {
 	// wants the conversation gone from the list on one reply and kept in front
 	// of them on the next.
 	ArchiveAfterSend bool `json:"archive_after_send,omitempty"`
+	// calendarReply is the iCalendar answer to an invitation, sent beside the
+	// text body as its text/calendar alternative. Only the invitation card's
+	// route sets it; nothing a browser posts can.
+	calendarReply []byte
 }
 
 type composeExistingAttachment struct {
