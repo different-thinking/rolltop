@@ -565,6 +565,22 @@ func (s *Server) sendComposeTracked(ctx context.Context, cu currentUser, form co
 	// The message has left through SMTP. Every error from here on describes a
 	// local bookkeeping failure, not a failed send, and must not be reported as
 	// one: the caller answers a request that already delivered the mail.
+	if form.DraftMessageID > 0 {
+		// A message composed from a saved draft is sent now, so the draft goes,
+		// whatever happens to the Sent copy below: left behind, it sat in Drafts
+		// looking like mail still waiting to go out. Deferred so it runs after
+		// the Sent copy is filed and while the foreground turn is still held,
+		// which the move needs. supersedeDraft only ever moves a row that is
+		// still in a Drafts folder, and moves it to Trash, so a stale id from a
+		// compose tab cannot touch other mail. It runs on its own clock for the
+		// same reason the draft save's cleanup does: the mail is already gone,
+		// and a client that leaves right away must not cancel the move.
+		defer func() {
+			retireCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), draftSupersedeTimeout)
+			defer cancel()
+			s.supersedeDraft(retireCtx, cu.User.ID, form.DraftMessageID)
+		}()
+	}
 	progress.enter("append_to_sent")
 	fetched, err := s.appendSentMessage(ctx, imapAccount, sentMailbox, raw, msg.MessageID, msg.Date)
 	if err != nil {
