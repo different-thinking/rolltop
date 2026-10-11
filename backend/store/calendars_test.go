@@ -593,11 +593,11 @@ func TestListCalendarEventTravelMatchesKeyAndTouch(t *testing.T) {
 		StartAt: start, EndAt: end, LinkKey: "k1",
 	})
 	before := mustEvent(t, db, ctx, user, CalendarEvent{
-		CalendarID: work.ID, ExternalID: "t1", Summary: "Travel to: Visit",
+		CalendarID: work.ID, ExternalID: "t1", Summary: "Anfahrt: Visit",
 		StartAt: start.Add(-45 * time.Minute), EndAt: start, LinkKey: "k1", LinkTravel: CalendarTravelBefore,
 	})
 	after := mustEvent(t, db, ctx, user, CalendarEvent{
-		CalendarID: work.ID, ExternalID: "t2", Summary: "Travel back: Visit",
+		CalendarID: work.ID, ExternalID: "t2", Summary: "Abfahrt: Visit",
 		StartAt: end, EndAt: end.Add(30 * time.Minute), LinkKey: "k1", LinkTravel: CalendarTravelAfter,
 	})
 	if before.LinkTravel != CalendarTravelBefore || after.LinkTravel != CalendarTravelAfter {

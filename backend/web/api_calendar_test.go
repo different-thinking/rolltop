@@ -977,11 +977,11 @@ func TestCalendarRangeFoldsTravelIntoItsEvent(t *testing.T) {
 		return stored
 	}
 	visit := upsert(store.CalendarEvent{ExternalID: "e1", Summary: "Visit", StartAt: start, EndAt: end, LinkKey: "k1", LinkPrimary: true})
-	upsert(store.CalendarEvent{ExternalID: "t1", Summary: "Travel to: Visit", StartAt: start.Add(-45 * time.Minute), EndAt: start,
+	upsert(store.CalendarEvent{ExternalID: "t1", Summary: "Anfahrt: Visit", StartAt: start.Add(-45 * time.Minute), EndAt: start,
 		LinkKey: "k1", LinkTravel: store.CalendarTravelBefore})
-	upsert(store.CalendarEvent{ExternalID: "t2", Summary: "Travel back: Visit", StartAt: end, EndAt: end.Add(30 * time.Minute),
+	upsert(store.CalendarEvent{ExternalID: "t2", Summary: "Abfahrt: Visit", StartAt: end, EndAt: end.Add(30 * time.Minute),
 		LinkKey: "k1", LinkTravel: store.CalendarTravelAfter})
-	stray := upsert(store.CalendarEvent{ExternalID: "t3", Summary: "Travel to: Lunch", StartAt: start.Add(4 * time.Hour), EndAt: start.Add(5 * time.Hour),
+	stray := upsert(store.CalendarEvent{ExternalID: "t3", Summary: "Anfahrt: Lunch", StartAt: start.Add(4 * time.Hour), EndAt: start.Add(5 * time.Hour),
 		LinkKey: "k2", LinkTravel: store.CalendarTravelBefore})
 
 	events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
@@ -1033,7 +1033,7 @@ func TestCreateEventWithTravelAndDeleteIt(t *testing.T) {
 	if len(writes) != 3 {
 		t.Fatalf("Google was asked to create %d events, want the event and two travel blocks", len(writes))
 	}
-	if writes[1]["summary"] != "Travel to: Visit" || writes[1]["location"] != "Stuttgart" {
+	if writes[1]["summary"] != "Anfahrt: Visit" || writes[1]["location"] != "Stuttgart" {
 		t.Fatalf("journey there = %+v", writes[1])
 	}
 	if _, ok := writes[1]["attendees"].([]any); ok && len(writes[1]["attendees"].([]any)) > 0 {

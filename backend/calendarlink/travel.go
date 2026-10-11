@@ -99,7 +99,8 @@ func clampTravel(minutes int) int {
 // TravelFor renders one travel block of an event: its journey there
 // (store.CalendarTravelBefore) or back (store.CalendarTravelAfter), lasting the
 // given minutes, in the given calendar. It carries the event's title so it
-// reads for what it is in another client, and the journey there carries the
+// reads for what it is in another client -- in German ("Anfahrt",
+// "Abfahrt"), which is how the people using this name it in their calendars -- and the journey there carries the
 // place, which is where a phone offers directions from; neither carries guests,
 // notes of the event or a meeting -- it is the reader's time, not the
 // appointment's.
@@ -114,16 +115,16 @@ func TravelFor(event store.CalendarEvent, side string, minutes int, calendarID i
 	}
 	length := time.Duration(minutes) * time.Minute
 	if side == store.CalendarTravelBefore {
-		block.Summary = "Travel to: " + title
+		block.Summary = "Anfahrt: " + title
 		block.Location = event.Location
 		block.StartAt = event.StartAt.Add(-length)
 		block.EndAt = event.StartAt
-		block.Description = "Travel time for “" + title + "”. Rolltop moves it with that event and deletes it with it."
+		block.Description = "Fahrzeit zu „" + title + "“. Rolltop verschiebt und löscht sie zusammen mit diesem Termin."
 	} else {
-		block.Summary = "Travel back: " + title
+		block.Summary = "Abfahrt: " + title
 		block.StartAt = event.EndAt
 		block.EndAt = event.EndAt.Add(length)
-		block.Description = "Travel time after “" + title + "”. Rolltop moves it with that event and deletes it with it."
+		block.Description = "Fahrzeit nach „" + title + "“. Rolltop verschiebt und löscht sie zusammen mit diesem Termin."
 	}
 	return block
 }

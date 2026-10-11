@@ -40,7 +40,7 @@ func TestCreateWithTravelBlocksTheJourneyAroundTheEvent(t *testing.T) {
 	if !before.StartAt.Equal(start.Add(-45*time.Minute)) || !before.EndAt.Equal(start) {
 		t.Fatalf("before runs %s-%s, want 45 minutes ending at the start", before.StartAt, before.EndAt)
 	}
-	if before.Location != "Königstraße 12" || before.Summary != "Travel to: Customer visit" {
+	if before.Location != "Königstraße 12" || before.Summary != "Anfahrt: Customer visit" {
 		t.Fatalf("before = %q at %q", before.Summary, before.Location)
 	}
 	if !after.StartAt.Equal(start.Add(90*time.Minute)) || !after.EndAt.Equal(start.Add(120*time.Minute)) || after.LinkTravel != store.CalendarTravelAfter {
@@ -172,7 +172,7 @@ func TestUpdateThroughAPlaceholderOnlyMovesTheTravel(t *testing.T) {
 	if len(google.deletes) != 0 || len(google.updates) != 3 {
 		t.Fatalf("updates=%d deletes=%d, want the journey moved and kept", len(google.updates), len(google.deletes))
 	}
-	if before := google.updates[1]; before.Summary != "Travel to: Visit" || !before.EndAt.Equal(edited.StartAt) {
+	if before := google.updates[1]; before.Summary != "Anfahrt: Visit" || !before.EndAt.Equal(edited.StartAt) {
 		t.Fatalf("before = %+v", before)
 	}
 }
