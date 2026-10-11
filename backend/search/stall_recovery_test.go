@@ -552,7 +552,8 @@ func TestActiveWriterStallRestartsWhenTheMarkerWriteBlocks(t *testing.T) {
 	t.Cleanup(releaseMarker)
 
 	svc.activeStallAfter = 20 * time.Millisecond
-	svc.bleveErrorLog = (&capturedBleveLogs{}).Printf
+	logs := &capturedBleveLogs{}
+	svc.bleveErrorLog = logs.Printf
 	stalledUsers := make(chan int64, 2)
 	svc.SetActiveWriterStallHandler(func(userID int64) {
 		stalledUsers <- userID
@@ -584,4 +585,15 @@ func TestActiveWriterStallRestartsWhenTheMarkerWriteBlocks(t *testing.T) {
 	// Let the marker write finish so the watchdog goroutine is not left holding
 	// the package lock for whatever test runs next.
 	releaseMarker()
+	// And wait for it: the released write lands in this test's directory, and
+	// the watchdog is not one of the writes Close waits for, so returning now
+	// races the marker file against TempDir's cleanup ("directory not empty").
+	// The summary line is logged only after the marker write has returned.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "bleve active writer stalled") {
+		if time.Now().After(deadline) {
+			t.Fatal("the watchdog never finished after the marker write was released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
