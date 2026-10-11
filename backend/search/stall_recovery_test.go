@@ -590,9 +590,13 @@ func TestActiveWriterStallRestartsWhenTheMarkerWriteBlocks(t *testing.T) {
 	// races the marker file against TempDir's cleanup ("directory not empty").
 	// The summary line is logged only after the marker write has returned.
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(logs.String(), "bleve active writer stalled") {
+	for {
+		output := logs.String()
+		if strings.Contains(output, "bleve active writer stalled") {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the watchdog never finished after the marker write was released")
+			t.Fatalf("the watchdog never finished after the marker write was released; logs: %q", output)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
