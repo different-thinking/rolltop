@@ -263,7 +263,7 @@ func attachmentArchiveMethod(contentType string) uint16 {
 	}
 	switch mediaType {
 	case "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/avif",
-		"application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip",
+		"application/pdf", "application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip",
 		"application/x-7z-compressed", "application/x-rar-compressed", "application/vnd.rar",
 		"application/x-bzip2", "application/x-xz", "application/zstd":
 		return zip.Store
