@@ -195,7 +195,7 @@ func snoozeReminderWebPushNotification(count int, latest store.SnoozeReminderEve
 	}
 	return webPushNotification{
 		Title: title, Body: body, Tag: "rolltop-snooze-reminder",
-		Icon: "/icon.svg?v=transparent-logo-v2", Badge: "/icon.svg?v=transparent-logo-v2",
+		Icon: webPushMailIconURL, Badge: webPushBadgeURL,
 		URL: messageURL, APIURL: apiURL, MessageID: messageID,
 	}
 }

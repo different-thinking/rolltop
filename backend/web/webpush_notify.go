@@ -29,6 +29,13 @@ type webPushNotification struct {
 
 const webPushMaxRetryAttempts = 3
 
+// Notifications are about mail, so they carry the mail area's icon; the badge
+// stays the brand mark, which Android draws as a monochrome silhouette.
+const (
+	webPushMailIconURL = "/icons/mail.svg"
+	webPushBadgeURL    = "/icon.svg?v=transparent-logo-v2"
+)
+
 func (s *Server) notifyNewMailWebPushAsync(userID int64) {
 	if s == nil || s.store == nil || userID <= 0 {
 		return
@@ -257,8 +264,8 @@ func newMailWebPushNotification(count int, latest store.NewMailEvent) webPushNot
 		Title:     title,
 		Body:      body,
 		Tag:       "rolltop-new-mail",
-		Icon:      "/icon.svg?v=transparent-logo-v2",
-		Badge:     "/icon.svg?v=transparent-logo-v2",
+		Icon:      webPushMailIconURL,
+		Badge:     webPushBadgeURL,
 		URL:       messageURL,
 		APIURL:    apiURL,
 		MessageID: messageID,

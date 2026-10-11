@@ -107,6 +107,46 @@ func TestHandleAppServesContactsRoute(t *testing.T) {
 	}
 }
 
+func TestHandlerServesAreaIcons(t *testing.T) {
+	dir := t.TempDir()
+	iconDir := filepath.Join(dir, frontendDistDir, "icons")
+	if err := os.MkdirAll(iconDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mail.svg", "calendar.svg", "contacts.svg"} {
+		if err := os.WriteFile(filepath.Join(iconDir, name), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(wd)
+	})
+
+	handler := (&Server{}).Handler()
+	for _, path := range []string{"/icons/mail.svg", "/icons/calendar.svg", "/icons/contacts.svg"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", path, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "image/svg+xml") {
+			t.Fatalf("%s content-type = %q", path, got)
+		}
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/icons/../index.html", nil))
+	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "<html") {
+		t.Fatal("icon route served a file outside the icon directory")
+	}
+}
+
 func TestHandleAppEmbedsOnlyCurrentUserBootstrap(t *testing.T) {
 	ctx := context.Background()
 	db, err := storetest.Open(t)

@@ -17,6 +17,7 @@ import { recordFiledMessages, releaseFiledMessages } from "./lib/filedMessages";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
+import { appIconURL, syncDocumentIcon } from "./lib/appIcon";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
@@ -47,7 +48,8 @@ const allMailWakePrefetchAfterMS = 3 * 60 * 1000;
 const notificationPreferenceKey = "rolltop.notifications.enabled";
 const pushSubscriptionOwnerKey = "rolltop.push.owner-user-id";
 const pluginThemeLinkID = "rolltop-plugin-theme-css";
-const notificationIconURL = "/icon.svg?v=transparent-logo-v2";
+const notificationIconURL = appIconURL("mail");
+const notificationBadgeURL = "/icon.svg?v=transparent-logo-v2";
 const toastDurationMS = 4200;
 const undoToastDurationMS = 6000;
 let inMemoryPushSubscriptionOwner = 0;
@@ -269,6 +271,12 @@ export default function App() {
     window.history.pushState({}, "", url);
     setLocation(currentLocation());
   }, []);
+
+  // The tab icon names the area on screen, so a calendar window and a mail
+  // window stay distinguishable in the tab strip and the window switcher.
+  useEffect(() => {
+    syncDocumentIcon(location.path);
+  }, [location.path]);
 
   useEffect(() => {
     const onPop = () => setLocation(currentLocation());
@@ -667,7 +675,7 @@ export default function App() {
       body,
       tag: "rolltop-new-mail",
       icon: notificationIconURL,
-      badge: notificationIconURL,
+      badge: notificationBadgeURL,
       data: { url: targetURL, messageID: single ? messageID : 0 }
     });
     notification.onclick = () => {
