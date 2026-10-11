@@ -664,7 +664,7 @@ func (s *Server) foregroundBlockersSuffix(userID int64) string {
 	var names []string
 	seen := map[string]bool{}
 	for _, activity := range s.syncRunner.WorkerActivities(userID) {
-		if activity.Waiting {
+		if !activity.HoldsUpForeground() {
 			continue
 		}
 		name := syncer.WorkerKindLabel(activity.Kind)

@@ -302,8 +302,13 @@ func (s *Sender) dial(ctx context.Context, account store.MailAccount, trace *smt
 	// Implicit TLS: the handshake precedes the greeting, so it is done here
 	// rather than by the conversation. The deadline wrapper stays underneath
 	// the TLS connection so a stalled handshake is still bounded.
+	// The handshake is part of connecting, and a port that accepts TCP but never
+	// answers TLS would otherwise hold the send for the whole idle timeout.
 	tlsConn := tls.Client(deadlineConn, &tls.Config{ServerName: account.SMTPHost, MinVersion: tls.VersionTLS12})
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, min(timeout, smtpConnectTimeout))
+	err = tlsConn.HandshakeContext(handshakeCtx)
+	cancelHandshake()
+	if err != nil {
 		trace.Note("TLS handshake failed: " + err.Error())
 		_ = tlsConn.Close()
 		return nil, fmt.Errorf("start SMTP TLS: %w", err)
