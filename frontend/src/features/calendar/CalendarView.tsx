@@ -46,20 +46,6 @@ const nowLineInterval = 60_000;
  * lists. */
 const calendarSettingsPath = "/settings/account/preferences/calendars";
 
-/** dayLensKey remembers per browser whether the day lens is on. It is a way
- * of looking at the week, not a setting: a narrow laptop and a wide desk
- * screen want different answers, and losing it to cleared site data costs one
- * click. */
-const dayLensKey = "rolltop.calendar.dayLens";
-
-function storedDayLens(): boolean {
-  try {
-    return window.localStorage.getItem(dayLensKey) === "on";
-  } catch {
-    return false;
-  }
-}
-
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
 const initialScrollHour = 7;
@@ -96,7 +82,6 @@ export function CalendarView({
   const [dialogProblem, setDialogProblem] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
   const [now, setNow] = useState(() => new Date());
-  const [dayLens, setDayLens] = useState(storedDayLens);
   // The day the lens is open on, as a date key. null leaves the choice to
   // resolveLensIndex; "" is the reader having closed it, which holds until
   // they open a day again.
@@ -357,35 +342,23 @@ export function CalendarView({
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
-  // The day lens: one day opened up with a lane per calendar, every other day
-  // sized by how much it has at once. Lanes follow the Calendars menu's order.
-  // Every day is laid out to size it, so the result is kept until the week,
-  // its events or the lens change rather than redone on every render (the
-  // now-line ticks once a minute).
+  // The day lens, which is how the week is always drawn: one day opened up
+  // with a lane per calendar, every other day sized by how much it has at
+  // once. Lanes follow the Calendars menu's order. Every day is laid out to
+  // size it, so the result is kept until the week, its events or the open day
+  // change rather than redone on every render (the now-line ticks once a
+  // minute).
   const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
-    const index = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+    const index = lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
     const lanes =
       index >= 0
         ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
         : [];
-    const columns = dayLens
-      ? dayColumnWeights(events, days, index, lanes.length)
-          .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
-          .join(" ")
-      : undefined;
+    const columns = dayColumnWeights(events, days, index, lanes.length)
+      .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
+      .join(" ");
     return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
-  }, [dayLens, lensDayKey, days, events, todayKey, listedCalendars]);
-
-  const toggleDayLens = () => {
-    const next = !dayLens;
-    setDayLens(next);
-    setLensDayKey(null);
-    try {
-      window.localStorage.setItem(dayLensKey, next ? "on" : "off");
-    } catch {
-      // Remembering the choice is a convenience; the switch itself still works.
-    }
-  };
+  }, [lensDayKey, days, events, todayKey, listedCalendars]);
 
   const openEvent = (event: CalendarEvent, day: Date) => {
     setDialogProblem("");
@@ -437,8 +410,8 @@ export function CalendarView({
   return (
     <div className="calendar-shell">
       <section
-        className={`calendar-main ${dayLens ? "day-lens" : ""}`}
-        style={dayColumns ? ({ "--calendar-day-columns": dayColumns } as CSSProperties) : undefined}
+        className="calendar-main day-lens"
+        style={{ "--calendar-day-columns": dayColumns } as CSSProperties}
       >
         <header className="content-head calendar-head">
           <div className="calendar-nav">
@@ -473,20 +446,6 @@ export function CalendarView({
               onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
               navigate={navigate}
             />
-            <button
-              type="button"
-              className="ghost calendar-lens-toggle"
-              aria-pressed={dayLens}
-              title={
-                dayLens
-                  ? "Turn the day lens off and give every day the same width"
-                  : "Open one day with a column per calendar; click a weekday to choose which"
-              }
-              onClick={toggleDayLens}
-            >
-              <Icon name="search" />
-              Day lens
-            </button>
             <button type="button" className="ghost" disabled={syncing || calendars.length === 0} onClick={() => void syncNow()}>
               <Icon name="sync" />
               {syncing ? "Syncing…" : "Sync now"}
@@ -524,13 +483,6 @@ export function CalendarView({
                 <span className="calendar-dayname-number">{day.getDate()}</span>
               </>
             );
-            if (!dayLens) {
-              return (
-                <div key={day.toISOString()} className={`calendar-dayname ${today}`}>
-                  {label}
-                </div>
-              );
-            }
             const open = index === lensIndex;
             return (
               <div key={day.toISOString()} className={`calendar-dayname ${today} ${open ? "lens-open" : ""}`}>

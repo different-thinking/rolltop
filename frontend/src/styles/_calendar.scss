@@ -874,15 +874,8 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   }
 }
 
-// The day lens. The switch reads as pressed while it is on, the way the
-// sidebar's toggles do, rather than as a second primary button.
-.calendar-lens-toggle[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--text);
-}
-
-// Under the lens every weekday is a button that opens it; the label keeps the
-// look it has when the lens is off, so turning the lens on moves nothing.
+// The day lens. Every weekday is a button that opens it on that day, or
+// closes it when it is already open there.
 .day-lens .calendar-dayname {
   flex-direction: column;
   align-items: stretch;

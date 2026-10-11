@@ -659,11 +659,12 @@ site and in review.
   event created there would exist at the provider and never appear in the
   week. Showing it again lists it switched off. Every calendar an upgrade finds stays
   listed: hiding is the reader's choice.
-- **The day lens changes how the week is drawn, never what it holds.** With it
-  on (a per-browser switch in `localStorage`, off by default), one day opens up
-  with a lane per calendar and every other day is sized by how much it has at
-  once (`dayColumnWeights`); with it off the week is exactly the equal-column
-  grid. The widths are one custom property, `--calendar-day-columns`, set on
+- **The day lens changes how the week is drawn, never what it holds.** It is
+  how the week is always drawn -- there is no switch for it any more: one day
+  opens up with a lane per calendar and every other day is sized by how much it
+  has at once (`dayColumnWeights`). Clicking the open day's name closes it,
+  which leaves the days sized by their load with no lanes; clicking any other
+  day opens it there. The widths are one custom property, `--calendar-day-columns`, set on
   `.calendar-main` and read by the day names, the all-day bar and the grid
   alike -- set it on one of them only and the columns stop lining up. Lanes
   follow `calendarAccountGroups`, the one order the Calendars menu and the calendar
