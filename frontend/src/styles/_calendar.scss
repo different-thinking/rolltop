@@ -269,6 +269,12 @@
   // Horizontal drags are the picker's own swipe; vertical ones still scroll.
   touch-action: pan-y;
   user-select: none;
+
+  // Focusable only so a click or swipe keeps the keyboard in the picker; the
+  // panel is not a control of its own and draws no ring.
+  &:focus {
+    outline: none;
+  }
 }
 
 // On a phone the range sits too far right for the panel to fit beside it, so

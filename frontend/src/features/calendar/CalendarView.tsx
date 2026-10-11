@@ -4,7 +4,7 @@
 // leading system, so every write here goes through the API that reaches it
 // first.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
@@ -661,6 +661,12 @@ function WeekPicker({
   const weeks = useMemo(() => monthPickerWeeks(month), [month]);
   const anchorKey = localDateKey(anchor);
 
+  // Turning the month remounts the grid, and a day button that had the focus
+  // goes with it; the panel takes the focus back so the keyboard stays here.
+  useLayoutEffect(() => {
+    if (open && document.activeElement === document.body) panelRef.current?.focus();
+  }, [month, open]);
+
   const turn = useCallback((months: number) => {
     setDirection(months > 0 ? "next" : "previous");
     setMonth((current) => startOfMonth(current, months));
@@ -677,8 +683,9 @@ function WeekPicker({
   };
 
   // A click anywhere else or Escape closes the picker; Page Up and Page Down
-  // turn the month wherever the focus is, since a swipe or a click on the
-  // page leaves it outside the picker.
+  // turn the month while the focus is in the picker, and leave the page's own
+  // scrolling alone otherwise. The panel takes focus itself when it is
+  // clicked or swiped, so those keys keep working after a swipe.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (pointerEvent: PointerEvent) => {
@@ -690,7 +697,10 @@ function WeekPicker({
         // Focus inside the panel would otherwise fall back to the page.
         if (rootRef.current?.contains(document.activeElement)) buttonRef.current?.focus();
       }
-      if (keyEvent.key === "PageUp" || keyEvent.key === "PageDown") {
+      if (
+        (keyEvent.key === "PageUp" || keyEvent.key === "PageDown") &&
+        rootRef.current?.contains(document.activeElement)
+      ) {
         keyEvent.preventDefault();
         turn(keyEvent.key === "PageDown" ? 1 : -1);
       }
@@ -767,6 +777,7 @@ function WeekPicker({
         <div
           className="calendar-week-picker-panel"
           ref={panelRef}
+          tabIndex={-1}
           role="dialog"
           aria-label="Choose a week"
           onPointerDown={(pointerEvent) => {
@@ -823,8 +834,10 @@ function WeekPicker({
                         className={`calendar-week-picker-day ${outside ? "outside" : ""} ${
                           key === todayKey ? "today" : ""
                         }`}
-                        aria-current={shown ? "date" : undefined}
-                        aria-label={day.toLocaleDateString(undefined, { dateStyle: "full" })}
+                        aria-current={key === todayKey ? "date" : undefined}
+                        aria-label={`${day.toLocaleDateString(undefined, { dateStyle: "full" })}${
+                          shown ? ", shown week" : ""
+                        }`}
                         onClick={(clickEvent) => choose(day, clickEvent.detail)}
                       >
                         {day.getDate()}
