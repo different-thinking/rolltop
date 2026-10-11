@@ -155,25 +155,80 @@ func TestUpdateAddsTravelToAnUnlinkedEvent(t *testing.T) {
 }
 
 // Moving a placeholder moves the journey and keeps its title: the stand-in
-// title is not the appointment's.
+// Moving a placeholder moves the journey and asks nothing else of it: the
+// blocks beside the event keep the event's title, and the busy calendar's own
+// pair -- added here because the busy calendar had none yet -- carries only the
+// stand-in title.
 func TestUpdateThroughAPlaceholderOnlyMovesTheTravel(t *testing.T) {
-	router, google, _ := newRouter()
+	router, google, microsoft := newRouter()
 	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
-	_, travel := travelFixture(start)
+	primary, travel := travelFixture(start)
+	primary.CalendarID = microsoftCalendarID
+	for i := range travel {
+		travel[i].CalendarID = microsoftCalendarID
+	}
 	placeholder := store.CalendarEvent{ID: 9, CalendarID: googleCalendarID, Summary: "Busy", StartAt: start, EndAt: start.Add(time.Hour),
 		LinkKey: "k", LinkMasked: true}
 	edited := placeholder
 	edited.StartAt, edited.EndAt = start.Add(time.Hour), start.Add(2*time.Hour)
-	_, _, err := UpdateGroupWithTravel(context.Background(), router, 7, placeholder, edited, nil, nil, travel,
+	_, problems, err := UpdateGroupWithTravel(context.Background(), router, 7, placeholder, edited, []store.CalendarEvent{primary}, nil, travel,
 		TravelRequest{Before: minutesPtr(0), After: minutesPtr(0)})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("update: %v %v", err, problems)
 	}
-	if len(google.deletes) != 0 || len(google.updates) != 3 {
-		t.Fatalf("updates=%d deletes=%d, want the journey moved and kept", len(google.updates), len(google.deletes))
+	if len(microsoft.deletes) != 0 || len(google.deletes) != 0 {
+		t.Fatalf("deletes = %d/%d, want the journey kept", len(microsoft.deletes), len(google.deletes))
 	}
-	if before := google.updates[1]; before.Summary != "Anfahrt: Visit" || !before.EndAt.Equal(edited.StartAt) {
+	// The event follows, then its two blocks move.
+	if len(microsoft.updates) != 3 {
+		t.Fatalf("microsoft updates = %d, want the event and both blocks", len(microsoft.updates))
+	}
+	if before := microsoft.updates[1]; before.Summary != "Anfahrt: Visit" || !before.EndAt.Equal(edited.StartAt) {
 		t.Fatalf("before = %+v", before)
+	}
+	if len(google.creates) != 2 {
+		t.Fatalf("busy calendar blocks = %d, want a pair", len(google.creates))
+	}
+	for _, block := range google.creates {
+		if block.Summary != "Busy" || block.Location != "" || block.Description != "" || block.LinkKey != "k" {
+			t.Fatalf("busy calendar block = %+v, want the stand-in title and nothing else", block)
+		}
+	}
+}
+
+// The journey is kept in every calendar the event is: the second calendar gets
+// it in full, the busy calendar as placeholders, and taking a copy away takes
+// that calendar's journey with it.
+func TestTravelFollowsTheEventIntoItsCopies(t *testing.T) {
+	router, google, microsoft := newRouter()
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	created, problems, err := CreateWithTravel(context.Background(), router, 7, googleCalendarID,
+		[]Target{{CalendarID: microsoftCalendarID, Masked: true, Title: "Away", Change: CopyAdd}},
+		TravelRequest{Before: minutesPtr(30), After: minutesPtr(15)},
+		store.CalendarEvent{Summary: "Visit", Location: "Ulm", StartAt: start, EndAt: start.Add(time.Hour)})
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("create: %v %v", err, problems)
+	}
+	if len(google.creates) != 3 || len(microsoft.creates) != 3 {
+		t.Fatalf("creates google=%d microsoft=%d, want the event or its placeholder and a pair each", len(google.creates), len(microsoft.creates))
+	}
+	busyBefore := microsoft.creates[1]
+	if busyBefore.Summary != "Away" || busyBefore.Location != "" || busyBefore.LinkTravel != store.CalendarTravelBefore ||
+		busyBefore.LinkKey != created.LinkKey || !busyBefore.EndAt.Equal(start) {
+		t.Fatalf("busy calendar journey = %+v", busyBefore)
+	}
+
+	// Taking the placeholder away takes its journey along; the event's own
+	// stays where it is.
+	placeholder := microsoft.creates[0]
+	travel := []store.CalendarEvent{google.creates[1], google.creates[2], microsoft.creates[1], microsoft.creates[2]}
+	_, problems, err = UpdateGroupWithTravel(context.Background(), router, 7, created, created, []store.CalendarEvent{placeholder},
+		[]Target{{CalendarID: microsoftCalendarID, Masked: true, Title: "Away", Change: CopyRemove}}, travel, TravelRequest{})
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("update: %v %v", err, problems)
+	}
+	if len(microsoft.deletes) != 3 || len(google.deletes) != 0 {
+		t.Fatalf("deletes microsoft=%d google=%d, want the placeholder and its journey only", len(microsoft.deletes), len(google.deletes))
 	}
 }
 
@@ -240,5 +295,30 @@ func TestTravelBlockIsNeverCopied(t *testing.T) {
 	}
 	if google.updates[0].LinkTravel != store.CalendarTravelBefore {
 		t.Fatalf("block lost its role: %+v", google.updates[0])
+	}
+}
+
+// A copy the provider has already deleted takes its journey with it: the
+// calendar keeps nothing of the appointment, so a block kept or made there
+// would be travel to nothing.
+func TestTravelLeavesACalendarWhoseCopyIsGone(t *testing.T) {
+	router, google, microsoft := newRouter()
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	event, travel := travelFixture(start)
+	copied := store.CalendarEvent{ID: 20, CalendarID: microsoftCalendarID, Summary: "Visit", StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k"}
+	gone := TravelFor(copied, store.CalendarTravelBefore, 30, microsoftCalendarID)
+	gone.ID = 21
+	travel = append(travel, gone)
+	microsoft.failOn = map[int64]error{microsoftCalendarID: ErrRemoteDeleted}
+	edited := event
+	edited.StartAt, edited.EndAt = start.Add(time.Hour), start.Add(2*time.Hour)
+	if _, _, err := UpdateGroupWithTravel(context.Background(), router, 7, event, edited, []store.CalendarEvent{copied}, nil, travel, TravelRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(microsoft.creates) != 0 || len(microsoft.updates) != 0 {
+		t.Fatalf("microsoft creates=%d updates=%d, want nothing made or moved beside a gone copy", len(microsoft.creates), len(microsoft.updates))
+	}
+	if len(google.updates) != 3 {
+		t.Fatalf("google updates = %d, want the event and its own pair moved", len(google.updates))
 	}
 }

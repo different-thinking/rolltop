@@ -140,10 +140,32 @@ func sameTravelBlock(held, wanted store.CalendarEvent) bool {
 		!held.AllDay
 }
 
+// travelForMember renders one travel block for one member of an event's
+// group, in that member's calendar: the journey in full beside the event and
+// its copies, and beside a placeholder a block that says no more than the
+// placeholder does -- its stand-in title and the time, because the busy
+// calendar is the one other people read.
+func travelForMember(member store.CalendarEvent, side string, minutes int) store.CalendarEvent {
+	block := TravelFor(member, side, minutes, member.CalendarID)
+	if member.LinkMasked {
+		title := strings.TrimSpace(member.Summary)
+		if title == "" {
+			title = store.DefaultBusyLabel
+		}
+		block.Summary = title
+		block.Location = ""
+		block.Description = ""
+	}
+	return block
+}
+
 // CreateWithTravel creates an event, its copies and its travel blocks. An event
 // that is to have travel needs a link key before it is written, because the
 // key is what the blocks are found by; one the copies did not already ask for
-// is minted here, making the event the primary of a group of its own.
+// is minted here, making the event the primary of a group of its own. Every
+// calendar the event is kept in gets the journey: a second calendar is read
+// by the same reader, and a busy calendar by the people who would otherwise
+// book the time the reader spends on the road.
 func CreateWithTravel(ctx context.Context, w Writer, userID, calendarID int64, targets []Target, travel TravelRequest, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
 	plan := travel.resolve(event, nil)
 	if plan.any() && event.LinkKey == "" {
@@ -151,24 +173,24 @@ func CreateWithTravel(ctx context.Context, w Writer, userID, calendarID int64, t
 		event.LinkPrimary = true
 		event.LinkMasked = false
 	}
-	created, problems, err := CreateWithCopies(ctx, w, userID, calendarID, targets, event)
+	created, copies, problems, err := createWithCopies(ctx, w, userID, calendarID, targets, event)
 	if err != nil {
 		return created, nil, err
 	}
-	problems = append(problems, syncTravel(ctx, w, userID, created, nil, plan, false)...)
+	members := append([]store.CalendarEvent{created}, copies...)
+	problems = append(problems, syncTravel(ctx, w, userID, members, nil, plan)...)
 	return created, problems, nil
 }
 
 // UpdateGroupWithTravel applies an edit to an event, carries it to the event's
 // copies (UpdateGroupTargets) and brings the travel blocks along: they follow
 // the event's new bounds, take the minutes the request asks for, and are added
-// or removed. travel is the blocks as they stood before the edit
-// (store.ListCalendarEventTravel). An edit made through a placeholder moves
-// the blocks and changes nothing else about them: there is no journey in a
-// placeholder to edit.
+// or removed, in every calendar the event is kept in. travel is the blocks as
+// they stood before the edit (store.ListCalendarEventTravel). An edit made
+// through a placeholder moves the journey and asks nothing else of it: there
+// is no journey in a placeholder to edit.
 func UpdateGroupWithTravel(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target, travel []store.CalendarEvent, request TravelRequest) (store.CalendarEvent, []LinkedProblem, error) {
-	timesOnly := existing.Linked() && existing.LinkMasked
-	if timesOnly {
+	if existing.Linked() && existing.LinkMasked {
 		request = TravelRequest{}
 	}
 	if existing.LinkTravel != "" {
@@ -187,65 +209,74 @@ func UpdateGroupWithTravel(ctx context.Context, w Writer, userID int64, existing
 		existing.LinkKey = NewLinkKey()
 		existing.LinkPrimary = true
 	}
-	updated, problems, err := UpdateGroupTargets(ctx, w, userID, existing, edited, copies, targets)
+	updated, after, problems, err := updateGroupTargets(ctx, w, userID, existing, edited, copies, targets)
 	if err != nil {
 		return updated, nil, err
 	}
-	problems = append(problems, syncTravel(ctx, w, userID, updated, travel, plan, timesOnly)...)
+	members := append([]store.CalendarEvent{updated}, after...)
+	problems = append(problems, syncTravel(ctx, w, userID, members, travel, plan)...)
 	return updated, problems, nil
 }
 
-// syncTravel makes an event's travel blocks match a plan: the side the plan
-// has minutes for is created or moved, and the side it has none for removed.
-// A block that already matches is left alone. New blocks go into the event's
-// own calendar; existing ones stay wherever they were made. timesOnly moves
-// the blocks and keeps everything else they say, for an event that is a
-// placeholder: its stand-in title is not the appointment's.
-func syncTravel(ctx context.Context, w Writer, userID int64, event store.CalendarEvent, held []store.CalendarEvent, plan travelPlan, timesOnly bool) []LinkedProblem {
+// syncTravel makes the travel blocks of an event's group match a plan, one
+// pair per member's calendar: the side the plan has minutes for is created or
+// moved, the side it has none for removed, and a block in a calendar that no
+// longer holds a member -- a copy the reader took away -- removed with it. A
+// block that already says what it should is left alone. members are the group
+// as it stands after the write, the event acted on first.
+func syncTravel(ctx context.Context, w Writer, userID int64, members []store.CalendarEvent, held []store.CalendarEvent, plan travelPlan) []LinkedProblem {
 	var problems []LinkedProblem
-	for _, side := range []string{store.CalendarTravelBefore, store.CalendarTravelAfter} {
-		var current *store.CalendarEvent
-		for i := range held {
-			if held[i].LinkTravel == side {
-				current = &held[i]
-				break
+	kept := map[int64]bool{}
+	seen := map[int64]bool{}
+	for _, member := range members {
+		if member.CalendarID <= 0 || seen[member.CalendarID] || member.LinkTravel != "" {
+			continue
+		}
+		seen[member.CalendarID] = true
+		for _, side := range []string{store.CalendarTravelBefore, store.CalendarTravelAfter} {
+			var current *store.CalendarEvent
+			for i := range held {
+				if held[i].LinkTravel == side && held[i].CalendarID == member.CalendarID && !kept[held[i].ID] {
+					current = &held[i]
+					break
+				}
+			}
+			minutes := plan.minutes(side)
+			switch {
+			case minutes <= 0:
+				// Left for the sweep below, with everything else not kept.
+			case current != nil:
+				kept[current.ID] = true
+				wanted := travelForMember(member, side, minutes)
+				if sameTravelBlock(*current, wanted) {
+					continue
+				}
+				wanted.ID = current.ID
+				wanted.ExternalID = current.ExternalID
+				wanted.ETag = current.ETag
+				if _, err := w.UpdateRemoteEvent(ctx, userID, *current, wanted); err != nil {
+					problems = append(problems, LinkedProblem{CalendarID: current.CalendarID, Action: LinkedUpdate, Err: err, Travel: side})
+				}
+			case member.LinkKey == "":
+				// Nothing to tie a block to. CreateWithTravel and
+				// UpdateGroupWithTravel mint a key before getting here, so
+				// this is a provider that dropped it; a block nothing can
+				// find again would be travel nobody can move or delete with
+				// its event.
+			default:
+				wanted := travelForMember(member, side, minutes)
+				if _, err := w.CreateRemoteEvent(ctx, userID, member.CalendarID, wanted); err != nil {
+					problems = append(problems, LinkedProblem{CalendarID: member.CalendarID, Action: LinkedCreate, Err: err, Travel: side})
+				}
 			}
 		}
-		minutes := plan.minutes(side)
-		switch {
-		case minutes <= 0 && current != nil:
-			if err := w.DeleteRemoteEvent(ctx, userID, *current); err != nil && !errors.Is(err, ErrRemoteDeleted) {
-				problems = append(problems, LinkedProblem{CalendarID: current.CalendarID, Action: LinkedDelete, Err: err, Travel: side})
-			}
-		case minutes <= 0:
-		case current != nil:
-			wanted := TravelFor(event, side, minutes, current.CalendarID)
-			if timesOnly {
-				moved := *current
-				moved.StartAt, moved.EndAt = wanted.StartAt, wanted.EndAt
-				moved.TimeZone = wanted.TimeZone
-				wanted = moved
-			}
-			if sameTravelBlock(*current, wanted) {
-				continue
-			}
-			wanted.ID = current.ID
-			wanted.ExternalID = current.ExternalID
-			wanted.ETag = current.ETag
-			if _, err := w.UpdateRemoteEvent(ctx, userID, *current, wanted); err != nil {
-				problems = append(problems, LinkedProblem{CalendarID: current.CalendarID, Action: LinkedUpdate, Err: err, Travel: side})
-			}
-		case event.LinkKey == "" || timesOnly:
-			// Nothing to tie a block to. CreateWithTravel and
-			// UpdateGroupWithTravel mint a key before getting here, so this is
-			// a provider that dropped it; a block nothing can find again would
-			// be travel nobody can move or delete with its event. And a
-			// placeholder never grows travel of its own.
-		default:
-			wanted := TravelFor(event, side, minutes, event.CalendarID)
-			if _, err := w.CreateRemoteEvent(ctx, userID, event.CalendarID, wanted); err != nil {
-				problems = append(problems, LinkedProblem{CalendarID: event.CalendarID, Action: LinkedCreate, Err: err, Travel: side})
-			}
+	}
+	for _, block := range held {
+		if kept[block.ID] {
+			continue
+		}
+		if err := w.DeleteRemoteEvent(ctx, userID, block); err != nil && !errors.Is(err, ErrRemoteDeleted) {
+			problems = append(problems, LinkedProblem{CalendarID: block.CalendarID, Action: LinkedDelete, Err: err, Travel: block.LinkTravel})
 		}
 	}
 	return problems

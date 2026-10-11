@@ -700,8 +700,8 @@ export function EventDialog({
               />
               {draft.travelBeforeOn || draft.travelAfterOn ? (
                 <p className="calendar-dialog-note">
-                  Blocked as its own time in {provider}, so others see you as busy. It moves and is deleted with this
-                  event.
+                  Blocked as its own time in {provider} and in every calendar this event is copied to, so others see
+                  you as busy. It moves and is deleted with this event.
                 </p>
               ) : null}
             </div>
@@ -838,7 +838,10 @@ function TravelField({
             inputMode="numeric"
             min={1}
             max={maxTravelMinutes}
-            step={5}
+            // Any whole minute is a journey. A coarser step makes the browser
+            // count its valid values from min -- 1, 6, 11 ... -- and refuse
+            // the round numbers people actually type, 30 among them.
+            step={1}
             value={minutes}
             disabled={disabled}
             aria-label={`${label}, minutes`}

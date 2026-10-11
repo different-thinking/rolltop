@@ -158,6 +158,14 @@ func CreateWithCopy(ctx context.Context, w Writer, userID, calendarID, copyCalen
 // the event in place and is returned as a problem, because the reader asked for
 // the appointment above all and it now exists.
 func CreateWithCopies(ctx context.Context, w Writer, userID, calendarID int64, targets []Target, event store.CalendarEvent) (store.CalendarEvent, []LinkedProblem, error) {
+	created, _, problems, err := createWithCopies(ctx, w, userID, calendarID, targets, event)
+	return created, problems, err
+}
+
+// createWithCopies is CreateWithCopies, also returning the copies that were
+// made -- the other members of the new group, which travel time follows into
+// their calendars.
+func createWithCopies(ctx context.Context, w Writer, userID, calendarID int64, targets []Target, event store.CalendarEvent) (store.CalendarEvent, []store.CalendarEvent, []LinkedProblem, error) {
 	wanted := make([]Target, 0, len(targets))
 	seen := map[int64]bool{calendarID: true}
 	for _, target := range targets {
@@ -169,27 +177,31 @@ func CreateWithCopies(ctx context.Context, w Writer, userID, calendarID int64, t
 	}
 	if len(wanted) == 0 {
 		created, err := w.CreateRemoteEvent(ctx, userID, calendarID, event)
-		return created, nil, err
+		return created, nil, nil, err
 	}
 	event.LinkKey = NewLinkKey()
 	event.LinkPrimary = true
 	event.LinkMasked = false
 	created, err := w.CreateRemoteEvent(ctx, userID, calendarID, event)
 	if err != nil {
-		return store.CalendarEvent{}, nil, err
+		return store.CalendarEvent{}, nil, nil, err
 	}
 	// The copies are rendered from what the provider accepted, not from what
 	// was submitted: a pair is its key and its start, and a start the provider
 	// normalized on the event would otherwise leave the copy unmatched.
 	var problems []LinkedProblem
+	var members []store.CalendarEvent
 	for _, target := range wanted {
 		copied := target.render(created)
 		copied.LinkKey = event.LinkKey
-		if _, err := w.CreateRemoteEvent(ctx, userID, target.CalendarID, copied); err != nil {
+		made, err := w.CreateRemoteEvent(ctx, userID, target.CalendarID, copied)
+		if err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: target.CalendarID, Action: LinkedCreate, Err: err})
+			continue
 		}
+		members = append(members, made)
 	}
-	return created, problems, nil
+	return created, members, problems, nil
 }
 
 // UpdateGroup applies an edit and carries it to the event's copies, with one
@@ -216,6 +228,15 @@ func UpdateGroup(ctx context.Context, w Writer, userID int64, existing, edited s
 // and an edit made through a placeholder moves the other copies' time and
 // nothing else: its title is not the event's.
 func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target) (store.CalendarEvent, []LinkedProblem, error) {
+	updated, _, problems, err := updateGroupTargets(ctx, w, userID, existing, edited, copies, targets)
+	return updated, problems, err
+}
+
+// updateGroupTargets is UpdateGroupTargets, also returning the copies the
+// group holds afterwards, as they were written: the ones carried along, the
+// ones added, and a removal the provider refused -- every calendar the
+// appointment is still kept in, which travel time follows into.
+func updateGroupTargets(ctx context.Context, w Writer, userID int64, existing, edited store.CalendarEvent, copies []store.CalendarEvent, targets []Target) (store.CalendarEvent, []store.CalendarEvent, []LinkedProblem, error) {
 	throughPlaceholder := existing.Linked() && existing.LinkMasked
 	type plan struct {
 		target Target
@@ -291,7 +312,7 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 	}
 	updated, err := w.UpdateRemoteEvent(ctx, userID, existing, edited)
 	if err != nil {
-		return updated, nil, err
+		return updated, nil, nil, err
 	}
 
 	removing := map[int64]bool{}
@@ -303,13 +324,21 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 	// The copies follow what the provider accepted, not what was submitted,
 	// for the reason CreateWithCopies gives.
 	var problems []LinkedProblem
+	var members []store.CalendarEvent
 	for _, copied := range copies {
 		if removing[copied.ID] {
 			continue
 		}
 		follow := followCopy(updated, copied, throughPlaceholder, placeholderTitle(copied, targets))
-		if _, err := w.UpdateRemoteEvent(ctx, userID, copied, follow); err != nil {
+		if written, err := w.UpdateRemoteEvent(ctx, userID, copied, follow); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: copied.CalendarID, Action: LinkedUpdate, Err: err})
+			// A copy the provider no longer has is not a member any more:
+			// its calendar keeps nothing of the appointment, travel included.
+			if !errors.Is(err, ErrRemoteDeleted) {
+				members = append(members, follow)
+			}
+		} else {
+			members = append(members, written)
 		}
 	}
 	for _, p := range plans {
@@ -318,6 +347,9 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 		}
 		if err := w.DeleteRemoteEvent(ctx, userID, *p.remove); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: p.remove.CalendarID, Action: LinkedDelete, Err: err})
+			if !errors.Is(err, ErrRemoteDeleted) {
+				members = append(members, *p.remove)
+			}
 		}
 	}
 	for _, p := range plans {
@@ -326,11 +358,14 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 		}
 		copied := p.target.render(updated)
 		copied.LinkKey = edited.LinkKey
-		if _, err := w.CreateRemoteEvent(ctx, userID, p.target.CalendarID, copied); err != nil {
+		made, err := w.CreateRemoteEvent(ctx, userID, p.target.CalendarID, copied)
+		if err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: p.target.CalendarID, Action: LinkedCreate, Err: err})
+			continue
 		}
+		members = append(members, made)
 	}
-	return updated, problems, nil
+	return updated, members, problems, nil
 }
 
 // followCopy renders what one copy becomes after its group's event was edited

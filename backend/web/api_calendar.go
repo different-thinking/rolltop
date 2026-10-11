@@ -574,16 +574,16 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 		visible[calendar.ID] = calendar.Selected
 	}
 	groups := map[string][]store.CalendarEvent{}
-	travel := map[string]store.CalendarEvent{}
+	// Every calendar an event is kept in holds its own pair of blocks, and
+	// the entry drawn stands for all of them.
+	travel := map[string][]store.CalendarEvent{}
 	for _, event := range linked {
 		if event.LinkTravel != "" {
 			// A block is never a member of a group: the journey back starts
 			// where the event ends, which is where the next occurrence of a
 			// back-to-back series starts, under the same key.
 			key := travelGroupKey(event.LinkKey, event.LinkTravel, travelTouchAt(event))
-			if held, ok := travel[key]; !ok || event.ID < held.ID {
-				travel[key] = event
-			}
+			travel[key] = append(travel[key], event)
 			continue
 		}
 		key := linkedGroupKey(event)
@@ -620,9 +620,12 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 			name string
 			at   time.Time
 		}{{store.CalendarTravelBefore, event.StartAt}, {store.CalendarTravelAfter, event.EndAt}} {
-			if block, ok := travel[travelGroupKey(event.LinkKey, side.name, side.at)]; ok {
-				blocks = append(blocks, block)
+			held := travel[travelGroupKey(event.LinkKey, side.name, side.at)]
+			for _, block := range held {
 				claimed[block.ID] = true
+			}
+			if len(held) > 0 {
+				blocks = append(blocks, held[0])
 			}
 		}
 		out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(blocks)
