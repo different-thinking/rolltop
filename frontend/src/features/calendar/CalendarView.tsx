@@ -27,9 +27,11 @@ import {
   lensLaneCalendarIDs,
   localDateKey,
   minutesIntoDay,
+  monthPickerWeeks,
   providerName,
   readableTextColor,
   startOfDay,
+  startOfMonth,
   startOfWeek,
   timedEventTouchesDay,
   weekDays
@@ -459,7 +461,7 @@ export function CalendarView({
             >
               <Icon name="chevron_right" />
             </button>
-            <h1>{weekLabel}</h1>
+            <WeekPicker anchor={anchor} label={weekLabel} todayKey={todayKey} navigate={navigate} />
           </div>
           <div className="calendar-head-actions">
             <CalendarPicker
@@ -664,6 +666,210 @@ export function CalendarView({
  * button, and the button's dots still say which calendars are drawn. The
  * second-calendar choice is made among the same calendars: one hidden under
  * settings is never offered there. */
+/** swipeThreshold is how far, in pixels, a horizontal drag across the week
+ * picker has to travel before it turns the month. Shorter, and a tap that
+ * wobbles turns it; a day cell is about this wide. */
+const swipeThreshold = 40;
+
+/** wheelThreshold is how much scrolling over the week picker turns the month
+ * once. A trackpad reports a gesture as dozens of small deltas, so they are
+ * added up rather than each one turning a month. */
+const wheelThreshold = 60;
+
+/**
+ * WeekPicker is the week's date range in the header, and the way to any other
+ * week: pressing it opens a month with its weeks, which the reader turns with
+ * the arrows, a swipe, the scroll wheel or Page Up/Down, and picking a day
+ * opens the week it falls in. The arrows beside it still step one week.
+ */
+function WeekPicker({
+  anchor,
+  label,
+  todayKey,
+  navigate
+}: {
+  anchor: Date;
+  label: string;
+  todayKey: string;
+  navigate: (url: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [month, setMonth] = useState(() => startOfMonth(anchor));
+  // Which way the last turn went, so the new month slides in from that side.
+  const [direction, setDirection] = useState<"next" | "previous" | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; pointer: number } | null>(null);
+  // A swipe ends on a day button more often than not; the click that follows
+  // it is the end of the gesture, not a choice of week.
+  const swipedRef = useRef(false);
+  const wheelRef = useRef(0);
+
+  const weeks = useMemo(() => monthPickerWeeks(month), [month]);
+  const anchorKey = localDateKey(anchor);
+  const weekdays = useMemo(() => weekDays(anchor), [anchor]);
+
+  const turn = useCallback((months: number) => {
+    setDirection(months > 0 ? "next" : "previous");
+    setMonth((current) => startOfMonth(current, months));
+  }, []);
+
+  const toggle = () => {
+    if (!open) {
+      // The picker opens on the month of the week being shown, not wherever
+      // it was last left.
+      setMonth(startOfMonth(anchor));
+      setDirection(null);
+    }
+    setOpen(!open);
+  };
+
+  // A click anywhere else or Escape closes the picker; Page Up and Page Down
+  // turn the month wherever the focus is, since a swipe or a click on the
+  // page leaves it outside the picker.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (pointerEvent: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(pointerEvent.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") setOpen(false);
+      if (keyEvent.key === "PageUp" || keyEvent.key === "PageDown") {
+        keyEvent.preventDefault();
+        turn(keyEvent.key === "PageDown" ? 1 : -1);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, turn]);
+
+  // The wheel listener is attached by hand because React's is passive, and a
+  // scroll that turns the month must not also scroll the page behind it.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!open || !panel) return;
+    wheelRef.current = 0;
+    const onWheel = (wheelEvent: WheelEvent) => {
+      wheelEvent.preventDefault();
+      const delta = Math.abs(wheelEvent.deltaX) > Math.abs(wheelEvent.deltaY) ? wheelEvent.deltaX : wheelEvent.deltaY;
+      // A mouse wheel in line mode reports a few lines, not pixels.
+      wheelRef.current += wheelEvent.deltaMode === 0 ? delta : delta * 20;
+      if (Math.abs(wheelRef.current) < wheelThreshold) return;
+      turn(wheelRef.current > 0 ? 1 : -1);
+      wheelRef.current = 0;
+    };
+    panel.addEventListener("wheel", onWheel, { passive: false });
+    return () => panel.removeEventListener("wheel", onWheel);
+  }, [open, turn]);
+
+  const choose = (day: Date) => {
+    if (swipedRef.current) {
+      swipedRef.current = false;
+      return;
+    }
+    setOpen(false);
+    navigate(calendarURL(day));
+  };
+
+  const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  return (
+    <div className="calendar-week-picker" ref={rootRef}>
+      <h1>
+        <button
+          type="button"
+          className="calendar-week-picker-button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          title="Choose a week"
+          onClick={toggle}
+        >
+          <span>{label}</span>
+          <Icon name="expand_more" />
+        </button>
+      </h1>
+      {open ? (
+        <div
+          className="calendar-week-picker-panel"
+          ref={panelRef}
+          role="dialog"
+          aria-label="Choose a week"
+          onPointerDown={(pointerEvent) => {
+            swipedRef.current = false;
+            swipeRef.current = { x: pointerEvent.clientX, y: pointerEvent.clientY, pointer: pointerEvent.pointerId };
+          }}
+          onPointerUp={(pointerEvent) => {
+            const start = swipeRef.current;
+            swipeRef.current = null;
+            if (!start || start.pointer !== pointerEvent.pointerId) return;
+            const dx = pointerEvent.clientX - start.x;
+            const dy = pointerEvent.clientY - start.y;
+            if (Math.abs(dx) < swipeThreshold || Math.abs(dx) < Math.abs(dy)) return;
+            // Dragging the page to the left brings the next month in from the
+            // right, the way a phone's pages turn.
+            swipedRef.current = true;
+            turn(dx < 0 ? 1 : -1);
+          }}
+          onPointerCancel={() => {
+            swipeRef.current = null;
+          }}
+        >
+          <div className="calendar-week-picker-head">
+            <button type="button" className="icon-button" title="Previous month" onClick={() => turn(-1)}>
+              <Icon name="chevron_left" />
+            </button>
+            <span className="calendar-week-picker-month" aria-live="polite">
+              {monthLabel}
+            </span>
+            <button type="button" className="icon-button" title="Next month" onClick={() => turn(1)}>
+              <Icon name="chevron_right" />
+            </button>
+          </div>
+          <div
+            key={localDateKey(month)}
+            className={`calendar-week-picker-grid ${direction ? `slide-${direction}` : ""}`}
+          >
+            <div className="calendar-week-picker-week calendar-week-picker-weekdays" aria-hidden="true">
+              {weekdays.map((day) => (
+                <span key={day.getDay()}>{day.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
+              ))}
+            </div>
+            {weeks.map((week) => {
+              const shown = localDateKey(week[0]) === anchorKey;
+              return (
+                <div key={localDateKey(week[0])} className={`calendar-week-picker-week ${shown ? "shown" : ""}`}>
+                  {week.map((day) => {
+                    const key = localDateKey(day);
+                    const outside = day.getMonth() !== month.getMonth();
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`calendar-week-picker-day ${outside ? "outside" : ""} ${
+                          key === todayKey ? "today" : ""
+                        }`}
+                        aria-current={shown ? "date" : undefined}
+                        aria-label={day.toLocaleDateString(undefined, { dateStyle: "full" })}
+                        onClick={() => choose(day)}
+                      >
+                        {day.getDate()}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CalendarPicker({
   calendars,
   hiddenCount,

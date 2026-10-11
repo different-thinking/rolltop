@@ -54,6 +54,26 @@ export function weekDays(date: Date): Date[] {
   return Array.from({ length: 7 }, (_, index) => addDays(start, index));
 }
 
+/** startOfMonth returns local midnight of the first day of a date's month,
+ * shifted by whole months. The day is pinned to the first before shifting, so
+ * stepping on from the 31st never skips a short month. */
+export function startOfMonth(date: Date, months = 0): Date {
+  return new Date(date.getFullYear(), date.getMonth() + months, 1);
+}
+
+/** monthPickerWeekCount is how many weeks the week picker shows for every
+ * month. A month spans four to six Monday-first weeks; a fixed six keeps the
+ * picker the same height while the reader swipes through months. */
+export const monthPickerWeekCount = 6;
+
+/** monthPickerWeeks returns the Monday-first weeks the week picker shows for a
+ * month: the week holding its first day and the ones after it, as seven days
+ * each, padded with days of the neighbouring months. */
+export function monthPickerWeeks(month: Date): Date[][] {
+  const first = startOfWeek(startOfMonth(month));
+  return Array.from({ length: monthPickerWeekCount }, (_, index) => weekDays(addDays(first, index * 7)));
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
