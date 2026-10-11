@@ -158,7 +158,7 @@ func parseOffset(value string) (time.Duration, bool) {
 	if len(value) == 7 {
 		seconds, err3 = strconv.Atoi(value[5:7])
 	}
-	if err1 != nil || err2 != nil || err3 != nil {
+	if err1 != nil || err2 != nil || err3 != nil || hours >= 24 || minutes >= 60 || seconds >= 60 {
 		return 0, false
 	}
 	return sign * (time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second), true

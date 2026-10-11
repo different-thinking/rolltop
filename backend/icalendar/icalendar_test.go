@@ -266,3 +266,17 @@ func TestParseRejoinsCharacterSplitAcrossFold(t *testing.T) {
 		t.Fatalf("uid = %q, want a,b", got)
 	}
 }
+
+func TestParseOffsetRejectsOutOfRangeParts(t *testing.T) {
+	if got, ok := parseOffset("+0130"); !ok || got != 90*time.Minute {
+		t.Fatalf("+0130 = %v, %v", got, ok)
+	}
+	if got, ok := parseOffset("-043000"); !ok || got != -(4*time.Hour+30*time.Minute) {
+		t.Fatalf("-043000 = %v, %v", got, ok)
+	}
+	for _, bad := range []string{"+9999", "+2400", "+0160", "+010060", "0100", "+1"} {
+		if _, ok := parseOffset(bad); ok {
+			t.Errorf("parseOffset(%q) accepted", bad)
+		}
+	}
+}
