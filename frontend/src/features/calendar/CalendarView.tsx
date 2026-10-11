@@ -23,6 +23,7 @@ import {
   dayColumnWeights,
   dayHeight,
   hourHeight,
+  isoWeekNumber,
   layoutDayEvents,
   lensLaneCalendarIDs,
   localDateKey,
@@ -816,14 +817,26 @@ function WeekPicker({
             className={`calendar-week-picker-grid ${direction ? `slide-${direction}` : ""}`}
           >
             <div className="calendar-week-picker-week calendar-week-picker-weekdays" aria-hidden="true">
+              <span className="calendar-week-picker-number" />
               {weeks[0].map((day) => (
                 <span key={day.getDay()}>{day.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
               ))}
             </div>
             {weeks.map((week) => {
               const shown = localDateKey(week[0]) === anchorKey;
+              const weekNumber = isoWeekNumber(week[0]);
               return (
                 <div key={localDateKey(week[0])} className={`calendar-week-picker-week ${shown ? "shown" : ""}`}>
+                  {/* The calendar week (ISO 8601), which opens that week like any of its days. */}
+                  <button
+                    type="button"
+                    className="calendar-week-picker-number"
+                    aria-label={`Week ${weekNumber}${shown ? ", shown week" : ""}`}
+                    title={`Week ${weekNumber}`}
+                    onClick={(clickEvent) => choose(week[0], clickEvent.detail)}
+                  >
+                    {weekNumber}
+                  </button>
                   {week.map((day) => {
                     const key = localDateKey(day);
                     const outside = day.getMonth() !== month.getMonth();

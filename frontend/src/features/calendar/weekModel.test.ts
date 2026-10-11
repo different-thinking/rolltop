@@ -4,6 +4,7 @@ import {
   busiestColumns,
   calendarAccountGroups,
   dayColumnWeights,
+  isoWeekNumber,
   lensLaneCalendarIDs,
   localDateKey,
   monthPickerWeekCount,
@@ -160,5 +161,27 @@ describe("startOfMonth", () => {
   it("steps from the end of a long month without skipping a short one", () => {
     expect(localDateKey(startOfMonth(new Date(2026, 0, 31), 1))).toBe("2026-02-01");
     expect(localDateKey(startOfMonth(new Date(2026, 0, 15), -1))).toBe("2025-12-01");
+  });
+});
+
+describe("isoWeekNumber", () => {
+  it("numbers the week by ISO 8601", () => {
+    expect(isoWeekNumber(new Date(2026, 9, 5))).toBe(41);
+    expect(isoWeekNumber(new Date(2026, 9, 11))).toBe(41);
+    expect(isoWeekNumber(new Date(2026, 9, 12))).toBe(42);
+  });
+
+  it("gives a week to the year its Thursday falls in", () => {
+    // 2026 begins on a Thursday, so 1 January is in week 1 and the year has 53.
+    expect(isoWeekNumber(new Date(2026, 0, 1))).toBe(1);
+    expect(isoWeekNumber(new Date(2027, 0, 1))).toBe(53);
+    expect(isoWeekNumber(new Date(2027, 0, 4))).toBe(1);
+    // 30 December 2024 is a Monday whose Thursday is in 2025.
+    expect(isoWeekNumber(new Date(2024, 11, 30))).toBe(1);
+  });
+
+  it("is not thrown by a daylight saving change inside the year", () => {
+    expect(isoWeekNumber(new Date(2026, 2, 30))).toBe(14);
+    expect(isoWeekNumber(new Date(2026, 9, 26))).toBe(44);
   });
 });

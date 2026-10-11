@@ -74,6 +74,20 @@ export function monthPickerWeeks(month: Date): Date[][] {
   return Array.from({ length: monthPickerWeekCount }, (_, index) => weekDays(addDays(first, index * 7)));
 }
 
+/** isoWeekNumber returns the ISO 8601 week number of the week a date falls
+ * in -- the "KW" printed in German calendars. A week belongs to the year its
+ * Thursday falls in, so the last days of December can be week 1 of the next
+ * year and the first days of January week 52 or 53 of the last. */
+export function isoWeekNumber(date: Date): number {
+  const day = startOfDay(date);
+  const thursday = addDays(day, 3 - ((day.getDay() + 6) % 7));
+  const yearStart = new Date(thursday.getFullYear(), 0, 1);
+  // Rounded, because a DST change makes the span between two local midnights
+  // an hour short of or past a whole number of days.
+  const days = Math.round((thursday.getTime() - yearStart.getTime()) / msPerDay);
+  return Math.floor(days / 7) + 1;
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
