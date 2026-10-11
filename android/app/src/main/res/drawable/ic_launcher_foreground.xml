@@ -4,7 +4,10 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <!-- The mail icon of frontend/public/icons/mail.svg (its 64-unit grid),
-         scaled so the arch's bottom corners stay inside the 66dp safe circle. -->
+         scaled by 0.76 about the centre. The arch's bottom corners, its
+         farthest points, then sit about 29dp from the centre, inside the
+         33dp radius of the 66dp safe circle that no launcher mask clips. -->
+    <!-- Same transform as ic_launcher_monochrome.xml; change both together. -->
     <group
         android:scaleX="0.76"
         android:scaleY="0.76"
