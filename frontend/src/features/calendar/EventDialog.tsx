@@ -8,7 +8,7 @@ import type { FormEvent } from "react";
 import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
 import { Icon } from "../../components/Icon";
-import { calendarColor, providerName } from "./weekModel";
+import { calendarColor, eventEditable, providerName } from "./weekModel";
 
 /** responseOptions are the answers an invitee can give. */
 const responseOptions: { value: string; label: string }[] = [
@@ -122,6 +122,59 @@ function draftForNewEvent(day: Date, calendarID: number): DraftState {
   };
 }
 
+/** EventPrefill seeds a new event with more than a day: the stretch the reader
+ * drew in the week, or everything of an event they copied. start and end are
+ * instants for a timed event; for an all-day one they are the UTC midnights an
+ * all-day event is stored with, the end exclusive. */
+export type EventPrefill = {
+  start: Date;
+  end: Date;
+  allDay: boolean;
+  /** calendarID is the calendar to offer first, when the reader may write to
+   * it; the lane a new event was drawn in, or the copied event's own. */
+  calendarID?: number;
+  summary?: string;
+  location?: string;
+  description?: string;
+  attendees?: CalendarAttendee[];
+  copy?: boolean;
+  busyCopy?: boolean;
+  onlineMeeting?: boolean;
+};
+
+/** draftFromPrefill fills the form for a new event from a prefill. */
+function draftFromPrefill(prefill: EventPrefill, calendarID: number): DraftState {
+  const base = draftForNewEvent(prefill.start, calendarID);
+  const filled = {
+    ...base,
+    summary: prefill.summary || "",
+    location: prefill.location || "",
+    description: prefill.description || "",
+    // Only who is invited carries over; their answers were to the other event.
+    attendees: (prefill.attendees || []).map((attendee) => ({ ...attendee, response: "", organizer: false, self: false })),
+    copy: Boolean(prefill.copy),
+    busyCopy: Boolean(prefill.busyCopy),
+    onlineMeeting: Boolean(prefill.onlineMeeting)
+  };
+  if (prefill.allDay) {
+    const inclusiveEnd = new Date(prefill.end.getTime() - 86_400_000);
+    return {
+      ...filled,
+      allDay: true,
+      startDate: utcDateValue(prefill.start),
+      endDate: utcDateValue(inclusiveEnd >= prefill.start ? inclusiveEnd : prefill.start)
+    };
+  }
+  return {
+    ...filled,
+    allDay: false,
+    startDate: localDateValue(prefill.start),
+    endDate: localDateValue(prefill.end),
+    startTime: localTimeValue(prefill.start),
+    endTime: localTimeValue(prefill.end)
+  };
+}
+
 /** toInput renders the form as the API payload, converting the inclusive end
  * date back into the exclusive bound the backend and Google both use. */
 function toInput(draft: DraftState): { input: CalendarEventInput; problem: string } {
@@ -221,6 +274,7 @@ function parseLocalDateTime(date: string, time: string): Date | null {
 export function EventDialog({
   event,
   day,
+  prefill,
   calendars,
   saving,
   problem,
@@ -233,6 +287,8 @@ export function EventDialog({
   event: CalendarEvent | null;
   /** day seeds a new event's date. */
   day: Date;
+  /** prefill seeds a new event with more than its date; it wins over day. */
+  prefill?: EventPrefill | null;
   calendars: CalendarSummary[];
   saving: boolean;
   problem: string;
@@ -250,11 +306,14 @@ export function EventDialog({
   // every write, and any reset keyed on it would wipe what the user is typing.
   const copyTarget = calendars.find((item) => item.copy_target && item.can_write);
   const busyTarget = calendars.find((item) => item.busy_target && item.can_write);
-  const [draft, setDraft] = useState<DraftState>(() =>
-    event
-      ? draftFromEvent(event, copyTarget?.id || 0, busyTarget?.id || 0)
-      : draftForNewEvent(day, writable[0]?.id || 0)
-  );
+  const [draft, setDraft] = useState<DraftState>(() => {
+    if (event) return draftFromEvent(event, copyTarget?.id || 0, busyTarget?.id || 0);
+    if (prefill) {
+      const preferred = writable.find((item) => item.id === prefill.calendarID);
+      return draftFromPrefill(prefill, (preferred || writable[0])?.id || 0);
+    }
+    return draftForNewEvent(day, writable[0]?.id || 0);
+  });
   const [localProblem, setLocalProblem] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const titleRef = useRef<HTMLInputElement | null>(null);
@@ -278,7 +337,7 @@ export function EventDialog({
   // same goes for a Microsoft 365 meeting somebody else organizes: only its
   // organizer can change it, and the reader's part is the answer.
   const invitedToMicrosoftMeeting = Boolean(event?.my_response) && calendar?.provider === "microsoft";
-  const editable = !event || (Boolean(calendar?.can_write) && !invitedToMicrosoftMeeting);
+  const editable = !event || eventEditable(event, calendar);
   const update = (patch: Partial<DraftState>) => setDraft((current) => ({ ...current, ...patch }));
   // The box is offered whenever the event lives anywhere but the second
   // calendar itself; an event already in it has nothing to copy.

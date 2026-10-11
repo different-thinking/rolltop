@@ -998,3 +998,92 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
     }
   }
 }
+
+// Dragging in the week. A block can be grabbed anywhere to move it and by its
+// bottom edge to change how long it lasts; while a drag is under way the
+// cursor says which of the two, or that a copy is being made, wherever the
+// pointer is.
+.calendar-day,
+.calendar-allday-cell {
+  user-select: none;
+}
+
+.calendar-event-resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.calendar-event.drag-source,
+.calendar-chip.drag-source {
+  opacity: 0.35;
+}
+
+.calendar-drag-ghost {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  overflow: hidden;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.25;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.22);
+  pointer-events: none;
+
+  // A drawn event does not exist yet, and looks it.
+  &.drawing {
+    opacity: 0.75;
+    border-style: dashed;
+    border-color: currentColor;
+    box-shadow: none;
+  }
+
+  .calendar-event-time {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-weight: 600;
+  }
+}
+
+.calendar-drag-ghost-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.85;
+  pointer-events: none;
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.calendar-main.dragging {
+  &,
+  * {
+    cursor: grabbing !important;
+  }
+
+  &.drag-resize,
+  &.drag-resize *,
+  &.drag-create,
+  &.drag-create * {
+    cursor: ns-resize !important;
+  }
+
+  &.drag-allday-create,
+  &.drag-allday-create * {
+    cursor: ew-resize !important;
+  }
+
+  &.drag-copy,
+  &.drag-copy * {
+    cursor: copy !important;
+  }
+}
