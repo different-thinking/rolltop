@@ -382,6 +382,15 @@ export function CalendarView({
         });
       }
     } catch (err) {
+      // Put the block back where it was before asking the provider again: a
+      // reload that fails as well must not leave it drawn where it never went.
+      setEvents((current) =>
+        current.map((item) =>
+          item.id === event.id
+            ? { ...item, start_at: original.start.toISOString(), end_at: original.end.toISOString() }
+            : item
+        )
+      );
       if (err instanceof ApiError && err.status === 409) {
         const winner = err.payload.event as CalendarEvent | undefined;
         if (winner) setEvents((current) => current.map((item) => (item.id === winner.id ? winner : item)));

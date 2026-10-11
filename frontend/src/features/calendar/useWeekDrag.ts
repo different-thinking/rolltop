@@ -107,20 +107,17 @@ export function useWeekDrag({
   const columnAt = useCallback((cells: (HTMLElement | null)[], clientX: number) => {
     let nearest = -1;
     let nearestDistance = Infinity;
-    cells.forEach((cell, index) => {
-      if (!cell) return;
+    for (let index = 0; index < cells.length; index++) {
+      const cell = cells[index];
+      if (!cell) continue;
       const bounds = cell.getBoundingClientRect();
-      if (clientX >= bounds.left && clientX < bounds.right) {
-        nearest = index;
-        nearestDistance = 0;
-        return;
-      }
+      if (clientX >= bounds.left && clientX < bounds.right) return index;
       const distance = Math.min(Math.abs(clientX - bounds.left), Math.abs(clientX - bounds.right));
       if (distance < nearestDistance) {
         nearest = index;
         nearestDistance = distance;
       }
-    });
+    }
     return nearest;
   }, []);
 
