@@ -2496,6 +2496,19 @@ export function ThreadView({
                         ) : null}
                       </div>
                     ))}
+                    {item.attachments.length > 1 ? (
+                      <div className="attachment-group attachment-download-all">
+                        <a
+                          className="attachment"
+                          href={`/attachments/message/${item.message.id}/zip`}
+                          download
+                          title={`Download all ${item.attachments.length} attachments as a ZIP file`}
+                        >
+                          <Icon name="download" />
+                          <span>Download all (ZIP)</span>
+                        </a>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
                 {index === thread.length - 1 && !replyOpen ? (
