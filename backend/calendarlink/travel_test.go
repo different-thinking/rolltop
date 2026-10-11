@@ -297,3 +297,28 @@ func TestTravelBlockIsNeverCopied(t *testing.T) {
 		t.Fatalf("block lost its role: %+v", google.updates[0])
 	}
 }
+
+// A copy the provider has already deleted takes its journey with it: the
+// calendar keeps nothing of the appointment, so a block kept or made there
+// would be travel to nothing.
+func TestTravelLeavesACalendarWhoseCopyIsGone(t *testing.T) {
+	router, google, microsoft := newRouter()
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	event, travel := travelFixture(start)
+	copied := store.CalendarEvent{ID: 20, CalendarID: microsoftCalendarID, Summary: "Visit", StartAt: start, EndAt: start.Add(time.Hour), LinkKey: "k"}
+	gone := TravelFor(copied, store.CalendarTravelBefore, 30, microsoftCalendarID)
+	gone.ID = 21
+	travel = append(travel, gone)
+	microsoft.failOn = map[int64]error{microsoftCalendarID: ErrRemoteDeleted}
+	edited := event
+	edited.StartAt, edited.EndAt = start.Add(time.Hour), start.Add(2*time.Hour)
+	if _, _, err := UpdateGroupWithTravel(context.Background(), router, 7, event, edited, []store.CalendarEvent{copied}, nil, travel, TravelRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(microsoft.creates) != 0 || len(microsoft.updates) != 0 {
+		t.Fatalf("microsoft creates=%d updates=%d, want nothing made or moved beside a gone copy", len(microsoft.creates), len(microsoft.updates))
+	}
+	if len(google.updates) != 3 {
+		t.Fatalf("google updates = %d, want the event and its own pair moved", len(google.updates))
+	}
+}

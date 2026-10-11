@@ -332,7 +332,11 @@ func updateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 		follow := followCopy(updated, copied, throughPlaceholder, placeholderTitle(copied, targets))
 		if written, err := w.UpdateRemoteEvent(ctx, userID, copied, follow); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: copied.CalendarID, Action: LinkedUpdate, Err: err})
-			members = append(members, follow)
+			// A copy the provider no longer has is not a member any more:
+			// its calendar keeps nothing of the appointment, travel included.
+			if !errors.Is(err, ErrRemoteDeleted) {
+				members = append(members, follow)
+			}
 		} else {
 			members = append(members, written)
 		}
@@ -343,7 +347,9 @@ func updateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 		}
 		if err := w.DeleteRemoteEvent(ctx, userID, *p.remove); err != nil {
 			problems = append(problems, LinkedProblem{CalendarID: p.remove.CalendarID, Action: LinkedDelete, Err: err})
-			members = append(members, *p.remove)
+			if !errors.Is(err, ErrRemoteDeleted) {
+				members = append(members, *p.remove)
+			}
 		}
 	}
 	for _, p := range plans {
