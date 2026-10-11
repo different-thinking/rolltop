@@ -251,3 +251,18 @@ func TestNthWeekday(t *testing.T) {
 		t.Fatalf("second Sunday of March = %d", got)
 	}
 }
+
+func TestParseRejoinsCharacterSplitAcrossFold(t *testing.T) {
+	// "Café" with the two octets of é folded onto two lines.
+	data := []byte("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\\,b\r\nDTSTART:20261124T130000Z\r\nSUMMARY:Caf\xc3\r\n \xa9\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	cal, err := Parse(data)
+	if err != nil || len(cal.Events) != 1 {
+		t.Fatalf("events = %d (%v)", len(cal.Events), err)
+	}
+	if got := cal.Events[0].Summary; got != "Café" {
+		t.Fatalf("summary = %q, want Café", got)
+	}
+	if got := cal.Events[0].UID; got != "a,b" {
+		t.Fatalf("uid = %q, want a,b", got)
+	}
+}

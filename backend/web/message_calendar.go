@@ -140,12 +140,11 @@ func (s *Server) apiMessageCalendar(w http.ResponseWriter, r *http.Request, id i
 		s.serverError(w, r, err)
 		return
 	}
-	raw, err := s.rawMessageBytes(r.Context(), userID, msg)
-	if err != nil {
+	parts, readable, err := s.messageCalendarParts(r.Context(), userID, msg)
+	if !readable {
 		writeAPIError(w, http.StatusGone, "The message could not be read from the mail server.")
 		return
 	}
-	parts, err := mailparse.CalendarParts(bytes.NewReader(raw))
 	if err != nil && len(parts) == 0 {
 		writeAPIError(w, http.StatusUnprocessableEntity, "The calendar attached to this message could not be read.")
 		return
@@ -186,6 +185,27 @@ func (s *Server) apiMessageCalendar(w http.ResponseWriter, r *http.Request, id i
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, out)
+}
+
+// messageCalendarParts finds the calendar objects of a message. The local copy
+// is streamed through the MIME walk rather than read whole, so a large
+// attachment beside the invitation is scanned and never held in memory; only a
+// message with no local copy is fetched, through rawMessageBytes. readable is
+// false when the message could not be read at all.
+func (s *Server) messageCalendarParts(ctx context.Context, userID int64, msg store.MessageRecord) (parts []mailparse.CalendarPart, readable bool, err error) {
+	if s.blobs != nil && strings.TrimSpace(msg.BlobPath) != "" {
+		if f, openErr := s.blobs.OpenUserBlob(userID, msg.BlobPath); openErr == nil {
+			defer f.Close()
+			parts, err = mailparse.CalendarParts(f)
+			return parts, true, err
+		}
+	}
+	raw, rawErr := s.rawMessageBytes(ctx, userID, msg)
+	if rawErr != nil {
+		return nil, false, rawErr
+	}
+	parts, err = mailparse.CalendarParts(bytes.NewReader(raw))
+	return parts, true, err
 }
 
 // calendarEventsFromParts reads every part and drops the repeats: Google sends

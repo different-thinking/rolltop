@@ -193,23 +193,29 @@ func parseComponents(data []byte) *component {
 }
 
 // unfold joins folded lines (RFC 5545 3.1): a line starting with a space or a
-// tab continues the one before it, without that one character.
+// tab continues the one before it, without that one character. The lines are
+// joined as octets and only then checked for valid UTF-8, because a fold may
+// fall inside a multi-octet character and each half alone is invalid.
 func unfold(data []byte) []string {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	text := string(data)
-	if !utf8.ValidString(text) {
-		text = strings.ToValidUTF8(text, "�")
-	}
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	raw := strings.Split(text, "\n")
-	lines := make([]string, 0, len(raw))
+	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+	raw := bytes.Split(data, []byte("\n"))
+	joined := make([][]byte, 0, len(raw))
 	for _, line := range raw {
-		if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(lines) > 0 {
-			lines[len(lines)-1] += line[1:]
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') && len(joined) > 0 {
+			joined[len(joined)-1] = append(joined[len(joined)-1], line[1:]...)
 			continue
 		}
-		lines = append(lines, line)
+		joined = append(joined, append([]byte(nil), line...))
+	}
+	lines := make([]string, 0, len(joined))
+	for _, line := range joined {
+		text := string(line)
+		if !utf8.ValidString(text) {
+			text = strings.ToValidUTF8(text, "�")
+		}
+		lines = append(lines, text)
 	}
 	return lines
 }
@@ -317,7 +323,9 @@ func readEvent(c *component, zones map[string]*vtimezone) (Event, bool) {
 		return Event{}, false
 	}
 	event := Event{
-		UID:         clip(strings.TrimSpace(firstValue(c, "UID")), 300),
+		// UID is a TEXT value: read it unescaped, as the provider stores it
+		// in iCalUID and as BuildReply escapes it again on the way out.
+		UID:         clip(strings.TrimSpace(unescapeText(firstValue(c, "UID"))), 300),
 		Summary:     textValue(c, "SUMMARY", maxShortBytes),
 		Description: textValue(c, "DESCRIPTION", maxTextBytes),
 		Location:    textValue(c, "LOCATION", maxShortBytes),

@@ -2392,8 +2392,11 @@ export function ThreadView({
                   {/* An invitation is read for its time and place, which its
                       body spells out in whatever layout the sender's client
                       chose, if at all; the card says it the same way every
-                      time and leads into the reader's calendar. */}
-                  {item.has_calendar ? (
+                      time and leads into the reader's calendar. A collapsed
+                      card still mounts its body (hidden by CSS), so the card
+                      is drawn for expanded messages only: reading the
+                      calendar may cost an IMAP fetch per message. */}
+                  {item.has_calendar && isExpanded ? (
                     <MessageCalendarCard
                       messageID={item.message.id}
                       csrf={csrf}

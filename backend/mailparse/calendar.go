@@ -110,7 +110,31 @@ func collectCalendarParts(header textproto.MIMEHeader, body io.Reader, parts *[]
 	if len(data) > maxCalendarPartBytes {
 		return nil
 	}
-	text := DecodeTextBytes(data, params["charset"])
+	// Unfold before decoding: RFC 5545 lets a fold fall inside a multi-octet
+	// character, and decoding first would read each half as a bad byte and
+	// repair it into mojibake that unfolding afterwards cannot undo.
+	text := DecodeTextBytes(unfoldCalendarBytes(data), params["charset"])
 	*parts = append(*parts, CalendarPart{Filename: filename, Data: []byte(text)})
 	return nil
+}
+
+// unfoldCalendarBytes joins folded content lines (RFC 5545 3.1) on the raw
+// octets: a line break followed by a space or a tab is removed together with
+// that one character.
+func unfoldCalendarBytes(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\r' || data[i] == '\n' {
+			next := i + 1
+			if data[i] == '\r' && next < len(data) && data[next] == '\n' {
+				next++
+			}
+			if next < len(data) && (data[next] == ' ' || data[next] == '\t') {
+				i = next
+				continue
+			}
+		}
+		out = append(out, data[i])
+	}
+	return out
 }

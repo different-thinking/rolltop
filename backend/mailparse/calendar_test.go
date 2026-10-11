@@ -77,3 +77,15 @@ func TestIsCalendarPart(t *testing.T) {
 		}
 	}
 }
+
+func TestCalendarPartsRejoinsCharacterSplitAcrossFold(t *testing.T) {
+	raw := "From: a@example.test\r\nContent-Type: text/calendar; charset=utf-8\r\n\r\n" +
+		"BEGIN:VCALENDAR\r\nSUMMARY:Caf\xc3\r\n \xa9\r\nEND:VCALENDAR\r\n"
+	parts, err := CalendarParts(strings.NewReader(raw))
+	if err != nil || len(parts) != 1 {
+		t.Fatalf("parts = %d (%v)", len(parts), err)
+	}
+	if !strings.Contains(string(parts[0].Data), "SUMMARY:Café") {
+		t.Fatalf("data = %q", parts[0].Data)
+	}
+}

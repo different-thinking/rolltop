@@ -12,7 +12,6 @@
 package web
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -24,7 +23,6 @@ import (
 
 	"rolltop/backend/icalendar"
 	"rolltop/backend/logging"
-	"rolltop/backend/mailparse"
 	"rolltop/backend/smtpclient"
 	"rolltop/backend/store"
 )
@@ -92,12 +90,11 @@ func (s *Server) apiMessageCalendarReply(w http.ResponseWriter, r *http.Request,
 		s.serverError(w, r, err)
 		return
 	}
-	raw, err := s.rawMessageBytes(r.Context(), userID, msg)
-	if err != nil {
+	parts, readable, _ := s.messageCalendarParts(r.Context(), userID, msg)
+	if !readable {
 		writeAPIError(w, http.StatusGone, "The message could not be read from the mail server.")
 		return
 	}
-	parts, _ := mailparse.CalendarParts(bytes.NewReader(raw))
 	var method string
 	events := calendarEventsFromParts(parts, &method)
 	// The index and the UID together: the index says which event of the

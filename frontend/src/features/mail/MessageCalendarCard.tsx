@@ -14,7 +14,14 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../../api";
 import type { AddToast, DatePrefs } from "../../appTypes";
-import type { CalendarEventInput, CalendarSummary, MessageCalendar, MessageCalendarEvent, MessageCalendarPerson } from "../../types";
+import type {
+  CalendarEventInput,
+  CalendarSummary,
+  MessageCalendar,
+  MessageCalendarEvent,
+  MessageCalendarMatch,
+  MessageCalendarPerson
+} from "../../types";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { EventDialog, responseOptions } from "../calendar/EventDialog";
@@ -88,6 +95,23 @@ export function prefillFor(event: MessageCalendarEvent): EventPrefill {
     location: event.location || "",
     description: notes
   };
+}
+
+/** guestCopy is the copy of the event a calendar holds with the reader as a
+ * guest -- the one an answer goes through. Any calendar may come first in
+ * in_calendars, including one holding the reader's own copy, which has no
+ * answer to give. */
+function guestCopy(event: MessageCalendarEvent): MessageCalendarMatch | undefined {
+  return event.in_calendars.find((match) => Boolean(match.my_response));
+}
+
+/** calendarDay is the day to open the calendar on. An all-day start is the
+ * UTC midnight of its date and is read in UTC; west of UTC it would otherwise
+ * be the evening before, a week early on a Monday. */
+function calendarDay(at: string, allDay: boolean): Date {
+  const date = new Date(at);
+  if (!allDay || Number.isNaN(date.getTime())) return date;
+  return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 type Added = { calendarName: string; start: string };
@@ -176,7 +200,7 @@ export function MessageCalendarCard({
   // Anything else is answered by mail to the organizer, from the account the
   // invitation arrived through.
   const respond = async (index: number, event: MessageCalendarEvent, response: string) => {
-    const held = event.in_calendars[0];
+    const held = guestCopy(event);
     setAnswering(index);
     try {
       if (held?.my_response) {
@@ -247,9 +271,10 @@ export function MessageCalendarCard({
         const zoneNote = writtenZoneNote(event);
         const done = added[index];
         const held = event.in_calendars[0];
+        const invited = guestCopy(event);
         const guests = event.attendees.length;
-        const answerable = !cancelled && !reply && (Boolean(held?.my_response) || Boolean(event.can_reply));
-        const answer = answers[index] || held?.my_response || "";
+        const answerable = !cancelled && !reply && (Boolean(invited) || Boolean(event.can_reply));
+        const answer = answers[index] || invited?.my_response || "";
         return (
           <div className="message-calendar-event" key={`${event.uid || ""}-${event.start_at}-${index}`}>
             <div className="message-calendar-head">
@@ -329,7 +354,7 @@ export function MessageCalendarCard({
                   <button
                     className="secondary"
                     type="button"
-                    onClick={() => navigate(calendarURL(new Date(done ? done.start : held?.start_at || event.start_at)))}
+                    onClick={() => navigate(calendarURL(calendarDay(done ? done.start : held?.start_at || event.start_at, event.all_day)))}
                   >
                     <Icon name="calendar" />
                     Show in calendar
