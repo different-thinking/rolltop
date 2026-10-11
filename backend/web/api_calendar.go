@@ -115,6 +115,15 @@ type apiCalendarEvent struct {
 	OnlineMeeting         bool   `json:"online_meeting"`
 	OnlineMeetingProvider string `json:"online_meeting_provider"`
 	OnlineMeetingURL      string `json:"online_meeting_url"`
+	// TravelBeforeMinutes and TravelAfterMinutes are the journey there and
+	// back the event keeps around it. The blocks are events of their own at
+	// the provider; the week folds them into the event they belong to.
+	TravelBeforeMinutes int `json:"travel_before_minutes"`
+	TravelAfterMinutes  int `json:"travel_after_minutes"`
+	// Travel marks a travel block drawn on its own ("before" or "after"):
+	// one whose event is not in the range drawn, or was moved away from it
+	// somewhere else. Folded blocks never reach the client.
+	Travel string `json:"travel"`
 }
 
 // apiCalendarEventCopy is one other copy of a linked event.
@@ -209,6 +218,7 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 		OnlineMeeting:         event.OnlineMeeting,
 		OnlineMeetingProvider: event.OnlineMeetingProvider,
 		OnlineMeetingURL:      event.OnlineMeetingURL,
+		Travel:                event.LinkTravel,
 	}
 }
 
@@ -217,12 +227,22 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 // whether the "also add to" box starts ticked, and an answer without it would
 // have the next save delete a copy nobody asked to remove. A failed lookup
 // costs the names, which the next week reload restores.
+//
+// The same goes for travel: the dialog starts its travel fields from the
+// minutes an answer names, and an answer without them would read as an event
+// whose journey was taken away.
 func (s *Server) presentCalendarEvent(ctx context.Context, userID int64, event store.CalendarEvent) apiCalendarEvent {
 	copies, err := s.store.ListCalendarEventCopies(ctx, userID, event)
 	if err != nil {
 		log.Printf("calendar event copies user_id=%d event_id=%d: %v", userID, event.ID, err)
 	}
-	return apiCalendarEventWithCopies(event, copies)
+	travel, err := s.store.ListCalendarEventTravel(ctx, userID, event)
+	if err != nil {
+		log.Printf("calendar event travel user_id=%d event_id=%d: %v", userID, event.ID, err)
+	}
+	out := apiCalendarEventWithCopies(event, copies)
+	out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(travel)
+	return out
 }
 
 // apiCalendarEventWithCopies renders an event together with the copies it
@@ -543,6 +563,9 @@ func linkedGroupKey(event store.CalendarEvent) string {
 // when no other copy is visible. Folding never hides an event whose
 // group it cannot find: drawing a copy twice is recoverable, hiding the only
 // one is not.
+//
+// Travel blocks are folded into the entry they touch (travelGroupKey) and only
+// drawn on their own when no drawn entry claims them, for the same reason.
 func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Calendar) []apiCalendarEvent {
 	rank := make(map[int64]int, len(calendars))
 	visible := make(map[int64]bool, len(calendars))
@@ -551,7 +574,18 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 		visible[calendar.ID] = calendar.Selected
 	}
 	groups := map[string][]store.CalendarEvent{}
+	travel := map[string]store.CalendarEvent{}
 	for _, event := range linked {
+		if event.LinkTravel != "" {
+			// A block is never a member of a group: the journey back starts
+			// where the event ends, which is where the next occurrence of a
+			// back-to-back series starts, under the same key.
+			key := travelGroupKey(event.LinkKey, event.LinkTravel, travelTouchAt(event))
+			if held, ok := travel[key]; !ok || event.ID < held.ID {
+				travel[key] = event
+			}
+			continue
+		}
 		key := linkedGroupKey(event)
 		groups[key] = append(groups[key], event)
 	}
@@ -576,11 +610,34 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 		})
 		groups[key] = members
 	}
-	out := make([]apiCalendarEvent, 0, len(events))
+	claimed := map[int64]bool{}
+	withTravel := func(event store.CalendarEvent, out apiCalendarEvent) apiCalendarEvent {
+		if !event.Linked() || event.AllDay {
+			return out
+		}
+		var blocks []store.CalendarEvent
+		for _, side := range []struct {
+			name string
+			at   time.Time
+		}{{store.CalendarTravelBefore, event.StartAt}, {store.CalendarTravelAfter, event.EndAt}} {
+			if block, ok := travel[travelGroupKey(event.LinkKey, side.name, side.at)]; ok {
+				blocks = append(blocks, block)
+				claimed[block.ID] = true
+			}
+		}
+		out.TravelBeforeMinutes, out.TravelAfterMinutes = calendarlink.TravelMinutes(blocks)
+		return out
+	}
+	drawn := make([]apiCalendarEvent, 0, len(events))
+	var loose []store.CalendarEvent
 	for _, event := range events {
+		if event.LinkTravel != "" {
+			loose = append(loose, event)
+			continue
+		}
 		members := groups[linkedGroupKey(event)]
 		if !event.Linked() || len(members) == 0 {
-			out = append(out, apiCalendarEventFromStore(event))
+			drawn = append(drawn, withTravel(event, apiCalendarEventFromStore(event)))
 			continue
 		}
 		head := members[0]
@@ -589,7 +646,7 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 				// Two rows of one calendar are not a pair: an event
 				// duplicated at Google carries the private link along, and
 				// folding it would hide an appointment of its own.
-				out = append(out, apiCalendarEventFromStore(event))
+				drawn = append(drawn, withTravel(event, apiCalendarEventFromStore(event)))
 			}
 			continue
 		}
@@ -599,9 +656,29 @@ func foldLinkedEvents(events, linked []store.CalendarEvent, calendars []store.Ca
 				copies = append(copies, member)
 			}
 		}
-		out = append(out, apiCalendarEventWithCopies(event, copies))
+		drawn = append(drawn, withTravel(event, apiCalendarEventWithCopies(event, copies)))
 	}
-	return out
+	for _, block := range loose {
+		if !claimed[block.ID] {
+			drawn = append(drawn, apiCalendarEventFromStore(block))
+		}
+	}
+	return drawn
+}
+
+// travelGroupKey names the place a travel block belongs: its event's key, the
+// side, and the instant it touches the event at.
+func travelGroupKey(key, side string, at time.Time) string {
+	return key + "\x00" + side + "\x00" + strconv.FormatInt(at.Unix(), 10)
+}
+
+// travelTouchAt is the instant a travel block meets its event: the end of the
+// journey there, the start of the journey back.
+func travelTouchAt(block store.CalendarEvent) time.Time {
+	if block.LinkTravel == store.CalendarTravelBefore {
+		return block.EndAt
+	}
+	return block.StartAt
 }
 
 // calendarEventInput is what the event dialog submits.
@@ -629,6 +706,22 @@ type calendarEventInput struct {
 	// in a Microsoft calendar. Once a meeting is online it stays so; false on
 	// an edit does not take it back.
 	OnlineMeeting bool `json:"online_meeting"`
+	// TravelBeforeMinutes and TravelAfterMinutes ask for the journey there and
+	// back to be blocked around the event, as events of their own. Left out,
+	// an edit keeps the travel the event has -- a drag in the week sends
+	// neither -- and zero takes that side away.
+	TravelBeforeMinutes *int `json:"travel_before_minutes"`
+	TravelAfterMinutes  *int `json:"travel_after_minutes"`
+}
+
+// travelRequest reads what the submission asks of the event's travel time.
+func (in calendarEventInput) travelRequest() (calendarlink.TravelRequest, string) {
+	for _, minutes := range []*int{in.TravelBeforeMinutes, in.TravelAfterMinutes} {
+		if minutes != nil && (*minutes < 0 || *minutes > calendarlink.MaxTravelMinutes) {
+			return calendarlink.TravelRequest{}, "Travel time has to be between 0 and 12 hours."
+		}
+	}
+	return calendarlink.TravelRequest{Before: in.TravelBeforeMinutes, After: in.TravelAfterMinutes}, ""
 }
 
 // copyChange reads what one of the submission's copy fields asks.
@@ -714,11 +807,16 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
+	travel, problem := in.travelRequest()
+	if problem != "" {
+		writeAPIError(w, http.StatusBadRequest, problem)
+		return
+	}
 	targets, ok := s.copyTargetsForWrite(w, r, userID, in, false)
 	if !ok {
 		return
 	}
-	created, problems, err := s.calendarRouter().CreateWithCopies(r.Context(), userID, in.CalendarID, targets, event)
+	created, problems, err := calendarlink.CreateWithTravel(r.Context(), s.calendarRouter(), userID, in.CalendarID, targets, travel, event)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return
@@ -800,17 +898,27 @@ func (s *Server) copyTargetsForWrite(w http.ResponseWriter, r *http.Request, use
 func (s *Server) linkedProblemMessages(ctx context.Context, userID int64, problems []calendarlink.LinkedProblem) []string {
 	out := []string{}
 	for _, problem := range problems {
-		log.Printf("calendar linked copy user_id=%d calendar_id=%d action=%s: %v",
-			userID, problem.CalendarID, problem.Action, problem.Err)
+		log.Printf("calendar linked copy user_id=%d calendar_id=%d action=%s travel=%q: %v",
+			userID, problem.CalendarID, problem.Action, problem.Travel, problem.Err)
 		name := "the other calendar"
 		if calendar, err := s.store.Calendar(ctx, userID, problem.CalendarID); err == nil && strings.TrimSpace(calendar.Summary) != "" {
 			name = "“" + calendar.Summary + "”"
 		}
 		var what string
-		switch problem.Action {
-		case calendarlink.LinkedCreate:
+		journey := "travel time before the event"
+		if problem.Travel == store.CalendarTravelAfter {
+			journey = "travel time after the event"
+		}
+		switch {
+		case problem.Travel != "" && problem.Action == calendarlink.LinkedCreate:
+			what = "The " + journey + " could not be added to " + name
+		case problem.Travel != "" && problem.Action == calendarlink.LinkedDelete:
+			what = "The " + journey + " in " + name + " could not be removed"
+		case problem.Travel != "":
+			what = "The " + journey + " in " + name + " could not be moved"
+		case problem.Action == calendarlink.LinkedCreate:
 			what = "The event could not be copied to " + name
-		case calendarlink.LinkedDelete:
+		case problem.Action == calendarlink.LinkedDelete:
 			what = "The copy in " + name + " could not be deleted"
 		default:
 			what = "The copy in " + name + " could not be updated"
@@ -902,6 +1010,11 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 	// the request claims.
 	edited.CalendarID = existing.CalendarID
 	edited.ExternalID = existing.ExternalID
+	travelRequest, problem := in.travelRequest()
+	if problem != "" {
+		writeAPIError(w, http.StatusBadRequest, problem)
+		return
+	}
 	targets, ok := s.copyTargetsForWrite(w, r, userID, in, true)
 	if !ok {
 		return
@@ -911,7 +1024,12 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 		s.serverError(w, r, err)
 		return
 	}
-	updated, problems, err := s.calendarRouter().UpdateGroupTargets(r.Context(), userID, existing, edited, copies, targets)
+	travel, err := s.store.ListCalendarEventTravel(r.Context(), userID, existing)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	updated, problems, err := calendarlink.UpdateGroupWithTravel(r.Context(), s.calendarRouter(), userID, existing, edited, copies, targets, travel, travelRequest)
 	if errors.Is(err, calendarlink.ErrRemoteChanged) {
 		// The user's edit lost, and the version that won is what they need to
 		// see. 409 with the winning event is more useful than a bare error.
@@ -964,9 +1082,16 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 			"This is a placeholder for an event in another calendar. Untick “Block the time” on that event to remove it.")
 		return
 	}
+	// The journey there and back belongs to the event and goes with it,
+	// whichever of its copies the delete was started from.
+	travel, err := s.store.ListCalendarEventTravel(r.Context(), userID, event)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	// Already gone at Google is the end state the user asked for, and is
 	// absorbed inside the group delete so the copies still go with it.
-	problems, err := s.calendarRouter().DeleteGroup(r.Context(), userID, event, copies)
+	problems, err := calendarlink.DeleteGroupWithTravel(r.Context(), s.calendarRouter(), userID, event, copies, travel)
 	if err != nil {
 		s.writeCalendarError(w, r, err)
 		return

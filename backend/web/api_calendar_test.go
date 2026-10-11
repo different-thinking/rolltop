@@ -58,7 +58,9 @@ func (f *fakeCalendarAPI) handler() http.Handler {
 				copied[key] = value
 			}
 			f.writes = append(f.writes, copied)
-			write["id"] = "created-1"
+			// The first create keeps the id older tests expect; later ones
+			// get their own, as Google's do.
+			write["id"] = "created-" + strconv.Itoa(f.created)
 			write["etag"] = "etag-created"
 			write["status"] = "confirmed"
 			_ = json.NewEncoder(w).Encode(write)
@@ -952,5 +954,111 @@ func TestPlaceholderIsNotDeletedOnItsOwn(t *testing.T) {
 	}
 	if response := env.send(t, env.owner, http.MethodDelete, target, nil); response.Code != http.StatusOK {
 		t.Fatalf("delete orphaned placeholder status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}
+
+// The journey there and back is drawn as part of the event it touches, not as
+// appointments of their own; a block whose event is not drawn stands on its
+// own, marked as travel.
+func TestCalendarRangeFoldsTravelIntoItsEvent(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	ctx := context.Background()
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+	upsert := func(event store.CalendarEvent) store.CalendarEvent {
+		t.Helper()
+		event.CalendarID = work.ID
+		stored, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+	visit := upsert(store.CalendarEvent{ExternalID: "e1", Summary: "Visit", StartAt: start, EndAt: end, LinkKey: "k1", LinkPrimary: true})
+	upsert(store.CalendarEvent{ExternalID: "t1", Summary: "Anfahrt: Visit", StartAt: start.Add(-45 * time.Minute), EndAt: start,
+		LinkKey: "k1", LinkTravel: store.CalendarTravelBefore})
+	upsert(store.CalendarEvent{ExternalID: "t2", Summary: "Abfahrt: Visit", StartAt: end, EndAt: end.Add(30 * time.Minute),
+		LinkKey: "k1", LinkTravel: store.CalendarTravelAfter})
+	stray := upsert(store.CalendarEvent{ExternalID: "t3", Summary: "Anfahrt: Lunch", StartAt: start.Add(4 * time.Hour), EndAt: start.Add(5 * time.Hour),
+		LinkKey: "k2", LinkTravel: store.CalendarTravelBefore})
+
+	events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want the visit and the stray block", events)
+	}
+	if events[0].ID != visit.ID || events[0].TravelBeforeMinutes != 45 || events[0].TravelAfterMinutes != 30 || events[0].Travel != "" {
+		t.Fatalf("visit = %+v, want 45 minutes there and 30 back", events[0])
+	}
+	if events[1].ID != stray.ID || events[1].Travel != store.CalendarTravelBefore {
+		t.Fatalf("stray = %+v, want the block on its own, marked as travel", events[1])
+	}
+}
+
+// Travel asked for in the dialog reaches Google as two events of their own,
+// and deleting the event deletes them too.
+func TestCreateEventWithTravelAndDeleteIt(t *testing.T) {
+	env := newGoogleTestEnv(t)
+	connection := env.connect(t, env.owner)
+	work := storedCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	fake := &fakeCalendarAPI{}
+	withCalendarSync(t, env, fake, true)
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	body := func(before string) []byte {
+		return []byte(`{"calendar_id":` + strconv.FormatInt(work.ID, 10) +
+			`,"summary":"Visit","location":"Stuttgart","travel_before_minutes":` + before + `,"travel_after_minutes":30,"start_at":"` +
+			start.Format(time.RFC3339) + `","end_at":"` + start.Add(90*time.Minute).Format(time.RFC3339) + `"}`)
+	}
+	if response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body("721")); response.Code != http.StatusBadRequest {
+		t.Fatalf("travel past 12 hours status=%d, want 400", response.Code)
+	}
+	response := env.send(t, env.owner, http.MethodPost, "/api/calendar/events", body("45"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Event    apiCalendarEvent `json:"event"`
+		Warnings []string         `json:"warnings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Warnings) != 0 || payload.Event.TravelBeforeMinutes != 45 || payload.Event.TravelAfterMinutes != 30 {
+		t.Fatalf("answer = %+v warnings=%v, want it to name the journey", payload.Event, payload.Warnings)
+	}
+	fake.mu.Lock()
+	writes := append([]map[string]any(nil), fake.writes...)
+	fake.mu.Unlock()
+	if len(writes) != 3 {
+		t.Fatalf("Google was asked to create %d events, want the event and two travel blocks", len(writes))
+	}
+	if writes[1]["summary"] != "Anfahrt: Visit" || writes[1]["location"] != "Stuttgart" {
+		t.Fatalf("journey there = %+v", writes[1])
+	}
+	if _, ok := writes[1]["attendees"].([]any); ok && len(writes[1]["attendees"].([]any)) > 0 {
+		t.Fatalf("journey there carried guests: %+v", writes[1])
+	}
+	properties, _ := writes[2]["extendedProperties"].(map[string]any)
+	private, _ := properties["private"].(map[string]any)
+	if private["rolltopLinkRole"] != "travelAfter" || private["rolltopLink"] == "" {
+		t.Fatalf("journey back link = %+v", properties)
+	}
+	if events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1)); len(events) != 1 || events[0].TravelAfterMinutes != 30 {
+		t.Fatalf("week = %+v, want one event carrying its journey", events)
+	}
+
+	target := "/api/calendar/events/" + strconv.FormatInt(payload.Event.ID, 10)
+	if response := env.send(t, env.owner, http.MethodDelete, target, nil); response.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	}
+	fake.mu.Lock()
+	deleted := len(fake.deleted)
+	fake.mu.Unlock()
+	if deleted != 3 {
+		t.Fatalf("Google was asked to delete %d events, want the event and its journey", deleted)
+	}
+	if events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1)); len(events) != 0 {
+		t.Fatalf("events after the delete = %+v, want none", events)
 	}
 }

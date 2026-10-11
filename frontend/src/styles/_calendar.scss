@@ -568,6 +568,85 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   }
 }
 
+// Travel time is the reader away from their desk on either side of an event.
+// It is drawn as part of the event -- the same colour, hatched, joined to its
+// edge -- because it is one appointment in the reader's mind, even though the
+// provider holds it as events of their own so others see the time as taken.
+@mixin travel-hatch {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--travel-color, var(--accent)) 32%, transparent) 0 5px,
+    color-mix(in srgb, var(--travel-color, var(--accent)) 12%, transparent) 5px 10px
+  );
+}
+
+.calendar-event-travel {
+  @include travel-hatch;
+  position: absolute;
+  display: flex;
+  overflow: hidden;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--travel-color, var(--accent)) 55%, transparent);
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text);
+  cursor: pointer;
+
+  &.before {
+    align-items: flex-start;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+  }
+
+  &.after {
+    align-items: flex-end;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+  }
+
+  &.drag-source {
+    opacity: 0.35;
+  }
+
+  &.ghost {
+    z-index: 3;
+    pointer-events: none;
+  }
+}
+
+.calendar-event-travel-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+
+  svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+  }
+}
+
+.calendar-event.travel-before,
+.calendar-drag-ghost.travel-before {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.calendar-event.travel-after,
+.calendar-drag-ghost.travel-after {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+// A travel block whose event is not drawn beside it stands on its own, and
+// still reads as a journey rather than as an appointment.
+.calendar-event.travel-block {
+  @include travel-hatch;
+  border-style: dashed;
+}
+
 .calendar-event-time {
   font-variant-numeric: tabular-nums;
   opacity: 0.85;
@@ -684,6 +763,37 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   align-items: center;
   gap: 8px;
   font-size: 13px;
+}
+
+.calendar-travel {
+  display: grid;
+  gap: 6px;
+}
+
+.calendar-travel-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+
+  .calendar-checkbox {
+    min-width: 140px;
+  }
+
+  // Nested so it outranks the base rule that stretches every text input.
+  .calendar-travel-minutes {
+    flex: none;
+    width: 76px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.calendar-travel-unit,
+.calendar-travel-hint {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .calendar-dialog-note {
@@ -1034,7 +1144,7 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   border-radius: 4px;
   font-size: 11px;
   line-height: 1.25;
-  box-shadow: 0 4px 14px rgb(0 0 0 / 0.22);
+  box-shadow: var(--shadow);
   pointer-events: none;
 
   // A drawn event does not exist yet, and looks it.

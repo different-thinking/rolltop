@@ -67,6 +67,7 @@ func ToEvent(event Event, calendarID int64) store.CalendarEvent {
 	}
 	out.Attendees, out.MyResponse = attendees(event.Attendees)
 	out.LinkKey, out.LinkPrimary, out.LinkMasked = eventLink(event)
+	out.LinkTravel = eventTravel(event)
 	return out
 }
 

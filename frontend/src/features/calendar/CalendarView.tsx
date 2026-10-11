@@ -4,8 +4,8 @@
 // leading system, so every write here goes through the API that reaches it
 // first.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
 import type { AddToast, LocationState } from "../../appTypes";
@@ -41,6 +41,7 @@ import {
   startOfMonth,
   startOfWeek,
   timedEventTouchesDay,
+  travelMinutes,
   weekDays
 } from "./weekModel";
 import type { PositionedEvent, TimeRange } from "./weekModel";
@@ -432,7 +433,9 @@ export function CalendarView({
           attendees: event.attendees,
           copy,
           busyCopy,
-          onlineMeeting: event.online_meeting
+          onlineMeeting: event.online_meeting,
+          travelBefore: travelMinutes(event).before,
+          travelAfter: travelMinutes(event).after
         },
         formKey: `copy-${event.id}-${range.start.getTime()}`
       });
@@ -442,6 +445,7 @@ export function CalendarView({
     try {
       const data = await api.createCalendarEvent(csrf, {
         ...inputForEvent(event, range),
+        ...travelInputForEvent(event),
         ...(copy ? { copy: true } : {}),
         ...(busyCopy ? { busy_copy: true } : {})
       });
@@ -552,56 +556,101 @@ export function CalendarView({
     const width = laneWidth / placed.columns;
     const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
     const draggable = eventDraggable(placed.event, calendar);
-    return (
-      <button
-        key={placed.event.id}
-        type="button"
-        className={`calendar-event ${declined ? "declined" : ""} ${
-          placed.event.status === "cancelled" ? "cancelled" : ""
-        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
-          draggable ? "draggable" : ""
-        } ${dragSource(drag, placed.event) ? "drag-source" : ""}`}
-        style={{
-          top: placed.top,
-          height: placed.height,
-          left: `${lane * laneWidth + placed.column * width}%`,
-          width: `calc(${width}% - 3px)`,
-          background: declined ? "transparent" : color,
-          borderColor: color,
-          color: declined ? "var(--text)" : readableTextColor(color)
-        }}
-        title={eventTooltip(placed.event, calendar, calendarsByID)}
-        onPointerDown={(pointerEvent) => {
-          // Pressing an event never starts drawing a new one underneath it.
-          pointerEvent.stopPropagation();
-          if (draggable) beginMove(pointerEvent, placed.event, dayIndex, eventCopyable(placed.event, calendar));
-        }}
-        onClick={() => openEvent(placed.event, day)}
-      >
-        <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
-        <span className="calendar-event-title">
-          <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
-          {placed.event.online_meeting ? (
-            <span className="calendar-event-online" title="Online meeting">
-              <Icon name="video" />
+    const left = `${lane * laneWidth + placed.column * width}%`;
+    const blockWidth = `calc(${width}% - 3px)`;
+    const source = dragSource(drag, placed.event);
+    const tooltip = eventTooltip(placed.event, calendar, calendarsByID);
+    // Pressing an event never starts drawing a new one underneath it, and
+    // its journey is part of it: grabbing the travel moves the event.
+    const press = (pointerEvent: ReactPointerEvent) => {
+      pointerEvent.stopPropagation();
+      if (draggable) beginMove(pointerEvent, placed.event, dayIndex, eventCopyable(placed.event, calendar));
+    };
+    const travel = (side: "before" | "after", height: number) =>
+      height > 0 ? (
+        <div
+          key={`${placed.event.id}-travel-${side}`}
+          className={`calendar-event-travel ${side} ${draggable ? "draggable" : ""} ${source ? "drag-source" : ""}`}
+          style={
+            {
+              top: side === "before" ? placed.top - height : placed.top + placed.height,
+              height,
+              left,
+              width: blockWidth,
+              "--travel-color": color
+            } as CSSProperties
+          }
+          title={tooltip}
+          aria-hidden="true"
+          onPointerDown={press}
+          onClick={() => openEvent(placed.event, day)}
+        >
+          {height >= 14 ? (
+            <span className="calendar-event-travel-label">
+              <Icon name="car" />
+              {formatTravel(side === "before" ? placed.event.travel_before_minutes : placed.event.travel_after_minutes)}
             </span>
           ) : null}
-          {placed.event.summary || "(No title)"}
-        </span>
-        {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
-        {draggable && !placed.continuesAfter ? (
-          // The end of an event is pulled to change how long it lasts. Only
-          // where the end is drawn: a block cut off by midnight ends elsewhere.
-          <span
-            className="calendar-event-resize"
-            aria-hidden="true"
-            onPointerDown={(pointerEvent) => {
-              pointerEvent.stopPropagation();
-              beginResize(pointerEvent, placed.event);
-            }}
-          />
-        ) : null}
-      </button>
+        </div>
+      ) : null;
+    // One keyed fragment per entry, so React keeps matching the block and its
+    // journey by event rather than by position when the day reorders.
+    return (
+      <Fragment key={placed.event.id}>
+        {travel("before", placed.travelBefore)}
+        <button
+          type="button"
+          className={`calendar-event ${declined ? "declined" : ""} ${
+            placed.event.status === "cancelled" ? "cancelled" : ""
+          } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
+            draggable ? "draggable" : ""
+          } ${source ? "drag-source" : ""} ${placed.travelBefore > 0 ? "travel-before" : ""} ${
+            placed.travelAfter > 0 ? "travel-after" : ""
+          } ${placed.event.travel ? "travel-block" : ""}`}
+          style={
+            {
+              top: placed.top,
+              height: placed.height,
+              left,
+              width: blockWidth,
+              // A travel block standing alone is drawn hatched, as the journey
+              // it is, by its class rather than in its calendar's solid colour.
+              background: declined ? "transparent" : placed.event.travel ? undefined : color,
+              borderColor: color,
+              color: declined || placed.event.travel ? "var(--text)" : readableTextColor(color),
+              "--travel-color": color
+            } as CSSProperties
+          }
+          title={tooltip}
+          onPointerDown={press}
+          onClick={() => openEvent(placed.event, day)}
+        >
+          <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
+          <span className="calendar-event-title">
+            <CopyMarks event={placed.event} calendarsByID={calendarsByID} />
+            {placed.event.online_meeting ? (
+              <span className="calendar-event-online" title="Online meeting">
+                <Icon name="video" />
+              </span>
+            ) : null}
+            {placed.event.summary || "(No title)"}
+          </span>
+          {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
+          {draggable && !placed.continuesAfter ? (
+            // The end of an event is pulled to change how long it lasts. Only
+            // where the end is drawn: a block cut off by midnight ends elsewhere.
+            <span
+              className="calendar-event-resize"
+              aria-hidden="true"
+              onPointerDown={(pointerEvent) => {
+                pointerEvent.stopPropagation();
+                beginResize(pointerEvent, placed.event);
+              }}
+            />
+          ) : null}
+        </button>
+        {travel("after", placed.travelAfter)}
+      </Fragment>
     );
   };
 
@@ -619,9 +668,40 @@ export function CalendarView({
     const left = lane >= 0 ? (lane * 100) / lanes.length : 0;
     const width = lane >= 0 ? 100 / lanes.length : 100;
     const copying = drag.kind === "move" && drag.copy;
-    return (
+    // The journey moves with the event, so the ghost shows where it lands too.
+    const journey = drag.kind === "create" ? { before: 0, after: 0 } : travelMinutes(drag.event);
+    const dayStart = startOfDay(day).getTime();
+    const dayEnd = addDays(startOfDay(day), 1).getTime();
+    const travelBefore =
+      drag.range.start.getTime() >= dayStart ? Math.min((journey.before / 60) * hourHeight, slice.top) : 0;
+    const travelAfter =
+      drag.range.end.getTime() <= dayEnd
+        ? Math.min((journey.after / 60) * hourHeight, dayHeight - slice.top - slice.height)
+        : 0;
+    const ghostTravel = (side: "before" | "after", height: number) =>
+      height > 0 ? (
+        <div
+          key={`ghost-travel-${side}`}
+          className={`calendar-event-travel ghost ${side}`}
+          style={
+            {
+              top: side === "before" ? slice.top - height : slice.top + slice.height,
+              height,
+              left: `${left}%`,
+              width: `calc(${width}% - 3px)`,
+              "--travel-color": color
+            } as CSSProperties
+          }
+          aria-hidden="true"
+        />
+      ) : null;
+    return [
+      ghostTravel("before", travelBefore),
       <div
-        className={`calendar-drag-ghost ${drag.kind === "create" ? "drawing" : ""}`}
+        key="ghost"
+        className={`calendar-drag-ghost ${drag.kind === "create" ? "drawing" : ""} ${
+          travelBefore > 0 ? "travel-before" : ""
+        } ${travelAfter > 0 ? "travel-after" : ""}`}
         style={{
           top: slice.top,
           height: slice.height,
@@ -640,8 +720,9 @@ export function CalendarView({
         {drag.kind === "create" ? null : (
           <span className="calendar-event-title">{drag.event.summary || "(No title)"}</span>
         )}
-      </div>
-    );
+      </div>,
+      ghostTravel("after", travelAfter)
+    ];
   };
 
   // The lane a press landed in under the day lens: a new event drawn there is
@@ -1470,7 +1551,19 @@ function eventTooltip(
     .map((copy) => calendarsByID.get(copy.calendar_id)?.name)
     .filter((name): name is string => Boolean(name));
   if (copies.length > 0) parts.push(`also in ${copies.join(", ")}`);
+  const journey = travelMinutes(event);
+  if (journey.before > 0) parts.push(`${formatTravel(journey.before)} travel there`);
+  if (journey.after > 0) parts.push(`${formatTravel(journey.after)} travel back`);
   return parts.join(" — ");
+}
+
+/** formatTravel names a journey's length the way a person would say it. */
+function formatTravel(minutes: number | undefined): string {
+  const total = Math.max(0, Math.round(minutes || 0));
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (hours === 0) return `${rest} min`;
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
 function weekRangeLabel(first: Date, last: Date): string {
@@ -1538,6 +1631,15 @@ function inputForEvent(event: CalendarEvent, range: TimeRange): CalendarEventInp
     })),
     online_meeting: event.online_meeting
   };
+}
+
+/** travelInputForEvent restates an event's journey for a copy of it: the copy
+ * is the same appointment at another time, and the reader travels to it the
+ * same way. A move sends none, so the journey the event has follows it. */
+function travelInputForEvent(event: CalendarEvent): Partial<CalendarEventInput> {
+  const journey = travelMinutes(event);
+  if (journey.before === 0 && journey.after === 0) return {};
+  return { travel_before_minutes: journey.before, travel_after_minutes: journey.after };
 }
 
 function formatRange(range: TimeRange): string {

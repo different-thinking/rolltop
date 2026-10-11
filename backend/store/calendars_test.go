@@ -570,3 +570,82 @@ func TestUpsertCalendarEventStoresThePlaceholderRole(t *testing.T) {
 		t.Fatal("an unlinked event was stored as a placeholder")
 	}
 }
+
+// An event's travel blocks are the rows of its key with a travel role that
+// touch it, in any calendar; a block of another occurrence, one moved away and
+// another tenant's are not. They are never copies of anything.
+func TestListCalendarEventTravelMatchesKeyAndTouch(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "travel@example.test")
+	other := mustUser(t, db, ctx, "travel-other@example.test")
+	work := mustCalendar(t, db, ctx, user, 1, "work")
+	family := mustCalendar(t, db, ctx, user, 1, "family")
+	theirs := mustCalendar(t, db, ctx, other, 1, "work")
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+
+	event := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "e1", Summary: "Visit",
+		StartAt: start, EndAt: end, LinkKey: "k1", LinkPrimary: true,
+	})
+	copied := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c1", Summary: "Visit",
+		StartAt: start, EndAt: end, LinkKey: "k1",
+	})
+	before := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "t1", Summary: "Anfahrt: Visit",
+		StartAt: start.Add(-45 * time.Minute), EndAt: start, LinkKey: "k1", LinkTravel: CalendarTravelBefore,
+	})
+	after := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "t2", Summary: "Abfahrt: Visit",
+		StartAt: end, EndAt: end.Add(30 * time.Minute), LinkKey: "k1", LinkTravel: CalendarTravelAfter,
+	})
+	if before.LinkTravel != CalendarTravelBefore || after.LinkTravel != CalendarTravelAfter {
+		t.Fatalf("stored roles = %q/%q", before.LinkTravel, after.LinkTravel)
+	}
+	// Moved away at the provider: no longer this event's journey.
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "t3", StartAt: start.Add(-3 * time.Hour), EndAt: start.Add(-2 * time.Hour),
+		LinkKey: "k1", LinkTravel: CalendarTravelBefore,
+	})
+	mustEvent(t, db, ctx, other, CalendarEvent{
+		CalendarID: theirs.ID, ExternalID: "x1", StartAt: start.Add(-time.Hour), EndAt: start,
+		LinkKey: "k1", LinkTravel: CalendarTravelBefore,
+	})
+
+	for _, through := range []CalendarEvent{event, copied} {
+		travel, err := db.ListCalendarEventTravel(ctx, user, through)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(travel) != 2 || travel[0].ID != before.ID || travel[1].ID != after.ID {
+			t.Fatalf("travel through %s = %+v, want the two touching blocks", through.ExternalID, travel)
+		}
+	}
+	if none, err := db.ListCalendarEventTravel(ctx, user, before); err != nil || len(none) != 0 {
+		t.Fatalf("travel of a travel block = %+v err=%v, want none", none, err)
+	}
+	// The journey back starts at the event's end, which is where a
+	// back-to-back occurrence would start: it is never taken for a copy.
+	if copies, err := db.ListCalendarEventCopies(ctx, user, CalendarEvent{
+		ID: 999, CalendarID: family.ID, LinkKey: "k1", StartAt: end,
+	}); err != nil || len(copies) != 0 {
+		t.Fatalf("copies at the journey's start = %+v err=%v, want none", copies, err)
+	}
+	// Nor does a block have copies of its own: the copy of a back-to-back
+	// occurrence starts where the journey back does, under the same key.
+	mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: family.ID, ExternalID: "c2", Summary: "Visit",
+		StartAt: end, EndAt: end.Add(90 * time.Minute), LinkKey: "k1",
+	})
+	if copies, err := db.ListCalendarEventCopies(ctx, user, after); err != nil || len(copies) != 0 {
+		t.Fatalf("copies of the journey back = %+v err=%v, want none", copies, err)
+	}
+	// An unlinked row cannot claim a travel role.
+	plain := mustEvent(t, db, ctx, user, CalendarEvent{
+		CalendarID: work.ID, ExternalID: "plain", StartAt: start, EndAt: end, LinkTravel: CalendarTravelBefore,
+	})
+	if plain.LinkTravel != "" {
+		t.Fatalf("unlinked row stored travel role %q", plain.LinkTravel)
+	}
+}

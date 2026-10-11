@@ -8,7 +8,9 @@ import {
   dayColumnWeights,
   drawnRange,
   eventEditable,
+  hourHeight,
   isoWeekNumber,
+  layoutDayEvents,
   lensLaneCalendarIDs,
   localDateKey,
   monthPickerWeekCount,
@@ -348,5 +350,39 @@ describe("eventEditable", () => {
     expect(eventEditable(event(2, at(tuesday, 9), at(tuesday, 10)), microsoft)).toBe(true);
     expect(eventEditable(event(3, at(tuesday, 9), at(tuesday, 10)), readOnly)).toBe(false);
     expect(eventEditable(event(3, at(tuesday, 9), at(tuesday, 10)), undefined)).toBe(false);
+  });
+});
+
+describe("layoutDayEvents with travel", () => {
+  it("draws the journey around the event and lets it share the width with what it overlaps", () => {
+    const daily = event(1, at(tuesday, 9), at(tuesday, 9, 30));
+    const visit = event(1, at(tuesday, 10), at(tuesday, 11, 30), {
+      travel_before_minutes: 45,
+      travel_after_minutes: 30
+    });
+    const placed = layoutDayEvents([daily, visit], tuesday);
+    const drawnVisit = placed.find((item) => item.event.id === visit.id);
+    const drawnDaily = placed.find((item) => item.event.id === daily.id);
+    expect(drawnVisit?.top).toBe(10 * hourHeight);
+    expect(drawnVisit?.height).toBe(1.5 * hourHeight);
+    expect(drawnVisit?.travelBefore).toBe(0.75 * hourHeight);
+    expect(drawnVisit?.travelAfter).toBe(0.5 * hourHeight);
+    // The journey there starts at 9:15, while the daily is still running.
+    expect(drawnVisit?.columns).toBe(2);
+    expect(drawnDaily?.columns).toBe(2);
+    expect(drawnVisit?.column).not.toBe(drawnDaily?.column);
+  });
+
+  it("keeps the journey inside the day it is drawn on", () => {
+    const early = event(1, at(tuesday, 0, 30), at(tuesday, 1), { travel_before_minutes: 60 });
+    const [drawn] = layoutDayEvents([early], tuesday);
+    expect(drawn.travelBefore).toBe(0.5 * hourHeight);
+    expect(layoutDayEvents([early], days[0])).toEqual([]);
+  });
+
+  it("draws no travel for an event without any", () => {
+    const [drawn] = layoutDayEvents([event(1, at(tuesday, 10), at(tuesday, 11))], tuesday);
+    expect(drawn.travelBefore).toBe(0);
+    expect(drawn.travelAfter).toBe(0);
   });
 });

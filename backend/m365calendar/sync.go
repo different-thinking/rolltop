@@ -425,6 +425,7 @@ func (s *Syncer) applyEvent(ctx context.Context, userID, calendarID int64, selfE
 		}
 		if !withLinks {
 			incoming.LinkKey, incoming.LinkPrimary, incoming.LinkMasked = existing.LinkKey, existing.LinkPrimary, existing.LinkMasked
+			incoming.LinkTravel = existing.LinkTravel
 		}
 		if _, err := s.Store.UpsertCalendarEvent(ctx, userID, incoming); err != nil {
 			return outcomeUnchanged, err

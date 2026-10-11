@@ -629,6 +629,21 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE calendar_events ADD COLUMN link_masked bigint NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// Travel time around an event, held at the provider as blocks of
+		// their own -- the journey there ending where the event starts, the
+		// journey back starting where it ends -- so the time reads as taken
+		// in every client that shows the calendar. A block carries the
+		// event's link key and the role "travelBefore" or "travelAfter";
+		// link_travel mirrors that role as "before" or "after", exactly as
+		// link_masked mirrors "busy". The week folds the blocks into the
+		// event they touch (Store.ListCalendarEventTravel) and every write
+		// to the event moves or removes them with it.
+		Version: "0018-calendar-travel-time",
+		Statements: []string{
+			`ALTER TABLE calendar_events ADD COLUMN link_travel text COLLATE "C" NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {
