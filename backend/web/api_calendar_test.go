@@ -983,6 +983,19 @@ func TestCalendarRangeFoldsTravelIntoItsEvent(t *testing.T) {
 		LinkKey: "k1", LinkTravel: store.CalendarTravelAfter})
 	stray := upsert(store.CalendarEvent{ExternalID: "t3", Summary: "Anfahrt: Lunch", StartAt: start.Add(4 * time.Hour), EndAt: start.Add(5 * time.Hour),
 		LinkKey: "k2", LinkTravel: store.CalendarTravelBefore})
+	// The copy in the second calendar keeps a journey of its own; it is part
+	// of the same entry, not two more blocks on the week.
+	family := secondCalendar(t, env, env.owner, connection.ID, store.CalendarAccessRoleOwner)
+	for _, row := range []store.CalendarEvent{
+		{ExternalID: "c1", Summary: "Visit", StartAt: start, EndAt: end, LinkKey: "k1"},
+		{ExternalID: "c2", Summary: "Anfahrt: Visit", StartAt: start.Add(-45 * time.Minute), EndAt: start, LinkKey: "k1", LinkTravel: store.CalendarTravelBefore},
+		{ExternalID: "c3", Summary: "Abfahrt: Visit", StartAt: end, EndAt: end.Add(30 * time.Minute), LinkKey: "k1", LinkTravel: store.CalendarTravelAfter},
+	} {
+		row.CalendarID = family.ID
+		if _, err := env.db.UpsertCalendarEvent(ctx, env.owner.ID, row); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	events := rangeEvents(t, env, env.owner, start.AddDate(0, 0, -1))
 	if len(events) != 2 {

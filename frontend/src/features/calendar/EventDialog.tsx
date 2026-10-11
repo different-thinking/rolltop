@@ -700,8 +700,8 @@ export function EventDialog({
               />
               {draft.travelBeforeOn || draft.travelAfterOn ? (
                 <p className="calendar-dialog-note">
-                  Blocked as its own time in {provider}, so others see you as busy. It moves and is deleted with this
-                  event.
+                  Blocked as its own time in {provider} and in every calendar this event is copied to, so others see
+                  you as busy. It moves and is deleted with this event.
                 </p>
               ) : null}
             </div>
