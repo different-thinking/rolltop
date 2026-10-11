@@ -38,6 +38,24 @@ type WorkerActivity struct {
 	Waiting bool
 }
 
+// HoldsUpForeground reports whether a foreground operation that gave up waiting
+// could have been waiting on this work, so an error can name it as the cause.
+// Queued work holds nothing, and a search-only rebuild is not waited for
+// (mailboxWriterRunningLocked skips it). A foreground reservation is left out
+// as well: one that failed to see its workers yield keeps its barrier until
+// they do, so the snapshot taken after the failure lists the caller's own
+// reservation, and naming it would tell the reader the send waited on itself.
+func (a WorkerActivity) HoldsUpForeground() bool {
+	if a.Waiting {
+		return false
+	}
+	switch a.Kind {
+	case runnerWorkForeground, runnerWorkMailboxSearchMaintenance:
+		return false
+	}
+	return true
+}
+
 // WorkerActivities reports the background work in progress for one user, newest
 // last so a list reads in the order the work started.
 func (r *Runner) WorkerActivities(userID int64) []WorkerActivity {
