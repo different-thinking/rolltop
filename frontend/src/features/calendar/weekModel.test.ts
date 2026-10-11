@@ -1,14 +1,22 @@
 import { describe, expect, it } from "vitest";
 import type { CalendarEvent, CalendarSummary } from "../../types";
 import {
+  allDayRangeCoversDay,
+  allDayRangeFromLocalDays,
   busiestColumns,
   calendarAccountGroups,
   dayColumnWeights,
+  drawnRange,
+  eventEditable,
   isoWeekNumber,
   lensLaneCalendarIDs,
   localDateKey,
   monthPickerWeekCount,
   monthPickerWeeks,
+  movedEventTimes,
+  rangeSliceForDay,
+  resizedEventTimes,
+  shiftedAllDayTimes,
   startOfMonth,
   weekDays
 } from "./weekModel";
@@ -193,5 +201,152 @@ describe("isoWeekNumber", () => {
       if (previousTZ === undefined) delete process.env.TZ;
       else process.env.TZ = previousTZ;
     }
+  });
+});
+
+function withZone(zone: string, run: () => void) {
+  const previousTZ = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    run();
+  } finally {
+    if (previousTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTZ;
+  }
+}
+
+function clock(date: Date): string {
+  return `${localDateKey(date)} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+describe("movedEventTimes", () => {
+  it("moves by the distance travelled, snapped, and keeps the length", () => {
+    const meeting = event(1, at(tuesday, 10, 10), at(tuesday, 11, 40));
+    // Grabbed at 10:30, held at 12:37: two hours and seven minutes, which
+    // snaps to two hours and leaves the odd ten minutes alone.
+    const moved = movedEventTimes(meeting, tuesday, 10 * 60 + 30, tuesday, 12 * 60 + 37);
+    expect(clock(moved.start)).toBe(`${localDateKey(tuesday)} 12:10`);
+    expect(clock(moved.end)).toBe(`${localDateKey(tuesday)} 13:40`);
+  });
+
+  it("carries an event to another day at the same time", () => {
+    const meeting = event(1, at(tuesday, 9), at(tuesday, 10));
+    const moved = movedEventTimes(meeting, tuesday, 9 * 60 + 20, days[3], 9 * 60 + 20);
+    expect(clock(moved.start)).toBe(`${localDateKey(days[3])} 09:00`);
+    expect(clock(moved.end)).toBe(`${localDateKey(days[3])} 10:00`);
+  });
+
+  it("keeps a drop at the top of a column on that day", () => {
+    const meeting = event(1, at(tuesday, 1), at(tuesday, 2));
+    const moved = movedEventTimes(meeting, tuesday, 90, days[3], 0);
+    expect(clock(moved.start)).toBe(`${localDateKey(days[3])} 00:00`);
+  });
+
+  it("keeps a late start off the grid where it was when moved to another day", () => {
+    const late = event(1, at(tuesday, 23, 50), at(tuesday, 23, 55));
+    const moved = movedEventTimes(late, tuesday, 23 * 60 + 52, days[3], 23 * 60 + 52);
+    expect(clock(moved.start)).toBe(`${localDateKey(days[3])} 23:50`);
+  });
+
+  it("keeps the wall-clock time across a daylight saving change", () => {
+    withZone("Europe/Berlin", () => {
+      // Friday 23 October 2026, carried to Monday 26th, after the clocks went
+      // back on the Sunday.
+      const friday = new Date(2026, 9, 23);
+      const monday = new Date(2026, 9, 26);
+      const start = new Date(2026, 9, 23, 10, 0);
+      const meeting = event(1, start.toISOString(), new Date(2026, 9, 23, 11, 0).toISOString());
+      const moved = movedEventTimes(meeting, friday, 10 * 60, monday, 10 * 60);
+      expect(moved.start.getHours()).toBe(10);
+      expect(moved.end.getTime() - moved.start.getTime()).toBe(3_600_000);
+    });
+  });
+});
+
+describe("resizedEventTimes", () => {
+  it("puts the end on the grid and never before the start", () => {
+    const meeting = event(1, at(tuesday, 10), at(tuesday, 11));
+    expect(clock(resizedEventTimes(meeting, tuesday, 12 * 60 + 8).end)).toBe(`${localDateKey(tuesday)} 12:15`);
+    const squeezed = resizedEventTimes(meeting, tuesday, 9 * 60);
+    expect(clock(squeezed.end)).toBe(`${localDateKey(tuesday)} 10:15`);
+    expect(squeezed.start.toISOString()).toBe(meeting.start_at);
+  });
+
+  it("can pull the end into the next day", () => {
+    const late = event(1, at(tuesday, 22), at(tuesday, 23));
+    expect(clock(resizedEventTimes(late, days[2], 60).end)).toBe(`${localDateKey(days[2])} 01:00`);
+  });
+});
+
+describe("drawnRange", () => {
+  it("draws downwards from the step pressed on", () => {
+    const range = drawnRange(tuesday, 10 * 60 + 5, 11 * 60 + 20);
+    expect(clock(range.start)).toBe(`${localDateKey(tuesday)} 10:00`);
+    expect(clock(range.end)).toBe(`${localDateKey(tuesday)} 11:15`);
+  });
+
+  it("draws upwards and is never empty", () => {
+    const up = drawnRange(tuesday, 10 * 60 + 5, 8 * 60 + 50);
+    expect(clock(up.start)).toBe(`${localDateKey(tuesday)} 08:45`);
+    expect(clock(up.end)).toBe(`${localDateKey(tuesday)} 10:15`);
+    const still = drawnRange(tuesday, 10 * 60 + 5, 10 * 60 + 2);
+    expect(clock(still.end)).toBe(`${localDateKey(tuesday)} 10:15`);
+  });
+
+  it("stays inside the day", () => {
+    const range = drawnRange(tuesday, 23 * 60 + 40, 30 * 60);
+    expect(clock(range.start)).toBe(`${localDateKey(tuesday)} 23:30`);
+    expect(clock(range.end)).toBe(`${localDateKey(days[2])} 00:00`);
+  });
+});
+
+describe("all-day drags", () => {
+  it("shifts the UTC dates and keeps the length", () => {
+    const holiday = event(1, "2026-10-06T00:00:00Z", "2026-10-08T00:00:00Z", { all_day: true });
+    const shifted = shiftedAllDayTimes(holiday, 3);
+    expect(shifted.start.toISOString()).toBe("2026-10-09T00:00:00.000Z");
+    expect(shifted.end.toISOString()).toBe("2026-10-11T00:00:00.000Z");
+  });
+
+  it("renders the local days drawn as an exclusive UTC range in either direction", () => {
+    const range = allDayRangeFromLocalDays(days[3], days[1]);
+    expect(range.start.toISOString()).toBe(`${localDateKey(days[1])}T00:00:00.000Z`);
+    expect(range.end.toISOString()).toBe(`${localDateKey(days[4])}T00:00:00.000Z`);
+    expect(allDayRangeCoversDay(range, days[1])).toBe(true);
+    expect(allDayRangeCoversDay(range, days[3])).toBe(true);
+    expect(allDayRangeCoversDay(range, days[4])).toBe(false);
+  });
+
+  it("is read on the plain dates west of UTC as well", () => {
+    withZone("America/Los_Angeles", () => {
+      const thursday = new Date(2026, 9, 8);
+      const range = allDayRangeFromLocalDays(thursday, thursday);
+      expect(range.start.toISOString()).toBe("2026-10-08T00:00:00.000Z");
+      expect(allDayRangeCoversDay(range, thursday)).toBe(true);
+      expect(allDayRangeCoversDay(range, new Date(2026, 9, 7))).toBe(false);
+    });
+  });
+});
+
+describe("rangeSliceForDay", () => {
+  it("clips a range to each day it reaches", () => {
+    const range = { start: new Date(at(tuesday, 23)), end: new Date(at(days[2], 1)) };
+    expect(rangeSliceForDay(range, tuesday)).toEqual({ top: 23 * 48, height: 48 });
+    expect(rangeSliceForDay(range, days[2])).toEqual({ top: 0, height: 48 });
+    expect(rangeSliceForDay(range, days[3])).toBeNull();
+  });
+});
+
+describe("eventEditable", () => {
+  it("needs a writable calendar and is never a Microsoft meeting somebody else organizes", () => {
+    const google = calendar(1, "a@example.com");
+    const microsoft = calendar(2, "b@example.com", "microsoft");
+    const readOnly = { ...calendar(3, "c@example.com"), can_write: false };
+    expect(eventEditable(event(1, at(tuesday, 9), at(tuesday, 10)), google)).toBe(true);
+    expect(eventEditable(event(1, at(tuesday, 9), at(tuesday, 10), { my_response: "accepted" }), google)).toBe(true);
+    expect(eventEditable(event(2, at(tuesday, 9), at(tuesday, 10), { my_response: "accepted" }), microsoft)).toBe(false);
+    expect(eventEditable(event(2, at(tuesday, 9), at(tuesday, 10)), microsoft)).toBe(true);
+    expect(eventEditable(event(3, at(tuesday, 9), at(tuesday, 10)), readOnly)).toBe(false);
+    expect(eventEditable(event(3, at(tuesday, 9), at(tuesday, 10)), undefined)).toBe(false);
   });
 });

@@ -139,13 +139,7 @@ export function calendarRouteDate(path: string): Date {
  * everyone west of wherever the event was created.
  */
 export function allDayCoversDay(event: CalendarEvent, day: Date): boolean {
-  const dayKey = localDateKey(day);
-  const startKey = utcDateKey(new Date(event.start_at));
-  const endKey = utcDateKey(new Date(event.end_at));
-  // Google's end date is exclusive. A degenerate pair where it is not after the
-  // start still describes one day rather than none.
-  if (endKey <= startKey) return dayKey === startKey;
-  return dayKey >= startKey && dayKey < endKey;
+  return allDayRangeCoversDay({ start: new Date(event.start_at), end: new Date(event.end_at) }, day);
 }
 
 /** timedEventTouchesDay reports whether a timed event overlaps a local day. */
@@ -356,4 +350,157 @@ export function dayColumnWeights(events: CalendarEvent[], days: Date[], lensInde
     const busiest = busiestColumns(events, day);
     return busiest <= 1 ? 0.7 : 0.85 + 0.15 * Math.min(busiest, 4);
   });
+}
+
+/** dragSnapMinutes is the step a dragged appointment moves, stretches and is
+ * drawn in. A quarter hour is the finest step people schedule in; finer, and a
+ * drop lands on 10:07 because the hand wobbled. */
+export const dragSnapMinutes = 15;
+
+const minutesPerDay = 24 * 60;
+
+/** snapMinutes rounds a number of minutes to the drag step. */
+export function snapMinutes(minutes: number): number {
+  return Math.round(minutes / dragSnapMinutes) * dragSnapMinutes;
+}
+
+/** atMinutes returns the local wall-clock time a number of minutes after a
+ * day's midnight. It sets the minutes rather than adding milliseconds, so ten
+ * o'clock is ten o'clock on the day the clocks change too; a count past the
+ * day's end runs on into the next one. */
+export function atMinutes(day: Date, minutes: number): Date {
+  const value = startOfDay(day);
+  value.setMinutes(minutes);
+  return value;
+}
+
+/** minutesFromDayStart counts an instant's wall-clock time from a local day's
+ * midnight: negative for an instant on an earlier day, past 1440 for a later
+ * one. */
+export function minutesFromDayStart(day: Date, instant: Date): number {
+  const days = Math.round((startOfDay(instant).getTime() - startOfDay(day).getTime()) / msPerDay);
+  return days * minutesPerDay + minutesIntoDay(instant);
+}
+
+/** daysBetween is how many local days separate two dates' midnights. */
+export function daysBetween(from: Date, to: Date): number {
+  return Math.round((startOfDay(to).getTime() - startOfDay(from).getTime()) / msPerDay);
+}
+
+/** eventEditable says whether the reader may change an event: its calendar
+ * has to be writable, and a Microsoft 365 meeting somebody else organizes can
+ * only be answered -- only its organizer can change it. The dialog and the
+ * week's drag both ask this one question, so a block that can be dragged is
+ * one whose dialog would have saved the same change. */
+export function eventEditable(event: CalendarEvent, calendar: CalendarSummary | undefined): boolean {
+  if (!calendar?.can_write) return false;
+  return !(Boolean(event.my_response) && calendar.provider === "microsoft");
+}
+
+/** TimeRange is a dragged appointment's new bounds. */
+export type TimeRange = { start: Date; end: Date };
+
+/**
+ * movedEventTimes is where a timed event lands when it was grabbed
+ * grabMinutes into grabDay and is held dropMinutes into dropDay.
+ *
+ * What moves is the distance the pointer travelled, snapped to the drag step,
+ * not the event's start snapped to the grid: an appointment at 10:10 moved an
+ * hour lands at 11:10, the way it would if the reader typed it. The length is
+ * kept in milliseconds, so a meeting across the night the clocks change keeps
+ * its real length. The start is kept inside the day it was dropped on unless it
+ * already began the day before -- a drop at the top of a column means "first
+ * thing", not "late last night".
+ */
+export function movedEventTimes(
+  event: CalendarEvent,
+  grabDay: Date,
+  grabMinutes: number,
+  dropDay: Date,
+  dropMinutes: number
+): TimeRange {
+  const start = new Date(event.start_at);
+  const length = Math.max(new Date(event.end_at).getTime() - start.getTime(), 0);
+  const startMinutes = minutesFromDayStart(grabDay, start);
+  const shifted = startMinutes + snapMinutes(dropMinutes - grabMinutes);
+  // Both bounds give way to where the event already starts, so a block that
+  // begins off the grid near either end of the day is never moved by a drop
+  // that did not travel that far.
+  const earliest = Math.min(0, startMinutes);
+  const latest = Math.max(minutesPerDay - dragSnapMinutes, startMinutes);
+  const newStart = atMinutes(dropDay, Math.min(Math.max(shifted, earliest), latest));
+  return { start: newStart, end: new Date(newStart.getTime() + length) };
+}
+
+/** resizedEventTimes is a timed event whose end was dragged to dropMinutes
+ * into dropDay: the end lands on the grid, never closer to the start than one
+ * drag step, and may be pulled on into a later day. */
+export function resizedEventTimes(event: CalendarEvent, dropDay: Date, dropMinutes: number): TimeRange {
+  const start = new Date(event.start_at);
+  const end = atMinutes(dropDay, snapMinutes(Math.min(Math.max(dropMinutes, 0), minutesPerDay)));
+  const shortest = start.getTime() + dragSnapMinutes * msPerMinute;
+  return { start, end: end.getTime() < shortest ? new Date(shortest) : end };
+}
+
+/** drawnRange is the stretch of one day a reader drew from anchorMinutes to
+ * pointerMinutes, in either direction: whole drag steps, never less than one,
+ * inside the day. The first step is the one pressed on, so a press at 10:05
+ * starts the event at 10:00 rather than 10:15. */
+export function drawnRange(day: Date, anchorMinutes: number, pointerMinutes: number): TimeRange {
+  const floor = (minutes: number) => Math.floor(minutes / dragSnapMinutes) * dragSnapMinutes;
+  const clamp = (minutes: number) => Math.min(Math.max(minutes, 0), minutesPerDay);
+  const anchor = clamp(floor(Math.min(anchorMinutes, minutesPerDay - 1)));
+  const pointer = clamp(snapMinutes(pointerMinutes));
+  const first = pointer >= anchor ? anchor : pointer;
+  const last = pointer >= anchor ? Math.max(pointer, anchor + dragSnapMinutes) : anchor + dragSnapMinutes;
+  return { start: atMinutes(day, first), end: atMinutes(day, Math.min(last, minutesPerDay)) };
+}
+
+/** shiftedAllDayTimes moves an all-day event by whole days. Its bounds are UTC
+ * midnights of plain dates, so the shift is made in UTC dates as well: adding
+ * local days would carry a DST change into a value that has no zone. */
+export function shiftedAllDayTimes(event: CalendarEvent, days: number): TimeRange {
+  const shift = (value: string) => {
+    const date = new Date(value);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date;
+  };
+  return { start: shift(event.start_at), end: shift(event.end_at) };
+}
+
+/** allDayRangeFromLocalDays renders the local days first..last (inclusive) as
+ * the UTC midnights an all-day event is stored with, the end exclusive. */
+export function allDayRangeFromLocalDays(first: Date, last: Date): TimeRange {
+  const utcMidnight = (day: Date) => new Date(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate()));
+  const [from, to] = first <= last ? [first, last] : [last, first];
+  const end = utcMidnight(to);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start: utcMidnight(from), end };
+}
+
+/** allDayRangeCoversDay reports whether an all-day range covers a local day.
+ * allDayCoversDay asks it of a stored event; the week's drag asks it of the
+ * preview of one being dragged, which is not an event yet. */
+export function allDayRangeCoversDay(range: TimeRange, day: Date): boolean {
+  const dayKey = localDateKey(day);
+  const startKey = utcDateKey(range.start);
+  const endKey = utcDateKey(range.end);
+  // Google's end date is exclusive. A degenerate pair where it is not after the
+  // start still describes one day rather than none.
+  if (endKey <= startKey) return dayKey === startKey;
+  return dayKey >= startKey && dayKey < endKey;
+}
+
+/** rangeSliceForDay is the part of a timed range drawn in one day column, in
+ * pixels, or null when the range does not reach that day. */
+export function rangeSliceForDay(range: TimeRange, day: Date): { top: number; height: number } | null {
+  const dayStart = startOfDay(day).getTime();
+  const dayEnd = addDays(startOfDay(day), 1).getTime();
+  const start = Math.max(range.start.getTime(), dayStart);
+  const end = Math.min(Math.max(range.end.getTime(), range.start.getTime() + minimumEventMinutes * msPerMinute), dayEnd);
+  if (end <= start) return null;
+  return {
+    top: ((start - dayStart) / msPerMinute / 60) * hourHeight,
+    height: Math.max(((end - start) / msPerMinute / 60) * hourHeight, 12)
+  };
 }

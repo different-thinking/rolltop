@@ -12,9 +12,13 @@ import type { AddToast, LocationState } from "../../appTypes";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { EventDialog } from "./EventDialog";
+import type { EventPrefill } from "./EventDialog";
+import { useWeekDrag } from "./useWeekDrag";
+import type { WeekDrag } from "./useWeekDrag";
 import {
   addDays,
   allDayEventsForDay,
+  allDayRangeCoversDay,
   busiestColumns,
   calendarAccountGroups,
   calendarColor,
@@ -22,6 +26,7 @@ import {
   calendarURL,
   dayColumnWeights,
   dayHeight,
+  eventEditable,
   hourHeight,
   isoWeekNumber,
   layoutDayEvents,
@@ -30,6 +35,7 @@ import {
   minutesIntoDay,
   monthPickerWeeks,
   providerName,
+  rangeSliceForDay,
   readableTextColor,
   startOfDay,
   startOfMonth,
@@ -37,7 +43,7 @@ import {
   timedEventTouchesDay,
   weekDays
 } from "./weekModel";
-import type { PositionedEvent } from "./weekModel";
+import type { PositionedEvent, TimeRange } from "./weekModel";
 
 /** nowLineInterval keeps the current-time marker roughly honest without
  * re-rendering the whole week every second. */
@@ -54,6 +60,9 @@ const initialScrollHour = 7;
 type DialogState = {
   event: CalendarEvent | null;
   day: Date;
+  /** prefill seeds a new event with a drawn stretch of time or a copied
+   * event's contents. */
+  prefill?: EventPrefill | null;
   /** formKey identifies the form's contents. The dialog is remounted whenever
    * it changes, which is how a deliberate reset -- opening a different event,
    * adopting the version that won a conflict -- is expressed, and how a routine
@@ -89,6 +98,10 @@ export function CalendarView({
   const [lensDayKey, setLensDayKey] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
+  // Each day's column in the time grid and its cell in the all-day bar, in the
+  // order of days, which is what a drag measures the pointer against.
+  const dayColumnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const allDayCellRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   // Memoized together with the days, because a fresh Date on every render would
   // give every loader a new identity, and a loader in an effect's dependencies
@@ -336,6 +349,168 @@ export function CalendarView({
       setDialog({ event: data.event, day: dialog.day, formKey: dialog.formKey });
     });
 
+  // A drag writes as soon as it is let go, the way the dialog's Save does, and
+  // the event is drawn at its new place before the provider answers so the
+  // block does not jump back under the pointer. Whatever the answer, the week
+  // is then reloaded from what the provider holds: a refusal puts the event
+  // back where it was, and the copies a linked event keeps in other calendars
+  // are only known to have followed once they are read back.
+  const moveEvent = async (event: CalendarEvent, range: TimeRange, verb: "moved" | "resized" | "undo") => {
+    const original = { start: new Date(event.start_at), end: new Date(event.end_at) };
+    if (sameRange(original, range)) return;
+    const provider = providerName(calendarsByID.get(event.calendar_id));
+    setEvents((current) =>
+      current.map((item) =>
+        item.id === event.id ? { ...item, start_at: range.start.toISOString(), end_at: range.end.toISOString() } : item
+      )
+    );
+    try {
+      const data = await api.updateCalendarEvent(csrf, event.id, inputForEvent(event, range));
+      await reload("events").catch(() => {
+        // The move landed; a refresh that failed after it only delays the
+        // copies being drawn, which the next load does.
+      });
+      if (data.warnings && data.warnings.length > 0) {
+        reportWarnings(data.warnings);
+      } else if (verb === "undo") {
+        addToast(`Change undone in ${provider} too.`, "success");
+      } else {
+        addToast(verb === "resized" ? `Event length changed in ${provider} too.` : `Event moved in ${provider} too.`, "success", {
+          label: "Undo",
+          onUndo: () => void moveEvent(data.event, original, "undo"),
+          onCommit: () => undefined
+        });
+      }
+    } catch (err) {
+      // Put the block back where it was before asking the provider again: a
+      // reload that fails as well must not leave it drawn where it never went.
+      setEvents((current) =>
+        current.map((item) =>
+          item.id === event.id
+            ? { ...item, start_at: original.start.toISOString(), end_at: original.end.toISOString() }
+            : item
+        )
+      );
+      if (err instanceof ApiError && err.status === 409) {
+        const winner = err.payload.event as CalendarEvent | undefined;
+        if (winner) setEvents((current) => current.map((item) => (item.id === winner.id ? winner : item)));
+      }
+      void reload("events").catch(() => {
+        // The message below is what the reader acts on.
+      });
+      addToast(messageFromError(err), "error");
+    }
+  };
+
+  // A copy is a new event: the same title, place and notes at the new time,
+  // in the same calendar, and in the second and busy calendars when the
+  // original is kept there too. An event with guests or an online meeting is
+  // not created on the spot -- that would send invitations, or book a meeting,
+  // on a drop -- but opened as a new event for the reader to look over first.
+  const copyEvent = async (event: CalendarEvent, range: TimeRange) => {
+    const copyTarget = calendars.find((calendar) => calendar.copy_target && calendar.can_write);
+    const busyTarget = calendars.find((calendar) => calendar.busy_target && calendar.can_write);
+    const keptIn = (target: CalendarSummary | undefined) =>
+      Boolean(target) &&
+      target?.id !== event.calendar_id &&
+      (event.also_in || []).some((copy) => copy.calendar_id === target?.id);
+    const copy = keptIn(copyTarget);
+    const busyCopy = keptIn(busyTarget);
+    if ((event.attendees || []).length > 0 || event.online_meeting) {
+      setDialogProblem("");
+      setDialog({
+        event: null,
+        day: startOfDay(range.start),
+        prefill: {
+          start: range.start,
+          end: range.end,
+          allDay: event.all_day,
+          calendarID: event.calendar_id,
+          summary: event.summary,
+          location: event.location,
+          description: event.description,
+          attendees: event.attendees,
+          copy,
+          busyCopy,
+          onlineMeeting: event.online_meeting
+        },
+        formKey: `copy-${event.id}-${range.start.getTime()}`
+      });
+      return;
+    }
+    const provider = providerName(calendarsByID.get(event.calendar_id));
+    try {
+      const data = await api.createCalendarEvent(csrf, {
+        ...inputForEvent(event, range),
+        ...(copy ? { copy: true } : {}),
+        ...(busyCopy ? { busy_copy: true } : {})
+      });
+      await reload("events").catch(() => {
+        // The copy exists; the next load draws it.
+      });
+      if (data.warnings && data.warnings.length > 0) {
+        reportWarnings(data.warnings);
+        return;
+      }
+      addToast(`Event copied in ${provider} too.`, "success", {
+        label: "Undo",
+        onUndo: () =>
+          void api
+            .deleteCalendarEvent(csrf, data.event.id)
+            .then((deleted) => {
+              reportWarnings(deleted.warnings);
+              return reload("events");
+            })
+            .catch((err) => addToast(messageFromError(err), "error")),
+        onCommit: () => undefined
+      });
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
+  const openNewEvent = (prefill: EventPrefill) => {
+    setDialogProblem("");
+    setDialog({
+      event: null,
+      day: startOfDay(prefill.start),
+      prefill,
+      formKey: `drawn-${prefill.start.getTime()}-${prefill.end.getTime()}`
+    });
+  };
+
+  const dropDrag = (finished: WeekDrag) => {
+    switch (finished.kind) {
+      case "create":
+        openNewEvent({ ...finished.range, allDay: false, calendarID: finished.calendarID || undefined });
+        return;
+      case "allday-create":
+        openNewEvent({ ...finished.range, allDay: true });
+        return;
+      case "resize":
+        void moveEvent(finished.event, finished.range, "resized");
+        return;
+      case "move":
+      case "allday-move": {
+        const original = { start: new Date(finished.event.start_at), end: new Date(finished.event.end_at) };
+        // Let go where it started is no change, copy key or not: a copy on top
+        // of the original is a double booking nobody meant.
+        if (sameRange(original, finished.range)) return;
+        if (finished.copy) void copyEvent(finished.event, finished.range);
+        else void moveEvent(finished.event, finished.range, "moved");
+        return;
+      }
+    }
+  };
+
+  const { drag, beginMove, beginResize, beginCreate, beginAllDayMove, beginAllDayCreate, consumeClick } = useWeekDrag({
+    days,
+    gridRef,
+    dayColumnRefs,
+    allDayCellRefs,
+    onDrop: dropDrag
+  });
+
   // Only the calendars the reader chose to list take part in the view; the
   // rest are still loaded so a copy mark can name the calendar it stands for.
   const listedCalendars = useMemo(() => calendars.filter((calendar) => calendar.listed), [calendars]);
@@ -362,25 +537,30 @@ export function CalendarView({
   }, [lensDayKey, days, events, todayKey, listedCalendars]);
 
   const openEvent = (event: CalendarEvent, day: Date) => {
+    // The release that ends a drag arrives as a click on the block it ended on.
+    if (consumeClick()) return;
     setDialogProblem("");
     setDialog({ event, day, formKey: `event-${event.id}` });
   };
 
   // One timed entry, placed in a share of its day column: the whole column
   // normally, one calendar's lane of it under the day lens.
-  const renderTimedEvent = (placed: PositionedEvent, day: Date, lane: number, lanes: number) => {
+  const renderTimedEvent = (placed: PositionedEvent, day: Date, dayIndex: number, lane: number, lanes: number) => {
     const calendar = calendarsByID.get(placed.event.calendar_id);
     const color = calendarColor(calendar);
     const laneWidth = 100 / lanes;
     const width = laneWidth / placed.columns;
     const declined = placed.event.my_response === "declined" || placed.event.status === "cancelled";
+    const draggable = eventDraggable(placed.event, calendar);
     return (
       <button
         key={placed.event.id}
         type="button"
         className={`calendar-event ${declined ? "declined" : ""} ${
           placed.event.status === "cancelled" ? "cancelled" : ""
-        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""}`}
+        } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
+          draggable ? "draggable" : ""
+        } ${dragSource(drag, placed.event) ? "drag-source" : ""}`}
         style={{
           top: placed.top,
           height: placed.height,
@@ -391,6 +571,11 @@ export function CalendarView({
           color: declined ? "var(--text)" : readableTextColor(color)
         }}
         title={eventTooltip(placed.event, calendar, calendarsByID)}
+        onPointerDown={(pointerEvent) => {
+          // Pressing an event never starts drawing a new one underneath it.
+          pointerEvent.stopPropagation();
+          if (draggable) beginMove(pointerEvent, placed.event, dayIndex, eventCopyable(placed.event, calendar));
+        }}
         onClick={() => openEvent(placed.event, day)}
       >
         <span className="calendar-event-time">{formatTimeRange(placed.event)}</span>
@@ -404,14 +589,77 @@ export function CalendarView({
           {placed.event.summary || "(No title)"}
         </span>
         {placed.event.location ? <span className="calendar-event-location">{placed.event.location}</span> : null}
+        {draggable && !placed.continuesAfter ? (
+          // The end of an event is pulled to change how long it lasts. Only
+          // where the end is drawn: a block cut off by midnight ends elsewhere.
+          <span
+            className="calendar-event-resize"
+            aria-hidden="true"
+            onPointerDown={(pointerEvent) => {
+              pointerEvent.stopPropagation();
+              beginResize(pointerEvent, placed.event);
+            }}
+          />
+        ) : null}
       </button>
     );
+  };
+
+  // Where a drag would leave an appointment, drawn over the day it reaches:
+  // in its calendar's lane under the day lens, across the day otherwise.
+  const renderTimedGhost = (day: Date, dayIndex: number, lanes: number[]) => {
+    if (!drag || (drag.kind !== "move" && drag.kind !== "resize" && drag.kind !== "create")) return null;
+    const slice = rangeSliceForDay(drag.range, day);
+    if (!slice) return null;
+    const calendarID = drag.kind === "create" ? drag.calendarID : drag.event.calendar_id;
+    const calendar = calendarID ? calendarsByID.get(calendarID) : undefined;
+    // calendarColor falls back to the accent for a drawing with no lane.
+    const color = calendarColor(calendar);
+    const lane = dayIndex === lensIndex && lanes.length > 1 ? lanes.indexOf(calendarID) : -1;
+    const left = lane >= 0 ? (lane * 100) / lanes.length : 0;
+    const width = lane >= 0 ? 100 / lanes.length : 100;
+    const copying = drag.kind === "move" && drag.copy;
+    return (
+      <div
+        className={`calendar-drag-ghost ${drag.kind === "create" ? "drawing" : ""}`}
+        style={{
+          top: slice.top,
+          height: slice.height,
+          left: `${left}%`,
+          width: `calc(${width}% - 3px)`,
+          background: color,
+          borderColor: color,
+          color: readableTextColor(color)
+        }}
+        aria-hidden="true"
+      >
+        <span className="calendar-event-time">
+          {copying ? <Icon name="copy" /> : null}
+          {formatRange(drag.range)}
+        </span>
+        {drag.kind === "create" ? null : (
+          <span className="calendar-event-title">{drag.event.summary || "(No title)"}</span>
+        )}
+      </div>
+    );
+  };
+
+  // The lane a press landed in under the day lens: a new event drawn there is
+  // offered that lane's calendar first, when the reader may write to it.
+  const laneCalendarAt = (dayIndex: number, clientX: number, column: HTMLElement): number => {
+    if (dayIndex !== lensIndex || lensLanes.length < 2) return 0;
+    const bounds = column.getBoundingClientRect();
+    const lane = Math.min(lensLanes.length - 1, Math.max(0, Math.floor(((clientX - bounds.left) / bounds.width) * lensLanes.length)));
+    const calendarID = lensLanes[lane];
+    return writableCalendars.some((calendar) => calendar.id === calendarID) ? calendarID : 0;
   };
 
   return (
     <div className="calendar-shell">
       <section
-        className="calendar-main day-lens"
+        className={`calendar-main day-lens ${drag ? `dragging drag-${drag.kind}` : ""} ${
+          drag && "copy" in drag && drag.copy ? "drag-copy" : ""
+        }`}
         style={{ "--calendar-day-columns": dayColumns } as CSSProperties}
       >
         <header className="content-head calendar-head">
@@ -519,27 +767,57 @@ export function CalendarView({
 
         <div className="calendar-allday">
           <div className="calendar-gutter">All day</div>
-          {days.map((day) => (
-            <div key={day.toISOString()} className="calendar-allday-cell">
+          {days.map((day, dayIndex) => (
+            <div
+              key={day.toISOString()}
+              className="calendar-allday-cell"
+              ref={(element) => {
+                allDayCellRefs.current[dayIndex] = element;
+              }}
+              onPointerDown={(pointerEvent) => {
+                if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
+                beginAllDayCreate(pointerEvent, dayIndex);
+              }}
+            >
               {allDayEventsForDay(events, day).map((event) => {
-                const color = calendarColor(calendarsByID.get(event.calendar_id));
+                const calendar = calendarsByID.get(event.calendar_id);
+                const color = calendarColor(calendar);
+                const draggable = eventDraggable(event, calendar);
                 return (
                   <button
                     key={`${event.id}-${localDateKey(day)}`}
                     type="button"
-                    className="calendar-chip"
+                    className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""}`}
                     style={{ background: color, color: readableTextColor(color) }}
-                    title={eventTooltip(event, calendarsByID.get(event.calendar_id), calendarsByID)}
-                    onClick={() => {
-                      setDialogProblem("");
-                      setDialog({ event, day, formKey: `event-${event.id}` });
+                    title={eventTooltip(event, calendar, calendarsByID)}
+                    onPointerDown={(pointerEvent) => {
+                      pointerEvent.stopPropagation();
+                      if (draggable) beginAllDayMove(pointerEvent, event, dayIndex, eventCopyable(event, calendar));
                     }}
+                    onClick={() => openEvent(event, day)}
                   >
                     <CopyMarks event={event} calendarsByID={calendarsByID} />
                     {event.summary || "(No title)"}
                   </button>
                 );
               })}
+              {drag && (drag.kind === "allday-move" || drag.kind === "allday-create") && allDayRangeCoversDay(drag.range, day) ? (
+                <div
+                  className="calendar-chip calendar-drag-ghost-chip"
+                  style={
+                    drag.kind === "allday-move"
+                      ? {
+                          background: calendarColor(calendarsByID.get(drag.event.calendar_id)),
+                          color: readableTextColor(calendarColor(calendarsByID.get(drag.event.calendar_id)))
+                        }
+                      : undefined
+                  }
+                  aria-hidden="true"
+                >
+                  {drag.kind === "allday-move" && drag.copy ? <Icon name="copy" /> : null}
+                  {drag.kind === "allday-move" ? drag.event.summary || "(No title)" : "New event"}
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -561,6 +839,19 @@ export function CalendarView({
                 key={day.toISOString()}
                 className={`calendar-day ${isToday ? "today" : ""}`}
                 style={{ height: dayHeight }}
+                ref={(element) => {
+                  dayColumnRefs.current[index] = element;
+                }}
+                onPointerDown={(pointerEvent) => {
+                  // Pressing empty time and pulling draws a new event; the
+                  // hour lines and the now line let the press through to here.
+                  if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
+                  beginCreate(
+                    pointerEvent,
+                    index,
+                    laneCalendarAt(index, pointerEvent.clientX, pointerEvent.currentTarget)
+                  );
+                }}
                 onDoubleClick={(mouseEvent) => {
                   if (writableCalendars.length === 0) return;
                   setDialogProblem("");
@@ -583,9 +874,10 @@ export function CalendarView({
                       ...layoutDayEvents(
                         dayEvents.filter((event) => event.calendar_id === calendarID),
                         day
-                      ).map((placed) => renderTimedEvent(placed, day, lane, lanes.length))
+                      ).map((placed) => renderTimedEvent(placed, day, index, lane, lanes.length))
                     ])
-                  : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, 0, 1))}
+                  : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, index, 0, 1))}
+                {renderTimedGhost(day, index, lanes)}
                 {isToday ? <div className="calendar-now" style={{ top: (minutesIntoDay(now) / 60) * hourHeight }} /> : null}
               </div>
             );
@@ -598,6 +890,7 @@ export function CalendarView({
           key={dialog.formKey}
           event={dialog.event}
           day={dialog.day}
+          prefill={dialog.prefill}
           calendars={calendars}
           saving={saving}
           problem={dialogProblem}
@@ -1192,4 +1485,62 @@ function weekRangeLabel(first: Date, last: Date): string {
     return `${first.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} – ${lastLabel}`;
   }
   return `${firstLabel} – ${lastLabel}`;
+}
+
+/** eventDraggable says whether a block in the week can be dragged: the reader
+ * may change the event, the way the dialog would let them, and the organizer
+ * has not cancelled it -- moving a cancelled meeting reschedules nothing. An
+ * event without a title is one the dialog refuses to save and the server
+ * refuses to write, so a drag of it could only bounce back. */
+function eventDraggable(event: CalendarEvent, calendar: CalendarSummary | undefined): boolean {
+  return event.status !== "cancelled" && (event.summary || "").trim() !== "" && eventEditable(event, calendar);
+}
+
+/** eventCopyable says whether the copy key may copy a dragged event. A
+ * placeholder is only the time of an event entered elsewhere, and a copy of it
+ * would be a second "Busy" standing for nothing. */
+function eventCopyable(event: CalendarEvent, calendar: CalendarSummary | undefined): boolean {
+  return !event.link_masked && eventDraggable(event, calendar);
+}
+
+/** dragSource says whether an event is the one a drag is taking away from its
+ * place, which is drawn faded; a copy leaves the original as it is. */
+function dragSource(drag: WeekDrag | null, event: CalendarEvent): boolean {
+  if (!drag) return false;
+  if (drag.kind === "resize") return drag.event.id === event.id;
+  if (drag.kind === "move" || drag.kind === "allday-move") return !drag.copy && drag.event.id === event.id;
+  return false;
+}
+
+function sameRange(a: TimeRange, b: TimeRange): boolean {
+  return a.start.getTime() === b.start.getTime() && a.end.getTime() === b.end.getTime();
+}
+
+/** inputForEvent restates an event as the dialog would submit it, at new
+ * bounds. Everything else is sent as it stands, so a drag changes the time and
+ * nothing more: the backend compares the guest list with the one it holds and
+ * leaves it alone when it is the same, and no copy field is sent, so the copies
+ * an event keeps in other calendars follow it. */
+function inputForEvent(event: CalendarEvent, range: TimeRange): CalendarEventInput {
+  return {
+    calendar_id: event.calendar_id,
+    summary: event.summary,
+    description: event.description,
+    location: event.location,
+    start_at: range.start.toISOString(),
+    end_at: range.end.toISOString(),
+    all_day: event.all_day,
+    time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+    attendees: (event.attendees || []).map((attendee) => ({
+      email: attendee.email,
+      name: attendee.name,
+      optional: attendee.optional
+    })),
+    online_meeting: event.online_meeting
+  };
+}
+
+function formatRange(range: TimeRange): string {
+  const options: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
+  return `${range.start.toLocaleTimeString(undefined, options)} – ${range.end.toLocaleTimeString(undefined, options)}`;
 }

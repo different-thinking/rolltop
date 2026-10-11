@@ -672,6 +672,18 @@ site and in review.
   settings use, and a calendar the order does not know still gets a lane
   (`lensLaneCalendarIDs`): drawing an event in an unnamed lane is recoverable,
   dropping it is not.
+- **A drag in the week is the dialog's Save, not a write of its own.**
+  Moving, copying (Ctrl, or Option on a Mac) and pulling an event's end
+  (`useWeekDrag`, `weekModel`'s drag arithmetic) restate the event exactly as
+  the dialog would submit it at the new bounds and send no copy field, so linked
+  copies follow and an unchanged guest list stays unsent. Only what
+  `eventEditable` lets the dialog save may be dragged -- one rule for both, or a
+  block moves that its dialog would refuse. A copy of an event with guests or an
+  online meeting is **never** created on the drop: it opens as a new event,
+  because creating it would send invitations or book a meeting from a flick of
+  the wrist. What moves is the distance travelled, snapped to the quarter hour,
+  not the start snapped to the grid, and all-day events shift in UTC dates.
+  Drawing a new event only opens the dialog. Touch is left to scrolling.
 - **The calendar list is a menu in the calendar header, not a column.**
   `CalendarPicker` holds the visibility switches, the second-calendar choice
   and the way to the calendar settings; the week takes the whole width beside
