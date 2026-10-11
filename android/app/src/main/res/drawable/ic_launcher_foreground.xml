@@ -3,29 +3,30 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Direct conversion of graphics/logo.svg: no added backing geometry. -->
+    <!-- The mail icon of frontend/public/icons/mail.svg (its 64-unit grid),
+         scaled by 0.76 about the centre. The arch's bottom corners, its
+         farthest points, then sit about 29dp from the centre, inside the
+         33dp radius of the 66dp safe circle that no launcher mask clips. -->
+    <!-- Same transform as ic_launcher_monochrome.xml; change both together. -->
     <group
-        android:pivotX="33.033203"
-        android:pivotY="34.55764"
-        android:scaleX="0.65"
-        android:scaleY="0.65"
-        android:translateX="20.966797"
-        android:translateY="17.94236">
-        <group
-            android:translateX="509.99438"
-            android:translateY="175.90039">
-            <path
-                android:fillColor="@android:color/transparent"
-                android:pathData="m-446.67797,-109.53511 -0.008,-29.44922 0,-0.002 -0.006,-3.89258c0,-16.75746 -13.51402,-30.27148 -30.27148,-30.27148h0.00056c-16.75746,0 -30.27149,13.51402 -30.27149,30.27148l-0.006,3.89258 0,0.002 -0.004,29.44922"
-                android:strokeColor="#C56C45"
-                android:strokeLineCap="round"
-                android:strokeWidth="5.5" />
-            <path
-                android:fillColor="#151F2E"
-                android:pathData="m-454.95974,-139.81893 -15.33653,11.85302c-3.75097,2.89903 -9.93295,2.89799 -13.68392,-0.001l-14.98513,-11.58172 -0.00052,0.56844 -0.004,32.19493h44.0154l-0.004,-32.19286z" />
-            <path
-                android:fillColor="#C46B44"
-                android:pathData="m-476.96253,-164.87683c-11.12016,0.00024 -20.09174,7.892 -21.73045,18.48931l19.27324,14.89573c1.30333,1.00731 3.25815,1.00731 4.56148,0l19.58588,-15.13706c-1.73637,-10.47584 -10.65408,-18.24774 -21.68963,-18.24798z" />
-        </group>
+        android:scaleX="0.76"
+        android:scaleY="0.76"
+        android:translateX="29.68"
+        android:translateY="29.68">
+        <path
+            android:fillColor="#C46B44"
+            android:pathData="M6,56V30a26,26 0,0 1,52 0v26a4,4 0,0 1,-4 4H10a4,4 0,0 1,-4 -4z" />
+        <path
+            android:pathData="M20,28h24a3,3 0,0 1,3 3v15a3,3 0,0 1,-3 3H20a3,3 0,0 1,-3 -3V31a3,3 0,0 1,3 -3z"
+            android:strokeColor="#F7FAF8"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="4" />
+        <path
+            android:pathData="M18.5,30.5L32,40.5L45.5,30.5"
+            android:strokeColor="#F7FAF8"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="4" />
     </group>
 </vector>

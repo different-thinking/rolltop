@@ -1,5 +1,12 @@
 const STATIC_CACHE = "rolltop-static-v11";
-const STATIC_ASSETS = ["/offline.html", "/icon.svg", "/icon.svg?v=transparent-logo-v2"];
+const STATIC_ASSETS = [
+  "/offline.html",
+  "/icon.svg",
+  "/icon.svg?v=transparent-logo-v2",
+  "/icons/mail.svg",
+  "/icons/calendar.svg",
+  "/icons/contacts.svg"
+];
 // Assets under /assets/ are content-hashed, so a new release never overwrites
 // the previous one's entries -- it simply stops requesting them. Unbounded,
 // this cache therefore accumulated every asset of every release an install had
