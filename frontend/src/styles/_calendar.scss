@@ -100,6 +100,15 @@
   .calendar-picker-summary .icon:last-child {
     transition: none;
   }
+
+  .calendar-week-picker-button .icon {
+    transition: none;
+  }
+
+  .calendar-week-picker-grid.slide-next,
+  .calendar-week-picker-grid.slide-previous {
+    animation: none;
+  }
 }
 
 .calendar-sidebar-group {
@@ -187,9 +196,184 @@
   min-width: 0;
 
   h1 {
-    @include truncate;
-    margin: 0 0 0 6px;
+    min-width: 0;
+    margin: 0;
     font-size: 17px;
+  }
+}
+
+// The date range doubles as the way to any other week: it opens a month the
+// reader turns by arrow, swipe or scroll.
+.calendar-week-picker {
+  position: relative;
+  min-width: 0;
+  margin-left: 2px;
+}
+
+.calendar-week-picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+
+  span {
+    @include truncate;
+  }
+
+  .icon {
+    flex: none;
+    width: 14px;
+    height: 14px;
+    color: var(--muted);
+    transition: transform 0.16s ease;
+  }
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &[aria-expanded="true"] {
+    background: var(--accent-soft);
+
+    .icon {
+      transform: rotate(180deg);
+    }
+  }
+}
+
+.calendar-week-picker-panel {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: min(280px, calc(100vw - 24px));
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  // Horizontal drags are the picker's own swipe; vertical ones still scroll.
+  touch-action: pan-y;
+  user-select: none;
+
+  // Focusable only so a click or swipe keeps the keyboard in the picker; the
+  // panel is not a control of its own and draws no ring.
+  &:focus {
+    outline: none;
+  }
+}
+
+// On a phone the range sits too far right for the panel to fit beside it, so
+// the panel hangs from the start of the navigation instead.
+@media (max-width: 560px) {
+  .calendar-nav {
+    position: relative;
+  }
+
+  .calendar-week-picker {
+    position: static;
+  }
+}
+
+.calendar-week-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.calendar-week-picker-month {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.calendar-week-picker-grid {
+  display: grid;
+  gap: 2px;
+
+  &.slide-next {
+    animation: calendar-week-picker-from-right 0.18s ease;
+  }
+
+  &.slide-previous {
+    animation: calendar-week-picker-from-left 0.18s ease;
+  }
+}
+
+@keyframes calendar-week-picker-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes calendar-week-picker-from-left {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+.calendar-week-picker-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-radius: 6px;
+
+  &.shown {
+    background: var(--accent-soft);
+  }
+}
+
+.calendar-week-picker-weekdays span {
+  padding: 2px 0 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calendar-week-picker-day {
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &.outside {
+    color: var(--muted);
+  }
+
+  &.today {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 }
 
@@ -696,15 +880,8 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   }
 }
 
-// The day lens. The switch reads as pressed while it is on, the way the
-// sidebar's toggles do, rather than as a second primary button.
-.calendar-lens-toggle[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--text);
-}
-
-// Under the lens every weekday is a button that opens it; the label keeps the
-// look it has when the lens is off, so turning the lens on moves nothing.
+// The day lens. Every weekday is a button that opens it on that day, or
+// closes it when it is already open there.
 .day-lens .calendar-dayname {
   flex-direction: column;
   align-items: stretch;

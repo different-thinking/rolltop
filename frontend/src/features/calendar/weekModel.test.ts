@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { CalendarEvent, CalendarSummary } from "../../types";
-import { busiestColumns, calendarAccountGroups, dayColumnWeights, lensLaneCalendarIDs, weekDays } from "./weekModel";
+import {
+  busiestColumns,
+  calendarAccountGroups,
+  dayColumnWeights,
+  lensLaneCalendarIDs,
+  localDateKey,
+  monthPickerWeekCount,
+  monthPickerWeeks,
+  startOfMonth,
+  weekDays
+} from "./weekModel";
 
 const monday = new Date(2026, 9, 5);
 const days = weekDays(monday);
@@ -126,5 +136,29 @@ describe("dayColumnWeights", () => {
 
   it("keeps a lens day readable even with one lane", () => {
     expect(dayColumnWeights(events, days, 0, 1)[0]).toBe(3);
+  });
+});
+
+describe("monthPickerWeeks", () => {
+  it("starts on the Monday on or before the first and always shows six weeks", () => {
+    // October 2026 begins on a Thursday.
+    const weeks = monthPickerWeeks(new Date(2026, 9, 20));
+    expect(weeks).toHaveLength(monthPickerWeekCount);
+    expect(localDateKey(weeks[0][0])).toBe("2026-09-28");
+    expect(localDateKey(weeks[0][3])).toBe("2026-10-01");
+    expect(localDateKey(weeks[5][6])).toBe("2026-11-08");
+    expect(weeks.every((week) => week.length === 7 && week[0].getDay() === 1)).toBe(true);
+  });
+
+  it("starts on the first itself when the month begins on a Monday", () => {
+    // June 2026 begins on a Monday.
+    expect(localDateKey(monthPickerWeeks(new Date(2026, 5, 30))[0][0])).toBe("2026-06-01");
+  });
+});
+
+describe("startOfMonth", () => {
+  it("steps from the end of a long month without skipping a short one", () => {
+    expect(localDateKey(startOfMonth(new Date(2026, 0, 31), 1))).toBe("2026-02-01");
+    expect(localDateKey(startOfMonth(new Date(2026, 0, 15), -1))).toBe("2025-12-01");
   });
 });

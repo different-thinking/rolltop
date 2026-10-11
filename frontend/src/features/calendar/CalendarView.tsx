@@ -4,7 +4,7 @@
 // leading system, so every write here goes through the API that reaches it
 // first.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
@@ -27,9 +27,11 @@ import {
   lensLaneCalendarIDs,
   localDateKey,
   minutesIntoDay,
+  monthPickerWeeks,
   providerName,
   readableTextColor,
   startOfDay,
+  startOfMonth,
   startOfWeek,
   timedEventTouchesDay,
   weekDays
@@ -43,20 +45,6 @@ const nowLineInterval = 60_000;
 /** calendarSettingsPath is where the reader chooses which calendars the view
  * lists. */
 const calendarSettingsPath = "/settings/account/preferences/calendars";
-
-/** dayLensKey remembers per browser whether the day lens is on. It is a way
- * of looking at the week, not a setting: a narrow laptop and a wide desk
- * screen want different answers, and losing it to cleared site data costs one
- * click. */
-const dayLensKey = "rolltop.calendar.dayLens";
-
-function storedDayLens(): boolean {
-  try {
-    return window.localStorage.getItem(dayLensKey) === "on";
-  } catch {
-    return false;
-  }
-}
 
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
@@ -94,7 +82,6 @@ export function CalendarView({
   const [dialogProblem, setDialogProblem] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
   const [now, setNow] = useState(() => new Date());
-  const [dayLens, setDayLens] = useState(storedDayLens);
   // The day the lens is open on, as a date key. null leaves the choice to
   // resolveLensIndex; "" is the reader having closed it, which holds until
   // they open a day again.
@@ -355,35 +342,23 @@ export function CalendarView({
   const todayKey = localDateKey(now);
   const weekLabel = weekRangeLabel(days[0], days[6]);
 
-  // The day lens: one day opened up with a lane per calendar, every other day
-  // sized by how much it has at once. Lanes follow the Calendars menu's order.
-  // Every day is laid out to size it, so the result is kept until the week,
-  // its events or the lens change rather than redone on every render (the
-  // now-line ticks once a minute).
+  // The day lens, which is how the week is always drawn: one day opened up
+  // with a lane per calendar, every other day sized by how much it has at
+  // once. Lanes follow the Calendars menu's order. Every day is laid out to
+  // size it, so the result is kept until the week, its events or the open day
+  // change rather than redone on every render (the now-line ticks once a
+  // minute).
   const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
-    const index = !dayLens || lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+    const index = lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
     const lanes =
       index >= 0
         ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
         : [];
-    const columns = dayLens
-      ? dayColumnWeights(events, days, index, lanes.length)
-          .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
-          .join(" ")
-      : undefined;
+    const columns = dayColumnWeights(events, days, index, lanes.length)
+      .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
+      .join(" ");
     return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
-  }, [dayLens, lensDayKey, days, events, todayKey, listedCalendars]);
-
-  const toggleDayLens = () => {
-    const next = !dayLens;
-    setDayLens(next);
-    setLensDayKey(null);
-    try {
-      window.localStorage.setItem(dayLensKey, next ? "on" : "off");
-    } catch {
-      // Remembering the choice is a convenience; the switch itself still works.
-    }
-  };
+  }, [lensDayKey, days, events, todayKey, listedCalendars]);
 
   const openEvent = (event: CalendarEvent, day: Date) => {
     setDialogProblem("");
@@ -435,8 +410,8 @@ export function CalendarView({
   return (
     <div className="calendar-shell">
       <section
-        className={`calendar-main ${dayLens ? "day-lens" : ""}`}
-        style={dayColumns ? ({ "--calendar-day-columns": dayColumns } as CSSProperties) : undefined}
+        className="calendar-main day-lens"
+        style={{ "--calendar-day-columns": dayColumns } as CSSProperties}
       >
         <header className="content-head calendar-head">
           <div className="calendar-nav">
@@ -459,7 +434,7 @@ export function CalendarView({
             >
               <Icon name="chevron_right" />
             </button>
-            <h1>{weekLabel}</h1>
+            <WeekPicker anchor={anchor} label={weekLabel} todayKey={todayKey} navigate={navigate} />
           </div>
           <div className="calendar-head-actions">
             <CalendarPicker
@@ -471,20 +446,6 @@ export function CalendarView({
               onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
               navigate={navigate}
             />
-            <button
-              type="button"
-              className="ghost calendar-lens-toggle"
-              aria-pressed={dayLens}
-              title={
-                dayLens
-                  ? "Turn the day lens off and give every day the same width"
-                  : "Open one day with a column per calendar; click a weekday to choose which"
-              }
-              onClick={toggleDayLens}
-            >
-              <Icon name="search" />
-              Day lens
-            </button>
             <button type="button" className="ghost" disabled={syncing || calendars.length === 0} onClick={() => void syncNow()}>
               <Icon name="sync" />
               {syncing ? "Syncing…" : "Sync now"}
@@ -522,13 +483,6 @@ export function CalendarView({
                 <span className="calendar-dayname-number">{day.getDate()}</span>
               </>
             );
-            if (!dayLens) {
-              return (
-                <div key={day.toISOString()} className={`calendar-dayname ${today}`}>
-                  {label}
-                </div>
-              );
-            }
             const open = index === lensIndex;
             return (
               <div key={day.toISOString()} className={`calendar-dayname ${today} ${open ? "lens-open" : ""}`}>
@@ -651,6 +605,250 @@ export function CalendarView({
           onRespond={(response) => void respond(response)}
           onClose={closeDialog}
         />
+      ) : null}
+    </div>
+  );
+}
+
+/** swipeThreshold is how far, in pixels, a horizontal drag across the week
+ * picker has to travel before it turns the month. Shorter, and a tap that
+ * wobbles turns it; a day cell is about this wide. */
+const swipeThreshold = 40;
+
+/** wheelThreshold is how much scrolling over the week picker turns the month
+ * once. A trackpad reports a gesture as dozens of small deltas, so they are
+ * added up rather than each one turning a month. */
+const wheelThreshold = 60;
+
+/** wheelGestureGap is how long, in milliseconds, the wheel has to be quiet
+ * before scrolling counts as a new gesture. A trackpad flick keeps reporting
+ * deltas through its momentum for hundreds of pixels; without a gap that whole
+ * flick would turn a month per threshold rather than once. */
+const wheelGestureGap = 200;
+
+/**
+ * WeekPicker is the week's date range in the header, and the way to any other
+ * week: pressing it opens a month with its weeks, which the reader turns with
+ * the arrows, a swipe, the scroll wheel or Page Up/Down, and picking a day
+ * opens the week it falls in. The arrows beside it still step one week.
+ */
+function WeekPicker({
+  anchor,
+  label,
+  todayKey,
+  navigate
+}: {
+  anchor: Date;
+  label: string;
+  todayKey: string;
+  navigate: (url: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [month, setMonth] = useState(() => startOfMonth(anchor));
+  // Which way the last turn went, so the new month slides in from that side.
+  const [direction, setDirection] = useState<"next" | "previous" | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; pointer: number } | null>(null);
+  // A swipe ends on a day button more often than not; the click that follows
+  // it is the end of the gesture, not a choice of week.
+  const swipedRef = useRef(false);
+  // The scroll gathered towards a turn, when the wheel last moved, and whether
+  // the current gesture has already turned the month.
+  const wheelRef = useRef({ total: 0, last: 0, turned: false });
+
+  const weeks = useMemo(() => monthPickerWeeks(month), [month]);
+  const anchorKey = localDateKey(anchor);
+
+  // Turning the month remounts the grid, and a day button that had the focus
+  // goes with it; the panel takes the focus back so the keyboard stays here.
+  useLayoutEffect(() => {
+    if (open && document.activeElement === document.body) panelRef.current?.focus();
+  }, [month, open]);
+
+  const turn = useCallback((months: number) => {
+    setDirection(months > 0 ? "next" : "previous");
+    setMonth((current) => startOfMonth(current, months));
+  }, []);
+
+  const toggle = () => {
+    if (!open) {
+      // The picker opens on the month of the week being shown, not wherever
+      // it was last left.
+      setMonth(startOfMonth(anchor));
+      setDirection(null);
+    }
+    setOpen(!open);
+  };
+
+  // A click anywhere else or Escape closes the picker; Page Up and Page Down
+  // turn the month while the focus is in the picker, and leave the page's own
+  // scrolling alone otherwise. The panel takes focus itself when it is
+  // clicked or swiped, so those keys keep working after a swipe.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (pointerEvent: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(pointerEvent.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") {
+        setOpen(false);
+        // Focus inside the panel would otherwise fall back to the page.
+        if (rootRef.current?.contains(document.activeElement)) buttonRef.current?.focus();
+      }
+      if (
+        (keyEvent.key === "PageUp" || keyEvent.key === "PageDown") &&
+        rootRef.current?.contains(document.activeElement)
+      ) {
+        keyEvent.preventDefault();
+        turn(keyEvent.key === "PageDown" ? 1 : -1);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, turn]);
+
+  // The wheel listener is attached by hand because React's is passive, and a
+  // scroll that turns the month must not also scroll the page behind it.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!open || !panel) return;
+    wheelRef.current = { total: 0, last: 0, turned: false };
+    const onWheel = (wheelEvent: WheelEvent) => {
+      wheelEvent.preventDefault();
+      const wheel = wheelRef.current;
+      // A pause ends the gesture: what was gathered before it is dropped, so
+      // stray deltas a minute apart never add up to a turn.
+      if (wheelEvent.timeStamp - wheel.last > wheelGestureGap) {
+        wheel.total = 0;
+        wheel.turned = false;
+      }
+      wheel.last = wheelEvent.timeStamp;
+      // One gesture turns one month; the rest of it is momentum.
+      if (wheel.turned) return;
+      const delta = Math.abs(wheelEvent.deltaX) > Math.abs(wheelEvent.deltaY) ? wheelEvent.deltaX : wheelEvent.deltaY;
+      // A mouse wheel in line mode reports a few lines, not pixels.
+      wheel.total += wheelEvent.deltaMode === 0 ? delta : delta * 20;
+      if (Math.abs(wheel.total) < wheelThreshold) return;
+      turn(wheel.total > 0 ? 1 : -1);
+      wheel.total = 0;
+      wheel.turned = true;
+    };
+    panel.addEventListener("wheel", onWheel, { passive: false });
+    return () => panel.removeEventListener("wheel", onWheel);
+  }, [open, turn]);
+
+  const choose = (day: Date, clickDetail: number) => {
+    // The flag is spent by the first click after a swipe whatever it was. A
+    // touch swipe or a drag across days usually produces no click at all, and
+    // a flag left standing would swallow the next choice made from the
+    // keyboard (a click with no pointer behind it, detail 0).
+    const swiped = swipedRef.current;
+    swipedRef.current = false;
+    if (swiped && clickDetail !== 0) return;
+    setOpen(false);
+    navigate(calendarURL(day));
+  };
+
+  const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  return (
+    <div className="calendar-week-picker" ref={rootRef}>
+      <h1>
+        <button
+          type="button"
+          ref={buttonRef}
+          className="calendar-week-picker-button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          title="Choose a week"
+          onClick={toggle}
+        >
+          <span>{label}</span>
+          <Icon name="expand_more" />
+        </button>
+      </h1>
+      {open ? (
+        <div
+          className="calendar-week-picker-panel"
+          ref={panelRef}
+          tabIndex={-1}
+          role="dialog"
+          aria-label="Choose a week"
+          onPointerDown={(pointerEvent) => {
+            swipedRef.current = false;
+            swipeRef.current = { x: pointerEvent.clientX, y: pointerEvent.clientY, pointer: pointerEvent.pointerId };
+          }}
+          onPointerUp={(pointerEvent) => {
+            const start = swipeRef.current;
+            swipeRef.current = null;
+            if (!start || start.pointer !== pointerEvent.pointerId) return;
+            const dx = pointerEvent.clientX - start.x;
+            const dy = pointerEvent.clientY - start.y;
+            if (Math.abs(dx) < swipeThreshold || Math.abs(dx) < Math.abs(dy)) return;
+            // Dragging the page to the left brings the next month in from the
+            // right, the way a phone's pages turn.
+            swipedRef.current = true;
+            turn(dx < 0 ? 1 : -1);
+          }}
+          onPointerCancel={() => {
+            swipeRef.current = null;
+          }}
+        >
+          <div className="calendar-week-picker-head">
+            <button type="button" className="icon-button" title="Previous month" onClick={() => turn(-1)}>
+              <Icon name="chevron_left" />
+            </button>
+            <span className="calendar-week-picker-month" aria-live="polite">
+              {monthLabel}
+            </span>
+            <button type="button" className="icon-button" title="Next month" onClick={() => turn(1)}>
+              <Icon name="chevron_right" />
+            </button>
+          </div>
+          <div
+            key={localDateKey(month)}
+            className={`calendar-week-picker-grid ${direction ? `slide-${direction}` : ""}`}
+          >
+            <div className="calendar-week-picker-week calendar-week-picker-weekdays" aria-hidden="true">
+              {weeks[0].map((day) => (
+                <span key={day.getDay()}>{day.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
+              ))}
+            </div>
+            {weeks.map((week) => {
+              const shown = localDateKey(week[0]) === anchorKey;
+              return (
+                <div key={localDateKey(week[0])} className={`calendar-week-picker-week ${shown ? "shown" : ""}`}>
+                  {week.map((day) => {
+                    const key = localDateKey(day);
+                    const outside = day.getMonth() !== month.getMonth();
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`calendar-week-picker-day ${outside ? "outside" : ""} ${
+                          key === todayKey ? "today" : ""
+                        }`}
+                        aria-current={key === todayKey ? "date" : undefined}
+                        aria-label={`${day.toLocaleDateString(undefined, { dateStyle: "full" })}${
+                          shown ? ", shown week" : ""
+                        }`}
+                        onClick={(clickEvent) => choose(day, clickEvent.detail)}
+                      >
+                        {day.getDate()}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -907,7 +1105,10 @@ function CopyMarks({
 
 /** resolveLensIndex picks the day the lens opens on: the one the reader chose
  * when it is in this week, otherwise today when today has anything timed,
- * otherwise the day with the most at once -- the day the lens exists for. */
+ * otherwise the day with the most at once -- the day the lens exists for. A
+ * week with nothing timed in it has no such day and opens none (-1), rather
+ * than widening Monday around an empty column -- which is also what the week
+ * looks like while its events are still loading. */
 function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: string | null, todayKey: string): number {
   const chosen = chosenKey ? days.findIndex((day) => localDateKey(day) === chosenKey) : -1;
   if (chosen >= 0) return chosen;
@@ -922,7 +1123,7 @@ function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: stri
       busiest = index;
     }
   });
-  return busiest;
+  return most > 0 ? busiest : -1;
 }
 
 /** dayAtOffset turns a double-click in a day column into the hour it landed on,
