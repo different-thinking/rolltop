@@ -259,7 +259,7 @@
   left: 0;
   top: calc(100% + 6px);
   z-index: 40;
-  width: min(280px, calc(100vw - 24px));
+  width: min(300px, calc(100vw - 24px));
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -329,9 +329,10 @@
   }
 }
 
+// The first column is the calendar week, narrower and quieter than the days.
 .calendar-week-picker-week {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: 26px repeat(7, minmax(0, 1fr));
   border-radius: 6px;
 
   &.shown {
@@ -344,6 +345,30 @@
   text-align: center;
   font-size: 11px;
   color: var(--muted);
+}
+
+.calendar-week-picker-number {
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
 }
 
 .calendar-week-picker-day {
