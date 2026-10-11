@@ -758,6 +758,29 @@ site and in review.
   deleted, because a group delete started from it would cancel the event for
   its guests from a calendar that shows none of it. One whose event is gone
   has no copies left and deletes like any event.
+- **Travel time is events of their own at the provider and part of the event
+  in Rolltop** (`backend/calendarlink/travel.go`). The journey there and back
+  is blocked as two real events in the event's calendar, so the time reads as
+  taken in every client that shows it -- a colleague booking a meeting, the
+  phone, Outlook -- and the week draws them as a hatched extension of the event
+  rather than as appointments (`foldLinkedEvents`, `layoutDayEvents`). Four
+  properties keep that honest. A block carries the event's link key under the
+  role `travelBefore` or `travelAfter`, mirrored in
+  `calendar_events.link_travel`, and belongs to the event it **touches** -- the
+  journey there ends where the event starts, the journey back starts where it
+  ends (`Store.ListCalendarEventTravel`): a key is handed down to every
+  occurrence of a series and the journey back starts where a back-to-back
+  occurrence would, so a block is never a member of a copy group and
+  `ListCalendarEventCopies` leaves it out. An event that gets travel and has
+  no key is given one in the same write, as the primary of a group of its own.
+  Every write to the event carries the blocks: a drag sends no travel fields
+  and the minutes it has follow it, a delete takes them along, and a block the
+  provider refuses afterwards is a `LinkedProblem` with `Travel` set, never a
+  reason to undo the event. A block nothing touches any more -- its event moved
+  or deleted in another client -- is drawn on its own, hatched, and is never
+  deleted by a sync: folding never hides what it cannot place, and nothing but
+  the reader deletes an event at the provider. A placeholder moves the journey
+  and never retitles or grows one, and an all-day event has none.
 - **Microsoft 365 is read in windows, not deltas.** Graph v1.0 has a delta
   cursor only for the primary calendar's view, and a delta cannot `$expand` the
   extended property the link lives in. So `m365calendar` reads the near window

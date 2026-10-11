@@ -40,7 +40,38 @@ type DraftState = {
   busyCopy: boolean;
   /** onlineMeeting is the "Teams meeting" box. */
   onlineMeeting: boolean;
+  /** travelBeforeOn and travelAfterOn are the travel boxes; the minutes are
+   * kept as typed, so unticking and ticking a box again keeps the number. */
+  travelBeforeOn: boolean;
+  travelBefore: string;
+  travelAfterOn: boolean;
+  travelAfter: string;
 };
+
+/** defaultTravelMinutes is what a travel box offers when it is ticked. */
+const defaultTravelMinutes = 30;
+
+/** maxTravelMinutes matches the server's bound on one journey. */
+const maxTravelMinutes = 12 * 60;
+
+/** travelDraft fills the travel fields from the minutes an event keeps. */
+function travelDraft(before: number | undefined, after: number | undefined) {
+  return {
+    travelBeforeOn: (before || 0) > 0,
+    travelBefore: String((before || 0) > 0 ? before : defaultTravelMinutes),
+    travelAfterOn: (after || 0) > 0,
+    travelAfter: String((after || 0) > 0 ? after : defaultTravelMinutes)
+  };
+}
+
+/** travelValue reads one travel field, or null when it is ticked but holds no
+ * usable number of minutes. */
+function travelValue(on: boolean, minutes: string): number | null {
+  if (!on) return 0;
+  const value = Number(minutes.trim());
+  if (!Number.isInteger(value) || value <= 0 || value > maxTravelMinutes) return null;
+  return value;
+}
 
 function pad(value: number): string {
   return String(value).padStart(2, "0");
@@ -80,7 +111,8 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number, busyTargetID
       attendees: event.attendees || [],
       copy,
       busyCopy,
-      onlineMeeting: Boolean(event.online_meeting)
+      onlineMeeting: Boolean(event.online_meeting),
+      ...travelDraft(0, 0)
     };
   }
   return {
@@ -96,7 +128,8 @@ function draftFromEvent(event: CalendarEvent, copyTargetID: number, busyTargetID
     attendees: event.attendees || [],
     copy,
     busyCopy,
-    onlineMeeting: Boolean(event.online_meeting)
+    onlineMeeting: Boolean(event.online_meeting),
+    ...travelDraft(event.travel_before_minutes, event.travel_after_minutes)
   };
 }
 
@@ -118,7 +151,8 @@ function draftForNewEvent(day: Date, calendarID: number): DraftState {
     attendees: [],
     copy: false,
     busyCopy: false,
-    onlineMeeting: false
+    onlineMeeting: false,
+    ...travelDraft(0, 0)
   };
 }
 
@@ -140,6 +174,9 @@ export type EventPrefill = {
   copy?: boolean;
   busyCopy?: boolean;
   onlineMeeting?: boolean;
+  /** travelBefore and travelAfter are the journey's minutes, 0 for none. */
+  travelBefore?: number;
+  travelAfter?: number;
 };
 
 /** draftFromPrefill fills the form for a new event from a prefill. */
@@ -157,7 +194,8 @@ function draftFromPrefill(prefill: EventPrefill, calendarID: number): DraftState
       .map((attendee) => ({ ...attendee, response: "", organizer: false, self: false })),
     copy: Boolean(prefill.copy),
     busyCopy: Boolean(prefill.busyCopy),
-    onlineMeeting: Boolean(prefill.onlineMeeting)
+    onlineMeeting: Boolean(prefill.onlineMeeting),
+    ...travelDraft(prefill.travelBefore, prefill.travelAfter)
   };
   if (prefill.allDay) {
     const inclusiveEnd = new Date(prefill.end.getTime() - 86_400_000);
@@ -377,6 +415,22 @@ export function EventDialog({
   const offerOnlineMeeting =
     editable && (calendar?.online_meeting_providers || []).length > 0 && !guestsElsewhere;
   const meetingLocked = Boolean(event?.online_meeting);
+  // Travel is the reader's own time around an appointment with a time of day.
+  // A placeholder has no journey of its own -- it moves the event's -- and a
+  // travel block standing alone is a journey, not something to travel to.
+  const offerTravel = editable && !placeholder && !event?.travel && !draft.allDay;
+  const travelTimes = useMemo(() => {
+    if (draft.allDay) return { leave: "", back: "" };
+    const start = parseLocalDateTime(draft.startDate, draft.startTime);
+    const end = parseLocalDateTime(draft.endDate || draft.startDate, draft.endTime);
+    const before = travelValue(draft.travelBeforeOn, draft.travelBefore);
+    const after = travelValue(draft.travelAfterOn, draft.travelAfter);
+    const clock = (value: Date) => value.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    return {
+      leave: start && before ? `leave at ${clock(new Date(start.getTime() - before * 60_000))}` : "",
+      back: end && after ? `back at ${clock(new Date(end.getTime() + after * 60_000))}` : ""
+    };
+  }, [draft]);
 
   const submit = (formEvent: FormEvent) => {
     formEvent.preventDefault();
@@ -389,10 +443,19 @@ export function EventDialog({
       setLocalProblem("Pick a calendar to save this to.");
       return;
     }
+    const travelBefore = travelValue(draft.travelBeforeOn, draft.travelBefore);
+    const travelAfter = travelValue(draft.travelAfterOn, draft.travelAfter);
+    if (offerTravel && (travelBefore === null || travelAfter === null)) {
+      setLocalProblem("Enter the travel time in whole minutes, up to 12 hours.");
+      return;
+    }
     setLocalProblem("");
     const withMeeting = { ...input, online_meeting: offerOnlineMeeting && draft.onlineMeeting };
     onSave({
       ...withMeeting,
+      // Only sent while the boxes are shown: an event whose dialog never
+      // offered them keeps the travel it has.
+      ...(offerTravel ? { travel_before_minutes: travelBefore || 0, travel_after_minutes: travelAfter || 0 } : {}),
       ...(offerCopy ? { copy: draft.copy } : {}),
       ...(offerBusyCopy ? { busy_copy: draft.busyCopy } : {})
     });
@@ -608,6 +671,43 @@ export function EventDialog({
             />
           </div>
 
+          {offerTravel ? (
+            <div className="calendar-travel" role="group" aria-label="Travel time">
+              <TravelField
+                id="calendar-event-travel-before"
+                label="Travel there"
+                on={draft.travelBeforeOn}
+                minutes={draft.travelBefore}
+                hint={travelTimes.leave}
+                disabled={saving}
+                onToggle={(on) => update({ travelBeforeOn: on })}
+                onMinutes={(minutes) => update({ travelBefore: minutes })}
+              />
+              <TravelField
+                id="calendar-event-travel-after"
+                label="Travel back"
+                on={draft.travelAfterOn}
+                minutes={draft.travelAfter}
+                hint={travelTimes.back}
+                disabled={saving}
+                onToggle={(on) => update({ travelAfterOn: on })}
+                onMinutes={(minutes) => update({ travelAfter: minutes })}
+              />
+              {draft.travelBeforeOn || draft.travelAfterOn ? (
+                <p className="calendar-dialog-note">
+                  Blocked as its own time in {provider}, so others see you as busy. It moves and is deleted with this
+                  event.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {event?.travel ? (
+            <p className="calendar-dialog-note">
+              This is travel time Rolltop blocked for an event that is no longer next to it — it was moved or deleted
+              somewhere else. Delete it if you no longer need it.
+            </p>
+          ) : null}
+
           <AttendeeEditor
             attendees={draft.attendees}
             disabled={!editable || saving || guestsElsewhere}
@@ -660,6 +760,9 @@ export function EventDialog({
                       : event.attendees.length > 0 && !event.my_response
                         ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
                         : `Delete this event in ${provider} too?`}
+                  {(event.travel_before_minutes || 0) > 0 || (event.travel_after_minutes || 0) > 0
+                    ? " Its travel time goes with it."
+                    : ""}
                 </span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete
@@ -688,6 +791,57 @@ export function EventDialog({
           </div>
         </div>
       </form>
+    </div>
+  );
+}
+
+/** TravelField is one side of the journey: a box to ask for it and the
+ * minutes it takes. */
+function TravelField({
+  id,
+  label,
+  on,
+  minutes,
+  hint,
+  disabled,
+  onToggle,
+  onMinutes
+}: {
+  id: string;
+  label: string;
+  on: boolean;
+  minutes: string;
+  hint: string;
+  disabled: boolean;
+  onToggle: (on: boolean) => void;
+  onMinutes: (minutes: string) => void;
+}) {
+  return (
+    <div className="calendar-travel-row">
+      <label className="calendar-checkbox">
+        <input type="checkbox" checked={on} disabled={disabled} onChange={(changeEvent) => onToggle(changeEvent.target.checked)} />
+        <Icon name="car" />
+        {label}
+      </label>
+      {on ? (
+        <>
+          <input
+            id={id}
+            className="calendar-travel-minutes"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={maxTravelMinutes}
+            step={5}
+            value={minutes}
+            disabled={disabled}
+            aria-label={`${label}, minutes`}
+            onChange={(changeEvent) => onMinutes(changeEvent.target.value)}
+          />
+          <span className="calendar-travel-unit">min</span>
+          {hint ? <span className="calendar-travel-hint">{hint}</span> : null}
+        </>
+      ) : null}
     </div>
   );
 }

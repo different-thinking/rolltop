@@ -165,15 +165,33 @@ export type PositionedEvent = {
    * there. */
   continuesBefore: boolean;
   continuesAfter: boolean;
+  /** travelBefore and travelAfter are the pixel heights of the journey there
+   * and back, drawn above and below the event within the same day. */
+  travelBefore: number;
+  travelAfter: number;
 };
 
 type Span = {
   event: CalendarEvent;
   start: number;
   end: number;
+  /** occupiedStart and occupiedEnd include the travel around the event: the
+   * reader is away for all of it, so an appointment during the journey
+   * overlaps the event as much as one during the event does. */
+  occupiedStart: number;
+  occupiedEnd: number;
   continuesBefore: boolean;
   continuesAfter: boolean;
 };
+
+/** travelMinutes reads an event's journey there and back, never negative. */
+export function travelMinutes(event: CalendarEvent): { before: number; after: number } {
+  if (event.all_day) return { before: 0, after: 0 };
+  return {
+    before: Math.max(0, event.travel_before_minutes || 0),
+    after: Math.max(0, event.travel_after_minutes || 0)
+  };
+}
 
 /**
  * layoutDayEvents places one day's timed events, sharing the column width
@@ -195,15 +213,22 @@ export function layoutDayEvents(events: CalendarEvent[], day: Date): PositionedE
     if (Number.isNaN(rawStart) || Number.isNaN(rawEnd)) continue;
     const end = Math.max(rawEnd, rawStart + minimumEventMinutes * msPerMinute);
     if (rawStart >= dayEnd || end <= dayStart) continue;
+    // The journey is drawn on the day of the event only: a block reaching
+    // into the evening before is part of an appointment that is not there.
+    const travel = travelMinutes(event);
+    const start = Math.max(rawStart, dayStart);
+    const clippedEnd = Math.min(end, dayEnd);
     spans.push({
       event,
-      start: Math.max(rawStart, dayStart),
-      end: Math.min(end, dayEnd),
+      start,
+      end: clippedEnd,
+      occupiedStart: Math.max(start - travel.before * msPerMinute, dayStart),
+      occupiedEnd: Math.min(clippedEnd + travel.after * msPerMinute, dayEnd),
       continuesBefore: rawStart < dayStart,
       continuesAfter: rawEnd > dayEnd
     });
   }
-  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  spans.sort((a, b) => a.occupiedStart - b.occupiedStart || a.occupiedEnd - b.occupiedEnd);
 
   const positioned: PositionedEvent[] = [];
   let cluster: Span[] = [];
@@ -214,12 +239,12 @@ export function layoutDayEvents(events: CalendarEvent[], day: Date): PositionedE
     const columnEnds: number[] = [];
     const assignment = new Map<Span, number>();
     for (const span of cluster) {
-      let column = columnEnds.findIndex((end) => end <= span.start);
+      let column = columnEnds.findIndex((end) => end <= span.occupiedStart);
       if (column === -1) {
         column = columnEnds.length;
-        columnEnds.push(span.end);
+        columnEnds.push(span.occupiedEnd);
       } else {
-        columnEnds[column] = span.end;
+        columnEnds[column] = span.occupiedEnd;
       }
       assignment.set(span, column);
     }
@@ -234,16 +259,18 @@ export function layoutDayEvents(events: CalendarEvent[], day: Date): PositionedE
         column: assignment.get(span) ?? 0,
         columns,
         continuesBefore: span.continuesBefore,
-        continuesAfter: span.continuesAfter
+        continuesAfter: span.continuesAfter,
+        travelBefore: ((span.start - span.occupiedStart) / msPerMinute / 60) * hourHeight,
+        travelAfter: ((span.occupiedEnd - span.end) / msPerMinute / 60) * hourHeight
       });
     }
     cluster = [];
     clusterEnd = -Infinity;
   };
   for (const span of spans) {
-    if (cluster.length > 0 && span.start >= clusterEnd) flush();
+    if (cluster.length > 0 && span.occupiedStart >= clusterEnd) flush();
     cluster.push(span);
-    clusterEnd = Math.max(clusterEnd, span.end);
+    clusterEnd = Math.max(clusterEnd, span.occupiedEnd);
   }
   flush();
   return positioned;

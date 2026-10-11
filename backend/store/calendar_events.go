@@ -35,6 +35,15 @@ const (
 	CalendarResponseTentative = "tentative"
 )
 
+const (
+	// CalendarTravelBefore marks the block that holds the journey to an
+	// event: it ends where the event starts.
+	CalendarTravelBefore = "before"
+	// CalendarTravelAfter marks the block that holds the journey back: it
+	// starts where the event ends.
+	CalendarTravelAfter = "after"
+)
+
 // allDayRangePadding widens a range query so an all-day event cannot fall out
 // of the week that shows it. All-day rows are stored at midnight UTC because
 // the date they name has no instant, so for a viewer far enough east or west
@@ -47,7 +56,7 @@ const calendarEventSelectColumns = `id, user_id, calendar_id, external_id, etag,
 	summary, description, location, status, start_at, end_at, all_day, time_zone,
 	recurring_event_id, organizer_email, organizer_name, attendees_json, my_response,
 	html_link, remote_updated_at, link_key, link_primary, online_meeting,
-	online_meeting_provider, online_meeting_url, link_masked`
+	online_meeting_provider, online_meeting_url, link_masked, link_travel`
 
 // CalendarAttendee is one invitee as Google reports them. It is display data:
 // nothing queries against it, so the list is stored as JSON on the event.
@@ -108,6 +117,14 @@ type CalendarEvent struct {
 	// else. Like the key it is read from the provider, so an edit keeps
 	// rendering the copy as a placeholder whatever its calendar is by then.
 	LinkMasked bool
+	// LinkTravel marks a travel block -- CalendarTravelBefore or
+	// CalendarTravelAfter -- held at the provider as an event of its own so
+	// the time reads as taken everywhere, and belonging to the event that
+	// carries its link key and touches it: a block before ends where that
+	// event starts, a block after starts where it ends. Like the other link
+	// fields it is read from the provider. A travel block is never a copy of
+	// anything; empty for every other event.
+	LinkTravel string
 	// OnlineMeeting marks an event that is held online -- a Teams meeting for
 	// a Microsoft calendar. On a write it asks for one to be created; the
 	// provider and the join link are only ever read back from the provider.
@@ -146,8 +163,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			 location, status, start_at, end_at, all_day, time_zone, recurring_event_id,
 			 organizer_email, organizer_name, attendees_json, my_response, html_link,
 			 remote_updated_at, link_key, link_primary, online_meeting, online_meeting_provider,
-			 online_meeting_url, link_masked, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 online_meeting_url, link_masked, link_travel, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, calendar_id, external_id) DO UPDATE SET
 			etag = excluded.etag,
 			ical_uid = excluded.ical_uid,
@@ -172,6 +189,7 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			online_meeting_provider = excluded.online_meeting_provider,
 			online_meeting_url = excluded.online_meeting_url,
 			link_masked = excluded.link_masked,
+			link_travel = excluded.link_travel,
 			updated_at = excluded.updated_at`,
 		userID, event.CalendarID, trimLimit(externalID, 300), trimLimit(event.ETag, 200),
 		trimLimit(event.ICalUID, 300), trimLimit(event.Summary, 500),
@@ -184,7 +202,7 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary),
 		boolInt(event.OnlineMeeting), trimLimit(strings.TrimSpace(event.OnlineMeetingProvider), 60),
 		trimLimit(strings.TrimSpace(event.OnlineMeetingURL), 2000),
-		boolInt(event.Linked() && event.LinkMasked), ts, ts)
+		boolInt(event.Linked() && event.LinkMasked), storedTravel(event), ts, ts)
 	if err != nil {
 		return CalendarEvent{}, err
 	}
@@ -251,13 +269,52 @@ func (s *Store) ListCalendarEventCopies(ctx context.Context, userID int64, event
 	}
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
 		FROM calendar_events
-		WHERE user_id = ? AND link_key = ? AND start_at = ? AND calendar_id <> ?
+		WHERE user_id = ? AND link_key = ? AND start_at = ? AND calendar_id <> ? AND link_travel = ''
 		ORDER BY link_primary DESC, id ASC`,
 		userID, key, timeUnix(event.StartAt), event.CalendarID)
 	if err != nil {
 		return nil, err
 	}
 	return collectCalendarEvents(rows)
+}
+
+// ListCalendarEventTravel returns the travel blocks of one event: the rows
+// carrying its link key whose role is travel and which touch it -- a block
+// before ending where it starts, a block after starting where it ends. Every
+// copy of a linked event shares its bounds, so the blocks are found the same
+// way through any copy and in whichever calendar they were made. Touching is
+// part of the identity for the reason the start is part of a copy's: a key is
+// handed down to every occurrence of a series, and a block somebody moved at
+// the provider is no longer this event's journey. A travel block has none of
+// its own.
+func (s *Store) ListCalendarEventTravel(ctx context.Context, userID int64, event CalendarEvent) ([]CalendarEvent, error) {
+	key := strings.TrimSpace(event.LinkKey)
+	if userID <= 0 || key == "" || event.LinkTravel != "" || event.AllDay {
+		return []CalendarEvent{}, nil
+	}
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+		FROM calendar_events
+		WHERE user_id = ? AND link_key = ? AND all_day = 0
+			AND ((link_travel = ? AND end_at = ?) OR (link_travel = ? AND start_at = ?))
+		ORDER BY start_at ASC, id ASC`,
+		userID, key, CalendarTravelBefore, timeUnix(event.StartAt), CalendarTravelAfter, timeUnix(event.EndAt))
+	if err != nil {
+		return nil, err
+	}
+	return collectCalendarEvents(rows)
+}
+
+// storedTravel is the travel role a row is stored with: one of the two known
+// roles on a linked event, nothing otherwise.
+func storedTravel(event CalendarEvent) string {
+	if !event.Linked() {
+		return ""
+	}
+	switch event.LinkTravel {
+	case CalendarTravelBefore, CalendarTravelAfter:
+		return event.LinkTravel
+	}
+	return ""
 }
 
 // collectCalendarEvents scans every row of an event query and closes it.
@@ -435,7 +492,7 @@ func scanCalendarEvent(dest scanDest) (CalendarEvent, error) {
 		&event.Status, &startAt, &endAt, &allDay, &event.TimeZone, &event.RecurringEventID,
 		&event.OrganizerEmail, &event.OrganizerName, &attendees, &event.MyResponse,
 		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary, &onlineMeeting,
-		&event.OnlineMeetingProvider, &event.OnlineMeetingURL, &linkMasked); err != nil {
+		&event.OnlineMeetingProvider, &event.OnlineMeetingURL, &linkMasked, &event.LinkTravel); err != nil {
 		return CalendarEvent{}, err
 	}
 	event.OnlineMeeting = onlineMeeting != 0

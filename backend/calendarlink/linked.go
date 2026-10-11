@@ -54,6 +54,9 @@ type LinkedProblem struct {
 	CalendarID int64
 	Action     LinkedAction
 	Err        error
+	// Travel names the travel block the problem concerns
+	// (store.CalendarTravelBefore or After); empty for a copy.
+	Travel string
 }
 
 // CopyChange is what an edit asks of the copy in one of the reader's target
@@ -254,6 +257,7 @@ func UpdateGroupTargets(ctx context.Context, w Writer, userID int64, existing, e
 	edited.LinkKey = existing.LinkKey
 	edited.LinkPrimary = existing.LinkPrimary
 	edited.LinkMasked = existing.LinkMasked
+	edited.LinkTravel = existing.LinkTravel
 	if throughPlaceholder {
 		// A placeholder never takes on content, whoever asks: the dialog
 		// greys these fields out, but the route accepts whatever is sent, and
@@ -355,6 +359,7 @@ func followCopy(updated, copied store.CalendarEvent, throughPlaceholder bool, ti
 	follow.LinkKey = copied.LinkKey
 	follow.LinkPrimary = copied.LinkPrimary
 	follow.LinkMasked = copied.LinkMasked
+	follow.LinkTravel = copied.LinkTravel
 	follow.OnlineMeeting = copied.OnlineMeeting
 	follow.OnlineMeetingProvider = copied.OnlineMeetingProvider
 	follow.OnlineMeetingURL = copied.OnlineMeetingURL

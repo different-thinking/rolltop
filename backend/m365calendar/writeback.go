@@ -231,6 +231,7 @@ func (s *Syncer) storeWritten(ctx context.Context, userID int64, calendar store.
 	row := ToEvent(written, calendar.ID, connection.Email)
 	if row.LinkKey == "" {
 		row.LinkKey, row.LinkPrimary, row.LinkMasked = submitted.LinkKey, submitted.LinkPrimary, submitted.LinkMasked
+		row.LinkTravel = submitted.LinkTravel
 	}
 	return s.Store.UpsertCalendarEvent(ctx, userID, row)
 }

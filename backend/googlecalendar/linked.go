@@ -27,6 +27,10 @@ const (
 	linkRolePrimary  = "primary"
 	linkRoleCopy     = "copy"
 	linkRoleBusy     = "busy"
+	// linkRoleTravelBefore and linkRoleTravelAfter mark the travel blocks
+	// around an event: events of their own in its calendar, carrying its key.
+	linkRoleTravelBefore = "travelBefore"
+	linkRoleTravelAfter  = "travelAfter"
 )
 
 // The pair logic is shared with Microsoft 365 and lives in calendarlink; these
@@ -55,15 +59,31 @@ func NewLinkKey() string {
 // the key, whether this is the copy that was entered, and whether it is a
 // placeholder.
 func eventLink(event Event) (key string, primary, masked bool) {
+	key, role := eventLinkRole(event)
+	return key, role == linkRolePrimary, role == linkRoleBusy
+}
+
+// eventTravel reads whether an event is a travel block, and which one.
+func eventTravel(event Event) string {
+	_, role := eventLinkRole(event)
+	switch role {
+	case linkRoleTravelBefore:
+		return store.CalendarTravelBefore
+	case linkRoleTravelAfter:
+		return store.CalendarTravelAfter
+	}
+	return ""
+}
+
+func eventLinkRole(event Event) (key, role string) {
 	if event.ExtendedProperties == nil {
-		return "", false, false
+		return "", ""
 	}
 	key = strings.TrimSpace(event.ExtendedProperties.Private[linkKeyProperty])
 	if key == "" {
-		return "", false, false
+		return "", ""
 	}
-	role := event.ExtendedProperties.Private[linkRoleProperty]
-	return key, role == linkRolePrimary, role == linkRoleBusy
+	return key, event.ExtendedProperties.Private[linkRoleProperty]
 }
 
 // linkProperties renders an event's link for a write, or nothing for an event
@@ -75,6 +95,10 @@ func linkProperties(event store.CalendarEvent) *EventExtendedProperties {
 	}
 	role := linkRoleCopy
 	switch {
+	case event.LinkTravel == store.CalendarTravelBefore:
+		role = linkRoleTravelBefore
+	case event.LinkTravel == store.CalendarTravelAfter:
+		role = linkRoleTravelAfter
 	case event.LinkPrimary:
 		role = linkRolePrimary
 	case event.LinkMasked:

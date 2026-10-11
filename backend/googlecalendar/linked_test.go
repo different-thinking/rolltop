@@ -388,3 +388,18 @@ func TestCreateRemoteEventWithPlaceholderMarksItAtGoogle(t *testing.T) {
 		t.Fatalf("read back key=%q primary=%v masked=%v", key, primary, masked)
 	}
 }
+
+// A travel block's role survives the round trip through Google: written as
+// travelBefore or travelAfter and read back as the same block, never as a copy.
+func TestTravelRoleRoundTrips(t *testing.T) {
+	for _, side := range []string{store.CalendarTravelBefore, store.CalendarTravelAfter} {
+		written := linkProperties(store.CalendarEvent{LinkKey: "k", LinkTravel: side})
+		read := ToEvent(Event{ID: "x", ExtendedProperties: written}, 1)
+		if read.LinkKey != "k" || read.LinkTravel != side || read.LinkPrimary || read.LinkMasked {
+			t.Fatalf("%s read back as %+v", side, read)
+		}
+	}
+	if plain := ToEvent(Event{ID: "x", ExtendedProperties: linkProperties(store.CalendarEvent{LinkKey: "k", LinkPrimary: true})}, 1); plain.LinkTravel != "" {
+		t.Fatalf("primary read back as travel %q", plain.LinkTravel)
+	}
+}

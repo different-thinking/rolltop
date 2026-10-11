@@ -1204,6 +1204,15 @@ export type CalendarEvent = {
   online_meeting: boolean;
   online_meeting_provider: string;
   online_meeting_url: string;
+  /** travel_before_minutes and travel_after_minutes are the journey there and
+   * back blocked around the event. The blocks are events of their own at the
+   * provider, so the time reads as taken everywhere; the week draws them as
+   * part of this event. */
+  travel_before_minutes?: number;
+  travel_after_minutes?: number;
+  /** travel marks a travel block drawn on its own ("before" or "after"):
+   * one whose event is not drawn. Folded blocks never arrive. */
+  travel?: string;
 };
 
 /** CalendarEventCopy is one other copy of a linked event. */
@@ -1231,6 +1240,11 @@ export type CalendarEventInput = {
   /** online_meeting asks for a Teams meeting. Once an event is online it
    * stays so; false on an edit does not take it back. */
   online_meeting?: boolean;
+  /** travel_before_minutes and travel_after_minutes ask for the journey
+   * there and back. Left out, an edit keeps the travel the event has; zero
+   * takes that side away. */
+  travel_before_minutes?: number;
+  travel_after_minutes?: number;
 };
 
 /** DuplicateAccountSummary is one account's share of the hidden duplicate copies. */
