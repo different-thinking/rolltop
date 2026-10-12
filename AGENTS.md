@@ -667,7 +667,11 @@ site and in review.
   day opens it there. A week with nothing timed in it opens no day on its own
   (`resolveLensIndex`), rather than widening Monday around an empty column. The widths are one custom property, `--calendar-day-columns`, set on
   `.calendar-main` and read by the day names, the all-day bar and the grid
-  alike -- set it on one of them only and the columns stop lining up. Lanes
+  alike -- set it on one of them only and the columns stop lining up. The
+  grid is the one row that scrolls, so all three reserve its scrollbar
+  (`scrollbar-gutter: stable`, which needs a non-visible overflow to apply):
+  without that the grid's columns are a scrollbar narrower than the ones
+  above them and every edge drifts further left towards Sunday. Lanes
   follow `calendarAccountGroups`, the one order the Calendars menu and the calendar
   settings use, and a calendar the order does not know still gets a lane
   (`lensLaneCalendarIDs`): drawing an event in an unnamed lane is recoverable,
