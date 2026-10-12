@@ -428,6 +428,13 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   display: grid;
   grid-template-columns: $calendar-gutter $calendar-day-columns;
   border-bottom: 1px solid var(--border);
+  // The time grid below is the one scrolling region, and its scrollbar takes
+  // its width out of the day columns. These two rows reserve the same gutter
+  // (which needs a non-visible overflow to apply) so a column edge up here is
+  // the same column edge down there; on overlay scrollbars all three reserve
+  // nothing and still agree.
+  overflow: hidden;
+  scrollbar-gutter: stable;
 }
 
 .calendar-gutter {
@@ -496,6 +503,7 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   display: grid;
   grid-template-columns: $calendar-gutter $calendar-day-columns;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   // The grid is the only scrolling region, so the header and the all-day bar
   // stay put while a day is scrolled.
   max-height: calc(100vh - 240px);
