@@ -506,6 +506,7 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   // and its cells are padded less than the global ring reaches, so the ring
   // draws inside the chip the way the day-name buttons' does.
   &:focus-visible {
+    outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 }
