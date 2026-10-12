@@ -423,18 +423,23 @@
 $calendar-gutter: 58px;
 $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 
+// The time grid is the one scrolling region, and its scrollbar takes its width
+// out of the day columns. All three rows reserve that gutter, declared once for
+// the same reason the columns are, so a column edge up here is the same column
+// edge down there; on overlay scrollbars all three reserve nothing and still
+// agree. The two header rows need a non-visible overflow for it to apply.
+.calendar-daynames,
+.calendar-allday,
+.calendar-grid {
+  scrollbar-gutter: stable;
+}
+
 .calendar-daynames,
 .calendar-allday {
   display: grid;
   grid-template-columns: $calendar-gutter $calendar-day-columns;
   border-bottom: 1px solid var(--border);
-  // The time grid below is the one scrolling region, and its scrollbar takes
-  // its width out of the day columns. These two rows reserve the same gutter
-  // (which needs a non-visible overflow to apply) so a column edge up here is
-  // the same column edge down there; on overlay scrollbars all three reserve
-  // nothing and still agree.
   overflow: hidden;
-  scrollbar-gutter: stable;
 }
 
 .calendar-gutter {
@@ -496,6 +501,13 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   font-size: 11px;
   text-align: left;
   cursor: pointer;
+
+  // The all-day bar clips its overflow to reserve the grid's scrollbar gutter,
+  // and its cells are padded less than the global ring reaches, so the ring
+  // draws inside the chip the way the day-name buttons' does.
+  &:focus-visible {
+    outline-offset: -2px;
+  }
 }
 
 .calendar-grid {
@@ -503,7 +515,6 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   display: grid;
   grid-template-columns: $calendar-gutter $calendar-day-columns;
   overflow-y: auto;
-  scrollbar-gutter: stable;
   // The grid is the only scrolling region, so the header and the all-day bar
   // stay put while a day is scrolled.
   max-height: calc(100vh - 240px);
