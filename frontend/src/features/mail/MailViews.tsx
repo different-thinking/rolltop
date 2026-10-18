@@ -3357,11 +3357,13 @@ function MessageList({
                 {attachmentNames.length > 0 ? (
                   <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
                     <Icon name="attach_file" />
-                    <HighlightedText
-                      text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
-                      query={searchQuery}
-                      terms={matchTerms}
-                    />
+                    <span className="attachment-preview-names">
+                      <HighlightedText
+                        text={attachmentMatches.length > 0 ? attachmentMatches.join(", ") : attachmentNames.join(", ")}
+                        query={searchQuery}
+                        terms={matchTerms}
+                      />
+                    </span>
                   </span>
                 ) : conversation.has_attachments ? <Icon name="attach_file" /> : null}
               </span>
