@@ -354,6 +354,12 @@
   cursor: pointer;
   transition: transform .18s cubic-bezier(.2, .8, .2, 1);
   z-index: 1;
+  // A horizontal move on a row is a swipe, so the browser keeps only vertical
+  // panning for itself. Without this a browser - unlike the native shell's
+  // WebView - may claim a slightly diagonal swipe as a pan and cancel the
+  // touch halfway through. React's touch listeners are passive, so the
+  // preventDefault in the swipe handler cannot do that job.
+  touch-action: pan-y pinch-zoom;
 
   // Read and unread part ways the same way Gmail's rows do: a shaded ground
   // and regular weight against a plain ground and bold ink. No accent bar.
@@ -999,7 +1005,9 @@
     color: var(--text);
   }
 
-  > span {
+  // The names get a span of their own because HighlightedText hands back a
+  // bare text node when nothing is highlighted, which no selector reaches.
+  .attachment-preview-names {
     @include truncate;
   }
 }

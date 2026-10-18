@@ -1,4 +1,4 @@
-// Shared action metadata and recurring snooze calculations for Android row swipes.
+// Shared action metadata and recurring snooze calculations for touch row swipes.
 
 import type { SwipeAction, SwipePreferences, SwipeSnoozePreset } from "../types";
 
@@ -15,6 +15,25 @@ export const swipeSnoozeChoices: Array<{ value: SwipeSnoozePreset; label: string
   { value: "tomorrow", label: "Tomorrow morning" },
   { value: "next_week", label: "Next Monday" }
 ];
+
+/**
+ * rowSwipeAvailable says whether the message list should answer a horizontal
+ * touch with a row swipe. It used to be the native Android shell alone, which
+ * left the installed web app and a phone browser with neither swipes nor the
+ * hover toolbar a narrow row hides - no way to act on a row without opening
+ * it. Any screen with touch input gets them now; the native shell keeps its
+ * own long-press drag, which stays tied to the bridge.
+ */
+export function rowSwipeAvailable(
+  nativeShell: boolean,
+  env: { maxTouchPoints?: number; matchMedia?: (query: string) => { matches: boolean } } = typeof window === "undefined"
+    ? {}
+    : { maxTouchPoints: window.navigator.maxTouchPoints, matchMedia: window.matchMedia?.bind(window) }
+): boolean {
+  if (nativeShell) return true;
+  if ((env.maxTouchPoints || 0) > 0) return true;
+  return Boolean(env.matchMedia?.("(pointer: coarse)").matches);
+}
 
 export function defaultSwipePreferences(): SwipePreferences {
   return {
