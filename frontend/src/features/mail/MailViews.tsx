@@ -1770,7 +1770,7 @@ function MessageList({
   const nativeTouchDrag = androidNativeAvailable();
   // Swipes are a touch gesture, not a native-shell feature: the installed web
   // app has them too. Long-press drag stays native, it needs the bridge.
-  const touchSwipe = rowSwipeAvailable(nativeTouchDrag);
+  const touchSwipe = useMemo(() => rowSwipeAvailable(nativeTouchDrag), [nativeTouchDrag]);
   const effectiveSwipePreferences = swipePreferences || defaultSwipePreferences();
   const leftSwipePresentation = swipeActionPresentation(effectiveSwipePreferences.left_action);
   const rightSwipePresentation = swipeActionPresentation(effectiveSwipePreferences.right_action);
