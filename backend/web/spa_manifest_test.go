@@ -180,7 +180,9 @@ func TestShippedManifestsAreTwoAppsWithTheirOwnIcons(t *testing.T) {
 			t.Fatalf("%s needs a 512px PNG and a maskable icon to install everywhere", name)
 		}
 	}
-	if strings.Contains(calendar.Icons[0].Src, "mail") {
-		t.Fatalf("calendar app uses the mail icon: %+v", calendar.Icons)
+	for _, ic := range calendar.Icons {
+		if strings.Contains(ic.Src, "mail") {
+			t.Fatalf("calendar app uses the mail icon: %s", ic.Src)
+		}
 	}
 }
