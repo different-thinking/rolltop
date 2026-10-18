@@ -82,21 +82,37 @@ export async function loadCalendarOutbox(userID: number): Promise<QueuedCalendar
   activeUserID = userID;
   queue = [];
   notify();
-  loading = (async () => {
-    const stored = await loadOfflineEntry<unknown>(userID, "calendar-outbox", queueName);
+  const load = (async () => {
+    const items = await storedQueue(userID);
     if (activeUserID !== userID) return;
-    const items = Array.isArray(stored?.data) ? stored.data.filter(validItem) : [];
     if (items.length > 0) {
       queue = items;
       notify();
     }
   })();
+  loading = load;
   try {
-    await loading;
+    await load;
   } finally {
-    loading = null;
+    // Only this load's own marker: a load for the next user may already have
+    // replaced it, and clearing that one would hand a caller for the new user
+    // an empty queue before its load has finished.
+    if (loading === load) loading = null;
   }
   return queue;
+}
+
+async function storedQueue(userID: number): Promise<QueuedCalendarEvent[]> {
+  const stored = await loadOfflineEntry<unknown>(userID, "calendar-outbox", queueName);
+  return Array.isArray(stored?.data) ? stored.data.filter(validItem) : [];
+}
+
+// A write for a user other than the signed-in one goes to that user's stored
+// queue and nowhere near the queue in memory: a flush still settling a request
+// it sent before a sign-out records the outcome for the user who entered the
+// event, without making that user the active one again.
+async function updateStoredQueue(userID: number, update: (items: QueuedCalendarEvent[]) => QueuedCalendarEvent[]): Promise<void> {
+  await saveOfflineEntry(userID, "calendar-outbox", queueName, update(await storedQueue(userID)));
 }
 
 async function commit(userID: number, next: QueuedCalendarEvent[]): Promise<void> {
@@ -155,6 +171,10 @@ export async function replaceQueuedCalendarEvent(userID: number, localID: string
 }
 
 export async function removeQueuedCalendarEvent(userID: number, localID: string): Promise<void> {
+  if (activeUserID !== userID) {
+    await updateStoredQueue(userID, (items) => items.filter((item) => item.local_id !== localID));
+    return;
+  }
   await loadCalendarOutbox(userID);
   if (activeUserID !== userID) return;
   const next = queue.filter((item) => item.local_id !== localID);
@@ -162,27 +182,36 @@ export async function removeQueuedCalendarEvent(userID: number, localID: string)
 }
 
 export async function markQueuedCalendarEventError(userID: number, localID: string, error: string): Promise<void> {
+  const mark = (items: QueuedCalendarEvent[]) => items.map((item) => (item.local_id === localID ? { ...item, error } : item));
+  if (activeUserID !== userID) {
+    await updateStoredQueue(userID, mark);
+    return;
+  }
   await loadCalendarOutbox(userID);
   if (activeUserID !== userID) return;
-  await commit(userID, queue.map((item) => (item.local_id === localID ? { ...item, error } : item)));
+  await commit(userID, mark(queue));
 }
 
 /**
  * flushCalendarOutbox sends the waiting events, in order, through `create`. It
  * stops at the first request that never got an answer and leaves a refused
  * event in place with its reason; see the rules at the top of the file. One
- * flush runs at a time.
+ * flush runs at a time per user: a second call for the same user joins the
+ * running one, and a call for another user - a sign-in while the previous
+ * user's flush is still settling - starts its own rather than being handed
+ * the other user's outcome.
  */
-let flushing: Promise<{ sent: number; refused: number }> | null = null;
+type FlushOutcome = { sent: number; refused: number };
+let flushing: { userID: number; promise: Promise<FlushOutcome> } | null = null;
 
 export function flushCalendarOutbox(
   userID: number,
   create: (input: CalendarEventInput) => Promise<unknown>,
   isNetworkFailure: (err: unknown) => boolean,
   describe: (err: unknown) => string
-): Promise<{ sent: number; refused: number }> {
-  if (flushing) return flushing;
-  flushing = (async () => {
+): Promise<FlushOutcome> {
+  if (flushing && flushing.userID === userID) return flushing.promise;
+  const promise: Promise<FlushOutcome> = (async () => {
     const outcome = { sent: 0, refused: 0 };
     await loadCalendarOutbox(userID);
     const waiting = queue.filter((item) => !item.error);
@@ -204,9 +233,10 @@ export function flushCalendarOutbox(
     }
     return outcome;
   })().finally(() => {
-    flushing = null;
+    if (flushing?.promise === promise) flushing = null;
   });
-  return flushing;
+  flushing = { userID, promise };
+  return promise;
 }
 
 /**

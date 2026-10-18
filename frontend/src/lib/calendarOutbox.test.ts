@@ -96,6 +96,50 @@ describe("calendarOutbox", () => {
     expect(calendarOutboxSnapshot()).toEqual([]);
   });
 
+  it("a sign-in during another user's flush starts a flush of its own, and the first settles for its own user", async () => {
+    await enqueueCalendarEvent(1, input("theirs"));
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started: () => void = () => undefined;
+    const createStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = flushCalendarOutbox(1, () => {
+      started();
+      return blocked;
+    }, () => false, String);
+    // The first user's request is on the wire when the second user signs in.
+    await createStarted;
+    await enqueueCalendarEvent(2, input("mine"));
+    const sent: string[] = [];
+    const second = flushCalendarOutbox(2, async (item) => {
+      sent.push(item.summary);
+    }, () => false, String);
+    expect(second).not.toBe(first);
+    expect(await second).toEqual({ sent: 1, refused: 0 });
+    expect(sent).toEqual(["mine"]);
+
+    release();
+    expect(await first).toEqual({ sent: 1, refused: 0 });
+    // The event the first flush sent is gone from its user's stored queue, and
+    // the signed-in user has not been switched back.
+    expect(calendarOutboxSnapshot()).toEqual([]);
+    resetCalendarOutboxForTests();
+    expect(await loadCalendarOutbox(1)).toEqual([]);
+  });
+
+  it("a load for the next user is not cut short by the previous user's load finishing", async () => {
+    await enqueueCalendarEvent(2, input("two"));
+    resetCalendarOutboxForTests();
+    const firstLoad = loadCalendarOutbox(1);
+    const secondLoad = loadCalendarOutbox(2);
+    await firstLoad;
+    expect((await loadCalendarOutbox(2)).map((item) => item.input.summary)).toEqual(["two"]);
+    await secondLoad;
+  });
+
   it("removes and marks by local id", async () => {
     const item = await enqueueCalendarEvent(1, input("x"));
     await markQueuedCalendarEventError(1, item!.local_id, "no");
