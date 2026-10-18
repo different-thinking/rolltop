@@ -17,7 +17,7 @@ import { recordFiledMessages, releaseFiledMessages } from "./lib/filedMessages";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
-import { appIconURL, syncDocumentIcon } from "./lib/appIcon";
+import { appIconURL, syncDocumentIcon, syncDocumentManifest } from "./lib/appIcon";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
@@ -273,9 +273,11 @@ export default function App() {
   }, []);
 
   // The tab icon names the area on screen, so a calendar window and a mail
-  // window stay distinguishable in the tab strip and the window switcher.
+  // window stay distinguishable in the tab strip and the window switcher; the
+  // manifest link makes "Install" on a calendar page install the calendar app.
   useEffect(() => {
     syncDocumentIcon(location.path);
+    syncDocumentManifest(location.path);
   }, [location.path]);
 
   useEffect(() => {

@@ -144,8 +144,10 @@ func TestServiceWorkerDoesNotCacheThePersonalisedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read service worker: %v", err)
 	}
-	if bytes.Contains(raw, []byte("manifest.webmanifest")) {
-		t.Fatal("sw.js still caches /manifest.webmanifest, which is now per-user")
+	for _, manifest := range webManifestPaths {
+		if bytes.Contains(raw, []byte(strings.TrimPrefix(manifest, "/"))) {
+			t.Fatalf("sw.js caches %s, which is per-user", manifest)
+		}
 	}
 }
 

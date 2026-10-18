@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appAreaForPath, appIconURL } from "./appIcon";
+import { appAreaForPath, appIconURL, appManifestURL } from "./appIcon";
 
 describe("appAreaForPath", () => {
   it("names the calendar for its page and the routes below it", () => {
@@ -24,5 +24,13 @@ describe("appIconURL", () => {
   it("gives each area its own icon", () => {
     const urls = new Set([appIconURL("mail"), appIconURL("calendar"), appIconURL("contacts")]);
     expect(urls.size).toBe(3);
+  });
+});
+
+describe("appManifestURL", () => {
+  it("installs the calendar as its own app and everything else as mail", () => {
+    expect(appManifestURL("calendar")).toBe("/calendar.webmanifest");
+    expect(appManifestURL("mail")).toBe("/manifest.webmanifest");
+    expect(appManifestURL("contacts")).toBe("/manifest.webmanifest");
   });
 });

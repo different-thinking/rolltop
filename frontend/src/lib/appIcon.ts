@@ -1,6 +1,7 @@
 // File overview: Picks the tab icon for the area the reader is in, so a window
 // showing the calendar or the address book can be told apart from one showing
-// mail without reading its title.
+// mail without reading its title, and the manifest the browser would install
+// from there, so the calendar installs as an app of its own.
 
 import { organizerRoute } from "./routes";
 
@@ -12,6 +13,14 @@ const appIconURLs: Record<AppArea, string> = {
   calendar: "/icons/calendar.svg",
   contacts: "/icons/contacts.svg"
 };
+
+/**
+ * The calendar is the one area that installs separately. backend/web/spa.go
+ * links the same manifests on the first load (webManifestPathForRoute); this
+ * keeps the link right as the reader moves between areas without a reload.
+ */
+const mailManifestURL = "/manifest.webmanifest";
+const calendarManifestURL = "/calendar.webmanifest";
 
 /**
  * appAreaForPath answers through organizerRoute, the one definition of which
@@ -47,4 +56,22 @@ export function syncDocumentIcon(path: string): void {
     link.type = "image/svg+xml";
     link.setAttribute("href", href);
   }
+}
+
+/** appManifestURL is the manifest a browser installs from a page in an area. */
+export function appManifestURL(area: AppArea): string {
+  return area === "calendar" ? calendarManifestURL : mailManifestURL;
+}
+
+/**
+ * syncDocumentManifest points the shell's manifest link at the area's app, so
+ * "Install" on a calendar page installs the calendar rather than the mail app.
+ * It only ever edits the link the shell ships: a shell without one is a page
+ * that does not install, and adding a link would change that.
+ */
+export function syncDocumentManifest(path: string): void {
+  const link = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+  if (!link) return;
+  const href = appManifestURL(appAreaForPath(path));
+  if (link.getAttribute("href") !== href) link.setAttribute("href", href);
 }

@@ -1,4 +1,5 @@
 {
+  "id": "/mail/relevant",
   "name": "rolltop",
   "short_name": "rolltop",
   "description": "Self-hosted email mirror, search, and compose",
