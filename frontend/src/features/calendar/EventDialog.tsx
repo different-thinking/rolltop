@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
+import { pendingReason } from "../../lib/calendarOutbox";
 import { Icon } from "../../components/Icon";
 import { calendarColor, eventEditable, providerName } from "./weekModel";
 
@@ -488,7 +489,7 @@ export function EventDialog({
           {event?.pending_offline ? (
             <p className="calendar-dialog-note calendar-dialog-pending">
               {event.pending_error
-                ? `Your calendar refused this event: ${event.pending_error} Change it and save again, or discard it.`
+                ? `Your calendar refused this event: ${pendingReason(event.pending_error)}. Change it and save again, or discard it.`
                 : "Entered offline. It is kept on this device and will be added to your calendar when you are back online."}
             </p>
           ) : null}

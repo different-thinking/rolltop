@@ -18,14 +18,22 @@ export function useCalendarOutboxFlush(userID: number, csrf: string, addToast: A
   const waiting = queued.filter((item) => !item.error).length;
   const addToastRef = useRef(addToast);
   addToastRef.current = addToast;
+  // The flush being reported on. Every event the running flush sends shrinks
+  // `waiting`, which runs this effect again and hands it the same flush; a
+  // report attached on each of those turns told the reader about three events
+  // three times over. One flush, one report.
+  const reportedRef = useRef<Promise<unknown> | null>(null);
   useEffect(() => {
     if (!userID || !csrf || !reachable || waiting === 0) return;
-    void flushCalendarOutbox(
+    const flush = flushCalendarOutbox(
       userID,
       (input) => api.createCalendarEvent(csrf, input),
       isNetworkError,
       messageFromError
-    ).then(({ sent, refused }) => {
+    );
+    if (reportedRef.current === flush) return;
+    reportedRef.current = flush;
+    void flush.then(({ sent, refused }) => {
       if (sent > 0) {
         addToastRef.current(sent === 1 ? "The event you entered offline is in your calendar now." : `${sent} events you entered offline are in your calendar now.`, "success");
       }

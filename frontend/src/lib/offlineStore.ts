@@ -116,7 +116,11 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function openDatabase(): Promise<IDBDatabase> {
+/** OfflineStoreUnavailable is IndexedDB refusing to open at all, as opposed to
+ * one read or write failing inside a database that works. */
+class OfflineStoreUnavailable extends Error {}
+
+function openDatabase(onClose: () => void): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, databaseVersion);
     request.onupgradeneeded = () => {
@@ -129,13 +133,19 @@ function openDatabase(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => {
       const db = request.result;
-      // Another tab upgrading the schema asks this connection to step aside;
-      // the next call reopens it.
-      db.onversionchange = () => db.close();
+      // Another tab upgrading the schema asks this connection to step aside,
+      // and the browser may close it on its own (storage evicted, the profile
+      // locked). Either way the cached handle goes with it, so the next call
+      // opens a fresh one instead of failing on a closed connection.
+      db.onversionchange = () => {
+        db.close();
+        onClose();
+      };
+      db.onclose = onClose;
       resolve(db);
     };
-    request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
-    request.onblocked = () => reject(new Error("IndexedDB open blocked"));
+    request.onerror = () => reject(new OfflineStoreUnavailable(request.error?.message || "IndexedDB open failed"));
+    request.onblocked = () => reject(new OfflineStoreUnavailable("IndexedDB open blocked"));
   });
 }
 
@@ -150,10 +160,13 @@ function indexedDBBackend(): OfflineBackend {
   let database: Promise<IDBDatabase> | null = null;
   function db(): Promise<IDBDatabase> {
     if (!database) {
-      database = openDatabase().catch((err) => {
+      const opened: Promise<IDBDatabase> = openDatabase(() => {
+        if (database === opened) database = null;
+      }).catch((err) => {
         database = null;
         throw err;
       });
+      database = opened;
     }
     return database;
   }
@@ -213,15 +226,21 @@ function currentBackend(): OfflineBackend {
   return backend;
 }
 
-// A failing IndexedDB - private mode in some browsers, a locked-down profile,
-// storage the browser has just evicted - degrades to memory for this tab rather
-// than failing every save and read. The switch happens once and is one-way for
-// the tab; the next tab tries IndexedDB again.
+// An IndexedDB that will not open - private mode in some browsers, a
+// locked-down profile - degrades to memory for this tab rather than failing
+// every save and read. The switch happens once and is one-way for the tab; the
+// next tab tries IndexedDB again. Only a refused open switches. A single read
+// or write failing inside a database that works - a quota hit on one large
+// thread is the ordinary case - answers with the fallback for that call alone:
+// switching on it would make every copy already stored unreadable for the
+// tab, and would let the calendar outbox in memory drift from the one on disk,
+// which the next page load would read back and send again.
 async function withBackend<T>(run: (store: OfflineBackend) => Promise<T>, fallback: T): Promise<T> {
+  const store = currentBackend();
   try {
-    return await run(currentBackend());
-  } catch {
-    if (!backendOverride && backend && typeof indexedDB !== "undefined") {
+    return await run(store);
+  } catch (err) {
+    if (err instanceof OfflineStoreUnavailable && !backendOverride && store === backend) {
       backend = memoryBackend();
       try {
         return await run(backend);

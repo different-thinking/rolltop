@@ -41,20 +41,31 @@ export function serverReachable(): boolean {
   return lastRequestReachable !== false;
 }
 
+// The rejections fetch itself produced, as `reportRequestOutcome` saw them. A
+// fetch that never got an answer rejects with a TypeError, but so does any
+// slip in the code that handles the answer, and the two must not read alike:
+// one is a reason to show a saved copy or queue an event, the other is a bug
+// that would then be reported to the reader as a lost connection. So the one
+// place that knows a rejection came out of fetch marks it, and the wording
+// browsers give that rejection is the fallback for an error nothing marked.
+const fetchRejections = new WeakSet<object>();
+const fetchRejectionMessage = /fetch|network|load failed/i;
+
 /**
- * isNetworkError reports a request that never got an answer: the browser's
- * fetch rejects with a TypeError for that and only that (an HTTP failure of any
- * status resolves). The retry inside `fetchGET` rethrows the original, so the
- * verdict holds for both attempts.
+ * isNetworkError reports a request that never got an answer (an HTTP failure
+ * of any status resolves and is not one). The retry inside `fetchGET` rethrows
+ * the original, so the verdict holds for both attempts.
  */
 export function isNetworkError(err: unknown): boolean {
-  return err instanceof TypeError;
+  if (!(err instanceof TypeError)) return false;
+  return fetchRejections.has(err) || fetchRejectionMessage.test(err.message);
 }
 
 /** reportRequestOutcome feeds the verdict of one request back into what the app
- * shows. A failure that was not a network failure says nothing about the
- * connection and is ignored. */
+ * shows: null for an answer, fetch's rejection otherwise. A failure that was
+ * not a network failure says nothing about the connection and is ignored. */
 export function reportRequestOutcome(err: unknown): void {
+  if (err instanceof TypeError) fetchRejections.add(err);
   const reachable = err === null ? true : isNetworkError(err) ? false : null;
   if (reachable === null || reachable === lastRequestReachable) return;
   lastRequestReachable = reachable;

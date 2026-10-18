@@ -667,11 +667,10 @@ async function cachedCalendar(from: Date, to: Date): Promise<CachedCalendar | nu
     .map((entry) => ({ entry, range: parseCalendarRangeName(entry.name) }))
     .filter((item) => item.range !== null && item.range.from <= fromMS && item.range.to >= toMS)
     .sort((left, right) => right.entry.saved_at - left.entry.saved_at);
+  if (windows.length === 0) return null;
+  const calendars = await loadOfflineEntry<{ calendars: CalendarSummary[] }>(userID, "calendars", "list");
   for (const { entry } of windows) {
-    const [stored, calendars] = await Promise.all([
-      loadOfflineEntry<{ events: CalendarEvent[] }>(userID, "calendar-events", entry.name),
-      loadOfflineEntry<{ calendars: CalendarSummary[] }>(userID, "calendars", "list")
-    ]);
+    const stored = await loadOfflineEntry<{ events: CalendarEvent[] }>(userID, "calendar-events", entry.name);
     if (!stored) continue;
     const events = (stored.data.events || []).filter((event) => {
       const start = Date.parse(event.start_at);

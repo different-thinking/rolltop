@@ -11,10 +11,19 @@
 //     an event entered on the train is not forfeited by signing out before the
 //     train reaches a signal. Another user signing in on the browser drops it
 //     with everything else (`clearOtherOfflineUsers`).
-//   - Order is kept and a queued event is sent once: the flush walks the queue
-//     front to back, removes an event the moment the server has it, and stops
-//     at the first request the browser could not deliver, so a connection that
-//     is still flickering cannot send the same event twice.
+//   - Order is kept and the flush sends each event at most once per pass: it
+//     walks the queue front to back, removes an event the moment the server
+//     has answered for it, and stops at the first request the browser could
+//     not deliver, so a connection that is still flickering is not asked about
+//     the events behind it. The one case it cannot tell apart is a create the
+//     server accepted whose answer was lost on the way back: that event is
+//     still queued and the next pass sends it again, because a create carries
+//     no key the server could recognise it by. Keeping that from making two
+//     events needs the server to accept a client-chosen identity for a create.
+//   - The flush is the only sender. Saving a waiting event in the dialog
+//     restates it here (`replaceQueuedCalendarEvent`) rather than creating it,
+//     or the dialog and the flush race each other the moment the connection
+//     is back and the reader gets the event twice.
 //   - An event the server refused stays, with the refusal on it, and is not
 //     sent again until the reader has opened and saved it: a calendar that no
 //     longer accepts writes would otherwise be asked about the same event on
@@ -178,9 +187,13 @@ export function flushCalendarOutbox(
     await loadCalendarOutbox(userID);
     const waiting = queue.filter((item) => !item.error);
     for (const item of waiting) {
-      if (activeUserID !== userID || !queue.some((queued) => queued.local_id === item.local_id)) continue;
+      // Read again from the queue as it is now: the reader may have opened and
+      // re-saved the event since this pass began, and what is sent has to be
+      // what they saved last, not what the pass started with.
+      const current = activeUserID === userID ? queue.find((queued) => queued.local_id === item.local_id) : undefined;
+      if (!current || current.error) continue;
       try {
-        await create(item.input);
+        await create(current.input);
         await removeQueuedCalendarEvent(userID, item.local_id);
         outcome.sent += 1;
       } catch (err) {
@@ -244,6 +257,12 @@ export function pendingCalendarEvent(item: QueuedCalendarEvent, index: number, c
     pending_local_id: item.local_id,
     pending_error: item.error
   };
+}
+
+/** pendingReason is a refusal as it reads inside a sentence: without the full
+ * stop the server may have ended it with, so the sentence can add its own. */
+export function pendingReason(error: string): string {
+  return error.trim().replace(/[.\s]+$/, "");
 }
 
 /** queuedLocalID names the waiting event a drawn event stands for, or null for

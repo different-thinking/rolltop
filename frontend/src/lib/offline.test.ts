@@ -32,6 +32,13 @@ describe("serverReachable", () => {
     expect(serverReachable()).toBe(false);
   });
 
+  it("does not mistake a TypeError from the code for a lost connection", () => {
+    const slip = new TypeError("Cannot read properties of undefined (reading 'id')");
+    expect(isNetworkError(slip)).toBe(false);
+    reportRequestOutcome(slip);
+    expect(isNetworkError(slip)).toBe(true);
+    expect(serverReachable()).toBe(false);
+  });
   it("never reports reachable while the browser says offline", () => {
     vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
     reportRequestOutcome(null);

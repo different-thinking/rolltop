@@ -12,10 +12,11 @@ import type { AddToast, LocationState } from "../../appTypes";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime } from "../../lib/format";
-import { isNetworkError } from "../../lib/offline";
+import { isNetworkError, serverReachable } from "../../lib/offline";
 import {
   enqueueCalendarEvent,
   pendingCalendarEvent,
+  pendingReason,
   queuedLocalID,
   removeQueuedCalendarEvent,
   replaceQueuedCalendarEvent,
@@ -388,18 +389,35 @@ export function CalendarView({
         reportWarnings(data.warnings);
         return;
       }
+      if (pendingID) {
+        // A waiting event has one sender, the flush in App, and saving it
+        // restates what that sender will send. Creating it from here as well
+        // raced the flush the moment the connection came back: the dialog and
+        // the flush each created it, and the reader got the event twice.
+        const restated = await replaceQueuedCalendarEvent(userID, pendingID, input);
+        closeDialog();
+        if (!restated) {
+          // The flush took it while the dialog was open; the reload that the
+          // queue shrinking triggers draws it as the server has it.
+          addToast("This event has just been added to your calendar. Open it there to change it.", "success");
+          return;
+        }
+        addToast(
+          serverReachable()
+            ? "Saved. The event is being added to your calendar."
+            : "You are offline. The event is kept here and will be added to your calendar when you are back online.",
+          "success"
+        );
+        return;
+      }
       try {
         const data = await api.createCalendarEvent(csrf, input);
-        if (pendingID) await removeQueuedCalendarEvent(userID, pendingID);
         await reload("events");
         closeDialog();
         reportWarnings(data.warnings);
       } catch (err) {
         if (!isNetworkError(err)) throw err;
-        const queuedNow = pendingID
-          ? await replaceQueuedCalendarEvent(userID, pendingID, input)
-          : (await enqueueCalendarEvent(userID, input)) !== null;
-        if (!queuedNow) {
+        if ((await enqueueCalendarEvent(userID, input)) === null) {
           throw new Error("You are offline, and too many events are already waiting to be added. Try again once you are connected.");
         }
         closeDialog();
@@ -1686,7 +1704,7 @@ function eventDraggable(event: CalendarEvent, calendar: CalendarSummary | undefi
 function pendingTooltip(event: CalendarEvent): string {
   if (!event.pending_offline) return "";
   return event.pending_error
-    ? `Not in your calendar yet: ${event.pending_error}. Open it to change it or discard it.`
+    ? `Not in your calendar yet: ${pendingReason(event.pending_error)}. Open it to change it or discard it.`
     : "Entered offline. It will be added to your calendar when you are back online.";
 }
 

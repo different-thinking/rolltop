@@ -234,8 +234,15 @@ site and in review.
   deliver (`isNetworkError`, a fetch `TypeError`), never one the server
   answered - a 404 or a 500 is the server's word and is not contradicted by a
   copy. Warming threads for offline reading asks `/api/messages/:id?peek=1`,
-  which renders the thread without marking it read; a warm is not an open, and
-  without the flag warming the newest page cleared every unread badge on it.
+  which renders the thread the way an open does and changes nothing: it does
+  not mark the thread read, it does not acknowledge a snooze that has come
+  back (the open deletes it, and returned mail heads the very page the warm
+  asks for), and it never fetches from IMAP (`localMailOnly`, read by
+  `rawMessageBytes`; a pruned body stays the preview the row carries). A warm
+  is not an open, and it is forty threads per list load that nobody asked to
+  read - without the flag it cleared every unread badge on the page, and
+  without the IMAP gate it was forty body fetches against the account's
+  connection and the host's rate limit.
   The shell is stored only when its startup data names a user, a shell with
   none (the login page) deletes it, and `forgetUserMail` tells the worker to
   drop it (`rolltop:offline-clear`) before the sign-out request can fail - the
@@ -251,8 +258,15 @@ site and in review.
   refused stays with the refusal on it and is not sent again until the reader
   re-saves it. A waiting event is drawn in the week with a negative id
   (`pendingCalendarEvent`), cannot be dragged, and opens the same dialog, where
-  Save restates the queued one and Discard removes it. Every other write - a
-  move, a reply, an edit or delete of an event the server holds - fails with
+  Save restates the queued one and Discard removes it. The flush is the **only**
+  sender: the dialog never creates a waiting event itself, because the moment
+  the connection came back the dialog and the flush raced and the reader got
+  the event twice, and the flush sends the queue's current input for an item,
+  not the one its pass started with. A create the server accepted whose answer
+  was lost is the one case the queue cannot tell from one never sent; closing
+  it needs the server to accept a client-chosen identity for a create. Every
+  other write - a move, a reply, an edit or delete of an event the server
+  holds - fails with
   the connection named (`messageFromError`), and the banner in the shell
   (`OfflineBanner`, `useServerReachable`) says so first. Reachability is the
   browser's flag corrected by the last request (`lib/offline.ts`), because a

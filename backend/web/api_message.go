@@ -179,7 +179,11 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 	if snooze, snoozeErr := s.store.MessageSnoozeForUser(r.Context(), cu.User.ID, msg.ID); snoozeErr == nil {
 		if snooze.SnoozedUntil.After(time.Now()) {
 			snoozedUntil = timeString(snooze.SnoozedUntil)
-		} else {
+		} else if !peek {
+			// Opening mail that has come back from a snooze is what settles
+			// the return: the snooze row and its reminder go. A peek is not
+			// an open, and the newest page it warms is headed by exactly this
+			// mail, so it leaves both where the reader will find them.
 			acknowledged, ackErr := s.store.AcknowledgeDueSnoozeForUser(r.Context(), cu.User.ID, msg.ID, time.Now().UTC())
 			if ackErr != nil {
 				s.serverError(w, r, ackErr)
@@ -1293,12 +1297,34 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 	return s.threadViewsForMessagePeek(ctx, cu, msg, showImages, query, timing, false)
 }
 
+// localMailOnlyKey marks a request that reads stored mail and nothing else:
+// rawMessageBytes answers it from the blob store or not at all, never by
+// fetching from IMAP.
+const localMailOnlyKey contextKey = "local-mail-only"
+
+func withLocalMailOnly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, localMailOnlyKey, true)
+}
+
+func localMailOnly(ctx context.Context) bool {
+	only, _ := ctx.Value(localMailOnlyKey).(bool)
+	return only
+}
+
 // threadViewsForMessagePeek renders the thread the way an open does, except
-// that peek leaves the read state alone. Opening a message marks every unread
-// row of its thread read and pushes \Seen; a copy saved for reading offline is
-// not an open, and warming the newest page of a mailbox into that store must
-// not clear its unread badges.
+// that peek changes nothing and spends nothing on the reader's behalf. Opening
+// a message marks every unread row of its thread read and pushes \Seen, and
+// may fetch a pruned body from IMAP to show it; a copy saved for reading
+// offline is not an open. The offline store warms the newest page of every
+// list the reader looks at, forty threads at a time that nobody has asked to
+// read, so a peek must not clear their unread badges and must not turn into
+// forty IMAP fetches against the account's connection and the host's rate
+// limit. What is stored is rendered; what is not is left as the preview the
+// row already carries.
 func (s *Server) threadViewsForMessagePeek(ctx context.Context, cu currentUser, msg store.MessageRecord, showImages bool, query string, timing *searchTiming, peek bool) ([]threadMessageView, store.MessageRecord, error) {
+	if peek {
+		ctx = withLocalMailOnly(ctx)
+	}
 	stop := func() {}
 	if timing != nil {
 		stop = timing.measure(&timing.thread)

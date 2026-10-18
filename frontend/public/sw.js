@@ -63,9 +63,14 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== STATIC_CACHE && key !== SHELL_CACHE).map((key) => caches.delete(key)))
-    )
+    caches.keys().then((keys) => {
+      const stale = keys.filter((key) => key !== STATIC_CACHE && key !== SHELL_CACHE);
+      // A new asset cache leaves the old one behind, and the stored shell's
+      // scripts with it; a shell whose scripts are gone starts to a blank page.
+      // The shell goes too, and the next online navigation stores the new one
+      // together with the assets it names.
+      return Promise.all([...stale.map((key) => caches.delete(key)), stale.length > 0 ? forgetShell() : undefined]);
+    })
   );
   self.clients.claim();
 });
@@ -91,8 +96,11 @@ self.addEventListener("fetch", (event) => {
       fetch(networkRequest)
         .then((res) => {
           // The copy is taken before the response reaches the browser, for the
-          // same reason as below: the body is read as soon as it is handed over.
-          if (req.mode === "navigate") event.waitUntil(rememberShell(url, res.clone()));
+          // same reason as below: the body is read as soon as it is handed
+          // over. Only a page is copied: a navigation can also be a download,
+          // and a clone of one nobody reads holds the whole file in memory
+          // until the browser has finished saving it.
+          if (req.mode === "navigate" && isHTMLPage(res)) event.waitUntil(rememberShell(url, res.clone()));
           return res;
         })
         .catch(() => {
@@ -131,9 +139,12 @@ function isStaticAsset(url) {
   return STATIC_ASSETS.includes(`${url.pathname}${url.search}`) || STATIC_ASSETS.includes(url.pathname);
 }
 
+function isHTMLPage(res) {
+  return res.ok && (res.headers.get("Content-Type") || "").toLowerCase().includes("text/html");
+}
+
 async function rememberShell(url, res) {
   try {
-    if (!res.ok || !(res.headers.get("Content-Type") || "").toLowerCase().includes("text/html")) return;
     const text = await res.text();
     // The startup data is a JSON object; a signed-in shell carries its user as
     // an object under that key, and json encoding cannot produce this sequence
