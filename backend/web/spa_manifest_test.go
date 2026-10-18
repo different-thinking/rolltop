@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -24,14 +25,20 @@ func chdirToDist(t *testing.T, files map[string]string) {
 			t.Fatal(err)
 		}
 	}
-	wd, err := os.Getwd()
+	t.Chdir(dir)
+}
+
+// injectWebManifestLink rewrites the shell's mail link byte for byte, so a
+// shell that spells it any other way would silently link the mail manifest on
+// every calendar page.
+func TestFrontendShellCarriesTheManifestLinkTheServerRewrites(t *testing.T) {
+	raw, err := os.ReadFile("../../frontend/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
+	if !bytes.Contains(raw, mailWebManifestLink) {
+		t.Fatalf("frontend/index.html no longer carries %s, which injectWebManifestLink rewrites", mailWebManifestLink)
 	}
-	t.Cleanup(func() { _ = os.Chdir(wd) })
 }
 
 func TestWebManifestPathForRouteInstallsTheCalendarFromItsOwnPages(t *testing.T) {

@@ -109,13 +109,14 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(contents)
 }
 
-// webManifestPathForRoute names the manifest a page links. The calendar's
-// subtree matches the frontend's organizerRoute("calendar"), which swaps the
-// same link on client-side navigation (syncDocumentManifest); this half covers
-// the first load, which is the page a browser offers to install.
+// webManifestPathForRoute names the manifest a page links, read from the route
+// that serves it (spaRoute.webManifest). The calendar's entry matches the
+// frontend's organizerRoute("calendar"), which swaps the same link on
+// client-side navigation (syncDocumentManifest); this half covers the first
+// load, which is the page a browser offers to install.
 func webManifestPathForRoute(path string) string {
-	if path == "/calendar" || strings.HasPrefix(path, "/calendar/") {
-		return calendarWebManifestPath
+	if route, ok := matchSPARoute(path); ok && route.webManifest != "" {
+		return route.webManifest
 	}
 	return mailWebManifestPath
 }
@@ -370,6 +371,9 @@ type spaRoute struct {
 	// ownPrefixHandler marks a subtree that is registered elsewhere because it
 	// serves more than the app shell.
 	ownPrefixHandler bool
+	// webManifest names the manifest the page links when it is not the mail
+	// app's, which is what a browser installs from it (webManifestPathForRoute).
+	webManifest string
 }
 
 var spaRoutes = []spaRoute{
@@ -387,7 +391,8 @@ var spaRoutes = []spaRoute{
 	{path: "/contacts", exact: true, prefix: true, ownPrefixHandler: true},
 	// /calendar/2026-08-17 selects the week a date falls in, so the subtree
 	// serves the app shell like the mailbox one does.
-	{path: "/calendar", exact: true, prefix: true},
+	// It is also an installable app of its own.
+	{path: "/calendar", exact: true, prefix: true, webManifest: calendarWebManifestPath},
 	{path: "/messages", prefix: true},
 	{path: "/sync-runs", prefix: true},
 	// Everything running in the background, in one place rather than beside the
