@@ -11,6 +11,8 @@ import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../t
 import type { AddToast, LocationState } from "../../appTypes";
 import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
+import { displayDateTime } from "../../lib/format";
+import { isNetworkError } from "../../lib/offline";
 import { EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 import { useWeekDrag } from "./useWeekDrag";
@@ -88,6 +90,9 @@ export function CalendarView({
   const [calendars, setCalendars] = useState<CalendarSummary[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  // When the week on screen came out of the offline store: the time the copy
+  // was saved, 0 while the week is the server's answer.
+  const [savedCopyAt, setSavedCopyAt] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dialogProblem, setDialogProblem] = useState("");
@@ -117,13 +122,30 @@ export function CalendarView({
   const reload = useCallback(
     async (what: "all" | "events") => {
       const token = ++loadTokenRef.current;
-      const [calendarData, eventData] = await Promise.all([
-        what === "all" ? api.calendars() : Promise.resolve(null),
-        api.calendarEvents(range.start, range.end)
-      ]);
-      if (token !== loadTokenRef.current) return;
-      if (calendarData) setCalendars(calendarData.calendars || []);
-      setEvents(eventData.events || []);
+      try {
+        const [calendarData, eventData] = await Promise.all([
+          what === "all" ? api.calendars() : Promise.resolve(null),
+          api.calendarEvents(range.start, range.end)
+        ]);
+        if (token !== loadTokenRef.current) return;
+        if (calendarData) setCalendars(calendarData.calendars || []);
+        setEvents(eventData.events || []);
+        setSavedCopyAt(0);
+        // The weeks around this one, so turning the page offline still answers.
+        void api.warmOfflineCalendar(range.start);
+      } catch (err) {
+        // Only a request the browser could not deliver is answered from the
+        // offline store; an answer from the server, whatever it says, is not
+        // contradicted by a saved copy. A week the store never saw is the
+        // error it always was.
+        if (!isNetworkError(err)) throw err;
+        const saved = await api.cachedCalendar(range.start, range.end);
+        if (token !== loadTokenRef.current) return;
+        if (!saved) throw err;
+        if (saved.calendars.length > 0 || what === "all") setCalendars(saved.calendars);
+        setEvents(saved.events);
+        setSavedCopyAt(saved.saved_at);
+      }
     },
     [range]
   );
@@ -795,6 +817,11 @@ export function CalendarView({
           </div>
         </header>
 
+        {savedCopyAt > 0 && !loading ? (
+          <p className="calendar-offline-notice" role="status">
+            You are offline. Showing the calendar as it was saved on {displayDateTime(new Date(savedCopyAt).toISOString())}; changes need a connection.
+          </p>
+        ) : null}
         {calendars.length === 0 && !loading ? (
           <p className="calendar-empty">
             No calendars yet. Connect a Google account under <a href="/settings/account/google">Google settings</a> or a

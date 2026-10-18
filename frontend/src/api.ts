@@ -54,6 +54,15 @@ import { clearOtherMailSortOrders, defaultMailSortOrder, defaultSearchSortOrder 
 import type { MailSortOrder, SearchSortOrder } from "./lib/mailSort";
 import type { MailView } from "./lib/routes";
 import { clearOtherSidebarState } from "./lib/sidebarLocal";
+import { forgetOfflineShell, isNetworkError, reportRequestOutcome, serverReachable } from "./lib/offline";
+import {
+  clearOfflineUser,
+  clearOtherOfflineUsers,
+  deleteOfflineEntries,
+  listOfflineEntries,
+  loadOfflineEntry,
+  saveOfflineEntry
+} from "./lib/offlineStore";
 
 /** Error thrown for non-2xx API responses after the JSON error payload is decoded. */
 export class ApiError extends Error {
@@ -201,13 +210,28 @@ function cacheSet(key: string, value: { etag: string; data: unknown }): void {
 }
 type MutationRequestOptions = { keepalive?: boolean };
 
+// Every request passes through here so the app's idea of its connection is
+// the verdict of the request it last made (`lib/offline.ts`), not only the
+// browser's flag. A rejection is the browser never getting an answer; an HTTP
+// failure of any status is an answer and says the server is there.
+async function trackedFetch(url: string, init: RequestInit): Promise<Response> {
+  try {
+    const res = await fetch(url, init);
+    reportRequestOutcome(null);
+    return res;
+  } catch (err) {
+    reportRequestOutcome(err);
+    throw err;
+  }
+}
+
 async function fetchGET(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await trackedFetch(url, init);
   } catch (err) {
     await new Promise((resolve) => window.setTimeout(resolve, 250));
     try {
-      return await fetch(url, init);
+      return await trackedFetch(url, init);
     } catch {
       throw err;
     }
@@ -253,7 +277,7 @@ export async function getJSON<T>(url: string, cacheKey = url): Promise<T> {
 /** POST JSON to a mutating endpoint with the current CSRF token. */
 export async function postJSON<T>(url: string, csrf: string, body: unknown = {}, options: MutationRequestOptions = {}): Promise<T> {
   return parse<T>(
-    await fetch(url, {
+    await trackedFetch(url, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -269,7 +293,7 @@ export async function postJSON<T>(url: string, csrf: string, body: unknown = {},
 /** PUT JSON to a mutating endpoint with the current CSRF token. */
 export async function putJSON<T>(url: string, csrf: string, body: unknown = {}, options: MutationRequestOptions = {}): Promise<T> {
   return parse<T>(
-    await fetch(url, {
+    await trackedFetch(url, {
       method: "PUT",
       headers: {
         Accept: "application/json",
@@ -285,7 +309,7 @@ export async function putJSON<T>(url: string, csrf: string, body: unknown = {}, 
 /** DELETE JSON from a mutating endpoint with the current CSRF token. */
 export async function deleteJSON<T>(url: string, csrf: string, options: MutationRequestOptions = {}): Promise<T> {
   return parse<T>(
-    await fetch(url, {
+    await trackedFetch(url, {
       method: "DELETE",
       headers: {
         Accept: "application/json",
@@ -314,7 +338,7 @@ function chunkMessageIDs(ids: number[]): number[][] {
 /** DELETE JSON with a request body for endpoints keyed by payload rather than path. */
 export async function deleteJSONBody<T>(url: string, csrf: string, body: unknown = {}): Promise<T> {
   return parse<T>(
-    await fetch(url, {
+    await trackedFetch(url, {
       method: "DELETE",
       headers: {
         Accept: "application/json",
@@ -329,7 +353,7 @@ export async function deleteJSONBody<T>(url: string, csrf: string, body: unknown
 /** POST multipart form data without forcing a Content-Type boundary. */
 export async function postForm<T>(url: string, csrf: string, body: FormData): Promise<T> {
   return parse<T>(
-    await fetch(url, {
+    await trackedFetch(url, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -458,6 +482,10 @@ function clearMailCache(userID: number) {
 function forgetUserMail(userID: number) {
   clearMailCache(userID);
   clearFiledMessages(userID);
+  // The offline copies and the shell the service worker keeps for starting
+  // offline both carry this user's mail; a sign-out takes them with it.
+  void clearOfflineUser(userID);
+  forgetOfflineShell();
 }
 
 function retainMailCacheForUser(userID: number) {
@@ -472,7 +500,10 @@ function retainMailCacheForUser(userID: number) {
   // over and over for an answer that cannot have changed. The rewrite exists so
   // that mail filed away in an earlier session is out of the stored pages before
   // its record expires; the read path filters the rest.
-  if (switchedUser) forgetFiledMessages();
+  if (switchedUser) {
+    forgetFiledMessages();
+    void clearOtherOfflineUsers(userID);
+  }
   for (const cachedUserID of mailCacheEpochs.keys()) {
     if (cachedUserID !== userID) clearMailCache(cachedUserID);
   }
@@ -503,6 +534,182 @@ function retainMailCacheForUser(userID: number) {
   clearOtherSidebarState(userID);
 }
 
+// --- Offline copies --------------------------------------------------------
+//
+// What the reader can open while the server cannot be reached is kept in the
+// offline store (`lib/offlineStore.ts`), under the signed-in user: the threads
+// they opened, the newest threads of the lists they looked at, and the
+// calendar weeks around the one they had up. Every read of it is the fallback
+// for a request the browser could not deliver (`isNetworkError`), never for one
+// the server answered: a 404 or a 500 is the server's word about the message
+// and a saved copy must not contradict it.
+
+export type MessageResponse = {
+  message: { id: number; account_id: number; subject: string; mailbox_id: number };
+  thread: ThreadMessage[];
+  compose_from: string;
+  from_identities: ComposeIdentity[];
+  mailbox_id: number;
+  conversation: number;
+  snoozed_until?: string;
+  /** Set when the thread came out of the offline store rather than from the
+   * server: the time the copy was saved. */
+  offline_saved_at?: number;
+};
+
+async function loadMessage(id: string, showImages: boolean, highlightQuery = ""): Promise<MessageResponse> {
+  const userID = activeMailUserID;
+  try {
+    const data = await getJSON<MessageResponse>(messageURL(id, showImages, highlightQuery));
+    // A search opens the thread with its matches marked, which is not the copy
+    // to keep: the next open offline would show last week's query highlighted.
+    if (userID > 0 && !highlightQuery.trim()) void saveOfflineEntry(userID, "message", String(id), data);
+    return data;
+  } catch (err) {
+    if (!isNetworkError(err) || userID <= 0) throw err;
+    const saved = await loadOfflineEntry<MessageResponse>(userID, "message", String(id));
+    if (!saved) throw err;
+    return { ...saved.data, offline_saved_at: saved.saved_at };
+  }
+}
+
+// How many threads one list load warms into the offline store, and how many
+// requests that spends at once. The newest page of a list is forty rows at
+// most, so one load covers it; two at a time keeps the warm behind the reader's
+// own requests on a server that answers one message in tens of milliseconds.
+const offlineWarmLimit = 40;
+const offlineWarmConcurrency = 2;
+let offlineWarmRunning = false;
+
+/**
+ * warmOfflineMessages stores the threads behind a page of list rows so they
+ * open offline. It asks for each thread with `peek=1`, which renders it
+ * without marking it read - the reader has not opened anything. Threads the
+ * store already holds are not fetched again; the store's own eviction keeps
+ * the set bounded. One warm runs at a time, it stops at the first request the
+ * browser could not deliver, and it goes nowhere near the ETag cache: forty
+ * thread payloads would push every list page the reader is using out of it.
+ */
+async function warmOfflineMessages(messageIDs: number[]): Promise<void> {
+  const userID = activeMailUserID;
+  if (userID <= 0 || offlineWarmRunning || !serverReachable()) return;
+  offlineWarmRunning = true;
+  try {
+    const stored = new Set((await listOfflineEntries(userID, "message")).map((entry) => entry.name));
+    const pending = messageIDs
+      .filter((id, index) => Number.isInteger(id) && id > 0 && messageIDs.indexOf(id) === index && !stored.has(String(id)))
+      .slice(0, offlineWarmLimit);
+    let next = 0;
+    const worker = async () => {
+      while (next < pending.length && serverReachable() && activeMailUserID === userID) {
+        const id = pending[next];
+        next += 1;
+        try {
+          const res = await fetchGET(`/api/messages/${id}?peek=1`, { headers: { Accept: "application/json" } });
+          const data = await parse<MessageResponse>(res);
+          if (activeMailUserID === userID) await saveOfflineEntry(userID, "message", String(id), data);
+        } catch {
+          // A thread the server refused is skipped; a connection that went away
+          // ends the warm through serverReachable on the next turn.
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: offlineWarmConcurrency }, worker));
+  } finally {
+    offlineWarmRunning = false;
+  }
+}
+
+function calendarEventsURL(from: Date, to: Date) {
+  return `/api/calendar/events?${new URLSearchParams({ from: from.toISOString(), to: to.toISOString() })}`;
+}
+
+function calendarRangeName(from: Date, to: Date) {
+  return `${from.toISOString()}|${to.toISOString()}`;
+}
+
+function parseCalendarRangeName(name: string): { from: number; to: number } | null {
+  const [from, to] = name.split("|");
+  const fromMS = Date.parse(from || "");
+  const toMS = Date.parse(to || "");
+  if (!Number.isFinite(fromMS) || !Number.isFinite(toMS) || toMS <= fromMS) return null;
+  return { from: fromMS, to: toMS };
+}
+
+async function loadCalendars(): Promise<{ calendars: CalendarSummary[] }> {
+  const userID = activeMailUserID;
+  const data = await getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars");
+  if (userID > 0) void saveOfflineEntry(userID, "calendars", "list", data);
+  return data;
+}
+
+async function loadCalendarEvents(from: Date, to: Date): Promise<{ events: CalendarEvent[] }> {
+  const userID = activeMailUserID;
+  const data = await getJSON<{ events: CalendarEvent[] }>(calendarEventsURL(from, to));
+  if (userID > 0) void saveOfflineEntry(userID, "calendar-events", calendarRangeName(from, to), data);
+  return data;
+}
+
+export type CachedCalendar = { calendars: CalendarSummary[]; events: CalendarEvent[]; saved_at: number };
+
+/**
+ * cachedCalendar answers a week from the offline store: the calendar list and
+ * the newest stored window that covers the whole range, cut down to the events
+ * touching it. A window that covers only part of the week is no answer - a
+ * week drawn from it would show Monday's appointments and an empty Friday.
+ */
+async function cachedCalendar(from: Date, to: Date): Promise<CachedCalendar | null> {
+  const userID = activeMailUserID;
+  if (userID <= 0) return null;
+  const fromMS = from.getTime();
+  const toMS = to.getTime();
+  const windows = (await listOfflineEntries(userID, "calendar-events"))
+    .map((entry) => ({ entry, range: parseCalendarRangeName(entry.name) }))
+    .filter((item) => item.range !== null && item.range.from <= fromMS && item.range.to >= toMS)
+    .sort((left, right) => right.entry.saved_at - left.entry.saved_at);
+  for (const { entry } of windows) {
+    const [stored, calendars] = await Promise.all([
+      loadOfflineEntry<{ events: CalendarEvent[] }>(userID, "calendar-events", entry.name),
+      loadOfflineEntry<{ calendars: CalendarSummary[] }>(userID, "calendars", "list")
+    ]);
+    if (!stored) continue;
+    const events = (stored.data.events || []).filter((event) => {
+      const start = Date.parse(event.start_at);
+      const end = Date.parse(event.end_at);
+      return Number.isFinite(start) && Number.isFinite(end) && start < toMS && end > fromMS;
+    });
+    return { calendars: calendars?.data.calendars || [], events, saved_at: stored.saved_at };
+  }
+  return null;
+}
+
+// The window warmed around the week on screen: four weeks back, eight ahead,
+// re-read at most every half hour. Wider than the week because offline a reader
+// turns pages; bounded because every event in it travels on each warm.
+const calendarWarmBeforeMS = 28 * 24 * 60 * 60 * 1000;
+const calendarWarmAfterMS = 56 * 24 * 60 * 60 * 1000;
+const calendarWarmIntervalMS = 30 * 60 * 1000;
+const calendarWarmedAt = new Map<number, number>();
+
+/** warmOfflineCalendar stores the weeks around `anchor` for reading offline. */
+async function warmOfflineCalendar(anchor: Date): Promise<void> {
+  const userID = activeMailUserID;
+  if (userID <= 0 || !serverReachable()) return;
+  const last = calendarWarmedAt.get(userID) || 0;
+  if (Date.now() - last < calendarWarmIntervalMS) return;
+  calendarWarmedAt.set(userID, Date.now());
+  const from = new Date(anchor.getTime() - calendarWarmBeforeMS);
+  const to = new Date(anchor.getTime() + calendarWarmAfterMS);
+  try {
+    const res = await fetchGET(calendarEventsURL(from, to), { headers: { Accept: "application/json" } });
+    const data = await parse<{ events: CalendarEvent[] }>(res);
+    if (activeMailUserID === userID) await saveOfflineEntry(userID, "calendar-events", calendarRangeName(from, to), data);
+  } catch {
+    // The week itself was answered; the wider window is tried again next time.
+    calendarWarmedAt.delete(userID);
+  }
+}
+
 /**
  * forgetMessages takes messages out of every list page this browser is holding -
  * the in-memory pages, the prefetched neighbours, the localStorage snapshots -
@@ -525,7 +732,10 @@ function forgetMessages(messageIDs: number[]) {
     if (conversations.length === data.conversations.length) continue;
     getCache.set(key, { etag: "", data: { ...data, conversations } });
   }
-  if (activeMailUserID > 0) forgetMessagesInSnapshots(activeMailUserID, Array.from(gone));
+  if (activeMailUserID > 0) {
+    forgetMessagesInSnapshots(activeMailUserID, Array.from(gone));
+    void deleteOfflineEntries(activeMailUserID, "message", Array.from(gone, String));
+  }
 }
 
 /** forgetFiledMessages drops what is currently filed from the cached pages too. */
@@ -571,16 +781,8 @@ export const api = {
     domains.slice(0, 40).forEach((domain) => q.append("domain", domain));
     return getJSON<{ icons: Record<string, string> }>(`/api/brand-icons?${q}`);
   },
-  message: (id: string, showImages: boolean, highlightQuery = "") =>
-    getJSON<{
-      message: { id: number; account_id: number; subject: string; mailbox_id: number };
-      thread: ThreadMessage[];
-      compose_from: string;
-      from_identities: ComposeIdentity[];
-      mailbox_id: number;
-        conversation: number;
-        snoozed_until?: string;
-      }>(messageURL(id, showImages, highlightQuery)),
+  message: loadMessage,
+  warmOfflineMessages,
   prewarmMessage: (id: string | number) =>
     prefetchJSON(`/api/messages/${id}/prefetch`),
   messageLoadStatus: (id: string) =>
@@ -765,7 +967,9 @@ export const api = {
       message_ids: Array.isArray(messageIDs) ? messageIDs : [messageIDs],
       category
     }),
-  calendars: () => getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars"),
+  calendars: loadCalendars,
+  cachedCalendar,
+  warmOfflineCalendar,
   setCalendarSelected: (csrf: string, id: number, selected: boolean) =>
     putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { selected }),
   // The second calendar is one per reader; choosing one moves the mark off the
@@ -783,10 +987,7 @@ export const api = {
     putJSON<{ calendar: CalendarSummary }>(`/api/calendar/calendars/${id}`, csrf, { listed }),
   // The range is sent as absolute instants; which calendars are drawn is stored
   // server-side, so the client never has to keep a second copy of that choice.
-  calendarEvents: (from: Date, to: Date) =>
-    getJSON<{ events: CalendarEvent[] }>(
-      `/api/calendar/events?${new URLSearchParams({ from: from.toISOString(), to: to.toISOString() })}`
-    ),
+  calendarEvents: loadCalendarEvents,
   // warnings name the copies in other calendars a write could not bring
   // along; the event itself was saved.
   createCalendarEvent: (csrf: string, input: CalendarEventInput) =>

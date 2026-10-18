@@ -409,6 +409,16 @@
   flex-wrap: wrap;
 }
 
+.calendar-offline-notice {
+  margin: 0 0 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .calendar-empty {
   margin: 0;
   padding: 14px;

@@ -1,4 +1,23 @@
-const STATIC_CACHE = "rolltop-static-v11";
+const STATIC_CACHE = "rolltop-static-v12";
+// The app shell the reader last started online, kept so the app can start
+// again offline. It is the HTML the server personalises per navigation - the
+// signed-in user's startup data is embedded in it - so three rules keep it
+// from outliving the session it belongs to. It is stored only when its startup
+// data names a user, and a shell for nobody (the login page after a sign-out)
+// deletes it; the page asks for it to be dropped on sign-out
+// (rolltop:offline-clear), before the sign-out request can even fail; and it is
+// served only when the network could not answer a navigation, never in front of
+// it. The server marks it Vary: * so Cache.put would refuse the response as
+// received; what is stored is a fresh Response built from its text.
+const SHELL_CACHE = "rolltop-shell-v1";
+const SHELL_KEY = "/__rolltop/app-shell";
+// The routes a shell is never remembered from or served for: they are the
+// sign-in pages, which are no use without the server.
+const SHELL_PUBLIC_PATHS = ["/login", "/setup", "/reset-password"];
+// The hashed assets the stored shell references. They are kept out of the
+// asset cache's eviction, because a shell whose script was evicted starts to a
+// blank page rather than to offline.html, which is the worse of the two.
+let shellAssets = null;
 const STATIC_ASSETS = [
   "/offline.html",
   "/icon.svg",
@@ -45,7 +64,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== STATIC_CACHE).map((key) => caches.delete(key)))
+      Promise.all(keys.filter((key) => key !== STATIC_CACHE && key !== SHELL_CACHE).map((key) => caches.delete(key)))
     )
   );
   self.clients.claim();
@@ -69,7 +88,17 @@ self.addEventListener("fetch", (event) => {
   if (req.mode === "navigate" || acceptsHTML) {
     const networkRequest = new Request(req, { cache: "no-cache" });
     event.respondWith(
-      fetch(networkRequest).catch(() => req.mode === "navigate" ? caches.match("/offline.html") : Promise.reject(new Error("offline")))
+      fetch(networkRequest)
+        .then((res) => {
+          // The copy is taken before the response reaches the browser, for the
+          // same reason as below: the body is read as soon as it is handed over.
+          if (req.mode === "navigate") event.waitUntil(rememberShell(url, res.clone()));
+          return res;
+        })
+        .catch(() => {
+          if (req.mode !== "navigate") return Promise.reject(new Error("offline"));
+          return offlineShell(url).then((shell) => shell || caches.match("/offline.html"));
+        })
     );
     return;
   }
@@ -102,6 +131,88 @@ function isStaticAsset(url) {
   return STATIC_ASSETS.includes(`${url.pathname}${url.search}`) || STATIC_ASSETS.includes(url.pathname);
 }
 
+async function rememberShell(url, res) {
+  try {
+    if (!res.ok || !(res.headers.get("Content-Type") || "").toLowerCase().includes("text/html")) return;
+    const text = await res.text();
+    // The startup data is a JSON object; a signed-in shell carries its user as
+    // an object under that key, and json encoding cannot produce this sequence
+    // inside a string value (the quotes there are escaped). A shell without it
+    // is the app signed out - the login page, or an app route answered for a
+    // session that has ended - and the shell kept from before that goes. This
+    // is checked ahead of the route, so a visit to the login page cannot leave
+    // the previous session's shell behind.
+    if (!text.includes('<script id="rolltop-startup"') || !text.includes('"user":{"')) {
+      await forgetShell();
+      return;
+    }
+    if (SHELL_PUBLIC_PATHS.includes(url.pathname)) return;
+    const cache = await caches.open(SHELL_CACHE);
+    await cache.put(SHELL_KEY, new Response(text, { headers: { "Content-Type": "text/html; charset=utf-8" } }));
+    shellAssets = assetPathsIn(text);
+    await precacheShellAssets(shellAssets);
+  } catch {
+    // Starting offline is a convenience; the navigation itself was answered.
+  }
+}
+
+async function offlineShell(url) {
+  if (SHELL_PUBLIC_PATHS.includes(url.pathname)) return undefined;
+  try {
+    const cache = await caches.open(SHELL_CACHE);
+    return await cache.match(SHELL_KEY);
+  } catch {
+    return undefined;
+  }
+}
+
+async function forgetShell() {
+  shellAssets = new Set();
+  try {
+    const cache = await caches.open(SHELL_CACHE);
+    await cache.delete(SHELL_KEY);
+  } catch {
+    // Nothing stored, nothing to forget.
+  }
+}
+
+function assetPathsIn(html) {
+  const paths = new Set();
+  const pattern = /(?:src|href)="(\/assets\/[^"]+)"/g;
+  let match;
+  while ((match = pattern.exec(html)) !== null) paths.add(match[1]);
+  return paths;
+}
+
+// The shell's assets are fetched network-first like every other asset, so on a
+// healthy install they are cached by the time the page has loaded them. This
+// covers the ones the page did not ask for - a modulepreload the browser
+// skipped, a stylesheet a theme change will want - so a start offline finds
+// every file the shell names.
+async function precacheShellAssets(paths) {
+  const cache = await caches.open(STATIC_CACHE);
+  for (const path of paths) {
+    if (await cache.match(path)) continue;
+    try {
+      await cache.add(path);
+    } catch {
+      // The next online load of this asset caches it through the fetch path.
+    }
+  }
+}
+
+async function currentShellAssets() {
+  if (shellAssets) return shellAssets;
+  try {
+    const cache = await caches.open(SHELL_CACHE);
+    const shell = await cache.match(SHELL_KEY);
+    shellAssets = shell ? assetPathsIn(await shell.text()) : new Set();
+  } catch {
+    shellAssets = new Set();
+  }
+  return shellAssets;
+}
+
 async function cacheAsset(req, res) {
   let cache;
   try {
@@ -131,6 +242,7 @@ async function cacheAsset(req, res) {
 async function trimAssetCache(cache, limit) {
   try {
     const keys = await cache.keys();
+    const pinned = await currentShellAssets();
     const target = limit === null ? Math.max(MIN_CACHED_ASSETS, Math.floor(keys.length / 2)) : limit;
     let removable = keys.length - target;
     if (removable <= 0) return;
@@ -140,7 +252,8 @@ async function trimAssetCache(cache, limit) {
     const deletions = [];
     for (const key of keys) {
       if (removable <= 0) break;
-      if (isStaticAsset(new URL(key.url))) continue;
+      const keyURL = new URL(key.url);
+      if (isStaticAsset(keyURL) || pinned.has(keyURL.pathname)) continue;
       deletions.push(cache.delete(key));
       removable--;
     }
@@ -234,6 +347,10 @@ function isNotificationWarmAPIURL(url) {
 
 self.addEventListener("message", (event) => {
   const data = event.data || {};
+  if (data.type === "rolltop:offline-clear") {
+    event.waitUntil(forgetShell());
+    return;
+  }
   if (data.type === "rolltop:security-unlock-get") {
     const userID = Number(data.userID || 0);
     const state = currentSecurityUnlockState(userID);

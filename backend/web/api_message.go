@@ -158,7 +158,10 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	stop = timing.measure(&timing.hydrate)
-	views, msg, err := s.threadViewsForMessageTimed(r.Context(), cu, msg, r.URL.Query().Get("images") == "1", r.URL.Query().Get("q"), timing)
+	// peek=1 is the offline store warming a copy it may never show; it reads
+	// the thread without opening it, so nothing is marked read.
+	peek := r.URL.Query().Get("peek") == "1"
+	views, msg, err := s.threadViewsForMessagePeek(r.Context(), cu, msg, r.URL.Query().Get("images") == "1", r.URL.Query().Get("q"), timing, peek)
 	stop()
 	if err != nil {
 		s.serverError(w, r, err)
@@ -1287,6 +1290,15 @@ func (s *Server) threadViewsForMessage(ctx context.Context, cu currentUser, msg 
 }
 
 func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser, msg store.MessageRecord, showImages bool, query string, timing *searchTiming) ([]threadMessageView, store.MessageRecord, error) {
+	return s.threadViewsForMessagePeek(ctx, cu, msg, showImages, query, timing, false)
+}
+
+// threadViewsForMessagePeek renders the thread the way an open does, except
+// that peek leaves the read state alone. Opening a message marks every unread
+// row of its thread read and pushes \Seen; a copy saved for reading offline is
+// not an open, and warming the newest page of a mailbox into that store must
+// not clear its unread badges.
+func (s *Server) threadViewsForMessagePeek(ctx context.Context, cu currentUser, msg store.MessageRecord, showImages bool, query string, timing *searchTiming, peek bool) ([]threadMessageView, store.MessageRecord, error) {
 	stop := func() {}
 	if timing != nil {
 		stop = timing.measure(&timing.thread)
@@ -1342,7 +1354,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 			s.notifyUserChanged(cu.User.ID)
 		}
 	}()
-	if len(unreadIDs) > 0 {
+	if len(unreadIDs) > 0 && !peek {
 		if timing != nil {
 			stop = timing.measure(&timing.readState)
 		}
@@ -1407,7 +1419,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 		return header
 	}
 	for idx, threadMsg := range threadMessages {
-		if !threadMsg.IsRead {
+		if !threadMsg.IsRead && !peek {
 			threadMsg.IsRead = true
 			threadMsg.ReadSyncPending = true
 		}

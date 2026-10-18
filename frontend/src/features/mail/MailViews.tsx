@@ -137,6 +137,10 @@ function messageAnnotationNodes(plugins: RuntimePlugin[], message: Conversation[
 // in next looking at what the previous scheduled pass had left them.
 let bootFolderSyncUserID: number | null = null;
 
+// How long after the newest page is drawn its threads are warmed for offline
+// reading: long enough for the reader's own first click to go ahead of it.
+const offlineWarmDelayMS = 2500;
+
 export function MailView({
   userID,
   csrf,
@@ -448,6 +452,19 @@ export function MailView({
         if (data.conversations.length === 0 && page > 1) replaceRoute(mailURL(mailboxID, page - 1, view));
         if (data.has_next) api.prefetchMail(userID, mailboxID, page + 1, sortOrder, view);
         if (data.has_prev && page > 1) api.prefetchMail(userID, mailboxID, page - 1, sortOrder, view);
+        // The newest page of a list is what a reader expects to still open on
+        // a train, so its threads are stored for offline reading once the list
+        // itself is drawn. A row opens by its seed message, and one peek of the
+        // seed renders the whole thread, so only the seeds are asked for.
+        // Deferred a little so the page paints first and the rows the reader is
+        // about to click load ahead of the ones they may never need; the warm
+        // itself fetches nothing the store already has.
+        if (page === 1) {
+          const warmIDs = data.conversations.map((conversation) => conversation.message.id);
+          window.setTimeout(() => {
+            if (!cancelled) void api.warmOfflineMessages(warmIDs);
+          }, offlineWarmDelayMS);
+        }
       })
       .catch((err) => {
         if (!cancelled) {

@@ -222,6 +222,33 @@ site and in review.
     and is what mail hosts throttle. Each batch still selects its folder and
     proves its generation, so reuse costs nothing in safety — only the login is
     saved.
+- **Offline is a reading mode, and everything it reads was saved for one user.**
+  The browser can start and read mail and calendar while the server cannot be
+  reached, from three stores, each scoped by `user_id` and dropped on sign-out
+  and when another user signs in: the mail list pages in `localStorage`
+  (`mailSnapshot.ts`), opened and warmed threads and calendar windows in
+  IndexedDB (`lib/offlineStore.ts`, bounded per user and per kind in entries
+  and in bytes, oldest first), and the app shell the service worker keeps for
+  a navigation the network cannot answer (`sw.js`, `SHELL_CACHE`). Four rules
+  keep that honest. A saved copy answers only a request the browser could not
+  deliver (`isNetworkError`, a fetch `TypeError`), never one the server
+  answered - a 404 or a 500 is the server's word and is not contradicted by a
+  copy. Warming threads for offline reading asks `/api/messages/:id?peek=1`,
+  which renders the thread without marking it read; a warm is not an open, and
+  without the flag warming the newest page cleared every unread badge on it.
+  The shell is stored only when its startup data names a user, a shell with
+  none (the login page) deletes it, and `forgetUserMail` tells the worker to
+  drop it (`rolltop:offline-clear`) before the sign-out request can fail - the
+  server marks the shell `Vary: *` so the worker stores a Response rebuilt from
+  its text, and the assets it names are pinned against the asset cache's
+  eviction, because a shell whose script was evicted starts to a blank page.
+  And nothing is queued: a move, a reply or a calendar edit made offline fails
+  with the connection named (`messageFromError`), and the banner in the shell
+  (`OfflineBanner`, `useServerReachable`) says so first. Reachability is the
+  browser's flag corrected by the last request (`lib/offline.ts`), because a
+  captive portal reads as online while every request fails. Step one covers
+  the desktop browser and the installed web app; the Android wrapper loads the
+  same shell but has not been checked for it.
 - Anything in the frontend waiting on work the server will announce waits on the
   announcement, not on a timer: `waitForChromeEvent` (`chromeEvents.ts`) is that
   wait, and the interval passed to it is the fallback for the announcement that

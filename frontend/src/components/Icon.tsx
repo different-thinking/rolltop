@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowsClockwise,
+  WifiSlash,
   AirplaneTilt,
   Bank,
   Bell,
@@ -166,6 +167,7 @@ const iconMap: Record<string, PhosphorIcon> = {
   sort_descending: SortDescending,
   star: Star,
   sync: ArrowsClockwise,
+  offline: WifiSlash,
   travel: AirplaneTilt,
   video: VideoCamera
 };

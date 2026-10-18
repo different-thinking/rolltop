@@ -105,6 +105,45 @@
   }
 }
 
+// The quieter sibling of .account-alert: a connection that is gone is a state
+// the reader is usually already aware of, so it is told in the muted palette
+// rather than the warning one, and without a button because there is nothing
+// to press.
+.offline-alert {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--muted);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+
+  > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--muted);
+  }
+
+  div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  strong {
+    font-size: 14px;
+  }
+
+  span {
+    color: var(--text-soft);
+    font-size: 13px;
+  }
+}
+
 .confirm-backdrop {
   position: fixed;
   inset: 0;
