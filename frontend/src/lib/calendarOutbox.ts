@@ -162,10 +162,14 @@ export async function enqueueCalendarEvent(userID: number, input: CalendarEventI
 }
 
 /** replaceQueuedCalendarEvent restates a waiting event with what the reader
- * saved, and clears a refusal: the reader has answered it. */
+ * saved, and clears a refusal: the reader has answered it. It refuses while
+ * the flush has that event's request on the wire: the server is receiving
+ * the older input, and a restated queue entry would only be deleted when
+ * the request lands - the edit would be lost without a word. The dialog then
+ * says the event has just been added and is to be changed in the calendar. */
 export async function replaceQueuedCalendarEvent(userID: number, localID: string, input: CalendarEventInput): Promise<boolean> {
   await loadCalendarOutbox(userID);
-  if (activeUserID !== userID || !queue.some((item) => item.local_id === localID)) return false;
+  if (activeUserID !== userID || localID === inFlightLocalID || !queue.some((item) => item.local_id === localID)) return false;
   await commit(userID, queue.map((item) => (item.local_id === localID ? { ...item, input, error: "" } : item)));
   return true;
 }
@@ -203,6 +207,9 @@ export async function markQueuedCalendarEventError(userID: number, localID: stri
  */
 type FlushOutcome = { sent: number; refused: number };
 let flushing: { userID: number; promise: Promise<FlushOutcome> } | null = null;
+// The event whose create the running flush is awaiting; see
+// replaceQueuedCalendarEvent.
+let inFlightLocalID = "";
 
 export function flushCalendarOutbox(
   userID: number,
@@ -222,6 +229,7 @@ export function flushCalendarOutbox(
       const current = activeUserID === userID ? queue.find((queued) => queued.local_id === item.local_id) : undefined;
       if (!current || current.error) continue;
       try {
+        inFlightLocalID = current.local_id;
         await create(current.input);
         await removeQueuedCalendarEvent(userID, item.local_id);
         outcome.sent += 1;
@@ -229,6 +237,8 @@ export function flushCalendarOutbox(
         if (isNetworkFailure(err)) break;
         await markQueuedCalendarEventError(userID, item.local_id, describe(err));
         outcome.refused += 1;
+      } finally {
+        inFlightLocalID = "";
       }
     }
     return outcome;
@@ -307,4 +317,5 @@ export function resetCalendarOutboxForTests(): void {
   queue = [];
   loading = null;
   flushing = null;
+  inFlightLocalID = "";
 }

@@ -1589,7 +1589,12 @@ func (s *Server) ensureMessageAttachments(ctx context.Context, userID int64, msg
 		return current, nil
 	}
 	if !allowSyncRepair || msg.Size <= 0 || msg.Size > maxSyncAttachmentRepairBytes {
-		s.repairMessageAttachmentsAsync(userID, msg)
+		// The background repair runs on its own context and would fetch a
+		// pruned body from IMAP; a local-only request (a peek warming the
+		// offline store) must not start one, see threadViewsForMessagePeek.
+		if !localMailOnly(ctx) {
+			s.repairMessageAttachmentsAsync(userID, msg)
+		}
 		return current, nil
 	}
 	repaired, err := s.repairMessageAttachments(ctx, userID, msg)
@@ -1632,8 +1637,11 @@ func (s *Server) ensureInlineCIDAttachments(ctx context.Context, userID int64, m
 		return current
 	}
 	// A message too large to reparse inside the request is repaired behind it,
-	// and the reader is told to fetch the thread again when it worked.
-	s.repairMessageAttachmentsAsync(userID, msg)
+	// and the reader is told to fetch the thread again when it worked. Not for
+	// a local-only request: the repair fetches from IMAP on its own context.
+	if !localMailOnly(ctx) {
+		s.repairMessageAttachmentsAsync(userID, msg)
+	}
 	return current
 }
 

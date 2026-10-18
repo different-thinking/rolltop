@@ -483,7 +483,11 @@ function forgetUserMail(userID: number) {
   clearMailCache(userID);
   clearFiledMessages(userID);
   // The offline copies and the shell the service worker keeps for starting
-  // offline both carry this user's mail; a sign-out takes them with it.
+  // offline both carry this user's mail; a sign-out takes them with it. The
+  // active user is dropped at the same moment, so a request still in flight
+  // answers to nobody and saves nothing - the bootstrap refresh that follows
+  // would do it a moment later, and a moment is enough for an answer to land.
+  if (activeMailUserID === userID) activeMailUserID = 0;
   void clearOfflineUser(userID);
   forgetOfflineShell();
 }
@@ -502,7 +506,10 @@ function retainMailCacheForUser(userID: number) {
   // its record expires; the read path filters the rest.
   if (switchedUser) {
     forgetFiledMessages();
-    void clearOtherOfflineUsers(userID);
+    // Only a real sign-in. A sign-out arrives here as 0, and clearing "every
+    // other user" then would take the calendar outbox clearOfflineUser just
+    // kept for the user who signed out.
+    if (userID > 0) void clearOtherOfflineUsers(userID);
   }
   for (const cachedUserID of mailCacheEpochs.keys()) {
     if (cachedUserID !== userID) clearMailCache(cachedUserID);
@@ -563,7 +570,9 @@ async function loadMessage(id: string, showImages: boolean, highlightQuery = "")
     const data = await getJSON<MessageResponse>(messageURL(id, showImages, highlightQuery));
     // A search opens the thread with its matches marked, which is not the copy
     // to keep: the next open offline would show last week's query highlighted.
-    if (userID > 0 && !highlightQuery.trim()) void saveOfflineEntry(userID, "message", String(id), data);
+    // Still this user's: an answer arriving after a sign-out must not write
+    // the signed-out user's mail back into a store that was just cleared.
+    if (userID > 0 && activeMailUserID === userID && !highlightQuery.trim()) void saveOfflineEntry(userID, "message", String(id), data);
     return data;
   } catch (err) {
     if (!isNetworkError(err) || userID <= 0) throw err;
@@ -639,14 +648,14 @@ function parseCalendarRangeName(name: string): { from: number; to: number } | nu
 async function loadCalendars(): Promise<{ calendars: CalendarSummary[] }> {
   const userID = activeMailUserID;
   const data = await getJSON<{ calendars: CalendarSummary[] }>("/api/calendar/calendars");
-  if (userID > 0) void saveOfflineEntry(userID, "calendars", "list", data);
+  if (userID > 0 && activeMailUserID === userID) void saveOfflineEntry(userID, "calendars", "list", data);
   return data;
 }
 
 async function loadCalendarEvents(from: Date, to: Date): Promise<{ events: CalendarEvent[] }> {
   const userID = activeMailUserID;
   const data = await getJSON<{ events: CalendarEvent[] }>(calendarEventsURL(from, to));
-  if (userID > 0) void saveOfflineEntry(userID, "calendar-events", calendarRangeName(from, to), data);
+  if (userID > 0 && activeMailUserID === userID) void saveOfflineEntry(userID, "calendar-events", calendarRangeName(from, to), data);
   return data;
 }
 

@@ -254,9 +254,12 @@ site and in review.
   with, so sending it later is the same request. The queue is per user, kept
   through a sign-out and dropped when another user signs in, sent in order by
   `useCalendarOutboxFlush` in App (so it goes whatever view is open), stopped
-  at the first request the browser could not deliver, and an event the server
-  refused stays with the refusal on it and is not sent again until the reader
-  re-saves it. A waiting event is drawn in the week with a negative id
+  at the first request the browser could not deliver or that a 5xx, 401, 408 or
+  429 answered (`transientFailure`: a restarting backend is not a refusal), and
+  an event the server refused stays with the refusal on it and is not sent
+  again until the reader re-saves it - nor may it be re-saved while its create
+  is on the wire (`inFlightLocalID`), or the edit is deleted with the entry the
+  moment the older request lands. A waiting event is drawn in the week with a negative id
   (`pendingCalendarEvent`), cannot be dragged, and opens the same dialog, where
   Save restates the queued one and Discard removes it. The flush is the **only**
   sender: the dialog never creates a waiting event itself, because the moment

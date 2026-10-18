@@ -18,6 +18,11 @@ const SHELL_PUBLIC_PATHS = ["/login", "/setup", "/reset-password"];
 // asset cache's eviction, because a shell whose script was evicted starts to a
 // blank page rather than to offline.html, which is the worse of the two.
 let shellAssets = null;
+// Bumped by every forgetShell. A rememberShell that began before a sign-out
+// cleared the shell must not finish after it: the navigation's body is read
+// and the cache opened across several turns, and a put landing after the
+// delete would put the signed-out user's shell back.
+let shellGeneration = 0;
 const STATIC_ASSETS = [
   "/offline.html",
   "/icon.svg",
@@ -144,6 +149,7 @@ function isHTMLPage(res) {
 }
 
 async function rememberShell(url, res) {
+  const generation = shellGeneration;
   try {
     const text = await res.text();
     // The startup data is a JSON object; a signed-in shell carries its user as
@@ -158,10 +164,24 @@ async function rememberShell(url, res) {
       return;
     }
     if (SHELL_PUBLIC_PATHS.includes(url.pathname)) return;
+    // The assets first, the shell second: a shell stored while one of its
+    // scripts is missing from the cache starts offline to a blank page, where
+    // the shell kept from the previous navigation would have started the app.
+    // So the previous shell stays until every asset the new one names is
+    // cached, and a navigation whose assets could not all be fetched leaves
+    // the stored shell as it was.
+    const assets = assetPathsIn(text);
+    if (!(await precacheShellAssets(assets))) return;
+    if (generation !== shellGeneration) return;
     const cache = await caches.open(SHELL_CACHE);
     await cache.put(SHELL_KEY, new Response(text, { headers: { "Content-Type": "text/html; charset=utf-8" } }));
-    shellAssets = assetPathsIn(text);
-    await precacheShellAssets(shellAssets);
+    if (generation !== shellGeneration) {
+      // A sign-out arrived between the check and the write; the write is
+      // taken back rather than left as the signed-out user's shell.
+      await forgetShell();
+      return;
+    }
+    shellAssets = assets;
   } catch {
     // Starting offline is a convenience; the navigation itself was answered.
   }
@@ -178,6 +198,7 @@ async function offlineShell(url) {
 }
 
 async function forgetShell() {
+  shellGeneration += 1;
   shellAssets = new Set();
   try {
     const cache = await caches.open(SHELL_CACHE);
@@ -199,17 +220,22 @@ function assetPathsIn(html) {
 // healthy install they are cached by the time the page has loaded them. This
 // covers the ones the page did not ask for - a modulepreload the browser
 // skipped, a stylesheet a theme change will want - so a start offline finds
-// every file the shell names.
+// every file the shell names. It reports whether every asset is now cached;
+// the shell is stored only on a yes.
 async function precacheShellAssets(paths) {
   const cache = await caches.open(STATIC_CACHE);
+  let complete = true;
   for (const path of paths) {
     if (await cache.match(path)) continue;
     try {
       await cache.add(path);
     } catch {
-      // The next online load of this asset caches it through the fetch path.
+      // The next online navigation tries again; until then the previous
+      // shell, whose assets are all there, is the one served offline.
+      complete = false;
     }
   }
+  return complete;
 }
 
 async function currentShellAssets() {

@@ -1,9 +1,20 @@
 import { useEffect, useRef } from "react";
-import { api } from "../../api";
+import { ApiError, api } from "../../api";
 import type { AddToast } from "../../appTypes";
 import { flushCalendarOutbox, useCalendarOutbox } from "../../lib/calendarOutbox";
 import { messageFromError } from "../../lib/errors";
 import { isNetworkError, useServerReachable } from "../../lib/offline";
+
+// A refusal is the calendar's word about the event; a gateway answering for a
+// backend that is restarting, a session that has expired, a request that timed
+// out or was rate-limited is not. Those stop the flush the way a lost
+// connection does and are tried again on the next turn, because one such pass
+// after a server restart otherwise marked every waiting event as refused and
+// left the reader to re-save each one.
+function transientFailure(err: unknown): boolean {
+  if (isNetworkError(err)) return true;
+  return err instanceof ApiError && (err.status >= 500 || err.status === 401 || err.status === 408 || err.status === 429);
+}
 
 /**
  * useCalendarOutboxFlush sends the events entered offline as soon as the
@@ -28,7 +39,7 @@ export function useCalendarOutboxFlush(userID: number, csrf: string, addToast: A
     const flush = flushCalendarOutbox(
       userID,
       (input) => api.createCalendarEvent(csrf, input),
-      isNetworkError,
+      transientFailure,
       messageFromError
     );
     if (reportedRef.current === flush) return;

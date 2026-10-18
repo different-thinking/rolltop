@@ -140,6 +140,30 @@ describe("calendarOutbox", () => {
     await secondLoad;
   });
 
+  it("refuses a re-save while that event's create is on the wire", async () => {
+    const item = await enqueueCalendarEvent(1, input("original"));
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started: () => void = () => undefined;
+    const createStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const sent: string[] = [];
+    const flush = flushCalendarOutbox(1, async (sentInput) => {
+      sent.push(sentInput.summary);
+      started();
+      await blocked;
+    }, () => false, String);
+    await createStarted;
+    expect(await replaceQueuedCalendarEvent(1, item!.local_id, input("edited"))).toBe(false);
+    release();
+    expect(await flush).toEqual({ sent: 1, refused: 0 });
+    expect(sent).toEqual(["original"]);
+    expect(calendarOutboxSnapshot()).toEqual([]);
+  });
+
   it("removes and marks by local id", async () => {
     const item = await enqueueCalendarEvent(1, input("x"));
     await markQueuedCalendarEventError(1, item!.local_id, "no");
