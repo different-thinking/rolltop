@@ -839,7 +839,7 @@ function NeighborList({ title, neighbors, datePrefs }: { title: string; neighbor
 
 function SpamBadge({ band, label, summary }: { band: string; label: string; summary: string }) {
   const safeBand = band === "high" || band === "medium" || band === "low" ? band : "medium";
-  return <span className={`experimental-spam-badge ${safeBand}`} title={summary} aria-label={`${label}. ${summary}`}><Icon name={safeBand === "high" ? "report" : "shield"} />{label}</span>;
+  return <span className={`experimental-spam-badge ${safeBand}`} title={summary} aria-label={`${label}. ${summary}`}><Icon name={safeBand === "high" ? "report" : "shield"} /><span className="experimental-spam-badge-label">{label}</span></span>;
 }
 
 function renderMessageAnnotations({ location, annotations }: AnnotationContext): ReactNode {

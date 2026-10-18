@@ -303,6 +303,24 @@
     display: none;
   }
 
+  // The same for Archive older / Delete older: with their words each wrapped
+  // onto a line of its own and pushed the first message down by two rows. As
+  // icons they share the title's line; the words stay for a screen reader and
+  // the button title says what each does.
+  .list-head-action {
+    min-height: 32px;
+    padding: 4px 8px;
+
+    > span {
+      @include visually-hidden;
+    }
+
+    .icon {
+      width: 17px;
+      height: 17px;
+    }
+  }
+
   .range-pager {
     gap: 8px;
     font-size: 12px;
@@ -512,10 +530,14 @@
   }
 
   // Two lines like Gmail's phone list: avatar left, sender and time on the
-  // first line, subject and the star on the second.
+  // first line, subject and the star on the second. The checkbox has no column
+  // of its own: it lies over the avatar, the way Gmail's phone list selects by
+  // tapping the avatar. A column of its own cost the text block 30px - an eighth
+  // of a 384px screen - and left it at "A..." as soon as a chip joined the
+  // subject.
   .message-row {
-    grid-template-columns: 22px 36px minmax(0, 1fr) 64px;
-    column-gap: 8px;
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    column-gap: 10px;
     row-gap: 0;
     padding-left: 12px;
   }
@@ -527,9 +549,47 @@
     --new-mail-row-height: 77px;
   }
 
+  // The label keeps the checkbox reachable and named for a screen reader; it is
+  // only drawn as the avatar underneath it. Tapping the avatar selects the row
+  // and never opens it, because the label already stops the click.
   .message-select {
     grid-column: 1;
-    grid-row: 1;
+    grid-row: 1 / 3;
+    align-self: center;
+    justify-self: center;
+    z-index: 1;
+    width: 36px;
+    height: 36px;
+
+    input {
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+    }
+  }
+
+  // A selected row's avatar turns into the check it stands for.
+  .message-row.selected .sender-avatar {
+    background: var(--accent);
+    color: transparent;
+    position: relative;
+
+    &::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      margin: auto;
+      width: 8px;
+      height: 14px;
+      border: solid var(--on-accent);
+      border-width: 0 2px 2px 0;
+      transform: translateY(-2px) rotate(45deg);
+    }
+  }
+
+  .message-select:has(input:focus-visible) + .sender-avatar {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
 
   // Narrow rows have no room for the hover toolbar; swipes cover the same actions.
@@ -542,17 +602,17 @@
   }
 
   .sender-avatar {
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 1 / 3;
     align-self: center;
   }
 
   .sender {
-    grid-column: 3 / 4;
+    grid-column: 2 / 3;
   }
 
   .subject {
-    grid-column: 3 / 4;
+    grid-column: 2 / 3;
   }
 
   // A narrow subject line has no room to give the category a column beside it -
@@ -616,18 +676,34 @@
     padding: 8px 10px;
   }
 
-  .attachment-preview {
-    max-width: 100%;
-    margin-left: 0;
+  // The chip used to take the whole line here (`max-width: 100%`, no shrink),
+  // which left the subject beside it at its first letter. A narrow row keeps
+  // the paperclip and drops the file names, the way the parcel and invoice
+  // markers drop their words; the names stay in the row for a screen reader.
+  // A search that matched an attachment keeps the names, shrinking before the
+  // subject does, because they are why the row is in the results.
+  .message-row .attachment-preview {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 45%;
+    margin-left: 6px;
+
+    &:not(.matched) {
+      padding: 1px 4px;
+
+      > span {
+        @include visually-hidden;
+      }
+    }
   }
 
   .date {
-    grid-column: 4 / 5;
+    grid-column: 3 / 4;
     grid-row: 1;
 
     // Narrow rows put the date right beside the text with no toolbar between
     // them, so it needs the gap even more than a wide one does.
-    margin-left: 12px;
+    margin-left: 4px;
   }
 
   // The snoozed date carries a button beside the time and already fills its

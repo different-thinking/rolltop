@@ -29,7 +29,7 @@ import type { MailView } from "../../lib/routes";
 import { messageSecurityIndicators, messageSecurityPreviewText, messageSecuritySnippetClassName } from "../../plugins/messageSecurity";
 import { messageQuickActionNodes } from "../../plugins/runtime";
 import type { RuntimePlugin } from "../../plugins/runtime";
-import { defaultSwipePreferences, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
+import { defaultSwipePreferences, rowSwipeAvailable, swipeActionPresentation, swipeSnoozeUntil } from "../../lib/swipeActions";
 import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip } from "../deliveries/ShipmentChip";
 import { InvoiceChip } from "../invoices/InvoiceChip";
@@ -1768,6 +1768,9 @@ function MessageList({
   const pendingSwipeMoveKey = Array.from(pendingSwipeMoveIDs).sort((a, b) => a - b).join(",");
   const pendingSwipeSnoozeKey = Array.from(pendingSwipeSnoozeIDs).sort((a, b) => a - b).join(",");
   const nativeTouchDrag = androidNativeAvailable();
+  // Swipes are a touch gesture, not a native-shell feature: the installed web
+  // app has them too. Long-press drag stays native, it needs the bridge.
+  const touchSwipe = rowSwipeAvailable(nativeTouchDrag);
   const effectiveSwipePreferences = swipePreferences || defaultSwipePreferences();
   const leftSwipePresentation = swipeActionPresentation(effectiveSwipePreferences.left_action);
   const rightSwipePresentation = swipeActionPresentation(effectiveSwipePreferences.right_action);
@@ -2943,7 +2946,7 @@ function MessageList({
   }
 
   function startRowSwipe(event: TouchEvent<HTMLDivElement>, conversation: Conversation) {
-    if (selectionBusy || swipeState || pendingSwipeActionIDs.current.has(conversation.message.id) || !nativeTouchDrag || event.touches.length !== 1 || (event.target as HTMLElement).closest("button,input,label")) return;
+    if (selectionBusy || swipeState || pendingSwipeActionIDs.current.has(conversation.message.id) || !touchSwipe || event.touches.length !== 1 || (event.target as HTMLElement).closest("button,input,label")) return;
     const touch = event.touches[0];
     swipeSession.current = { id: conversation.message.id, startX: touch.clientX, startY: touch.clientY, lastX: touch.clientX, lastY: touch.clientY, active: false, blocked: false };
   }

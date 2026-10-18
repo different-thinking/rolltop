@@ -109,3 +109,28 @@
 .experimental-spam-evidence-note p { margin: 0; }
 .experimental-spam-detail-meta { color: var(--muted); font-size: .75rem; }
 .experimental-spam-feedback-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+/* A list row is tight, so past a certain width the badge keeps its icon and
+   drops its words, the way the parcel and invoice markers beside it do. Spelt
+   out, "Medium spam risk" took more of a phone row than the subject it sits
+   beside. The colour still carries the band; the words stay for a screen
+   reader and the tooltip. */
+@media (max-width: 900px) {
+  .message-row .experimental-spam-badge {
+    flex: none;
+    margin-inline: .35rem 0;
+    padding: .2rem;
+  }
+
+  .message-row .experimental-spam-badge-label {
+    border: 0;
+    clip-path: inset(50%);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+}
