@@ -24,6 +24,7 @@ import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemT
 import { embeddedBootstrap } from "./lib/startup";
 import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
+import { useCalendarOutboxFlush } from "./features/calendar/useCalendarOutboxFlush";
 import { defaultSwipePreferences } from "./lib/swipeActions";
 
 
@@ -913,6 +914,10 @@ export default function App() {
   const openCompose = useCallback((query = "") => {
     setComposeOverlayQuery(query.replace(/^\?/, ""));
   }, []);
+
+  // Events entered offline are sent the moment the server is back, whatever
+  // view is open; the calendar only draws them while they wait.
+  useCalendarOutboxFlush(bootstrap?.user?.id || 0, bootstrap?.csrf || "", addToast);
 
   const unlockPlugin = securityUnlockPlugin(runtimePlugins.all);
 

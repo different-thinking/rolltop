@@ -13,6 +13,14 @@ import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { displayDateTime } from "../../lib/format";
 import { isNetworkError } from "../../lib/offline";
+import {
+  enqueueCalendarEvent,
+  pendingCalendarEvent,
+  queuedLocalID,
+  removeQueuedCalendarEvent,
+  replaceQueuedCalendarEvent,
+  useCalendarOutbox
+} from "../../lib/calendarOutbox";
 import { EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 import { useWeekDrag } from "./useWeekDrag";
@@ -76,11 +84,13 @@ type DialogState = {
 /** CalendarView renders one week of every visible calendar. */
 export function CalendarView({
   csrf,
+  userID,
   location,
   navigate,
   addToast
 }: {
   csrf: string;
+  userID: number;
   location: LocationState;
   navigate: (url: string) => void;
   addToast: AddToast;
@@ -89,6 +99,16 @@ export function CalendarView({
   const days = useMemo(() => weekDays(anchor), [anchor]);
   const [calendars, setCalendars] = useState<CalendarSummary[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
+  // Events entered while the server could not be reached. They are drawn with
+  // the week until the flush in App has sent them; the week reloads when the
+  // queue shrinks, which is when the server has them.
+  const queued = useCalendarOutbox(userID);
+  const pendingEvents = useMemo(() => {
+    const copyTargetID = calendars.find((calendar) => calendar.copy_target)?.id || 0;
+    const busyTargetID = calendars.find((calendar) => calendar.busy_target)?.id || 0;
+    return queued.map((item, index) => pendingCalendarEvent(item, index, copyTargetID, busyTargetID));
+  }, [queued, calendars]);
+  const shownEvents = useMemo(() => (pendingEvents.length === 0 ? events : [...events, ...pendingEvents]), [events, pendingEvents]);
   const [loading, setLoading] = useState(true);
   // When the week on screen came out of the offline store: the time the copy
   // was saved, 0 while the week is the server's answer.
@@ -169,6 +189,16 @@ export function CalendarView({
     const timer = window.setInterval(() => setNow(new Date()), nowLineInterval);
     return () => window.clearInterval(timer);
   }, []);
+
+  const previousQueuedRef = useRef(queued.length);
+  useEffect(() => {
+    if (queued.length < previousQueuedRef.current) {
+      void reload("events").catch(() => {
+        // The queue shrinking was the news; the next load draws the event.
+      });
+    }
+    previousQueuedRef.current = queued.length;
+  }, [queued.length, reload]);
 
   // Only on the first render: scrolling back to the morning every time the week
   // reloads would fight a user who scrolled to an evening appointment.
@@ -341,19 +371,52 @@ export function CalendarView({
     }
   };
 
+  // Creating an event is the one write that can be made offline: it names no
+  // version to conflict with. A create the browser could not deliver is queued
+  // (`lib/calendarOutbox.ts`) and drawn with the week until a connection
+  // carries it; opening the waiting event opens this same dialog, and saving it
+  // restates the queued one. An edit of an event the server holds is not
+  // queued - it would overwrite whatever the calendar has moved on to - and
+  // fails with the connection named.
   const saveEvent = (input: CalendarEventInput) =>
     runWrite(async () => {
-      const data = dialog?.event
-        ? await api.updateCalendarEvent(csrf, dialog.event.id, input)
-        : await api.createCalendarEvent(csrf, input);
-      await reload("events");
-      closeDialog();
-      reportWarnings(data.warnings);
+      const pendingID = queuedLocalID(dialog?.event);
+      if (dialog?.event && !pendingID) {
+        const data = await api.updateCalendarEvent(csrf, dialog.event.id, input);
+        await reload("events");
+        closeDialog();
+        reportWarnings(data.warnings);
+        return;
+      }
+      try {
+        const data = await api.createCalendarEvent(csrf, input);
+        if (pendingID) await removeQueuedCalendarEvent(userID, pendingID);
+        await reload("events");
+        closeDialog();
+        reportWarnings(data.warnings);
+      } catch (err) {
+        if (!isNetworkError(err)) throw err;
+        const queuedNow = pendingID
+          ? await replaceQueuedCalendarEvent(userID, pendingID, input)
+          : (await enqueueCalendarEvent(userID, input)) !== null;
+        if (!queuedNow) {
+          throw new Error("You are offline, and too many events are already waiting to be added. Try again once you are connected.");
+        }
+        closeDialog();
+        addToast("You are offline. The event is kept here and will be added to your calendar when you are back online.", "success");
+      }
     });
 
   const deleteEvent = () =>
     runWrite(async () => {
       if (!dialog?.event) return;
+      const pendingID = queuedLocalID(dialog.event);
+      if (pendingID) {
+        await removeQueuedCalendarEvent(userID, pendingID);
+        closeDialog();
+        addToast("The event was discarded. It had not reached your calendar.", "success");
+        return;
+      }
       const provider = providerName(calendarsByID.get(dialog.event.calendar_id));
       const data = await api.deleteCalendarEvent(csrf, dialog.event.id);
       await reload("events");
@@ -551,16 +614,16 @@ export function CalendarView({
   // change rather than redone on every render (the now-line ticks once a
   // minute).
   const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
-    const index = lensDayKey === "" ? -1 : resolveLensIndex(days, events, lensDayKey, todayKey);
+    const index = lensDayKey === "" ? -1 : resolveLensIndex(days, shownEvents, lensDayKey, todayKey);
     const lanes =
       index >= 0
-        ? lensLaneCalendarIDs(events, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
+        ? lensLaneCalendarIDs(shownEvents, calendarAccountGroups(listedCalendars).flatMap(([, items]) => items), days[index])
         : [];
-    const columns = dayColumnWeights(events, days, index, lanes.length)
+    const columns = dayColumnWeights(shownEvents, days, index, lanes.length)
       .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
       .join(" ");
     return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
-  }, [lensDayKey, days, events, todayKey, listedCalendars]);
+  }, [lensDayKey, days, shownEvents, todayKey, listedCalendars]);
 
   const openEvent = (event: CalendarEvent, day: Date) => {
     // The release that ends a drag arrives as a click on the block it ended on.
@@ -581,7 +644,7 @@ export function CalendarView({
     const left = `${lane * laneWidth + placed.column * width}%`;
     const blockWidth = `calc(${width}% - 3px)`;
     const source = dragSource(drag, placed.event);
-    const tooltip = eventTooltip(placed.event, calendar, calendarsByID);
+    const tooltip = pendingTooltip(placed.event) || eventTooltip(placed.event, calendar, calendarsByID);
     // Pressing an event never starts drawing a new one underneath it, and
     // its journey is part of it: grabbing the travel moves the event.
     const press = (pointerEvent: ReactPointerEvent) => {
@@ -622,7 +685,7 @@ export function CalendarView({
         {travel("before", placed.travelBefore)}
         <button
           type="button"
-          className={`calendar-event ${declined ? "declined" : ""} ${
+          className={`calendar-event ${declined ? "declined" : ""} ${placed.event.pending_offline ? "pending-offline" : ""} ${
             placed.event.status === "cancelled" ? "cancelled" : ""
           } ${placed.continuesBefore ? "continues-before" : ""} ${placed.continuesAfter ? "continues-after" : ""} ${
             draggable ? "draggable" : ""
@@ -887,7 +950,7 @@ export function CalendarView({
                 beginAllDayCreate(pointerEvent, dayIndex);
               }}
             >
-              {allDayEventsForDay(events, day).map((event) => {
+              {allDayEventsForDay(shownEvents, day).map((event) => {
                 const calendar = calendarsByID.get(event.calendar_id);
                 const color = calendarColor(calendar);
                 const draggable = eventDraggable(event, calendar);
@@ -895,9 +958,9 @@ export function CalendarView({
                   <button
                     key={`${event.id}-${localDateKey(day)}`}
                     type="button"
-                    className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""}`}
+                    className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""} ${event.pending_offline ? "pending-offline" : ""}`}
                     style={{ background: color, color: readableTextColor(color) }}
-                    title={eventTooltip(event, calendar, calendarsByID)}
+                    title={pendingTooltip(event) || eventTooltip(event, calendar, calendarsByID)}
                     onPointerDown={(pointerEvent) => {
                       pointerEvent.stopPropagation();
                       if (draggable) beginAllDayMove(pointerEvent, event, dayIndex, eventCopyable(event, calendar));
@@ -940,7 +1003,7 @@ export function CalendarView({
           </div>
           {days.map((day, index) => {
             const isToday = localDateKey(day) === todayKey;
-            const dayEvents = events.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
+            const dayEvents = shownEvents.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
             const lanes = index === lensIndex ? lensLanes : [];
             return (
               <div
@@ -1613,7 +1676,18 @@ function weekRangeLabel(first: Date, last: Date): string {
  * event without a title is one the dialog refuses to save and the server
  * refuses to write, so a drag of it could only bounce back. */
 function eventDraggable(event: CalendarEvent, calendar: CalendarSummary | undefined): boolean {
+  // A waiting event has nothing on the server to move; it is changed through
+  // its dialog, which restates the queued one.
+  if (event.pending_offline) return false;
   return event.status !== "cancelled" && (event.summary || "").trim() !== "" && eventEditable(event, calendar);
+}
+
+/** pendingTooltip is what a waiting event says on hover, or "" for any other. */
+function pendingTooltip(event: CalendarEvent): string {
+  if (!event.pending_offline) return "";
+  return event.pending_error
+    ? `Not in your calendar yet: ${event.pending_error}. Open it to change it or discard it.`
+    : "Entered offline. It will be added to your calendar when you are back online.";
 }
 
 /** eventCopyable says whether the copy key may copy a dragged event. A

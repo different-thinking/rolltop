@@ -485,6 +485,13 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-body">
+          {event?.pending_offline ? (
+            <p className="calendar-dialog-note calendar-dialog-pending">
+              {event.pending_error
+                ? `Your calendar refused this event: ${event.pending_error} Change it and save again, or discard it.`
+                : "Entered offline. It is kept on this device and will be added to your calendar when you are back online."}
+            </p>
+          ) : null}
           {event && event.my_response ? (
             <div className="calendar-rsvp">
               <span className="calendar-rsvp-label">Are you going?</span>
@@ -757,7 +764,11 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-footer">
-          {event && editable && !placeholderOfEvent ? (
+          {event?.pending_offline ? (
+            <button type="button" className="ghost" disabled={saving} onClick={onDelete}>
+              Discard
+            </button>
+          ) : event && editable && !placeholderOfEvent ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
                 <span>

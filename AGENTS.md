@@ -242,8 +242,18 @@ site and in review.
   server marks the shell `Vary: *` so the worker stores a Response rebuilt from
   its text, and the assets it names are pinned against the asset cache's
   eviction, because a shell whose script was evicted starts to a blank page.
-  And nothing is queued: a move, a reply or a calendar edit made offline fails
-  with the connection named (`messageFromError`), and the banner in the shell
+  Exactly one write queues: **creating a calendar event**
+  (`lib/calendarOutbox.ts`), because a create names no version to conflict
+  with, so sending it later is the same request. The queue is per user, kept
+  through a sign-out and dropped when another user signs in, sent in order by
+  `useCalendarOutboxFlush` in App (so it goes whatever view is open), stopped
+  at the first request the browser could not deliver, and an event the server
+  refused stays with the refusal on it and is not sent again until the reader
+  re-saves it. A waiting event is drawn in the week with a negative id
+  (`pendingCalendarEvent`), cannot be dragged, and opens the same dialog, where
+  Save restates the queued one and Discard removes it. Every other write - a
+  move, a reply, an edit or delete of an event the server holds - fails with
+  the connection named (`messageFromError`), and the banner in the shell
   (`OfflineBanner`, `useServerReachable`) says so first. Reachability is the
   browser's flag corrected by the last request (`lib/offline.ts`), because a
   captive portal reads as online while every request fails. Step one covers

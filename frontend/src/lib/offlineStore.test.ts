@@ -50,6 +50,16 @@ describe("offlineStore", () => {
     expect((await loadOfflineEntry(3, "message", "7"))?.data).toBe("d");
   });
 
+  it("keeps the calendar outbox through a sign-out but not through another user's sign-in", async () => {
+    await saveOfflineEntry(1, "calendar-outbox", "queue", [{ summary: "typed on the train" }]);
+    await saveOfflineEntry(1, "message", "1", "a");
+    await clearOfflineUser(1);
+    expect(await loadOfflineEntry(1, "message", "1")).toBeNull();
+    expect((await loadOfflineEntry(1, "calendar-outbox", "queue"))?.data).toEqual([{ summary: "typed on the train" }]);
+    await clearOtherOfflineUsers(2);
+    expect(await loadOfflineEntry(1, "calendar-outbox", "queue")).toBeNull();
+  });
+
   it("deletes named entries and lists what is left", async () => {
     await saveOfflineEntry(1, "message", "1", "a");
     await saveOfflineEntry(1, "message", "2", "b");

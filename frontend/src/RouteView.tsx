@@ -113,7 +113,7 @@ export function RouteView({
       return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "calendar")) {
-      return <CalendarView csrf={csrf} location={location} navigate={navigate} addToast={addToast} />;
+      return <CalendarView csrf={csrf} userID={user.id} location={location} navigate={navigate} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "contacts")) {
       return <ContactsView csrf={csrf} location={location} contactPlugins={runtimePlugins.all} addToast={addToast} />;

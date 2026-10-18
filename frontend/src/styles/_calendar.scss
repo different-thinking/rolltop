@@ -409,6 +409,22 @@
   flex-wrap: wrap;
 }
 
+// An event entered offline is drawn where it will be, but not as if it were
+// there: a dashed outline says it has not reached the calendar yet.
+.calendar-chip.pending-offline,
+.calendar-event.pending-offline {
+  outline: 2px dashed var(--text);
+  outline-offset: -2px;
+  opacity: 0.8;
+}
+
+.calendar-dialog-pending {
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
 .calendar-offline-notice {
   margin: 0 0 8px;
   padding: 7px 14px;

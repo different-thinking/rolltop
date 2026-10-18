@@ -24,7 +24,7 @@
 //     care whether the copy outlives the tab. It is a convenience store: a miss
 //     is answered by the network, never by an error.
 
-type OfflineKind = "message" | "calendars" | "calendar-events";
+type OfflineKind = "message" | "calendars" | "calendar-events" | "calendar-outbox";
 
 export type OfflineEntryMeta = {
   key: string;
@@ -55,8 +55,14 @@ const dataStore = "data";
 const limits: Record<OfflineKind, { entries: number; bytes: number }> = {
   message: { entries: 200, bytes: 32 * 1024 * 1024 },
   calendars: { entries: 1, bytes: 1024 * 1024 },
-  "calendar-events": { entries: 12, bytes: 8 * 1024 * 1024 }
+  "calendar-events": { entries: 12, bytes: 8 * 1024 * 1024 },
+  "calendar-outbox": { entries: 1, bytes: 2 * 1024 * 1024 }
 };
+
+/** Kinds a sign-out keeps. The calendar outbox is what the reader typed and
+ * has not reached the server yet; signing out must not forfeit it, and only
+ * another user signing in on this browser drops it (`clearOtherOfflineUsers`). */
+const keptThroughSignOut = new Set<OfflineKind>(["calendar-outbox"]);
 
 /** A single entry larger than this is not stored at all: it would evict most
  * of the set to make room for one thread. */
@@ -312,12 +318,13 @@ export async function deleteOfflineEntries(userID: number, kind: OfflineKind, na
   await withBackend(async (store) => store.delete(names.map((name) => entryKey(userID, kind, name))), undefined);
 }
 
-/** clearOfflineUser drops everything one user holds - a sign-out. */
+/** clearOfflineUser drops what one user holds - a sign-out - except what is
+ * theirs to send later (`keptThroughSignOut`). */
 export async function clearOfflineUser(userID: number): Promise<void> {
   if (!positiveInteger(userID)) return;
   await withBackend(async (store) => {
     const entries = await store.list(userID);
-    await store.delete(entries.map((entry) => entry.key));
+    await store.delete(entries.filter((entry) => !keptThroughSignOut.has(entry.kind)).map((entry) => entry.key));
   }, undefined);
 }
 
