@@ -688,12 +688,6 @@
     max-width: 45%;
     margin-left: 6px;
 
-    // The names get a span of their own because HighlightedText hands back a
-    // bare text node when nothing is highlighted, which no selector reaches.
-    .attachment-preview-names {
-      @include truncate;
-    }
-
     &:not(.matched) {
       padding: 1px 4px;
 

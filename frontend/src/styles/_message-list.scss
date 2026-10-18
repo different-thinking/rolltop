@@ -1005,7 +1005,9 @@
     color: var(--text);
   }
 
-  > span {
+  // The names get a span of their own because HighlightedText hands back a
+  // bare text node when nothing is highlighted, which no selector reaches.
+  .attachment-preview-names {
     @include truncate;
   }
 }
