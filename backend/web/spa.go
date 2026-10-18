@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -27,6 +28,20 @@ var (
 
 const frontendDistDir = "frontend/dist"
 const immutableFrontendAssetCacheControl = "public, max-age=31536000, immutable"
+
+// The calendar installs as an app of its own beside the mail app, so a reader
+// can pin it to the taskbar or the Start menu under its own icon. Browsers
+// install whichever manifest the page links, keyed by that manifest's id, so the
+// calendar's pages link their own manifest and every other page keeps the mail
+// one. Both are per-user (handleWebManifest) and served from the same table.
+const (
+	mailWebManifestPath     = "/manifest.webmanifest"
+	calendarWebManifestPath = "/calendar.webmanifest"
+)
+
+var webManifestPaths = []string{mailWebManifestPath, calendarWebManifestPath}
+
+var mailWebManifestLink = []byte(`href="` + mailWebManifestPath + `"`)
 
 var startupBootstrapMarker = []byte(`<meta name="rolltop-startup" />`)
 var startupThemeColorMarker = []byte(`<meta name="rolltop-theme-color" />`)
@@ -84,6 +99,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		}
 		contents = injectStartupTheme(injected, s.currentThemeID(r))
 	}
+	contents = injectWebManifestLink(contents, r.URL.Path)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
 	// Vary:* also makes Cache.put reject this response while older service
@@ -91,6 +107,29 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "*")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(contents)
+}
+
+// webManifestPathForRoute names the manifest a page links, read from the route
+// that serves it (spaRoute.webManifest). The calendar's entry matches the
+// frontend's organizerRoute("calendar"), which swaps the same link on
+// client-side navigation (syncDocumentManifest); this half covers the first
+// load, which is the page a browser offers to install.
+func webManifestPathForRoute(path string) string {
+	if route, ok := matchSPARoute(path); ok && route.webManifest != "" {
+		return route.webManifest
+	}
+	return mailWebManifestPath
+}
+
+// injectWebManifestLink points the shell's manifest link at the page's app. A
+// shell without the link is left alone rather than given one: it is a build
+// that does not install at all, and the mail link is the only one it ships.
+func injectWebManifestLink(index []byte, path string) []byte {
+	manifest := webManifestPathForRoute(path)
+	if manifest == mailWebManifestPath {
+		return index
+	}
+	return bytes.Replace(index, mailWebManifestLink, []byte(`href="`+manifest+`"`), 1)
 }
 
 // injectStartupTheme stamps the reader's theme into the shell before the browser
@@ -144,7 +183,11 @@ func (s *Server) handleWebManifest(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	full := filepath.Join(frontendDistDir, "manifest.webmanifest")
+	if !slices.Contains(webManifestPaths, r.URL.Path) {
+		http.NotFound(w, r)
+		return
+	}
+	full := filepath.Join(frontendDistDir, strings.TrimPrefix(r.URL.Path, "/"))
 	raw, err := os.ReadFile(full)
 	if err != nil {
 		http.NotFound(w, r)
@@ -328,6 +371,9 @@ type spaRoute struct {
 	// ownPrefixHandler marks a subtree that is registered elsewhere because it
 	// serves more than the app shell.
 	ownPrefixHandler bool
+	// webManifest names the manifest the page links when it is not the mail
+	// app's, which is what a browser installs from it (webManifestPathForRoute).
+	webManifest string
 }
 
 var spaRoutes = []spaRoute{
@@ -345,7 +391,8 @@ var spaRoutes = []spaRoute{
 	{path: "/contacts", exact: true, prefix: true, ownPrefixHandler: true},
 	// /calendar/2026-08-17 selects the week a date falls in, so the subtree
 	// serves the app shell like the mailbox one does.
-	{path: "/calendar", exact: true, prefix: true},
+	// It is also an installable app of its own.
+	{path: "/calendar", exact: true, prefix: true, webManifest: calendarWebManifestPath},
 	{path: "/messages", prefix: true},
 	{path: "/sync-runs", prefix: true},
 	// Everything running in the background, in one place rather than beside the

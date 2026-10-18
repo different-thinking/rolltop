@@ -526,7 +526,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/assets/", s.handleFrontendAsset)
-	mux.HandleFunc("/manifest.webmanifest", s.handleWebManifest)
+	for _, manifest := range webManifestPaths {
+		mux.HandleFunc(manifest, s.handleWebManifest)
+	}
 	mux.HandleFunc("/sw.js", s.handleFrontendAsset)
 	mux.HandleFunc("/offline.html", s.handleFrontendAsset)
 	mux.HandleFunc("/icon.svg", s.handleFrontendAsset)

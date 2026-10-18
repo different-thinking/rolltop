@@ -185,8 +185,13 @@ self.addEventListener("notificationclick", (event) => {
     Promise.all([
       warmNotificationMessage(data),
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
+        const targetIsCalendar = isCalendarPath(new URL(targetURL).pathname);
         for (const client of clients) {
           if (!client.url.startsWith(self.location.origin)) continue;
+          // The calendar installs as an app of its own, so a window showing it
+          // may be that app: turning it into the mail a notification names
+          // would take the reader's calendar away under the calendar's icon.
+          if (!targetIsCalendar && isCalendarPath(new URL(client.url).pathname)) continue;
           if ("navigate" in client && client.url !== targetURL) {
             const navigated = await client.navigate(targetURL);
             return navigated?.focus();
@@ -198,6 +203,12 @@ self.addEventListener("notificationclick", (event) => {
     ])
   );
 });
+
+// isCalendarPath mirrors organizerRoute(path, "calendar") in lib/routes.ts and
+// webManifestPathForRoute in backend/web/spa.go: the page and the routes below it.
+function isCalendarPath(pathname) {
+  return pathname === "/calendar" || pathname.startsWith("/calendar/");
+}
 
 function sameOriginPath(value, fallback) {
   if (typeof value !== "string" || !value) return fallback;
