@@ -1279,6 +1279,15 @@ export type CalendarEvent = {
   /** travel marks a travel block drawn on its own ("before" or "after"):
    * one whose event is not drawn. Folded blocks never arrive. */
   travel?: string;
+  /** pending_offline marks an event entered while the server could not be
+   * reached, drawn from the browser's own queue (`lib/calendarOutbox.ts`)
+   * until a connection carries it to the calendar. Nothing on the server
+   * knows it, and its id is negative. */
+  pending_offline?: boolean;
+  pending_local_id?: string;
+  /** pending_error is the calendar's refusal of a waiting event, empty while
+   * it is only waiting for a connection. */
+  pending_error?: string;
 };
 
 /** CalendarEventCopy is one other copy of a linked event. */

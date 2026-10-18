@@ -12,6 +12,7 @@ import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/and
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
+import { useServerReachable } from "../../lib/offline";
 import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
@@ -483,6 +484,7 @@ export function AppShell({
         <main className={`content ${mailRouteView(location.path, Boolean(user.is_admin)) ? "measured" : ""}`}>
           {databaseUnavailable ? <DatabaseUnavailableBanner isAdmin={Boolean(user.is_admin)} navigate={navigate} /> : null}
           {accountNeedsPassword ? <AccountCredentialBanner notice={accountNotice} navigate={navigate} /> : null}
+          <OfflineBanner />
           {children}
         </main>
         {touchDragPreview ? (
@@ -646,6 +648,25 @@ function DatabaseUnavailableBanner({ isAdmin, navigate }: { isAdmin: boolean; na
         </span>
       </div>
       {isAdmin ? <button type="button" onClick={() => navigate("/admin/database")}>Repair database</button> : null}
+    </section>
+  );
+}
+
+// Shown while the server cannot be reached - the browser says offline, or the
+// last request never got an answer. The views below keep drawing what the
+// browser has saved: the mail pages and threads it stored, the calendar weeks
+// it warmed. The banner says so once, above them, so a stale page is not read
+// as the current one and a Delete that cannot be sent is not a surprise.
+function OfflineBanner() {
+  const reachable = useServerReachable();
+  if (reachable) return null;
+  return (
+    <section className="offline-alert" role="status" aria-live="polite">
+      <Icon name="offline" weight="duotone" />
+      <div>
+        <strong>Offline</strong>
+        <span>Showing saved mail and calendar. New mail, moves, replies and calendar changes need a connection.</span>
+      </div>
     </section>
   );
 }

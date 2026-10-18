@@ -967,6 +967,9 @@ export function ThreadView({
   const [markUnreadBusy, setMarkUnreadBusy] = useState(false);
   const [loadStatus, setLoadStatus] = useState<MessageLoadStatus | null>(null);
   const [error, setError] = useState("");
+  // When the thread on screen came out of the offline store rather than from
+  // the server: the time that copy was saved, 0 for a live answer.
+  const [savedCopyAt, setSavedCopyAt] = useState(0);
   const [loading, setLoading] = useState(true);
   const pluginKey = enabledPlugins.join("|");
   const pluginSet = useMemo(() => createPluginSet(enabledPlugins), [pluginKey]);
@@ -1053,6 +1056,7 @@ export function ThreadView({
       try {
         const data = await api.message(id, images, highlightQuery);
         if (loadRequest !== loadRequestRef.current) return;
+        setSavedCopyAt(data.offline_saved_at || 0);
         setThread(data.thread);
         setSubject(data.message.subject || "(no subject)");
         setMailboxID(data.mailbox_id);
@@ -2086,6 +2090,12 @@ export function ThreadView({
         ) : null}
       </div>
       {error ? <div className="error">{error}</div> : null}
+      {savedCopyAt > 0 && !loading ? (
+        <div className="mail-cache-warning" role="status">
+          Saved copy from {displayDateTime(new Date(savedCopyAt).toISOString(), datePrefs)}. You are offline: remote images,
+          attachments and anything you change here need a connection.
+        </div>
+      ) : null}
       {loading ? <div className="panel muted">Loading conversation...</div> : null}
       {loadStatus ? (
         <div className="fetch-status-backdrop" role="presentation">

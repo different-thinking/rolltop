@@ -158,7 +158,10 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	stop = timing.measure(&timing.hydrate)
-	views, msg, err := s.threadViewsForMessageTimed(r.Context(), cu, msg, r.URL.Query().Get("images") == "1", r.URL.Query().Get("q"), timing)
+	// peek=1 is the offline store warming a copy it may never show; it reads
+	// the thread without opening it, so nothing is marked read.
+	peek := r.URL.Query().Get("peek") == "1"
+	views, msg, err := s.threadViewsForMessagePeek(r.Context(), cu, msg, r.URL.Query().Get("images") == "1", r.URL.Query().Get("q"), timing, peek)
 	stop()
 	if err != nil {
 		s.serverError(w, r, err)
@@ -176,7 +179,11 @@ func (s *Server) apiMessage(w http.ResponseWriter, r *http.Request, id int64) {
 	if snooze, snoozeErr := s.store.MessageSnoozeForUser(r.Context(), cu.User.ID, msg.ID); snoozeErr == nil {
 		if snooze.SnoozedUntil.After(time.Now()) {
 			snoozedUntil = timeString(snooze.SnoozedUntil)
-		} else {
+		} else if !peek {
+			// Opening mail that has come back from a snooze is what settles
+			// the return: the snooze row and its reminder go. A peek is not
+			// an open, and the newest page it warms is headed by exactly this
+			// mail, so it leaves both where the reader will find them.
 			acknowledged, ackErr := s.store.AcknowledgeDueSnoozeForUser(r.Context(), cu.User.ID, msg.ID, time.Now().UTC())
 			if ackErr != nil {
 				s.serverError(w, r, ackErr)
@@ -1287,6 +1294,37 @@ func (s *Server) threadViewsForMessage(ctx context.Context, cu currentUser, msg 
 }
 
 func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser, msg store.MessageRecord, showImages bool, query string, timing *searchTiming) ([]threadMessageView, store.MessageRecord, error) {
+	return s.threadViewsForMessagePeek(ctx, cu, msg, showImages, query, timing, false)
+}
+
+// localMailOnlyKey marks a request that reads stored mail and nothing else:
+// rawMessageBytes answers it from the blob store or not at all, never by
+// fetching from IMAP.
+const localMailOnlyKey contextKey = "local-mail-only"
+
+func withLocalMailOnly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, localMailOnlyKey, true)
+}
+
+func localMailOnly(ctx context.Context) bool {
+	only, _ := ctx.Value(localMailOnlyKey).(bool)
+	return only
+}
+
+// threadViewsForMessagePeek renders the thread the way an open does, except
+// that peek changes nothing and spends nothing on the reader's behalf. Opening
+// a message marks every unread row of its thread read and pushes \Seen, and
+// may fetch a pruned body from IMAP to show it; a copy saved for reading
+// offline is not an open. The offline store warms the newest page of every
+// list the reader looks at, forty threads at a time that nobody has asked to
+// read, so a peek must not clear their unread badges and must not turn into
+// forty IMAP fetches against the account's connection and the host's rate
+// limit. What is stored is rendered; what is not is left as the preview the
+// row already carries.
+func (s *Server) threadViewsForMessagePeek(ctx context.Context, cu currentUser, msg store.MessageRecord, showImages bool, query string, timing *searchTiming, peek bool) ([]threadMessageView, store.MessageRecord, error) {
+	if peek {
+		ctx = withLocalMailOnly(ctx)
+	}
 	stop := func() {}
 	if timing != nil {
 		stop = timing.measure(&timing.thread)
@@ -1342,7 +1380,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 			s.notifyUserChanged(cu.User.ID)
 		}
 	}()
-	if len(unreadIDs) > 0 {
+	if len(unreadIDs) > 0 && !peek {
 		if timing != nil {
 			stop = timing.measure(&timing.readState)
 		}
@@ -1407,7 +1445,7 @@ func (s *Server) threadViewsForMessageTimed(ctx context.Context, cu currentUser,
 		return header
 	}
 	for idx, threadMsg := range threadMessages {
-		if !threadMsg.IsRead {
+		if !threadMsg.IsRead && !peek {
 			threadMsg.IsRead = true
 			threadMsg.ReadSyncPending = true
 		}
@@ -1551,7 +1589,12 @@ func (s *Server) ensureMessageAttachments(ctx context.Context, userID int64, msg
 		return current, nil
 	}
 	if !allowSyncRepair || msg.Size <= 0 || msg.Size > maxSyncAttachmentRepairBytes {
-		s.repairMessageAttachmentsAsync(userID, msg)
+		// The background repair runs on its own context and would fetch a
+		// pruned body from IMAP; a local-only request (a peek warming the
+		// offline store) must not start one, see threadViewsForMessagePeek.
+		if !localMailOnly(ctx) {
+			s.repairMessageAttachmentsAsync(userID, msg)
+		}
 		return current, nil
 	}
 	repaired, err := s.repairMessageAttachments(ctx, userID, msg)
@@ -1594,8 +1637,11 @@ func (s *Server) ensureInlineCIDAttachments(ctx context.Context, userID int64, m
 		return current
 	}
 	// A message too large to reparse inside the request is repaired behind it,
-	// and the reader is told to fetch the thread again when it worked.
-	s.repairMessageAttachmentsAsync(userID, msg)
+	// and the reader is told to fetch the thread again when it worked. Not for
+	// a local-only request: the repair fetches from IMAP on its own context.
+	if !localMailOnly(ctx) {
+		s.repairMessageAttachmentsAsync(userID, msg)
+	}
 	return current
 }
 

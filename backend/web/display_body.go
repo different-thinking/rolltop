@@ -123,7 +123,9 @@ func (s *Server) rawMessageBytes(ctx context.Context, userID int64, msg store.Me
 			}
 		}
 	}
-	if s.syncer == nil {
+	// A request marked local-only (a peek warming the offline store) is
+	// answered from what is stored or not at all; see threadViewsForMessagePeek.
+	if s.syncer == nil || localMailOnly(ctx) {
 		return nil, store.ErrNotFound
 	}
 	return s.syncer.FetchAndCacheRawMessageForMessage(ctx, userID, msg)

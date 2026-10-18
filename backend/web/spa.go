@@ -102,8 +102,10 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	contents = injectWebManifestLink(contents, r.URL.Path)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
-	// Vary:* also makes Cache.put reject this response while older service
-	// workers are being replaced, so personalized startup JSON cannot linger.
+	// Vary:* makes Cache.put reject this response as received, so no service
+	// worker can keep the personalised startup JSON by accident. The one that
+	// keeps it on purpose (sw.js, SHELL_CACHE) stores a Response rebuilt from
+	// the text, and carries its own rules for when that copy is dropped.
 	w.Header().Set("Vary", "*")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(contents)
