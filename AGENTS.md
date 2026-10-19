@@ -806,7 +806,13 @@ site and in review.
   switches laid flat (`toggleCalendar`, i.e. `selected`), never a filter of
   their own, so the two cannot disagree. And the agenda's free time counts the
   journey as taken, as the week's layout does, and names only gaps between
-  appointments: it does not know the reader's working hours.
+  appointments: it does not know the reader's working hours. On a phone the
+  calendar **is** the page: it fills the screen under the top bar and only its
+  grid or list scrolls (`.content:has(> .calendar-shell > .calendar-main.compact)`),
+  because a grid with a height of its own inside a page that also scrolls
+  carried the header and the date away before the day moved. Its head is two
+  rows and the day view's date lives in the header's date button alone; every
+  line added up there is a line of the day the reader cannot see.
 - **A drag in the week is the dialog's Save, not a write of its own.**
   Moving, copying (Ctrl, or Option on a Mac) and pulling an event's end
   (`useWeekDrag`, `weekModel`'s drag arithmetic) restate the event exactly as

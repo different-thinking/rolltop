@@ -91,11 +91,13 @@ export function MobileViewSwitch({
 }
 
 /**
- * MobileDayHead is the top of the day view: the date, what the day holds, a
- * chip per calendar to show or hide it, and the all-day events folded into one
- * line. The chips are the Calendars menu's own switches laid out flat -- a
- * hidden calendar is switched off exactly as it is there, so the two never
- * disagree.
+ * MobileDayHead is the top of the day view: a chip per calendar to show or
+ * hide it, and the all-day events folded into one line. The chips are the
+ * Calendars menu's own switches laid out flat -- a hidden calendar is switched
+ * off exactly as it is there, so the two never disagree. The date and what the
+ * day holds are said to a screen reader only: the date button in the header
+ * already names the day, and on a phone every line up here is a line of the
+ * day the reader cannot see.
  */
 export function MobileDayHead({
   day,
@@ -129,12 +131,10 @@ export function MobileDayHead({
 
   return (
     <div className="calendar-mobile-day-head">
-      <div>
-        <h2 className="calendar-mobile-day-title">
-          {day.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
-        </h2>
-        <p className="calendar-mobile-day-summary">{summary}</p>
-      </div>
+      <h2 className="calendar-mobile-day-title">
+        {day.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
+        <span className="calendar-mobile-day-summary">, {summary}</span>
+      </h2>
       {calendars.length > 0 ? (
         <div className="calendar-mobile-chips" role="group" aria-label="Calendars shown">
           {calendars.map((calendar) => (

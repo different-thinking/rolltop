@@ -757,7 +757,7 @@ export function CalendarView({
   const weekLabel =
     view === "day"
       ? days[0].toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
-      : weekRangeLabel(days[0], days[days.length - 1]);
+      : weekRangeLabel(days[0], days[days.length - 1], view !== null);
   const focusIndex = view === "three" ? threeDayFocusIndex(days, focusDayKey, todayKey) : -1;
 
   // The phone pages by the span its view shows and routes to the day itself;
@@ -1769,7 +1769,7 @@ function CalendarPicker({
         title={shown.length > 0 ? `Shown: ${shown.map((calendar) => calendar.name).join(", ")}` : "No calendar shown"}
       >
         <Icon name="calendar" />
-        Calendars
+        <span className="calendar-picker-label">Calendars</span>
         <span className="calendar-picker-dots" aria-hidden="true">
           {shown.map((calendar) => (
             <span key={calendar.id} style={{ background: calendarColor(calendar) }} />
@@ -2004,13 +2004,17 @@ function formatTravel(minutes: number | undefined): string {
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
-function weekRangeLabel(first: Date, last: Date): string {
+// On a phone the range shares one row with the arrows, Today, sync and a new
+// event, so it leaves out the year while both ends fall in the current one.
+function weekRangeLabel(first: Date, last: Date, omitCurrentYear = false): string {
   const sameMonth = first.getMonth() === last.getMonth() && first.getFullYear() === last.getFullYear();
+  const currentYear = new Date().getFullYear();
+  const yearShown = !(omitCurrentYear && first.getFullYear() === currentYear && last.getFullYear() === currentYear);
   const firstLabel = first.toLocaleDateString(undefined, { day: "numeric", month: sameMonth ? undefined : "short" });
   const lastLabel = last.toLocaleDateString(undefined, {
     day: "numeric",
     month: "short",
-    year: first.getFullYear() === last.getFullYear() ? "numeric" : undefined
+    year: first.getFullYear() === last.getFullYear() && yearShown ? "numeric" : undefined
   });
   if (first.getFullYear() !== last.getFullYear()) {
     return `${first.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} – ${lastLabel}`;
