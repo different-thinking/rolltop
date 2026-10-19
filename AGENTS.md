@@ -276,6 +276,44 @@ site and in review.
   captive portal reads as online while every request fails. Step one covers
   the desktop browser and the installed web app; the Android wrapper loads the
   same shell but has not been checked for it.
+- **A calendar reminder is the provider's reminder, delivered; Rolltop never
+  invents one and never writes one back.** `calendar_events.reminders` mirrors
+  the popup reminders an event asks for (`store.EncodeCalendarReminders`:
+  minutes, `default`, `none`, or empty for a row read before reminders were)
+  and `calendars.default_reminders` a Google calendar's own default, so an
+  event is reminded of exactly as Google Calendar or Outlook would -- email
+  reminders are the provider's to send and are dropped. A row whose reminders
+  were never read is rewritten once by the next sync whatever its version says
+  (`CalendarEventRef.RemindersRead`), or it never gets any. The scheduler
+  (`Store.RecordDueCalendarReminderEvents`, driven by
+  `calendar_reminder_scheduler.go`) records a reminder once per (event, start,
+  minutes), which is what makes a pass idempotent and lets a moved event remind
+  again; it reads only the calendars drawn in the week, never a travel block, a
+  copy of a linked pair, a cancelled or a declined event, and never fires more
+  than `calendarReminderLateWindow` late -- the first pass after an upgrade must
+  not fire a day's worth of reminders at once. An all-day event's reminders
+  count back from midnight of its date in the event's (then the calendar's)
+  zone, not from the UTC midnight it is stored at. Delivery is the snooze shape:
+  a durable feed, a cursor per push endpoint (`last_calendar_reminder_event_id`,
+  started at the high-water mark so enabling notifications does not replay the
+  day), one push per reminder with the event's bounds in the payload so the
+  service worker says the time in the reader's zone, and
+  `/api/notifications/calendar-reminders` for a browser without push and for
+  native clients. A sync that landed and every calendar write wake the loop
+  (`notifyCalendarChanged`), so an event entered five minutes ahead is reminded
+  of rather than waited out. The notification carries "Remind me later" and
+  "Dismiss": dismissing closes it and nothing else, and putting it off opens
+  the calendar with the picker up (`?remind=<event id>`,
+  `ReminderSnoozeDialog`) because a notification has two fixed buttons and the
+  reader chooses the time. That wait is Rolltop's own, one per event
+  (`calendar_reminder_snoozes`, `Store.SnoozeCalendarReminder`,
+  `POST /api/calendar/events/:id/remind`), fires through the same feed with
+  the snooze's id in the row's key so it can land on the provider's minute,
+  fires however late it is because the reader asked for it by name, and is
+  dropped unfired when its event is gone. The calendar asks once per user and
+  browser whether this device should remind (`reminderPromptKey`); the answer
+  goes to the same switch the account menu owns, and a browser that refused
+  notifications is not asked.
 - Anything in the frontend waiting on work the server will announce waits on the
   announcement, not on a timer: `waitForChromeEvent` (`chromeEvents.ts`) is that
   wait, and the interval passed to it is the fallback for the announcement that

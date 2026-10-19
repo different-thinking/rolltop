@@ -46,7 +46,8 @@ import type {
   SyncRun,
   SyncRunLiveDetail,
   ThreadMessage,
-  User
+  User,
+  CalendarReminderFeed
 } from "./types";
 import { clearMailSnapshots, clearOtherMailSnapshots, forgetMessagesInSnapshots, loadMailSnapshot, saveMailSnapshot } from "./lib/mailSnapshot";
 import { clearFiledMessages, clearOtherFiledMessages, filedMessageIDs, filterFiledConversations, releaseAnsweredFilings, setFiledMessagesUser } from "./lib/filedMessages";
@@ -976,6 +977,14 @@ export const api = {
       category
     }),
   calendars: loadCalendars,
+  /** calendarReminderNotifications reads the reminders that came due after a
+   * cursor; with no cursor it answers the current high-water mark and no
+   * reminders, which is where a tab that has just opened starts. It is never
+   * cached: a feed read is a question about now. */
+  calendarReminderNotifications: async (after: number | null) => {
+    const url = after === null ? "/api/notifications/calendar-reminders" : `/api/notifications/calendar-reminders?after=${after}`;
+    return parse<CalendarReminderFeed>(await fetchGET(url, { headers: { Accept: "application/json" } }));
+  },
   cachedCalendar,
   warmOfflineCalendar,
   setCalendarSelected: (csrf: string, id: number, selected: boolean) =>
@@ -1019,6 +1028,10 @@ export const api = {
     ),
   respondToCalendarEvent: (csrf: string, id: number, response: string) =>
     postJSON<{ event: CalendarEvent }>(`/api/calendar/events/${id}/respond`, csrf, { response }),
+  /** snoozeCalendarReminder puts an event's reminder off to a chosen time;
+   * the server reminds again then, through the same notifications. */
+  snoozeCalendarReminder: (csrf: string, id: number, remindAt: Date) =>
+    postJSON<{ ok: boolean; remind_at: string }>(`/api/calendar/events/${id}/remind`, csrf, { remind_at: remindAt.toISOString() }),
   addSenderContact: (csrf: string, id: number) =>
     postJSON<{ contact: Contact; created: boolean }>(`/api/messages/${id}/contacts/add-sender`, csrf),
   syncStatus: () => getJSON<{ running: boolean; latest: SyncRun | null }>("/api/sync/status"),

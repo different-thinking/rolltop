@@ -435,6 +435,26 @@
   font-size: 13px;
 }
 
+.calendar-reminder-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text);
+
+  > span:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+.calendar-reminder-prompt-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
 .calendar-empty {
   margin: 0;
   padding: 14px;

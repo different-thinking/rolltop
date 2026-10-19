@@ -175,6 +175,10 @@ type Server struct {
 	snoozePushRunning         map[int64]bool
 	snoozePushDirty           map[int64]bool
 	snoozeSchedulerWake       chan struct{}
+	calendarPushScheduleMu    sync.Mutex
+	calendarPushRunning       map[int64]bool
+	calendarPushDirty         map[int64]bool
+	calendarReminderWake      chan struct{}
 	retentionSchedulerWake    chan struct{}
 	startedAt                 time.Time
 }
@@ -465,6 +469,9 @@ func New(opts Options) (*Server, error) {
 		snoozePushRunning:         map[int64]bool{},
 		snoozePushDirty:           map[int64]bool{},
 		snoozeSchedulerWake:       make(chan struct{}, 1),
+		calendarPushRunning:       map[int64]bool{},
+		calendarPushDirty:         map[int64]bool{},
+		calendarReminderWake:      make(chan struct{}, 1),
 		retentionSchedulerWake:    make(chan struct{}, 1),
 		startedAt:                 time.Now().UTC(),
 		// Login backs off per client IP (not per account -- see loginGateKey), so
@@ -474,6 +481,15 @@ func New(opts Options) (*Server, error) {
 		// throttles sooner and per (IP, address) to bound mail-bombing one victim.
 		loginGate:         newBackoffGate(10, time.Second, 15*time.Minute, time.Hour),
 		passwordResetGate: newBackoffGate(3, 30*time.Second, time.Hour, 2*time.Hour),
+	}
+	// A calendar sync that landed is what moves the next reminder: an event
+	// entered at Google five minutes from now has to wake the reminder loop
+	// rather than wait out its idle hour.
+	if opts.GoogleCalendar != nil {
+		opts.GoogleCalendar.AfterSync = srv.notifyCalendarChanged
+	}
+	if opts.MicrosoftCalendar != nil {
+		opts.MicrosoftCalendar.AfterSync = srv.notifyCalendarChanged
 	}
 	if opts.Syncer != nil {
 		opts.Syncer.Notify = srv.notifyUserChanged
@@ -508,7 +524,9 @@ func New(opts Options) (*Server, error) {
 	if !opts.DisableBackgroundWorkers {
 		srv.resumeNewMailWebPushAsync()
 		srv.resumeSnoozeReminderWebPushAsync()
+		srv.resumeCalendarReminderWebPushAsync()
 		srv.startSnoozeScheduler()
+		srv.startCalendarReminderScheduler()
 		srv.startRetentionScheduler()
 	}
 	return srv, nil

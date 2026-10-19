@@ -19,3 +19,16 @@ func TestTravelRoleRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// Outlook's one reminder is read as the event's own; one switched off is
+// stored as none rather than left to a default Graph does not have.
+func TestToEventReadsTheReminder(t *testing.T) {
+	on := ToEvent(Event{ID: "x", IsReminderOn: true, ReminderMinutesBeforeStart: 15}, 1, "")
+	if on.Reminders != "15" {
+		t.Fatalf("reminder on = %q", on.Reminders)
+	}
+	off := ToEvent(Event{ID: "y", IsReminderOn: false, ReminderMinutesBeforeStart: 15}, 1, "")
+	if off.Reminders != store.CalendarRemindersNone {
+		t.Fatalf("reminder off = %q", off.Reminders)
+	}
+}

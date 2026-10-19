@@ -25,6 +25,7 @@ import { embeddedBootstrap } from "./lib/startup";
 import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
 import { useCalendarOutboxFlush } from "./features/calendar/useCalendarOutboxFlush";
+import { reminderBody } from "./lib/calendarReminders";
 import { defaultSwipePreferences } from "./lib/swipeActions";
 
 
@@ -50,6 +51,7 @@ const notificationPreferenceKey = "rolltop.notifications.enabled";
 const pushSubscriptionOwnerKey = "rolltop.push.owner-user-id";
 const pluginThemeLinkID = "rolltop-plugin-theme-css";
 const notificationIconURL = appIconURL("mail");
+const calendarNotificationIconURL = appIconURL("calendar");
 const notificationBadgeURL = "/icon.svg?v=transparent-logo-v2";
 const toastDurationMS = 4200;
 const undoToastDurationMS = 6000;
@@ -611,7 +613,7 @@ export default function App() {
       if (bootstrap?.csrf && webPushSupported()) await unsubscribeWebPush(bootstrap.csrf);
       setNotificationPreference("off");
       setNotificationsEnabled(false);
-      addToast("New-mail notifications paused.");
+      addToast("Notifications paused.");
       return;
     }
     const result = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
@@ -632,7 +634,9 @@ export default function App() {
       }
       setNotificationPreference("on");
       setNotificationsEnabled(true);
-      addToast(webPushSupported() ? "New-mail push notifications enabled." : "New-mail notifications enabled for this tab.");
+      addToast(webPushSupported()
+        ? "Push notifications enabled for new mail and calendar reminders."
+        : "Notifications for new mail and calendar reminders enabled for this tab.");
       return;
     }
     setNotificationPreference("off");
@@ -700,6 +704,56 @@ export default function App() {
     notifyNewMailRef.current = notifyNewMail;
   }, [notifyNewMail]);
 
+  // Calendar reminders reach a browser with Web Push through the service
+  // worker, tab open or not. A browser without it -- a plain-http LAN install,
+  // say -- gets them here instead, read off the reminder feed whenever the
+  // server announces a chrome change (the reminder scheduler announces one when
+  // it records a reminder). The cursor starts at the high-water mark, so a tab
+  // that has just opened does not replay the morning's reminders.
+  const calendarReminderCursorRef = useRef<number | null>(null);
+  const calendarReminderBusyRef = useRef(false);
+  const notifyCalendarReminders = useCallback(async () => {
+    if (!bootstrap?.user || !notificationsEnabled || !("Notification" in window) || Notification.permission !== "granted") return;
+    if (webPushSupported() || calendarReminderBusyRef.current) return;
+    calendarReminderBusyRef.current = true;
+    try {
+      const cursor = calendarReminderCursorRef.current;
+      const feed = await api.calendarReminderNotifications(cursor);
+      if (feed.user_id !== bootstrap.user.id) return;
+      calendarReminderCursorRef.current = feed.cursor;
+      if (cursor === null) return;
+      for (const reminder of feed.reminders) {
+        const notification = new Notification(reminder.title || "Upcoming event", {
+          body: reminderBody(reminder),
+          tag: `rolltop-calendar-reminder-${reminder.event_id}`,
+          icon: calendarNotificationIconURL,
+          badge: notificationBadgeURL
+        });
+        // A plain Notification has no action buttons, so the click itself
+        // opens the calendar with the "remind me later" picker up; closing
+        // the notification is the dismissal.
+        notification.onclick = () => {
+          notification.close();
+          window.focus();
+          navigate(`${reminder.url || "/calendar"}?remind=${reminder.event_id}`);
+        };
+      }
+    } catch {
+      // The next chrome event asks again; a missed read costs nothing durable.
+    } finally {
+      calendarReminderBusyRef.current = false;
+    }
+  }, [bootstrap?.user, navigate, notificationsEnabled]);
+  const notifyCalendarRemindersRef = useRef(notifyCalendarReminders);
+  useEffect(() => {
+    notifyCalendarRemindersRef.current = notifyCalendarReminders;
+  }, [notifyCalendarReminders]);
+  useEffect(() => {
+    // A new user starts from their own high-water mark.
+    calendarReminderCursorRef.current = null;
+    void notifyCalendarRemindersRef.current();
+  }, [bootstrap?.user?.id, notificationsEnabled]);
+
   // When someone returns to an idle tab, warm All Mail before they click it.
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -755,6 +809,7 @@ export default function App() {
           }
           lastNotify.current = { id: chrome.latest_sync_run.id, stored: newMessages };
         }
+        void notifyCalendarRemindersRef.current();
         // Anything waiting on work the server is doing — a queued move settling
         // its rows — waits on this rather than on a timer of its own. It says a
         // snapshot arrived and was applied, so it belongs to the snapshot that
@@ -1011,6 +1066,8 @@ export default function App() {
           reloadRuntimePlugins={reloadRuntimePlugins}
           securityUnlock={securityUnlock}
           openSecurityUnlock={openSecurityUnlock}
+          notificationsEnabled={notificationsEnabled}
+          toggleNotifications={toggleNotifications}
           addToast={addToast}
         />
       </AppShell>

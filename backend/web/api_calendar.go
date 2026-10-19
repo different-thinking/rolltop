@@ -57,6 +57,10 @@ type apiCalendar struct {
 	// Listed says whether the calendar view lists the calendar at all. One
 	// that is not listed is never selected and never the second calendar.
 	Listed bool `json:"listed"`
+	// DefaultReminderMinutes is the calendar's own default popup reminders,
+	// which an event marked reminders_default follows. Microsoft calendars
+	// have none; every Outlook event states its own.
+	DefaultReminderMinutes []int `json:"default_reminder_minutes"`
 	// OnlineMeetingProviders lists the online meeting kinds an event here can
 	// be made -- a Microsoft calendar's Teams. Empty means none.
 	OnlineMeetingProviders []string `json:"online_meeting_providers"`
@@ -110,6 +114,12 @@ type apiCalendarEvent struct {
 	// where else the appointment lives -- including a calendar that is
 	// switched off.
 	AlsoIn []apiCalendarEventCopy `json:"also_in"`
+	// ReminderMinutes is the event's own popup reminders, minutes before it
+	// starts, as the provider holds them; RemindersDefault says the event
+	// follows its calendar's default instead (apiCalendar.DefaultReminderMinutes).
+	// They are read only: the reminders are set where the calendar lives.
+	ReminderMinutes  []int `json:"reminder_minutes"`
+	RemindersDefault bool  `json:"reminders_default"`
 	// OnlineMeeting marks an event held online; OnlineMeetingURL is the link
 	// that joins it (Teams, or Google Meet).
 	OnlineMeeting         bool   `json:"online_meeting"`
@@ -174,6 +184,7 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 		BusyLabel:              calendar.BusyLabel,
 		BusyTitle:              calendar.PlaceholderTitle(),
 		Listed:                 calendar.Listed,
+		DefaultReminderMinutes: calendarDefaultReminderMinutes(calendar),
 		SyncedFrom:             timeString(calendar.WindowStartAt),
 		LastSyncAt:             timeString(calendar.LastSyncAt),
 		Status:                 calendar.Status,
@@ -181,7 +192,19 @@ func apiCalendarFromStore(calendar store.Calendar, email string) apiCalendar {
 	}
 }
 
+func calendarDefaultReminderMinutes(calendar store.Calendar) []int {
+	_, minutes := store.DecodeCalendarReminders(calendar.DefaultReminders)
+	if minutes == nil {
+		return []int{}
+	}
+	return minutes
+}
+
 func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
+	remindersDefault, reminderMinutes := store.DecodeCalendarReminders(event.Reminders)
+	if reminderMinutes == nil {
+		reminderMinutes = []int{}
+	}
 	attendees := make([]apiCalendarAttendee, 0, len(event.Attendees))
 	for _, attendee := range event.Attendees {
 		attendees = append(attendees, apiCalendarAttendee{
@@ -214,6 +237,8 @@ func apiCalendarEventFromStore(event store.CalendarEvent) apiCalendarEvent {
 		LinkPrimary:      event.Linked() && event.LinkPrimary,
 		LinkMasked:       event.Linked() && event.LinkMasked,
 		AlsoIn:           []apiCalendarEventCopy{},
+		ReminderMinutes:  reminderMinutes,
+		RemindersDefault: remindersDefault,
 
 		OnlineMeeting:         event.OnlineMeeting,
 		OnlineMeetingProvider: event.OnlineMeetingProvider,
@@ -465,6 +490,7 @@ func (s *Server) apiCalendarByID(w http.ResponseWriter, r *http.Request, userID 
 			calendar = refreshed
 		}
 	}
+	s.notifyCalendarChanged(userID)
 	writeJSON(w, map[string]any{
 		"calendar": apiCalendarFromStore(calendar, s.calendarConnectionEmail(r.Context(), userID, calendar)),
 	})
@@ -824,6 +850,7 @@ func (s *Server) calendarEventCreate(w http.ResponseWriter, r *http.Request, use
 		s.writeCalendarError(w, r, err)
 		return
 	}
+	s.notifyCalendarChanged(userID)
 	writeJSON(w, map[string]any{
 		"event":    s.presentCalendarEvent(r.Context(), userID, created),
 		"warnings": s.linkedProblemMessages(r.Context(), userID, problems),
@@ -973,6 +1000,8 @@ func (s *Server) apiCalendarEventByID(w http.ResponseWriter, r *http.Request, us
 	switch {
 	case action == "respond" && r.Method == http.MethodPost:
 		s.calendarEventRespond(w, r, userID, eventID)
+	case action == "remind" && r.Method == http.MethodPost:
+		s.calendarEventRemind(w, r, userID, eventID)
 	case action == "" && r.Method == http.MethodPut:
 		s.calendarEventUpdate(w, r, userID, eventID)
 	case action == "" && r.Method == http.MethodDelete:
@@ -1047,6 +1076,7 @@ func (s *Server) calendarEventUpdate(w http.ResponseWriter, r *http.Request, use
 		s.writeCalendarError(w, r, err)
 		return
 	}
+	s.notifyCalendarChanged(userID)
 	writeJSON(w, map[string]any{
 		"event":    s.presentCalendarEvent(r.Context(), userID, updated),
 		"warnings": s.linkedProblemMessages(r.Context(), userID, problems),
@@ -1099,6 +1129,7 @@ func (s *Server) calendarEventDelete(w http.ResponseWriter, r *http.Request, use
 		s.writeCalendarError(w, r, err)
 		return
 	}
+	s.notifyCalendarChanged(userID)
 	writeJSON(w, map[string]any{"ok": true, "warnings": s.linkedProblemMessages(r.Context(), userID, problems)})
 }
 
@@ -1138,8 +1169,52 @@ func (s *Server) calendarEventRespond(w http.ResponseWriter, r *http.Request, us
 		s.writeCalendarError(w, r, err)
 		return
 	}
+	s.notifyCalendarChanged(userID)
 	writeJSON(w, map[string]any{"event": s.presentCalendarEvent(r.Context(), userID, answered)})
 }
+
+// calendarEventRemind puts an event's reminder off to a time the reader chose
+// from the notification ("remind me later"). It is Rolltop's own state, not a
+// write to the provider, so it needs no calendar router: the next reminder
+// pass fires it through the same feed the provider's reminders use.
+func (s *Server) calendarEventRemind(w http.ResponseWriter, r *http.Request, userID, eventID int64) {
+	if !s.verifyCSRF(w, r) {
+		return
+	}
+	var in struct {
+		RemindAt string `json:"remind_at"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	remindAt, err := time.Parse(time.RFC3339, strings.TrimSpace(in.RemindAt))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "remind_at must be an RFC 3339 time.")
+		return
+	}
+	if !remindAt.After(time.Now()) {
+		writeAPIError(w, http.StatusBadRequest, "The reminder time has to be ahead.")
+		return
+	}
+	if remindAt.After(time.Now().Add(calendarReminderSnoozeMaxAhead)) {
+		writeAPIError(w, http.StatusBadRequest, "A reminder can be put off by at most four weeks.")
+		return
+	}
+	if err := s.store.SnoozeCalendarReminder(r.Context(), userID, eventID, remindAt); err != nil {
+		if store.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, r, err)
+		return
+	}
+	s.notifyCalendarChanged(userID)
+	writeJSON(w, map[string]any{"ok": true, "remind_at": timeString(remindAt)})
+}
+
+// calendarReminderSnoozeMaxAhead bounds how far a reminder may be put off:
+// four weeks, the furthest ahead the providers let one be set.
+const calendarReminderSnoozeMaxAhead = 4 * 7 * 24 * time.Hour
 
 // googleCalendarSyncState assembles the calendar sync state of one connection.
 // A store failure is logged and reported as no state rather than failing the

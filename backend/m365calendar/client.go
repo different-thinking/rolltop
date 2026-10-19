@@ -49,7 +49,8 @@ const preferHeader = `outlook.timezone="UTC", outlook.body-content-type="text"`
 // of a busy calendar to what is drawn rather than every property Graph has.
 const eventSelect = "id,changeKey,iCalUId,subject,body,location,start,end,isAllDay,isCancelled," +
 	"isOrganizer,organizer,attendees,responseStatus,seriesMasterId,type,webLink," +
-	"lastModifiedDateTime,originalStartTimeZone,isOnlineMeeting,onlineMeetingProvider,onlineMeeting"
+	"lastModifiedDateTime,originalStartTimeZone,isOnlineMeeting,onlineMeetingProvider,onlineMeeting," +
+	"isReminderOn,reminderMinutesBeforeStart"
 
 const calendarSelect = "id,name,color,hexColor,isDefaultCalendar,canEdit,owner," +
 	"allowedOnlineMeetingProviders,defaultOnlineMeetingProvider"

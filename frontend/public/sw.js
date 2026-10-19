@@ -308,6 +308,10 @@ self.addEventListener("push", (event) => {
   } catch {
     data = {};
   }
+  if (data.kind === "calendar_reminder") {
+    event.waitUntil(self.registration.showNotification(...calendarReminderNotification(data)));
+    return;
+  }
   const title = typeof data.title === "string" && data.title ? data.title : "rolltop";
   const icon = typeof data.icon === "string" && data.icon ? data.icon : "/icon.svg?v=transparent-logo-v2";
   const options = {
@@ -330,7 +334,9 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
-  const targetURL = new URL(sameOriginPath(data.url, "/mail"), self.location.origin).href;
+  if (event.action === "dismiss") return;
+  const chosen = event.action === "snooze" && data.snoozeURL ? data.snoozeURL : data.url;
+  const targetURL = new URL(sameOriginPath(chosen, "/mail"), self.location.origin).href;
   event.waitUntil(
     Promise.all([
       warmNotificationMessage(data),
@@ -353,6 +359,78 @@ self.addEventListener("notificationclick", (event) => {
     ])
   );
 });
+
+// calendarReminderNotification renders a calendar reminder. The server cannot
+// know the reader's zone or locale, so the payload carries the event's bounds
+// and the worker says the time itself; the wording mirrors
+// lib/calendarReminders.ts, which the page uses when it has no push and reads
+// the feed instead. The click opens the week of the event, whose date is
+// likewise the reader's local date of the start, and the route takes any date
+// of the week.
+function calendarReminderNotification(data) {
+  const title = typeof data.title === "string" && data.title ? data.title : "Upcoming event";
+  const icon = typeof data.icon === "string" && data.icon ? data.icon : "/icons/calendar.svg";
+  const allDay = Boolean(data.all_day);
+  const minutes = Number(data.minutes_before || 0);
+  const start = new Date(typeof data.start_at === "string" ? data.start_at : "");
+  const end = new Date(typeof data.end_at === "string" ? data.end_at : "");
+  const parts = [calendarReminderLead(minutes, allDay)];
+  if (allDay) {
+    parts.push("All day");
+  } else if (!Number.isNaN(start.getTime())) {
+    const options = { hour: "2-digit", minute: "2-digit" };
+    let range = start.toLocaleTimeString([], options);
+    if (!Number.isNaN(end.getTime()) && end.getTime() > start.getTime()) range += "\u2013" + end.toLocaleTimeString([], options);
+    parts.push(range);
+  }
+  if (typeof data.location === "string" && data.location.trim()) parts.push(data.location.trim());
+  const body = parts.filter(Boolean).join(" \u00b7 ");
+  let url = sameOriginPath(data.url, "/calendar");
+  if (!Number.isNaN(start.getTime())) {
+    // An all-day event is stored at midnight UTC of its date and has to be
+    // read with the UTC getters; a timed one falls on the reader's local day.
+    const y = allDay ? start.getUTCFullYear() : start.getFullYear();
+    const m = (allDay ? start.getUTCMonth() : start.getMonth()) + 1;
+    const d = allDay ? start.getUTCDate() : start.getDate();
+    url = `/calendar/${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }
+  const eventID = Number(data.event_id || 0);
+  return [title, {
+    body: body || (typeof data.body === "string" ? data.body : ""),
+    tag: typeof data.tag === "string" && data.tag ? data.tag : `rolltop-calendar-reminder-${eventID}`,
+    icon,
+    badge: typeof data.badge === "string" && data.badge ? data.badge : "/icon.svg?v=transparent-logo-v2",
+    // "Remind me later" opens the calendar on the event with the picker up
+    // (CalendarView reads ?remind=); the time is chosen there, because a
+    // notification offers at most a couple of fixed buttons and the reader
+    // asked for a time of their choosing. Dismiss closes it and nothing else.
+    actions: eventID > 0
+      ? [{ action: "snooze", title: "Remind me later" }, { action: "dismiss", title: "Dismiss" }]
+      : [],
+    requireInteraction: true,
+    data: { url, apiURL: "", messageID: 0, eventID, snoozeURL: eventID > 0 ? `${url}?remind=${eventID}` : "" }
+  }];
+}
+
+function calendarReminderLead(minutes, allDay) {
+  if (allDay) {
+    if (minutes <= 0) return "Today";
+    if (minutes <= 24 * 60) return "Tomorrow";
+    return `In ${Math.ceil(minutes / (24 * 60))} days`;
+  }
+  if (minutes < 0) return `Started ${-minutes} minutes ago`;
+  if (minutes === 0) return "Starting now";
+  if (minutes < 60) return `Starts in ${minutes} minutes`;
+  if (minutes % (24 * 60) === 0) {
+    const days = minutes / (24 * 60);
+    return days === 1 ? "Starts tomorrow" : `Starts in ${days} days`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1 ? "Starts in 1 hour" : `Starts in ${hours} hours`;
+  }
+  return `Starts in ${minutes} minutes`;
+}
 
 // isCalendarPath mirrors organizerRoute(path, "calendar") in lib/routes.ts and
 // webManifestPathForRoute in backend/web/spa.go: the page and the routes below it.

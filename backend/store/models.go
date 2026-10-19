@@ -479,9 +479,13 @@ type WebPushSubscription struct {
 	UserAgent                 string
 	LastNewMailEventID        int64
 	LastSnoozeReminderEventID int64
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
-	LastSeenAt                time.Time
+	// LastCalendarReminderEventID is the endpoint's cursor over
+	// calendar_reminder_events, independent of the other two like they are
+	// of each other.
+	LastCalendarReminderEventID int64
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
+	LastSeenAt                  time.Time
 }
 
 // MessageSnooze is local-only reminder state for one user-owned conversation.

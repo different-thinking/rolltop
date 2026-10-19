@@ -26,6 +26,9 @@ type CalendarListEntry struct {
 	// this way rather than by omission.
 	Deleted bool `json:"deleted"`
 	Hidden  bool `json:"hidden"`
+	// DefaultReminders is what an event in this calendar reminds by when it
+	// follows the calendar's default (Event.Reminders.UseDefault).
+	DefaultReminders []EventReminder `json:"defaultReminders"`
 }
 
 // Name is the label to show for a calendar: the account's own override when it
@@ -104,7 +107,29 @@ type Event struct {
 	// entered once and kept in two calendars. Google stores it per copy and
 	// hands it down to every occurrence of a series.
 	ExtendedProperties *EventExtendedProperties `json:"extendedProperties,omitempty"`
+	// Reminders is what the event reminds by. It is read only: Rolltop
+	// delivers the reminders the calendar holds and does not set them, so a
+	// write that leaves it out keeps whatever Google has.
+	Reminders *EventReminders `json:"reminders,omitempty"`
 }
+
+// EventReminders is Google's reminder block on an event: either the
+// calendar's default applies, or the overrides listed do.
+type EventReminders struct {
+	UseDefault bool            `json:"useDefault"`
+	Overrides  []EventReminder `json:"overrides,omitempty"`
+}
+
+// EventReminder is one reminder: how it is delivered and how many minutes
+// before the event. Only popup reminders concern Rolltop; an email reminder
+// is Google's to send.
+type EventReminder struct {
+	Method  string `json:"method"`
+	Minutes int    `json:"minutes"`
+}
+
+// reminderMethodPopup is the reminder Google shows as a notification.
+const reminderMethodPopup = "popup"
 
 // EventExtendedProperties is Google's free-form key/value storage on an event.
 // Private properties are visible only on the calendar copy that carries them,

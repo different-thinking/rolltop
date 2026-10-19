@@ -46,7 +46,7 @@ const calendarSelectColumns = `id, user_id, google_connection_id, remote_calenda
 	summary, description, time_zone, color, access_role, is_primary, selected,
 	sync_token, window_start_at, last_sync_at, last_success_at, status, status_detail,
 	copy_target, provider, microsoft_connection_id, full_read_at, online_meeting_providers, listed,
-	busy_target, busy_label`
+	busy_target, busy_label, default_reminders`
 
 // Calendar is one calendar of one connected account.
 type Calendar struct {
@@ -92,6 +92,11 @@ type Calendar struct {
 	// BusyLabel is the title the busy calendar's placeholders carry. Empty
 	// means DefaultBusyLabel; read it through PlaceholderTitle.
 	BusyLabel string
+	// DefaultReminders is the calendar's own default popup reminders at the
+	// provider, in the encoding EncodeCalendarReminders writes. Google
+	// carries one per calendar and an event may follow it; Microsoft has
+	// none, every event there states its own.
+	DefaultReminders string
 	// Listed says whether the calendar view lists the calendar at all. A
 	// calendar that is not listed is never Selected, the CopyTarget or the
 	// BusyTarget: SetCalendarListed takes them away with the listing, and the
@@ -165,6 +170,10 @@ type CalendarUpsert struct {
 	// Selected seeds the visibility of a calendar Rolltop has not seen before,
 	// from the account's own choice at Google. It is ignored on update.
 	Selected bool
+	// DefaultReminders is the calendar's own default popup reminders, as
+	// EncodeCalendarReminders writes them; an event that follows its
+	// calendar's default reminds by these.
+	DefaultReminders string
 }
 
 // UpsertCalendar records a calendar the list sync returned and answers with the
@@ -178,8 +187,8 @@ func (s *Store) UpsertCalendar(ctx context.Context, userID int64, in CalendarUps
 	_, err := s.mustDataDB(ctx, userID).ExecContext(ctx, `INSERT INTO calendars
 			(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id,
 			 summary, description, time_zone, color, access_role, is_primary, selected,
-			 created_at, updated_at)
-		VALUES (?, 'google', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 default_reminders, created_at, updated_at)
+		VALUES (?, 'google', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, provider, google_connection_id, microsoft_connection_id, remote_calendar_id) DO UPDATE SET
 			summary = excluded.summary,
 			description = excluded.description,
@@ -187,11 +196,12 @@ func (s *Store) UpsertCalendar(ctx context.Context, userID int64, in CalendarUps
 			color = excluded.color,
 			access_role = excluded.access_role,
 			is_primary = excluded.is_primary,
+			default_reminders = excluded.default_reminders,
 			updated_at = excluded.updated_at`,
 		userID, in.GoogleConnectionID, trimLimit(googleID, 300), trimLimit(in.Summary, 300),
 		trimLimit(in.Description, 2000), trimLimit(in.TimeZone, 100), trimLimit(in.Color, 20),
 		trimLimit(strings.ToLower(strings.TrimSpace(in.AccessRole)), 40),
-		boolInt(in.IsPrimary), boolInt(in.Selected), ts, ts)
+		boolInt(in.IsPrimary), boolInt(in.Selected), trimLimit(strings.TrimSpace(in.DefaultReminders), 200), ts, ts)
 	if err != nil {
 		return Calendar{}, err
 	}
@@ -714,7 +724,7 @@ func scanCalendar(dest scanDest) (Calendar, error) {
 		&calendar.SyncToken, &windowStart, &lastSync, &lastSuccess,
 		&calendar.Status, &calendar.StatusDetail, &copyTarget,
 		&calendar.Provider, &calendar.MicrosoftConnectionID, &fullRead, &meetingProviders, &listed,
-		&busyTarget, &calendar.BusyLabel); err != nil {
+		&busyTarget, &calendar.BusyLabel, &calendar.DefaultReminders); err != nil {
 		return Calendar{}, err
 	}
 	calendar.FullReadAt = unixTime(fullRead)
