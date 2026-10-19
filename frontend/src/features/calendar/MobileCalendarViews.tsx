@@ -1,6 +1,6 @@
 // File overview: The parts of the calendar that only a phone draws: the switch
-// between its four views, the head of the day view with a chip per calendar,
-// the agenda and the week list. The day and three-day views reuse the week's
+// between its four views, a chip per calendar, the head of the day view, the
+// agenda and the week list. The day and three-day views reuse the week's
 // own time grid; CalendarView decides which of these it shows.
 
 import { useEffect, useState } from "react";
@@ -90,28 +90,80 @@ export function MobileViewSwitch({
   );
 }
 
+/** manageCalendarsLabel names the way to the calendar settings, in the
+ * desktop Calendars menu and at the end of a phone's chips alike. */
+export function manageCalendarsLabel(hiddenCount: number): string {
+  return hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars";
+}
+
 /**
- * MobileDayHead is the top of the day view: the date, what the day holds, a
- * chip per calendar to show or hide it, and the all-day events folded into one
- * line. The chips are the Calendars menu's own switches laid out flat -- a
- * hidden calendar is switched off exactly as it is there, so the two never
- * disagree.
+ * MobileCalendarChips is a phone's way to show and hide calendars, under the
+ * header in every view: a chip per listed calendar, and at the end the way to
+ * the calendar settings, where the reader decides which calendars are listed
+ * at all and which are the second and the busy calendar. The chips are the
+ * desktop Calendars menu's own switches laid out flat -- a hidden calendar is
+ * switched off exactly as it is there, so the two never disagree -- and they
+ * replace that menu on a phone: one row instead of a menu that repeated it.
+ */
+export function MobileCalendarChips({
+  calendars,
+  hiddenCount,
+  onToggleCalendar,
+  onManage
+}: {
+  calendars: CalendarSummary[];
+  hiddenCount: number;
+  onToggleCalendar: (calendar: CalendarSummary) => Promise<void>;
+  onManage: () => void;
+}) {
+  const manageLabel = manageCalendarsLabel(hiddenCount);
+  return (
+    <div className="calendar-mobile-chips" role="group" aria-label="Calendars shown">
+      {calendars.map((calendar) => (
+        <button
+          key={calendar.id}
+          type="button"
+          className={`calendar-mobile-chip ${calendar.selected ? "on" : ""}`}
+          aria-pressed={calendar.selected}
+          title={calendar.connection_email ? `${calendar.name} — ${calendar.connection_email}` : calendar.name}
+          style={{ "--chip-color": calendarColor(calendar) } as CSSProperties}
+          onClick={() => void onToggleCalendar(calendar)}
+        >
+          <span className="calendar-mobile-chip-dot" aria-hidden="true" />
+          {calendar.name}
+        </button>
+      ))}
+      <button
+        type="button"
+        className="calendar-mobile-chip calendar-mobile-chip-manage"
+        title={manageLabel}
+        aria-label={manageLabel}
+        onClick={onManage}
+      >
+        <Icon name="settings" />
+        {calendars.length === 0 ? manageLabel : null}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * MobileDayHead is the top of the day view: the all-day events folded into
+ * one line. The date and what the day holds are said to a screen reader only:
+ * the date button in the header already names the day, and on a phone every
+ * line up here is a line of the day the reader cannot see.
  */
 export function MobileDayHead({
   day,
   todayKey,
-  calendars,
   events,
   calendarsByID,
-  onToggleCalendar,
   onOpenEvent
 }: {
   day: Date;
   todayKey: string;
-  calendars: CalendarSummary[];
   events: CalendarEvent[];
   calendarsByID: Map<number, CalendarSummary>;
-  onToggleCalendar: (calendar: CalendarSummary) => Promise<void>;
   onOpenEvent: (event: CalendarEvent, day: Date) => void;
 }) {
   const [allDayOpen, setAllDayOpen] = useState(false);
@@ -129,30 +181,10 @@ export function MobileDayHead({
 
   return (
     <div className="calendar-mobile-day-head">
-      <div>
-        <h2 className="calendar-mobile-day-title">
-          {day.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
-        </h2>
-        <p className="calendar-mobile-day-summary">{summary}</p>
-      </div>
-      {calendars.length > 0 ? (
-        <div className="calendar-mobile-chips" role="group" aria-label="Calendars shown">
-          {calendars.map((calendar) => (
-            <button
-              key={calendar.id}
-              type="button"
-              className={`calendar-mobile-chip ${calendar.selected ? "on" : ""}`}
-              aria-pressed={calendar.selected}
-              title={calendar.connection_email ? `${calendar.name} — ${calendar.connection_email}` : calendar.name}
-              style={{ "--chip-color": calendarColor(calendar) } as CSSProperties}
-              onClick={() => void onToggleCalendar(calendar)}
-            >
-              <span className="calendar-mobile-chip-dot" aria-hidden="true" />
-              {calendar.name}
-            </button>
-          ))}
-        </div>
-      ) : null}
+      <h2 className="calendar-mobile-day-title">
+        {day.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
+        <span className="calendar-mobile-day-summary">, {summary}</span>
+      </h2>
       {allDay.length > 0 ? (
         <>
           <button

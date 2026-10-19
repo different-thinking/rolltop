@@ -1383,34 +1383,143 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 // narrower gutter and fewer columns.
 $calendar-compact-gutter: 44px;
 
-.calendar-main.compact {
-  // One column that may not grow past the screen: a row of calendar chips
-  // that scrolls sideways would otherwise widen the whole view to its length.
-  grid-template-columns: minmax(0, 1fr);
+// On a phone the calendar is the page. It fills the screen under the top bar
+// and only its own grid or list scrolls: a grid with a height of its own inside
+// a page that also scrolls was two scrolling regions, and the first swipe
+// carried the head and the date off the screen before the day moved at all.
+// Without :has() the rules below still hold the grid to a height of its own.
+.content:has(> .calendar-shell > .calendar-main.compact) {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px);
+  height: calc(100dvh - 64px);
+  padding: 0;
 
-  .calendar-head {
-    padding: 10px;
-    gap: 8px;
+  // A banner above the calendar keeps the gutter the page would have given it.
+  > :not(.calendar-shell) {
+    flex: none;
+    margin: 8px;
   }
 
-  // The menu, sync and a new event share one row under the dates.
-  .calendar-head-actions {
-    flex: 1 1 100%;
-    flex-wrap: nowrap;
+  > .calendar-shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
 
-    > :last-child {
-      margin-left: auto;
+  .calendar-main.compact {
+    border: 0;
+    border-radius: 0;
+  }
+
+  .calendar-main.compact .calendar-grid,
+  .calendar-main.compact .calendar-agenda,
+  .calendar-main.compact .calendar-weeklist {
+    max-height: none;
+  }
+}
+
+// The app's own minimum is the large viewport (100vh), which on a phone
+// browser is taller than the screen while its toolbar shows; left in place it
+// kept the page scrollable by that difference and the head slid under the top
+// bar again.
+.app:has(> .content > .calendar-shell > .calendar-main.compact) {
+  min-height: 0;
+}
+
+.calendar-main.compact {
+  // A column of rows, the last of which -- the grid, the agenda or the week
+  // list -- takes whatever height the rows above it leave.
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  > * {
+    flex: none;
+  }
+
+  // Whatever the view scrolls takes the height the rows above it leave.
+  > .calendar-grid,
+  > .calendar-agenda,
+  > .calendar-weeklist {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  // Two rows: the dates with sync and a new event beside them, then the view
+  // switch. The Calendars menu is not drawn here -- the chips under the head
+  // take its place -- and the actions wrapper steps aside so its two buttons
+  // can sit in the first row.
+  .calendar-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "nav sync add"
+      "switch switch switch";
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 6px 8px;
+  }
+
+  .calendar-nav {
+    grid-area: nav;
+    gap: 2px;
+  }
+
+  .calendar-head-actions {
+    display: contents;
+
+    > .calendar-sync-button {
+      grid-area: sync;
     }
+
+    > .calendar-new-event-button {
+      grid-area: add;
+    }
+  }
+
+  .calendar-nav > button,
+  .calendar-head-actions > button,
+  .calendar-week-picker-button {
+    min-height: 34px;
+  }
+
+  .calendar-head-actions > button {
+    width: 34px;
+    padding: 0;
+  }
+
+  .calendar-nav .ghost {
+    padding: 6px 8px;
+  }
+
+  .calendar-week-picker {
+    margin-left: 0;
+  }
+
+  .calendar-week-picker-button {
+    padding: 4px 6px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  // The chips under the head, in every view. The day view's head follows
+  // them directly and draws the line under both.
+  > .calendar-mobile-chips {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  &.view-day > .calendar-mobile-chips {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
 
   // A button's own centring would put an appointment's text in the middle of
   // a day that has the whole width.
   .calendar-event {
     justify-content: stretch;
-  }
-
-  .calendar-nav {
-    gap: 4px;
   }
 
   .calendar-daynames,
@@ -1436,19 +1545,29 @@ $calendar-compact-gutter: 44px;
     touch-action: pan-y;
   }
 
-  // The head of a phone view is taller than the desktop's -- the view switch
-  // is a row of its own -- so the scrolling region leaves it more room.
+  // The fallback height when the calendar cannot fill the screen; with it the
+  // rule at the top of this section lifts the cap. What it leaves out is the
+  // top bar, the page's own padding, the two-row head and the chips -- and the
+  // day names, or in the day view its head -- so the page itself never scrolls.
   .calendar-grid {
-    max-height: max(320px, calc(100dvh - 300px));
+    max-height: max(320px, calc(100dvh - 280px));
   }
 
   &.view-day .calendar-grid {
-    max-height: max(320px, calc(100dvh - 380px));
+    max-height: max(320px, calc(100dvh - 300px));
+  }
+
+  // The Compose button floats over the bottom of the screen; the last hours
+  // and the last day can still be scrolled out from under it.
+  .calendar-grid,
+  .calendar-agenda,
+  .calendar-weeklist {
+    padding-bottom: 72px;
   }
 }
 
 .calendar-view-switch {
-  flex: 1 1 100%;
+  grid-area: switch;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 2px;
@@ -1457,8 +1576,8 @@ $calendar-compact-gutter: 44px;
   border-radius: 999px;
 
   button {
-    min-height: 36px;
-    padding: 0 6px;
+    min-height: 30px;
+    padding: 0 4px;
     border: 0;
     border-radius: 999px;
     background: transparent;
@@ -1508,31 +1627,30 @@ $calendar-compact-gutter: 44px;
   }
 }
 
-// The day view's head: the date, what the day holds, a chip per calendar and
-// the all-day events folded into one line.
+// The day view's head: the all-day events folded into one line. The date and the day's summary are for screen readers; the
+// header's date button already shows the day.
 .calendar-mobile-day-head {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  padding: 12px 12px 10px;
+  gap: 6px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+
+  // With nothing all day only the hidden title is left, which still names the
+  // day to a screen reader; the head then only closes off the chips above it.
+  &:not(:has(> :not(.calendar-mobile-day-title))) {
+    padding-top: 0;
+  }
 }
 
 .calendar-mobile-day-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.calendar-mobile-day-summary {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 13px;
+  @include visually-hidden;
 }
 
 .calendar-mobile-chips {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   overflow-x: auto;
   // The row scrolls sideways under a finger; the page's swipe leaves it alone.
   touch-action: pan-x;
@@ -1541,8 +1659,8 @@ $calendar-compact-gutter: 44px;
 
 .calendar-mobile-chip {
   flex: none;
-  min-height: 36px;
-  padding: 0 12px 0 10px;
+  min-height: 30px;
+  padding: 0 10px 0 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
@@ -1553,6 +1671,17 @@ $calendar-compact-gutter: 44px;
     border-color: var(--accent-soft);
     background: var(--accent-soft);
     color: var(--text);
+  }
+}
+
+// The last chip leads to the calendar settings: an icon beside the calendars,
+// and its name as well when no calendar is listed to sit beside.
+.calendar-mobile-chip-manage {
+  padding: 0 9px;
+
+  .icon {
+    width: 16px;
+    height: 16px;
   }
 }
 
@@ -1571,8 +1700,8 @@ $calendar-compact-gutter: 44px;
 .calendar-mobile-allday-toggle {
   justify-content: flex-start;
   width: 100%;
-  min-height: 44px;
-  padding: 0 12px;
+  min-height: 34px;
+  padding: 0 10px;
   border: 0;
   border-radius: 10px;
   background: var(--surface-subtle);
@@ -1615,6 +1744,11 @@ $calendar-compact-gutter: 44px;
 .calendar-mobile-allday-list {
   display: grid;
   gap: 4px;
+  // The day's head does not scroll with the day, so a long list scrolls on
+  // its own instead of pushing the grid off a screen nothing else scrolls.
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 
   .calendar-chip {
     padding: 6px 10px;

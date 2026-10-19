@@ -2269,3 +2269,16 @@
   flex: none;
   gap: 4px;
 }
+
+// The second- and busy-calendar choices reuse the Calendars menu's controls,
+// each with its own label and rule; here they sit under the list with the room
+// of a settings page.
+.calendar-settings-roles {
+  display: grid;
+  gap: 12px;
+
+  select,
+  .calendar-busy-label {
+    max-width: 420px;
+  }
+}

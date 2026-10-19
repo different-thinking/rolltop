@@ -811,11 +811,21 @@ site and in review.
   absence entered as 00:00-00:00 is a column-high bar that takes half the
   day's width from the appointments beside it -- and such a chip is **not
   draggable**, since an all-day drag moves by whole dates and would turn it
-  into an all-day event. The day view's chips are the Calendars menu's own
-  switches laid flat (`toggleCalendar`, i.e. `selected`), never a filter of
-  their own, so the two cannot disagree. And the agenda's free time counts the
+  into an all-day event. A phone shows and hides calendars with chips under
+  the head in every view (`MobileCalendarChips`) and draws no Calendars menu:
+  the chips are that menu's own switches laid flat (`toggleCalendar`, i.e.
+  `selected`), never a filter of their own, so the two cannot disagree, and
+  their last chip leads to the calendar settings, where the listing and the
+  second and busy calendar are chosen (`CalendarRoleChoices`, shared with the
+  desktop menu so both places write the roles the same way). And the agenda's free time counts the
   journey as taken, as the week's layout does, and names only gaps between
-  appointments: it does not know the reader's working hours.
+  appointments: it does not know the reader's working hours. On a phone the
+  calendar **is** the page: it fills the screen under the top bar and only its
+  grid or list scrolls (`.content:has(> .calendar-shell > .calendar-main.compact)`),
+  because a grid with a height of its own inside a page that also scrolls
+  carried the header and the date away before the day moved. Its head is two
+  rows and the day view's date lives in the header's date button alone; every
+  line added up there is a line of the day the reader cannot see.
 - **A drag in the week is the dialog's Save, not a write of its own.**
   Moving, copying (Ctrl, or Option on a Mac) and pulling an event's end
   (`useWeekDrag`, `weekModel`'s drag arithmetic) restate the event exactly as
@@ -862,7 +872,10 @@ site and in review.
   and the way to the calendar settings; the week takes the whole width beside
   the app's own folder sidebar, which the top bar already hides. Toggling a
   calendar leaves the menu open (switching three on is the ordinary use), and
-  the closed button still shows a dot per calendar being drawn.
+  the closed button still shows a dot per calendar being drawn. A phone draws
+  chips instead (see the phone rule above), so nothing the menu offers may live
+  only in the menu: whatever it chooses beyond the switches has to be
+  reachable from the calendar settings too.
 - **An event kept in two calendars is two Google events and one appointment.**
   A reader picks one second calendar (`calendars.copy_target`, unique per user)
   and an event entered anywhere else can be copied into it
