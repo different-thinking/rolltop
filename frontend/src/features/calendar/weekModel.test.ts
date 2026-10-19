@@ -53,6 +53,7 @@ function calendar(id: number, email: string, provider: CalendarSummary["provider
     busy_title: "Busy",
     listed: true,
     online_meeting_providers: [],
+    default_reminder_minutes: [],
     synced_from: "",
     last_sync_at: "",
     status: "ok",

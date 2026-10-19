@@ -66,6 +66,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiNewMailNotifications(w, r)
 	case path == "notifications/reminders":
 		s.apiSnoozeReminderNotifications(w, r)
+	case path == "notifications/calendar-reminders":
+		s.apiCalendarReminderNotifications(w, r)
 	case path == "plugins":
 		s.apiPlugins(w, r)
 	case strings.HasPrefix(path, "plugins/"):

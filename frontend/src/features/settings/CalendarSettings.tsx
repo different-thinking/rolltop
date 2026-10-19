@@ -85,6 +85,11 @@ export function CalendarSettingsPanel({
         Only the calendars ticked here appear in the calendar's Calendars menu, in the week and as a choice for the second
         calendar. A hidden calendar is not synced either; nothing is changed in Google or Microsoft 365.
       </p>
+      <p className="muted">
+        Reminders follow the calendar: the popup reminders set on an event in Google Calendar or Outlook (or a Google
+        calendar's default) are delivered as browser notifications, for the calendars drawn in the week, while
+        browser notifications are enabled in the account menu.
+      </p>
       {calendars.length === 0 ? (
         <small className="swipe-validation">
           No calendars yet. Connect a Google or Microsoft 365 account and allow calendar access.

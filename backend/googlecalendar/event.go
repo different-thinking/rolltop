@@ -32,8 +32,32 @@ func ToCalendarUpsert(entry CalendarListEntry, connectionID int64) store.Calenda
 		// Only used the first time a calendar is seen. A calendar the account
 		// already switched off at Google arrives switched off here rather than
 		// dumping a subscribed holiday feed into the first week the user opens.
-		Selected: entry.Selected,
+		Selected:         entry.Selected,
+		DefaultReminders: store.EncodeCalendarReminders(false, popupReminderMinutes(entry.DefaultReminders)),
 	}
+}
+
+// eventReminders renders the event's reminder block for storage. An event
+// without one -- Google always sends it, so this is a defensive reading --
+// follows its calendar's default, which is what most events do anyway.
+func eventReminders(event Event) string {
+	if event.Reminders == nil || event.Reminders.UseDefault {
+		return store.EncodeCalendarReminders(true, nil)
+	}
+	return store.EncodeCalendarReminders(false, popupReminderMinutes(event.Reminders.Overrides))
+}
+
+// popupReminderMinutes keeps the popup reminders of a list and drops the rest:
+// an email reminder is sent by Google, and sending a notification for it too
+// would remind twice.
+func popupReminderMinutes(list []EventReminder) []int {
+	out := make([]int, 0, len(list))
+	for _, reminder := range list {
+		if strings.EqualFold(strings.TrimSpace(reminder.Method), reminderMethodPopup) {
+			out = append(out, reminder.Minutes)
+		}
+	}
+	return out
 }
 
 // ToEvent turns one occurrence into the row the store keeps. calendarID is the
@@ -68,6 +92,7 @@ func ToEvent(event Event, calendarID int64) store.CalendarEvent {
 	out.Attendees, out.MyResponse = attendees(event.Attendees)
 	out.LinkKey, out.LinkPrimary, out.LinkMasked = eventLink(event)
 	out.LinkTravel = eventTravel(event)
+	out.Reminders = eventReminders(event)
 	return out
 }
 

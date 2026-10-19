@@ -25,6 +25,19 @@ type webPushNotification struct {
 	URL       string `json:"url"`
 	APIURL    string `json:"api_url,omitempty"`
 	MessageID int64  `json:"message_id,omitempty"`
+	// Kind names what the notification is about when it is not mail; the
+	// service worker branches on it. The fields below it belong to a
+	// calendar reminder (webPushKindCalendarReminder) and let the worker say
+	// the event's time in the reader's own zone and locale.
+	Kind     string `json:"kind,omitempty"`
+	EventID  int64  `json:"event_id,omitempty"`
+	StartAt  string `json:"start_at,omitempty"`
+	EndAt    string `json:"end_at,omitempty"`
+	AllDay   bool   `json:"all_day,omitempty"`
+	Location string `json:"location,omitempty"`
+	// MinutesBefore is the reminder's own offset, so the worker can say how
+	// far off the event is the way the reader set it.
+	MinutesBefore int `json:"minutes_before,omitempty"`
 }
 
 const webPushMaxRetryAttempts = 3

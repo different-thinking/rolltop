@@ -46,6 +46,8 @@ export function RouteView({
   reloadRuntimePlugins,
   securityUnlock,
   openSecurityUnlock,
+  notificationsEnabled,
+  toggleNotifications,
   addToast
 }: {
   csrf: string;
@@ -71,6 +73,8 @@ export function RouteView({
   reloadRuntimePlugins: () => Promise<void>;
   securityUnlock: SecurityUnlockState;
   openSecurityUnlock: (identityID?: number, onUnlocked?: (state: SecurityUnlockState) => void, recipientKeyIDs?: string[], fallbackEmail?: string) => void;
+  notificationsEnabled: boolean;
+  toggleNotifications: () => Promise<void>;
   addToast: AddToast;
 }) {
   const securityEnabled = Boolean(securityUnlockPlugin(runtimePlugins.all));
@@ -113,7 +117,17 @@ export function RouteView({
       return <ComposePage userID={user.id} csrf={csrf} location={location} navigate={navigate} securityEnabled={securityEnabled} securityPlugins={runtimePlugins.all} securityUnlock={securityUnlock} openSecurityUnlock={openSecurityUnlock} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "calendar")) {
-      return <CalendarView csrf={csrf} userID={user.id} location={location} navigate={navigate} addToast={addToast} />;
+      return (
+        <CalendarView
+          csrf={csrf}
+          userID={user.id}
+          location={location}
+          navigate={navigate}
+          notificationsEnabled={notificationsEnabled}
+          toggleNotifications={toggleNotifications}
+          addToast={addToast}
+        />
+      );
     }
     if (organizerRoute(location.path, "contacts")) {
       return <ContactsView csrf={csrf} location={location} contactPlugins={runtimePlugins.all} addToast={addToast} />;

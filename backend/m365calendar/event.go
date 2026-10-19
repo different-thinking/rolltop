@@ -149,7 +149,18 @@ func ToEvent(event Event, calendarID int64, selfEmail string) store.CalendarEven
 	out.MyResponse = myResponse(event)
 	out.LinkKey, out.LinkPrimary, out.LinkMasked = eventLink(event)
 	out.LinkTravel = eventTravel(event)
+	out.Reminders = eventReminders(event)
 	return out
+}
+
+// eventReminders renders Outlook's one reminder for storage. Graph has no
+// per-calendar default an event could follow; every event states its own, so
+// an event with the reminder off is stored as having none.
+func eventReminders(event Event) string {
+	if !event.IsReminderOn {
+		return store.EncodeCalendarReminders(false, nil)
+	}
+	return store.EncodeCalendarReminders(false, []int{event.ReminderMinutesBeforeStart})
 }
 
 // eventBounds resolves Graph's start/end pair into a half-open interval.

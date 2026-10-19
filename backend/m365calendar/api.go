@@ -114,6 +114,11 @@ type Event struct {
 	OnlineMeetingProvider string             `json:"onlineMeetingProvider"`
 	OnlineMeeting         *OnlineMeetingInfo `json:"onlineMeeting"`
 	ExtendedProperties    []ExtendedProperty `json:"singleValueExtendedProperties"`
+	// IsReminderOn and ReminderMinutesBeforeStart are the event's one reminder
+	// as Outlook holds it. They are read only here: Rolltop delivers the
+	// reminder the calendar has and does not set it.
+	IsReminderOn               bool `json:"isReminderOn"`
+	ReminderMinutesBeforeStart int  `json:"reminderMinutesBeforeStart"`
 }
 
 // EventsPage is one page of a calendarView read.
