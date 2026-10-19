@@ -179,6 +179,17 @@ func TestShippedManifestsAreTwoAppsWithTheirOwnIcons(t *testing.T) {
 		if !png512 || !maskable {
 			t.Fatalf("%s needs a 512px PNG and a maskable icon to install everywhere", name)
 		}
+		// On Android a shortcut is how the calendar reaches the home screen
+		// beside the installed app, and an SVG alone is not an icon there.
+		for _, shortcut := range m.Shortcuts {
+			raster := false
+			for _, ic := range shortcut.Icons {
+				raster = raster || ic.Type == "image/png"
+			}
+			if !raster {
+				t.Fatalf("%s shortcut %s has no PNG icon", name, shortcut.URL)
+			}
+		}
 	}
 	for _, ic := range calendar.Icons {
 		if strings.Contains(ic.Src, "mail") {
