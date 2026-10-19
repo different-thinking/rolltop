@@ -4,7 +4,7 @@
   "short_name": "Calendar",
   "description": "The rolltop calendar in a window of its own",
   "start_url": "/calendar",
-  "scope": "/",
+  "scope": "/calendar",
   "display": "standalone",
   "background_color": "#f6f8fc",
   "theme_color": "#f6f8fc",
