@@ -1921,7 +1921,8 @@ function weekRangeLabel(first: Date, last: Date, omitYear?: number): string {
   const lastLabel = last.toLocaleDateString(undefined, {
     day: "numeric",
     month: "short",
-    year: first.getFullYear() === last.getFullYear() && yearShown ? "numeric" : undefined
+    // A range across New Year names both years; yearShown is always true then.
+    year: yearShown ? "numeric" : undefined
   });
   if (first.getFullYear() !== last.getFullYear()) {
     return `${first.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} – ${lastLabel}`;
