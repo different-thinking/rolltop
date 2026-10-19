@@ -179,8 +179,13 @@ type Server struct {
 	calendarPushRunning       map[int64]bool
 	calendarPushDirty         map[int64]bool
 	calendarReminderWake      chan struct{}
-	retentionSchedulerWake    chan struct{}
-	startedAt                 time.Time
+	// calendarReminderDirty names the users whose calendars changed since the
+	// reminder loop last looked, so a wake re-reads them alone rather than
+	// everybody; see notifyCalendarChanged.
+	calendarReminderDirtyMu sync.Mutex
+	calendarReminderDirty   map[int64]bool
+	retentionSchedulerWake  chan struct{}
+	startedAt               time.Time
 }
 
 type contextKey string
@@ -472,6 +477,7 @@ func New(opts Options) (*Server, error) {
 		calendarPushRunning:       map[int64]bool{},
 		calendarPushDirty:         map[int64]bool{},
 		calendarReminderWake:      make(chan struct{}, 1),
+		calendarReminderDirty:     map[int64]bool{},
 		retentionSchedulerWake:    make(chan struct{}, 1),
 		startedAt:                 time.Now().UTC(),
 		// Login backs off per client IP (not per account -- see loginGateKey), so

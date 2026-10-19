@@ -342,12 +342,20 @@ self.addEventListener("notificationclick", (event) => {
       warmNotificationMessage(data),
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
         const targetIsCalendar = isCalendarPath(new URL(targetURL).pathname);
-        for (const client of clients) {
+        const showsCalendar = (client) => client.url.startsWith(self.location.origin) && isCalendarPath(new URL(client.url).pathname);
+        // A calendar reminder goes to a window already showing the calendar
+        // when there is one, for the same reason mail stays out of it: the
+        // first window in the list may be the mail app, and turning that into
+        // the calendar takes the reader's mail away under the mail icon.
+        const ordered = targetIsCalendar
+          ? [...clients].sort((left, right) => Number(showsCalendar(right)) - Number(showsCalendar(left)))
+          : clients;
+        for (const client of ordered) {
           if (!client.url.startsWith(self.location.origin)) continue;
           // The calendar installs as an app of its own, so a window showing it
           // may be that app: turning it into the mail a notification names
           // would take the reader's calendar away under the calendar's icon.
-          if (!targetIsCalendar && isCalendarPath(new URL(client.url).pathname)) continue;
+          if (!targetIsCalendar && showsCalendar(client)) continue;
           if ("navigate" in client && client.url !== targetURL) {
             const navigated = await client.navigate(targetURL);
             return navigated?.focus();

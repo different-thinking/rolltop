@@ -33,12 +33,24 @@ func (s *Server) startCalendarReminderScheduler() {
 	go s.runCalendarReminderScheduler()
 }
 
+// runCalendarReminderScheduler runs the pass at two paces. The timer runs it
+// for every user and is what decides the next sleep; a wake runs it for the
+// users whose calendars changed and nobody else, and can only pull the timer
+// earlier. The distinction is the cost: both calendar pollers sync every
+// connection of every user every few minutes and each sync is a wake, so a
+// wake that re-read everybody made one poll round cost a pass per connection
+// over the whole user table.
 func (s *Server) runCalendarReminderScheduler() {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	// next is the earliest reminder the last full pass left ahead; a wake's
+	// partial pass moves it earlier, and only the full pass moves it later.
+	var next time.Time
 	for {
+		full := false
 		select {
 		case <-timer.C:
+			full = true
 		case <-s.calendarReminderWake:
 			if !timer.Stop() {
 				select {
@@ -48,7 +60,16 @@ func (s *Server) runCalendarReminderScheduler() {
 			}
 		}
 		now := time.Now().UTC()
-		next, err := s.processDueCalendarReminders(context.Background(), now)
+		var err error
+		if full {
+			next, err = s.processDueCalendarReminders(context.Background(), now)
+		} else {
+			var changedNext time.Time
+			changedNext, err = s.processCalendarRemindersFor(context.Background(), now, s.takeCalendarReminderDirty())
+			if !changedNext.IsZero() && (next.IsZero() || changedNext.Before(next)) {
+				next = changedNext
+			}
+		}
 		delay := calendarReminderIdleInterval
 		if store.IsClosed(err) {
 			return
@@ -57,6 +78,9 @@ func (s *Server) runCalendarReminderScheduler() {
 			log.Printf("calendar reminder scheduler: %v", err)
 			delay = calendarReminderErrorBackoff
 		} else if !next.IsZero() {
+			// A next already behind us -- the timer fired together with a
+			// wake and the wake was taken -- is the minimum delay, which is
+			// the full pass straight away rather than a lost reminder.
 			delay = time.Until(next)
 			if delay < calendarReminderMinimumDelay {
 				delay = calendarReminderMinimumDelay
@@ -77,14 +101,24 @@ func (s *Server) processDueCalendarReminders(ctx context.Context, now time.Time)
 	if err != nil {
 		return time.Time{}, err
 	}
+	ids := make([]int64, 0, len(users))
+	for _, user := range users {
+		ids = append(ids, user.ID)
+	}
+	return s.processCalendarRemindersFor(ctx, now, ids)
+}
+
+// processCalendarRemindersFor is the pass over the users named, with the same
+// contract as processDueCalendarReminders.
+func (s *Server) processCalendarRemindersFor(ctx context.Context, now time.Time, userIDs []int64) (time.Time, error) {
 	var next time.Time
 	var firstErr error
-	for _, user := range users {
-		events, userNext, err := s.store.RecordDueCalendarReminderEvents(ctx, user.ID, now, calendarReminderProcessLimit)
+	for _, userID := range userIDs {
+		events, userNext, err := s.store.RecordDueCalendarReminderEvents(ctx, userID, now, calendarReminderProcessLimit)
 		if len(events) > 0 {
-			s.notifyCalendarReminderWebPushAsync(user.ID)
+			s.notifyCalendarReminderWebPushAsync(userID)
 			if s.events != nil {
-				s.events.Notify(user.ID)
+				s.events.Notify(userID)
 			}
 		}
 		if err != nil {
@@ -108,10 +142,29 @@ func (s *Server) notifyCalendarChanged(userID int64) {
 	if s == nil || userID <= 0 {
 		return
 	}
+	s.calendarReminderDirtyMu.Lock()
+	if s.calendarReminderDirty == nil {
+		s.calendarReminderDirty = map[int64]bool{}
+	}
+	s.calendarReminderDirty[userID] = true
+	s.calendarReminderDirtyMu.Unlock()
 	if s.calendarReminderWake != nil {
 		select {
 		case s.calendarReminderWake <- struct{}{}:
 		default:
 		}
 	}
+}
+
+// takeCalendarReminderDirty hands the loop the users whose calendars changed
+// since it last asked, and forgets them.
+func (s *Server) takeCalendarReminderDirty() []int64 {
+	s.calendarReminderDirtyMu.Lock()
+	defer s.calendarReminderDirtyMu.Unlock()
+	ids := make([]int64, 0, len(s.calendarReminderDirty))
+	for id := range s.calendarReminderDirty {
+		ids = append(ids, id)
+	}
+	s.calendarReminderDirty = map[int64]bool{}
+	return ids
 }

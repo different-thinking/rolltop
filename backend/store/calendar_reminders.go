@@ -203,7 +203,7 @@ func (s *Store) RecordDueCalendarReminderEvents(ctx context.Context, userID int6
 		timeUnix(now.Add(-calendarReminderStartGrace-36*time.Hour)),
 		timeUnix(now.Add(time.Duration(maxCalendarReminderMinutes)*time.Minute+36*time.Hour)),
 		CalendarEventStatusCancelled, CalendarResponseDeclined, CalendarRemindersNone)
-	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarEventSelectColumns+`
+	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT `+calendarReminderCandidateColumns+`
 		FROM calendar_events
 		WHERE user_id = ? AND calendar_id IN (`+sqlPlaceholders(len(ids))+`)
 			AND start_at > ? AND start_at <= ?
@@ -213,7 +213,7 @@ func (s *Store) RecordDueCalendarReminderEvents(ctx context.Context, userID int6
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	events, err := collectCalendarEvents(rows)
+	events, err := collectCalendarReminderCandidates(rows)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -344,16 +344,28 @@ func (s *Store) recordDueCalendarReminderSnoozes(ctx context.Context, userID int
 		return nil, time.Time{}, err
 	}
 	recorded := make([]CalendarReminderEvent, 0, len(due))
+	dropWait := func(id int64) error {
+		_, err := db.ExecContext(ctx, `DELETE FROM calendar_reminder_snoozes WHERE user_id = ? AND id = ?`, userID, id)
+		return err
+	}
 	for _, item := range due {
-		if _, err := db.ExecContext(ctx, `DELETE FROM calendar_reminder_snoozes WHERE user_id = ? AND id = ?`, userID, item.id); err != nil {
-			return recorded, next, err
-		}
 		if item.event.Status == CalendarEventStatusCancelled || item.event.MyResponse == CalendarResponseDeclined {
+			if err := dropWait(item.id); err != nil {
+				return recorded, next, err
+			}
 			continue
 		}
+		// The reminder is recorded before the wait is dropped, not after: a
+		// failure between the two then leaves a wait the next pass fires
+		// again, where the other order lost the one reminder the reader asked
+		// for by name. The snooze's id in the row's key is what makes the
+		// second attempt a no-op rather than a second reminder.
 		minutes := int(item.event.StartAt.Sub(item.remindAt).Round(time.Minute) / time.Minute)
 		reminder, inserted, err := s.insertCalendarReminderEvent(ctx, userID, item.event, minutes, item.id, item.remindAt, now)
 		if err != nil {
+			return recorded, next, err
+		}
+		if err := dropWait(item.id); err != nil {
 			return recorded, next, err
 		}
 		if inserted {
@@ -361,6 +373,31 @@ func (s *Store) recordDueCalendarReminderSnoozes(ctx context.Context, userID int
 		}
 	}
 	return recorded, next, nil
+}
+
+// calendarReminderCandidateColumns is what the reminder pass needs of an
+// event: enough to place its reminders and to describe it in the feed. The
+// description and the guest list stay in the table -- the pass reads a
+// four-week window of every drawn calendar on every run, and an agenda is the
+// bulk of a row. Status and the reader's answer are filtered in the query.
+const calendarReminderCandidateColumns = `id, calendar_id, start_at, end_at, all_day, time_zone, summary, location, reminders`
+
+func collectCalendarReminderCandidates(rows *sql.Rows) ([]CalendarEvent, error) {
+	defer rows.Close()
+	var out []CalendarEvent
+	for rows.Next() {
+		var event CalendarEvent
+		var startAt, endAt, allDay int64
+		if err := rows.Scan(&event.ID, &event.CalendarID, &startAt, &endAt, &allDay,
+			&event.TimeZone, &event.Summary, &event.Location, &event.Reminders); err != nil {
+			return nil, err
+		}
+		event.StartAt = unixTime(startAt)
+		event.EndAt = unixTime(endAt)
+		event.AllDay = allDay != 0
+		out = append(out, event)
+	}
+	return out, rows.Err()
 }
 
 // qualifiedColumns prefixes every name of a comma-separated column list with a
@@ -373,30 +410,42 @@ func qualifiedColumns(alias, columns string) string {
 	return strings.Join(parts, ", ")
 }
 
+// insertCalendarReminderEvent records one reminder and answers with the row as
+// a read would return it -- built from what was written, at the second
+// precision the table keeps, rather than read back: a pass may record a
+// hundred of these and a query per row was the bulk of what it cost.
 func (s *Store) insertCalendarReminderEvent(ctx context.Context, userID int64, event CalendarEvent, minutes int, snoozeID int64, dueAt, now time.Time) (CalendarReminderEvent, bool, error) {
-	var id int64
+	reminder := CalendarReminderEvent{
+		UserID:        userID,
+		EventID:       event.ID,
+		CalendarID:    event.CalendarID,
+		StartAt:       unixTime(timeUnix(event.StartAt)),
+		EndAt:         unixTime(timeUnix(event.EndAt)),
+		AllDay:        event.AllDay,
+		MinutesBefore: minutes,
+		Summary:       trimLimit(event.Summary, 500),
+		Location:      trimLimit(event.Location, 1000),
+		TimeZone:      trimLimit(event.TimeZone, 100),
+		SnoozeID:      snoozeID,
+		DueAt:         unixTime(timeUnix(dueAt)),
+		CreatedAt:     unixTime(timeUnix(now)),
+	}
 	err := s.mustDataDB(ctx, userID).QueryRowContext(ctx, `INSERT INTO calendar_reminder_events
 			(user_id, event_id, calendar_id, start_at, end_at, all_day, minutes_before,
 			 summary, location, time_zone, snooze_id, due_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING
 		RETURNING id`,
-		userID, event.ID, event.CalendarID, timeUnix(event.StartAt), timeUnix(event.EndAt), boolInt(event.AllDay),
-		minutes, trimLimit(event.Summary, 500), trimLimit(event.Location, 1000), trimLimit(event.TimeZone, 100),
-		snoozeID, timeUnix(dueAt), timeUnix(now)).Scan(&id)
+		userID, reminder.EventID, reminder.CalendarID, timeUnix(reminder.StartAt), timeUnix(reminder.EndAt), boolInt(reminder.AllDay),
+		reminder.MinutesBefore, reminder.Summary, reminder.Location, reminder.TimeZone,
+		reminder.SnoozeID, timeUnix(reminder.DueAt), timeUnix(reminder.CreatedAt)).Scan(&reminder.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CalendarReminderEvent{}, false, nil
 	}
 	if err != nil {
 		return CalendarReminderEvent{}, false, err
 	}
-	reminder, err := s.calendarReminderEvent(ctx, userID, id)
-	return reminder, err == nil, err
-}
-
-func (s *Store) calendarReminderEvent(ctx context.Context, userID, id int64) (CalendarReminderEvent, error) {
-	return scanCalendarReminderEvent(s.mustDataDB(ctx, userID).QueryRowContext(ctx, `SELECT `+calendarReminderEventColumns+`
-		FROM calendar_reminder_events WHERE user_id = ? AND id = ?`, userID, id))
+	return reminder, true, nil
 }
 
 func (s *Store) pruneCalendarReminderEvents(ctx context.Context, userID int64, now time.Time) error {

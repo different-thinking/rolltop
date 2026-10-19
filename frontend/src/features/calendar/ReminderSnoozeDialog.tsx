@@ -9,7 +9,7 @@ import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
 import type { CalendarEvent } from "../../types";
-import { reminderSnoozeChoices, reminderTimeRange } from "../../lib/calendarReminders";
+import { reminderSnoozeChoices, reminderTimeRange, resolveReminderSnoozeChoice } from "../../lib/calendarReminders";
 
 function localDateTimeInputValue(value: Date) {
   const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
@@ -74,7 +74,7 @@ export function ReminderSnoozeDialog({
         </p>
         <div className="snooze-presets">
           {choices.map((choice) => (
-            <button type="button" disabled={busy} key={choice.label} onClick={() => void choose(choice.at)}>
+            <button type="button" disabled={busy} key={choice.label} onClick={() => void choose(resolveReminderSnoozeChoice(choice))}>
               <span>{choice.label}</span>
               <small>{choice.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
             </button>

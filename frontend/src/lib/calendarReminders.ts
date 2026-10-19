@@ -63,8 +63,18 @@ export function reminderLabel(minutes: number[]): string {
   }).join(", ");
 }
 
-/** ReminderSnoozeChoice is one time a reminder can be put off to. */
-export type ReminderSnoozeChoice = { label: string; at: Date };
+/** ReminderSnoozeChoice is one time a reminder can be put off to. `at` is the
+ * time as computed when the choices were made, for display; a choice relative
+ * to now also carries `minutesFromNow`, and resolveReminderSnoozeChoice reads
+ * that at the moment of choosing, because a dialog left open for a while would
+ * otherwise offer "In 5 minutes" and refuse it as already past. */
+export type ReminderSnoozeChoice = { label: string; at: Date; minutesFromNow?: number };
+
+/** resolveReminderSnoozeChoice is the instant a choice means when it is taken. */
+export function resolveReminderSnoozeChoice(choice: ReminderSnoozeChoice, now = new Date()): Date {
+  if (choice.minutesFromNow !== undefined) return new Date(now.getTime() + choice.minutesFromNow * 60_000);
+  return choice.at;
+}
 
 /**
  * reminderSnoozeChoices offers the times a reminder can be put off to: a few
@@ -73,11 +83,10 @@ export type ReminderSnoozeChoice = { label: string; at: Date };
  * rest.
  */
 export function reminderSnoozeChoices(startAt: string, allDay: boolean, now = new Date()): ReminderSnoozeChoice[] {
-  const choices: ReminderSnoozeChoice[] = [
-    { label: "In 5 minutes", at: new Date(now.getTime() + 5 * 60_000) },
-    { label: "In 15 minutes", at: new Date(now.getTime() + 15 * 60_000) },
-    { label: "In 1 hour", at: new Date(now.getTime() + 60 * 60_000) }
-  ];
+  const relative = (label: string, minutesFromNow: number): ReminderSnoozeChoice => ({
+    label, minutesFromNow, at: new Date(now.getTime() + minutesFromNow * 60_000)
+  });
+  const choices: ReminderSnoozeChoice[] = [relative("In 5 minutes", 5), relative("In 15 minutes", 15), relative("In 1 hour", 60)];
   const start = new Date(startAt);
   if (!allDay && !Number.isNaN(start.getTime())) {
     choices.push({ label: "5 minutes before it starts", at: new Date(start.getTime() - 5 * 60_000) });

@@ -283,8 +283,15 @@ site and in review.
   and `calendars.default_reminders` a Google calendar's own default, so an
   event is reminded of exactly as Google Calendar or Outlook would -- email
   reminders are the provider's to send and are dropped. A row whose reminders
-  were never read is rewritten once by the next sync whatever its version says
-  (`CalendarEventRef.RemindersRead`), or it never gets any. The scheduler
+  were never read is rewritten once by the next sync whatever its version says,
+  or it never gets any -- and the two providers need that done differently.
+  Microsoft's window read revisits every row anyway, so its version skip asks
+  `CalendarEventRef.RemindersRead` too. Google's sync is a delta that never
+  revisits an unchanged event or calendar-list entry, so the version skip in
+  its `applyEvent` cannot reach a row Google does not send again; the
+  `0019-calendar-reminders` migration therefore clears the Google cursors
+  (`calendars.sync_token`, `google_calendar_sync.sync_token`) and the next
+  poll is the full read a cursor expiry already costs. The scheduler
   (`Store.RecordDueCalendarReminderEvents`, driven by
   `calendar_reminder_scheduler.go`) records a reminder once per (event, start,
   minutes), which is what makes a pass idempotent and lets a moved event remind
