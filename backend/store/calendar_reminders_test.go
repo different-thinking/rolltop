@@ -280,3 +280,33 @@ func TestSnoozedCalendarReminderFiresAtTheChosenTime(t *testing.T) {
 		t.Fatalf("orphaned snooze = %+v next=%v err=%v", dropped, next, err)
 	}
 }
+
+// The feed pages oldest-first, so a client that advances to the last reminder
+// it was handed and comes back for the rest skips nothing.
+func TestCalendarReminderFeedPagesOldestFirst(t *testing.T) {
+	db, ctx := openCalendarStore(t)
+	user := mustUser(t, db, ctx, "calendar-reminder-paging@example.test")
+	calendar := mustCalendar(t, db, ctx, user, 1, "primary")
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		mustEvent(t, db, ctx, user, CalendarEvent{
+			CalendarID: calendar.ID, ExternalID: "e" + string(rune('a'+i)), ETag: "v1", Summary: "Event",
+			StartAt: now.Add(10 * time.Minute), EndAt: now.Add(time.Hour), Reminders: "10",
+		})
+	}
+	recorded, _, err := db.RecordDueCalendarReminderEvents(ctx, user, now, 100)
+	if err != nil || len(recorded) != 4 {
+		t.Fatalf("recorded = %+v err=%v", recorded, err)
+	}
+	first, count, cursor, err := db.CalendarReminderEventsAfter(ctx, user, 0, 3)
+	if err != nil || count != 4 || len(first) != 3 || cursor != recorded[3].ID {
+		t.Fatalf("first page = %+v count=%d cursor=%d err=%v", first, count, cursor, err)
+	}
+	if first[0].ID != recorded[0].ID || first[2].ID != recorded[2].ID {
+		t.Fatalf("first page = %+v, want the three oldest in order", first)
+	}
+	rest, count, _, err := db.CalendarReminderEventsAfter(ctx, user, first[2].ID, 3)
+	if err != nil || count != 1 || len(rest) != 1 || rest[0].ID != recorded[3].ID {
+		t.Fatalf("second page = %+v count=%d err=%v", rest, count, err)
+	}
+}

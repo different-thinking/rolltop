@@ -224,6 +224,7 @@ func (s *Store) RecordDueCalendarReminderEvents(ctx context.Context, userID int6
 		}
 	}
 	recorded := make([]CalendarReminderEvent, 0)
+candidates:
 	for _, event := range events {
 		calendar := byID[event.CalendarID]
 		start := CalendarReminderStart(event, calendar)
@@ -242,7 +243,7 @@ func (s *Store) RecordDueCalendarReminderEvents(ctx context.Context, userID int6
 			if len(recorded) >= limit {
 				// Whatever is left is due now; the caller comes straight back.
 				noteNext(now)
-				break
+				break candidates
 			}
 			reminder, inserted, err := s.insertCalendarReminderEvent(ctx, userID, event, minutes, 0, fireAt, now)
 			if err != nil {
@@ -458,8 +459,12 @@ const calendarReminderEventColumns = `id, user_id, event_id, calendar_id, start_
 	minutes_before, summary, location, time_zone, snooze_id, due_at, created_at`
 
 // CalendarReminderEventsAfter returns the retained reminders after a cursor,
-// oldest first, their count, and the user's current high-water mark -- the
-// same contract SnoozeReminderEventsAfter has, so one cursor loop serves both.
+// oldest first, their count, and the user's current high-water mark. Unlike
+// the snooze feed, whose page is the newest few behind one summary
+// notification, every reminder here is delivered on its own, so the page is
+// the **oldest** past the cursor: a caller that advances to the last id it was
+// handed and comes back for the rest (count > len) skips nothing, where the
+// newest few would have left the oldest behind the cursor for good.
 func (s *Store) CalendarReminderEventsAfter(ctx context.Context, userID, afterID int64, limit int) ([]CalendarReminderEvent, int, int64, error) {
 	if userID <= 0 || afterID < 0 {
 		return nil, 0, 0, errors.New("invalid calendar reminder cursor")
@@ -481,7 +486,7 @@ func (s *Store) CalendarReminderEventsAfter(ctx context.Context, userID, afterID
 	}
 	rows, err := db.QueryContext(ctx, `SELECT `+calendarReminderEventColumns+`
 		FROM calendar_reminder_events
-		WHERE user_id = ? AND id > ? AND id <= ? ORDER BY id DESC LIMIT ?`, userID, afterID, cursor, limit)
+		WHERE user_id = ? AND id > ? AND id <= ? ORDER BY id ASC LIMIT ?`, userID, afterID, cursor, limit)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -496,9 +501,6 @@ func (s *Store) CalendarReminderEventsAfter(ctx context.Context, userID, afterID
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, 0, err
-	}
-	for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
-		events[left], events[right] = events[right], events[left]
 	}
 	return events, count, cursor, nil
 }

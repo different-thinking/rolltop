@@ -67,12 +67,19 @@ func (s *Server) apiCalendarReminderNotifications(w http.ResponseWriter, r *http
 		s.serverError(w, r, err)
 		return
 	}
+	// The page is the oldest reminders past the cursor. When it does not
+	// reach the high-water mark, the cursor handed back is the last reminder
+	// on it, so a client that continues from there is handed the rest rather
+	// than skipping them.
+	if count > len(events) && len(events) > 0 {
+		cursor = events[len(events)-1].ID
+	}
 	writeJSON(w, apiCalendarReminderNotificationsResponse{
-		UserID: cu.User.ID, Count: count, Cursor: cursor, Reminders: apiCalendarReminderNotifications(events),
+		UserID: cu.User.ID, Count: count, Cursor: cursor, Reminders: presentCalendarReminderNotifications(events),
 	})
 }
 
-func apiCalendarReminderNotifications(events []store.CalendarReminderEvent) []apiCalendarReminderNotification {
+func presentCalendarReminderNotifications(events []store.CalendarReminderEvent) []apiCalendarReminderNotification {
 	out := make([]apiCalendarReminderNotification, 0, len(events))
 	for _, event := range events {
 		rendered := calendarReminderWebPushNotification(event)
