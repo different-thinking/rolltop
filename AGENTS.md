@@ -273,9 +273,16 @@ site and in review.
   the connection named (`messageFromError`), and the banner in the shell
   (`OfflineBanner`, `useServerReachable`) says so first. Reachability is the
   browser's flag corrected by the last request (`lib/offline.ts`), because a
-  captive portal reads as online while every request fails. Step one covers
-  the desktop browser and the installed web app; the Android wrapper loads the
-  same shell but has not been checked for it.
+  captive portal reads as online while every request fails. The Android
+  wrapper loads the same shell in a WebView, which runs the same service
+  worker and keeps its caches and IndexedDB between launches, so the whole
+  reading mode and the outbox hold there without wrapper code. The one thing
+  the wrapper decides is what to show when nothing in the WebView could answer
+  the first page - before the worker is installed, or when it had nothing
+  stored - and `ConnectionFailurePolicy` keeps that from being the server form:
+  a server that has served the app to this install before is unreachable, not
+  wrong, so the reader gets "offline" with Try again, and the form only as the
+  second choice.
 - **A calendar reminder is the provider's reminder, delivered; Rolltop never
   invents one and never writes one back.** `calendar_events.reminders` mirrors
   the popup reminders an event asks for (`store.EncodeCalendarReminders`:
