@@ -922,7 +922,7 @@ function Topbar({
                 onClick={() => void menuToggleNotifications()}
               >
                 <Icon name="notifications" weight={notificationsEnabled ? "bold" : "regular"} />
-                <span><strong>Browser notifications</strong><small>{notificationsEnabled ? "Enabled for new mail" : "Paused for this browser"}</small></span>
+                <span><strong>Browser notifications</strong><small>{notificationsEnabled ? "New mail and calendar reminders" : "Paused for this browser"}</small></span>
                 <span className="notification-toggle-track"><span /></span>
               </button>
             ) : null}

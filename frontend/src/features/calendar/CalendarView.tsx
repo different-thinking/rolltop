@@ -24,6 +24,7 @@ import {
 } from "../../lib/calendarOutbox";
 import { EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
+import { ReminderSnoozeDialog } from "./ReminderSnoozeDialog";
 import { useWeekDrag } from "./useWeekDrag";
 import type { WeekDrag } from "./useWeekDrag";
 import {
@@ -69,6 +70,37 @@ const calendarSettingsPath = "/settings/account/preferences/calendars";
  * the working day below the fold on every visit. */
 const initialScrollHour = 7;
 
+/** reminderPromptKey remembers, per user and browser, that the reader has
+ * answered the question whether this device should remind them of their
+ * appointments. Asked once: a question that comes back on every visit is
+ * nagging, and the account menu keeps the switch for later. */
+function reminderPromptKey(userID: number) {
+  return `rolltop.calendar.reminder-prompt.${userID}`;
+}
+
+function reminderPromptAnswered(userID: number): boolean {
+  try {
+    return window.localStorage.getItem(reminderPromptKey(userID)) !== null;
+  } catch {
+    return true;
+  }
+}
+
+function markReminderPromptAnswered(userID: number) {
+  try {
+    window.localStorage.setItem(reminderPromptKey(userID), new Date().toISOString());
+  } catch {
+    // Without storage the question would come back next visit; in-memory state
+    // keeps it away for this one.
+  }
+}
+
+/** reminderIntent reads the event a notification's "remind me later" named. */
+function reminderIntent(search: string): number {
+  const value = Number(new URLSearchParams(search).get("remind") || 0);
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
 type DialogState = {
   event: CalendarEvent | null;
   day: Date;
@@ -88,15 +120,27 @@ export function CalendarView({
   userID,
   location,
   navigate,
+  notificationsEnabled,
+  toggleNotifications,
   addToast
 }: {
   csrf: string;
   userID: number;
   location: LocationState;
   navigate: (url: string) => void;
+  /** notificationsEnabled and toggleNotifications are the browser
+   * notification switch the account menu owns; the calendar asks the question
+   * once and hands the answer to the same switch. */
+  notificationsEnabled: boolean;
+  toggleNotifications: () => Promise<void>;
   addToast: AddToast;
 }) {
   const anchor = useMemo(() => startOfWeek(calendarRouteDate(location.path)), [location.path]);
+  // The reminder a notification asked to put off, from ?remind=. The picker
+  // stays up until the reader chooses or dismisses; either clears the query.
+  const remindEventID = reminderIntent(location.search);
+  const [reminderPromptOpen, setReminderPromptOpen] = useState(() => !notificationsEnabled && !reminderPromptAnswered(userID));
+  const [reminderPromptBusy, setReminderPromptBusy] = useState(false);
   const days = useMemo(() => weekDays(anchor), [anchor]);
   const [calendars, setCalendars] = useState<CalendarSummary[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -335,6 +379,39 @@ export function CalendarView({
   const closeDialog = () => {
     setDialog(null);
     setDialogProblem("");
+  };
+
+  const closeReminderSnooze = () => {
+    navigate(location.path);
+  };
+
+  const snoozeReminder = async (eventID: number, at: Date) => {
+    try {
+      await api.snoozeCalendarReminder(csrf, eventID, at);
+      addToast(`Reminder set for ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+      navigate(location.path);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
+  // The question is asked only while this browser cannot remind. A browser
+  // that has refused notifications is not asked -- the answer is known -- and
+  // one that already reminds has nothing to be asked.
+  const canAskForReminders = typeof window !== "undefined" && "Notification" in window && Notification.permission !== "denied";
+  const answerReminderPrompt = async (turnOn: boolean) => {
+    markReminderPromptAnswered(userID);
+    if (!turnOn) {
+      setReminderPromptOpen(false);
+      return;
+    }
+    setReminderPromptBusy(true);
+    try {
+      await toggleNotifications();
+    } finally {
+      setReminderPromptBusy(false);
+      setReminderPromptOpen(false);
+    }
   };
 
   // A write that Google refused is reported in the dialog rather than as a
@@ -898,6 +975,23 @@ export function CalendarView({
           </div>
         </header>
 
+        {reminderPromptOpen && canAskForReminders && !notificationsEnabled && calendars.length > 0 ? (
+          <div className="calendar-offline-notice calendar-reminder-prompt" role="status">
+            <span>
+              <Icon name="notifications" />
+              Remind you of your appointments? The reminders set on your events are shown as notifications on this device,
+              with the app open or not.
+            </span>
+            <span className="calendar-reminder-prompt-actions">
+              <button type="button" disabled={reminderPromptBusy} onClick={() => void answerReminderPrompt(true)}>
+                Turn on reminders
+              </button>
+              <button type="button" className="ghost" disabled={reminderPromptBusy} onClick={() => void answerReminderPrompt(false)}>
+                Not now
+              </button>
+            </span>
+          </div>
+        ) : null}
         {savedCopyAt > 0 && !loading ? (
           <p className="calendar-offline-notice" role="status">
             You are offline. Showing the calendar as it was saved on {displayDateTime(new Date(savedCopyAt).toISOString())}; changes need a connection.
@@ -1087,6 +1181,15 @@ export function CalendarView({
           onDelete={() => void deleteEvent()}
           onRespond={(response) => void respond(response)}
           onClose={closeDialog}
+        />
+      ) : null}
+      {remindEventID > 0 ? (
+        <ReminderSnoozeDialog
+          key={remindEventID}
+          eventID={remindEventID}
+          event={shownEvents.find((item) => item.id === remindEventID) || null}
+          onSnooze={snoozeReminder}
+          onClose={closeReminderSnooze}
         />
       ) : null}
     </div>

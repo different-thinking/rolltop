@@ -10,6 +10,7 @@ import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSumma
 import { pendingReason } from "../../lib/calendarOutbox";
 import { Icon } from "../../components/Icon";
 import { calendarColor, eventEditable, providerName } from "./weekModel";
+import { reminderLabel } from "../../lib/calendarReminders";
 
 /** responseOptions are the answers an invitee can give. */
 export const responseOptions: { value: string; label: string }[] = [
@@ -753,6 +754,12 @@ export function EventDialog({
           ) : null}
           {event?.status === "cancelled" ? (
             <p className="calendar-dialog-note">The organizer cancelled this meeting.</p>
+          ) : null}
+          {event && !event.pending_offline && !placeholder && !event.travel ? (
+            <p className="calendar-dialog-note">
+              Reminder: {reminderLabel(event.reminders_default ? calendar?.default_reminder_minutes || [] : event.reminder_minutes || [])}
+              {" \u00b7 "}set in {calendar?.provider === "microsoft" ? "Outlook" : "Google Calendar"}, delivered as browser notifications when they are enabled.
+            </p>
           ) : null}
           {event?.html_link ? (
             <p className="calendar-dialog-note">

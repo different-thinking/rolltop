@@ -86,6 +86,9 @@ type Syncer struct {
 	Connections ConnectionLister
 	// Now is the clock; a field so a test can place a window boundary.
 	Now func() time.Time
+	// AfterSync, when set, is told the user whose calendars a sync just
+	// visited, whatever its outcome; the reminder scheduler listens.
+	AfterSync func(userID int64)
 
 	// linksRefused holds the calendars (by row id) for which Graph refused a
 	// calendarView that asks for the link property. Reads of those then go
@@ -185,6 +188,9 @@ func (s *Syncer) SyncConnection(ctx context.Context, userID, connectionID int64)
 	defer cancel()
 	result, err := s.run(ctx, userID, connection)
 	s.recordConnectionOutcome(ctx, userID, connectionID, result, err)
+	if s.AfterSync != nil {
+		s.AfterSync(userID)
+	}
 	return result, err
 }
 
@@ -208,6 +214,9 @@ func (s *Syncer) SyncCalendar(ctx context.Context, userID, calendarID int64) err
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 	_, err = s.syncCalendarEvents(ctx, userID, connection, calendar)
+	if s.AfterSync != nil {
+		s.AfterSync(userID)
+	}
 	return err
 }
 
@@ -377,7 +386,7 @@ func (s *Syncer) readWindow(ctx context.Context, userID int64, connection store.
 			}
 			ref, listed := known[externalID]
 			delete(known, externalID)
-			if listed && ref.ETag != "" && ref.ETag == event.version() {
+			if listed && ref.ETag != "" && ref.ETag == event.version() && ref.RemindersRead {
 				// Most of a poll is events nobody touched; the reconciliation
 				// list already carries their version, so they cost no query.
 				continue
@@ -420,7 +429,9 @@ func (s *Syncer) applyEvent(ctx context.Context, userID, calendarID int64, selfE
 	existing, err := s.Store.CalendarEventByExternalID(ctx, userID, calendarID, incoming.ExternalID)
 	switch {
 	case err == nil:
-		if existing.ETag != "" && existing.ETag == incoming.ETag {
+		// A row mirrored before reminders were read is rewritten once whatever
+		// its version says, or it never gets any.
+		if existing.ETag != "" && existing.ETag == incoming.ETag && existing.Reminders != "" {
 			return outcomeUnchanged, nil
 		}
 		if !withLinks {

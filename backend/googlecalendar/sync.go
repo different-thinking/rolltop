@@ -74,6 +74,11 @@ type Syncer struct {
 	// Now is the clock. It is a field so a test can place a window boundary
 	// without waiting for one.
 	Now func() time.Time
+	// AfterSync, when set, is told the user whose calendars a connection sync
+	// just visited, whatever its outcome. The reminder scheduler listens, so
+	// an event that arrived is reminded of at its time rather than after the
+	// scheduler's idle interval.
+	AfterSync func(userID int64)
 }
 
 // NewSyncer wires a syncer for production use. The process builds one in main
@@ -178,6 +183,9 @@ func (s *Syncer) SyncConnection(ctx context.Context, userID, connectionID int64)
 
 	result, err := s.run(ctx, userID, connectionID)
 	s.recordConnectionOutcome(ctx, userID, connectionID, result, err)
+	if s.AfterSync != nil {
+		s.AfterSync(userID)
+	}
 	return result, err
 }
 
@@ -206,6 +214,9 @@ func (s *Syncer) SyncCalendar(ctx context.Context, userID, calendarID int64) err
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 	_, err = s.syncCalendarEvents(ctx, userID, calendar)
+	if s.AfterSync != nil {
+		s.AfterSync(userID)
+	}
 	return err
 }
 
@@ -499,7 +510,9 @@ func (s *Syncer) applyEvent(ctx context.Context, userID, calendarID int64, event
 	existing, err := s.Store.CalendarEventByExternalID(ctx, userID, calendarID, incoming.ExternalID)
 	switch {
 	case err == nil:
-		if existing.ETag != "" && existing.ETag == incoming.ETag {
+		// A row mirrored before reminders were read is rewritten once whatever
+		// its version says, or it never gets any.
+		if existing.ETag != "" && existing.ETag == incoming.ETag && existing.Reminders != "" {
 			return outcomeUnchanged, nil
 		}
 		if _, err := s.Store.UpsertCalendarEvent(ctx, userID, incoming); err != nil {

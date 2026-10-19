@@ -1213,6 +1213,10 @@ export type CalendarSummary = {
   /** online_meeting_providers lists the online meetings an event here can be
    * made -- Teams for a Microsoft calendar. Empty means none. */
   online_meeting_providers: string[];
+  /** default_reminder_minutes is the calendar's own default popup reminders,
+   * which an event marked reminders_default follows. A Microsoft calendar has
+   * none; every Outlook event states its own. */
+  default_reminder_minutes: number[];
   /** synced_from is the oldest point the mirror covers. An empty week before it
    * means "not synced", not "nothing scheduled". */
   synced_from: string;
@@ -1265,6 +1269,12 @@ export type CalendarEvent = {
    * draws a linked pair once; this is what says where else it lives, including
    * a calendar that is switched off. */
   also_in: CalendarEventCopy[];
+  /** reminder_minutes is the event's own popup reminders, minutes before it
+   * starts, as the provider holds them; reminders_default says it follows its
+   * calendar's default instead. Read only: reminders are set where the
+   * calendar lives, and Rolltop delivers them as browser notifications. */
+  reminder_minutes?: number[];
+  reminders_default?: boolean;
   /** online_meeting marks an event held online; online_meeting_url joins it
    * (a Teams or Google Meet link). */
   online_meeting: boolean;
@@ -1288,6 +1298,32 @@ export type CalendarEvent = {
   /** pending_error is the calendar's refusal of a waiting event, empty while
    * it is only waiting for a connection. */
   pending_error?: string;
+};
+
+/** CalendarReminderNotification is one calendar reminder that came due, from
+ * the feed a browser without Web Push reads. */
+export type CalendarReminderNotification = {
+  id: number;
+  event_id: number;
+  calendar_id: number;
+  summary: string;
+  location: string;
+  start_at: string;
+  end_at: string;
+  all_day: boolean;
+  minutes_before: number;
+  due_at: string;
+  url: string;
+  title: string;
+  body: string;
+};
+
+/** CalendarReminderFeed is a page of the reminder feed after a cursor. */
+export type CalendarReminderFeed = {
+  user_id: number;
+  count: number;
+  cursor: number;
+  reminders: CalendarReminderNotification[];
 };
 
 /** CalendarEventCopy is one other copy of a linked event. */

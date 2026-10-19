@@ -56,7 +56,7 @@ const calendarEventSelectColumns = `id, user_id, calendar_id, external_id, etag,
 	summary, description, location, status, start_at, end_at, all_day, time_zone,
 	recurring_event_id, organizer_email, organizer_name, attendees_json, my_response,
 	html_link, remote_updated_at, link_key, link_primary, online_meeting,
-	online_meeting_provider, online_meeting_url, link_masked, link_travel`
+	online_meeting_provider, online_meeting_url, link_masked, link_travel, reminders`
 
 // CalendarAttendee is one invitee as Google reports them. It is display data:
 // nothing queries against it, so the list is stored as JSON on the event.
@@ -133,6 +133,16 @@ type CalendarEvent struct {
 	// OnlineMeetingURL is the link a participant follows to join, for an
 	// online meeting of either provider.
 	OnlineMeetingURL string
+	// Reminders is the popup reminders the provider holds for this event, in
+	// the encoding EncodeCalendarReminders writes: the minutes before the
+	// start, "default" for a Google event that follows its calendar's
+	// default, "none" for an event the reader switched them off on, and ""
+	// for a row the reminders have never been read for -- a row mirrored
+	// before reminders were, which is treated as "default" until its next
+	// read. They are read from the provider and never written back; the
+	// reminder scheduler (RecordDueCalendarReminderEvents) is their only
+	// reader.
+	Reminders string
 }
 
 // Linked reports whether this event is one copy of a linked pair.
@@ -146,6 +156,11 @@ type CalendarEventRef struct {
 	EventID    int64
 	ExternalID string
 	ETag       string
+	// RemindersRead reports whether the row's reminders have ever been read
+	// from the provider. A sync skips an unchanged event by its version, but
+	// a row mirrored before reminders were read has to be read once more
+	// whatever its version says, or it never gets any.
+	RemindersRead bool
 }
 
 // UpsertCalendarEvent stores one occurrence, replacing the mirror if it exists.
@@ -163,8 +178,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			 location, status, start_at, end_at, all_day, time_zone, recurring_event_id,
 			 organizer_email, organizer_name, attendees_json, my_response, html_link,
 			 remote_updated_at, link_key, link_primary, online_meeting, online_meeting_provider,
-			 online_meeting_url, link_masked, link_travel, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 online_meeting_url, link_masked, link_travel, reminders, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, calendar_id, external_id) DO UPDATE SET
 			etag = excluded.etag,
 			ical_uid = excluded.ical_uid,
@@ -190,6 +205,7 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 			online_meeting_url = excluded.online_meeting_url,
 			link_masked = excluded.link_masked,
 			link_travel = excluded.link_travel,
+			reminders = excluded.reminders,
 			updated_at = excluded.updated_at`,
 		userID, event.CalendarID, trimLimit(externalID, 300), trimLimit(event.ETag, 200),
 		trimLimit(event.ICalUID, 300), trimLimit(event.Summary, 500),
@@ -202,7 +218,8 @@ func (s *Store) UpsertCalendarEvent(ctx context.Context, userID int64, event Cal
 		trimLimit(strings.TrimSpace(event.LinkKey), 100), boolInt(event.LinkPrimary),
 		boolInt(event.OnlineMeeting), trimLimit(strings.TrimSpace(event.OnlineMeetingProvider), 60),
 		trimLimit(strings.TrimSpace(event.OnlineMeetingURL), 2000),
-		boolInt(event.Linked() && event.LinkMasked), storedTravel(event), ts, ts)
+		boolInt(event.Linked() && event.LinkMasked), storedTravel(event),
+		trimLimit(strings.TrimSpace(event.Reminders), 200), ts, ts)
 	if err != nil {
 		return CalendarEvent{}, err
 	}
@@ -433,15 +450,20 @@ func (s *Store) ListCalendarEventRefs(ctx context.Context, userID, calendarID in
 		return out, nil
 	}
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx,
-		`SELECT id, external_id, etag FROM calendar_events WHERE user_id = ? AND calendar_id = ?`,
+		`SELECT id, external_id, etag, reminders <> '' FROM calendar_events WHERE user_id = ? AND calendar_id = ?`,
 		userID, calendarID)
 	if err != nil {
 		return nil, err
 	}
+	return collectCalendarEventRefs(rows)
+}
+
+func collectCalendarEventRefs(rows *sql.Rows) (map[string]CalendarEventRef, error) {
 	defer rows.Close()
+	out := map[string]CalendarEventRef{}
 	for rows.Next() {
 		var ref CalendarEventRef
-		if err := rows.Scan(&ref.EventID, &ref.ExternalID, &ref.ETag); err != nil {
+		if err := rows.Scan(&ref.EventID, &ref.ExternalID, &ref.ETag, &ref.RemindersRead); err != nil {
 			return nil, err
 		}
 		out[ref.ExternalID] = ref
@@ -461,21 +483,13 @@ func (s *Store) ListCalendarEventRefsStartingIn(ctx context.Context, userID, cal
 		return out, nil
 	}
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx,
-		`SELECT id, external_id, etag FROM calendar_events
+		`SELECT id, external_id, etag, reminders <> '' FROM calendar_events
 			WHERE user_id = ? AND calendar_id = ? AND start_at >= ? AND start_at < ?`,
 		userID, calendarID, timeUnix(from), timeUnix(to))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var ref CalendarEventRef
-		if err := rows.Scan(&ref.EventID, &ref.ExternalID, &ref.ETag); err != nil {
-			return nil, err
-		}
-		out[ref.ExternalID] = ref
-	}
-	return out, rows.Err()
+	return collectCalendarEventRefs(rows)
 }
 
 // DeleteCalendarEventsEndingBefore removes the rows of one calendar that ended
@@ -523,15 +537,24 @@ func decodeAttendees(raw string) []CalendarAttendee {
 }
 
 func scanCalendarEvent(dest scanDest) (CalendarEvent, error) {
+	return scanCalendarEventWithPrefix(dest)
+}
+
+// scanCalendarEventWithPrefix scans a row whose columns are the given prefix
+// followed by calendarEventSelectColumns, which is what a query joining
+// another table onto an event selects.
+func scanCalendarEventWithPrefix(dest scanDest, prefix ...any) (CalendarEvent, error) {
 	var event CalendarEvent
 	var attendees string
 	var allDay, startAt, endAt, remoteUpdated, linkPrimary, onlineMeeting, linkMasked int64
-	if err := dest.Scan(&event.ID, &event.UserID, &event.CalendarID, &event.ExternalID,
+	targets := append(append([]any{}, prefix...), &event.ID, &event.UserID, &event.CalendarID, &event.ExternalID,
 		&event.ETag, &event.ICalUID, &event.Summary, &event.Description, &event.Location,
 		&event.Status, &startAt, &endAt, &allDay, &event.TimeZone, &event.RecurringEventID,
 		&event.OrganizerEmail, &event.OrganizerName, &attendees, &event.MyResponse,
 		&event.HTMLLink, &remoteUpdated, &event.LinkKey, &linkPrimary, &onlineMeeting,
-		&event.OnlineMeetingProvider, &event.OnlineMeetingURL, &linkMasked, &event.LinkTravel); err != nil {
+		&event.OnlineMeetingProvider, &event.OnlineMeetingURL, &linkMasked, &event.LinkTravel,
+		&event.Reminders)
+	if err := dest.Scan(targets...); err != nil {
 		return CalendarEvent{}, err
 	}
 	event.OnlineMeeting = onlineMeeting != 0

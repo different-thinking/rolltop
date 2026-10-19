@@ -403,3 +403,34 @@ func TestTravelRoleRoundTrips(t *testing.T) {
 		t.Fatalf("primary read back as travel %q", plain.LinkTravel)
 	}
 }
+
+// Reminders are read as the provider holds them: an event following its
+// calendar's default says so, overrides keep their popup minutes and drop the
+// email ones, and the calendar list carries the default an event may follow.
+func TestToEventReadsReminders(t *testing.T) {
+	start := fixedNow.Add(24 * time.Hour)
+	byDefault := timedEvent("e1", "etag-1", "Standup", start)
+	byDefault.Reminders = &EventReminders{UseDefault: true}
+	if got := ToEvent(byDefault, 1).Reminders; got != store.CalendarRemindersDefault {
+		t.Fatalf("default reminders = %q", got)
+	}
+	overridden := timedEvent("e2", "etag-2", "Review", start)
+	overridden.Reminders = &EventReminders{Overrides: []EventReminder{
+		{Method: "email", Minutes: 1440}, {Method: "popup", Minutes: 10}, {Method: "popup", Minutes: 60},
+	}}
+	if got := ToEvent(overridden, 1).Reminders; got != "10,60" {
+		t.Fatalf("overridden reminders = %q, want the popup minutes only", got)
+	}
+	silent := timedEvent("e3", "etag-3", "Quiet", start)
+	silent.Reminders = &EventReminders{}
+	if got := ToEvent(silent, 1).Reminders; got != store.CalendarRemindersNone {
+		t.Fatalf("silent reminders = %q", got)
+	}
+	if got := ToEvent(timedEvent("e4", "etag-4", "Bare", start), 1).Reminders; got != store.CalendarRemindersDefault {
+		t.Fatalf("missing reminder block = %q, want to follow the calendar default", got)
+	}
+	entry := CalendarListEntry{ID: "primary", DefaultReminders: []EventReminder{{Method: "popup", Minutes: 30}, {Method: "email", Minutes: 10}}}
+	if got := ToCalendarUpsert(entry, 1).DefaultReminders; got != "30" {
+		t.Fatalf("calendar default reminders = %q", got)
+	}
+}
