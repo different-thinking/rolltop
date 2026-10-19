@@ -337,16 +337,26 @@ class MainActivity : ComponentActivity() {
                 RolltopPrefs.rememberVisitedUrl(this@MainActivity, url)
             }
 
+            // The web app's service worker answers an offline navigation itself,
+            // with the shell it kept or its offline page, so these only run when
+            // nothing in the WebView could answer: before the worker is installed,
+            // or when it had nothing stored. Which screen follows is the policy's
+            // call - a server that has answered before is unreachable, not wrong.
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) {
-                    failInitialLoad(view, "Could not connect to this Rolltop server. Check the address and try again.")
-                }
+                if (!request.isForMainFrame) return
+                val action = ConnectionFailurePolicy.forLoadError(error.errorCode, serverReachedBefore())
+                failInitialLoad(view, connectionFailureMessage(action), action)
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
-                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
-                    failInitialLoad(view, "The server did not recognize Rolltop at this address. Check the URL and try again.")
+                if (!request.isForMainFrame || errorResponse.statusCode < 400) return
+                val action = ConnectionFailurePolicy.forHttpError(errorResponse.statusCode, serverReachedBefore())
+                val message = if (action == ConnectionFailureAction.OFFLINE_RETRY) {
+                    "The Rolltop server is not answering right now. Try again in a moment."
+                } else {
+                    "The server did not recognize Rolltop at this address. Check the URL and try again."
                 }
+                failInitialLoad(view, message, action)
             }
 
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
@@ -354,10 +364,21 @@ class MainActivity : ComponentActivity() {
                 failInitialLoad(view, "Rolltop could not verify this server's HTTPS certificate. Check the URL and certificate, then try again.")
             }
 
-            private fun failInitialLoad(view: WebView, message: String) {
+            private fun connectionFailureMessage(action: ConnectionFailureAction): String =
+                if (action == ConnectionFailureAction.OFFLINE_RETRY) {
+                    "You are offline, or the Rolltop server cannot be reached from this network."
+                } else {
+                    "Could not connect to this Rolltop server. Check the address and try again."
+                }
+
+            private fun failInitialLoad(
+                view: WebView,
+                message: String,
+                action: ConnectionFailureAction = ConnectionFailureAction.SETUP
+            ) {
                 if (mainFrameCommitted || failureHandled) return
                 failureHandled = true
-                view.post { showConnectionFailure(view, message) }
+                view.post { showConnectionFailure(view, message, action) }
             }
         }
         rolltopWebChromeClient = RolltopWebChromeClient(this) { navigation ->
@@ -432,7 +453,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showConnectionFailure(failedView: WebView, message: String) {
+    private fun showConnectionFailure(failedView: WebView, message: String, action: ConnectionFailureAction) {
         if (webView !== failedView || isFinishing || isDestroyed) return
         cancelLoadingExperience()
         androidWebBridge?.close()
@@ -441,8 +462,54 @@ class MainActivity : ComponentActivity() {
         rolltopWebChromeClient = null
         webView = null
         failedView.stopLoading()
-        showSetup(RolltopPrefs.serverUrl(this), message)
+        when (action) {
+            ConnectionFailureAction.OFFLINE_RETRY -> showOffline(message)
+            ConnectionFailureAction.SETUP -> showSetup(RolltopPrefs.serverUrl(this), message)
+        }
         failedView.destroy()
+    }
+
+    /** serverReachedBefore says whether this server has ever served the app to
+     * this install: a location is remembered only once a page has committed. */
+    private fun serverReachedBefore(): Boolean = RolltopPrefs.lastVisitedUrl(this).isNotBlank()
+
+    /**
+     * The screen for a server that has answered before and cannot be reached
+     * now. It keeps the configured server and offers to try again - which is a
+     * fresh load, so the service worker's stored shell gets its chance once it
+     * is installed - and the server form only as the second choice.
+     */
+    private fun showOffline(message: String) {
+        cancelLoadingExperience()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(SHELL_BACKGROUND)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+        val title = TextView(this).apply {
+            text = "Rolltop is offline"
+            textSize = 28f
+        }
+        val feedback = TextView(this).apply {
+            text = message
+            setTextColor(Color.rgb(74, 81, 78))
+        }
+        val retry = Button(this).apply {
+            text = "Try again"
+            setOnClickListener { showWeb(intent) }
+        }
+        val changeServer = Button(this).apply {
+            text = "Change server"
+            setOnClickListener { showSetup() }
+        }
+        root.addView(title, spacedLayoutParams(top = 0, bottom = 12))
+        root.addView(feedback, spacedLayoutParams(bottom = 12))
+        root.addView(retry, spacedLayoutParams(bottom = 4))
+        root.addView(changeServer, spacedLayoutParams())
+        applySystemBarInsets(root, dp(24))
+        setContentView(root)
     }
 
     private fun cancelLoadingExperience() {

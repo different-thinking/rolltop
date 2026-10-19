@@ -48,7 +48,23 @@ Android 13 and newer require the runtime notification permission.
 
 Push registration and polling rely on the WebView login cookie for the configured Rolltop server. If the session expires, the app stops notifying until the user signs in again. The Rolltop server also needs outbound HTTPS access to the selected distributor endpoint.
 
-## Updates
+## Offline
+
+The wrapper loads the same web app a desktop browser does, and the app's own
+service worker is what makes it work offline: once the app has been opened
+online since the update, a start without a network is answered with the stored
+shell, the newest page of each mail list and the threads it warmed open from
+IndexedDB, the calendar shows the weeks it saved, and events entered offline are
+queued and sent when the connection is back. Nothing has to be switched on; the
+WebView keeps the worker's caches and IndexedDB between launches.
+
+The shell only has a say when nothing in the WebView could answer the first
+page - before the worker is installed, or when it had nothing stored. It then
+tells connectivity apart from a wrong address (`ConnectionFailurePolicy`): a
+server that has served the app to this install before is shown as unreachable,
+with Try again and the server form as the second choice, instead of being sent
+back to the server form with "check the address".
+
 
 The updater checks:
 
