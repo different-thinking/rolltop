@@ -46,6 +46,12 @@ func TestListMailboxesForUserCountsHiddenRowsOnceAndPerTenant(t *testing.T) {
 	exec(`UPDATE messages SET blob_path = '' WHERE user_id = ? AND id = ?`, owner.ID, plainRead.ID)
 	exec(`UPDATE messages SET duplicate_of_message_id = ? WHERE user_id = ? AND id IN (?, ?)`, plainUnread.ID, owner.ID, duplicate.ID, snoozedDuplicate.ID)
 	exec(`UPDATE messages SET thread_key = '' WHERE user_id = ? AND id = ?`, owner.ID, snoozedNoKey.ID)
+	// Thread keys are derived from headers and subject, so two tenants share one
+	// whenever they receive the same thread. The other tenant's snooze names the
+	// owner's plain thread, which stays visible only while the snooze match keeps
+	// its user_id predicate.
+	exec(`UPDATE messages SET thread_key = 'shared-thread' WHERE user_id = ? AND id = ?`, owner.ID, plainUnread.ID)
+	exec(`UPDATE messages SET thread_key = 'shared-thread' WHERE user_id = ? AND id = ?`, other.ID, otherSnoozed.ID)
 	for _, message := range []MessageRecord{snoozed, snoozedNoKey, snoozedDuplicate, expired} {
 		if _, err := db.SnoozeMessage(ctx, owner.ID, message.ID, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
