@@ -90,6 +90,12 @@ export function MobileViewSwitch({
   );
 }
 
+/** manageCalendarsLabel names the way to the calendar settings, in the
+ * desktop Calendars menu and at the end of a phone's chips alike. */
+export function manageCalendarsLabel(hiddenCount: number): string {
+  return hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars";
+}
+
 /**
  * MobileCalendarChips is a phone's way to show and hide calendars, under the
  * header in every view: a chip per listed calendar, and at the end the way to
@@ -110,7 +116,7 @@ export function MobileCalendarChips({
   onToggleCalendar: (calendar: CalendarSummary) => Promise<void>;
   onManage: () => void;
 }) {
-  const manageLabel = hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars";
+  const manageLabel = manageCalendarsLabel(hiddenCount);
   return (
     <div className="calendar-mobile-chips" role="group" aria-label="Calendars shown">
       {calendars.map((calendar) => (

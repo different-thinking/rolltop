@@ -1546,13 +1546,15 @@ $calendar-compact-gutter: 44px;
   }
 
   // The fallback height when the calendar cannot fill the screen; with it the
-  // rule at the top of this section lifts the cap.
+  // rule at the top of this section lifts the cap. What it leaves out is the
+  // top bar, the page's own padding, the two-row head and the chips -- and the
+  // day names, or in the day view its head -- so the page itself never scrolls.
   .calendar-grid {
-    max-height: max(320px, calc(100dvh - 220px));
+    max-height: max(320px, calc(100dvh - 280px));
   }
 
   &.view-day .calendar-grid {
-    max-height: max(320px, calc(100dvh - 260px));
+    max-height: max(320px, calc(100dvh - 300px));
   }
 
   // The Compose button floats over the bottom of the screen; the last hours

@@ -75,6 +75,7 @@ import {
   MobileDayHead,
   MobileViewSwitch,
   MobileWeekList,
+  manageCalendarsLabel,
   useCompactCalendar,
   useMobileCalendarView
 } from "./MobileCalendarViews";
@@ -335,27 +336,10 @@ export function CalendarView({
 
   // The roles' writes are shared with the calendar settings (CalendarRoles);
   // each answers with an update of the whole list rather than a reload.
-  const chooseCopyTarget = async (calendarID: number) => {
+  const applyRole = async (write: () => ReturnType<typeof writeCopyTarget>) => {
     try {
-      const update = await writeCopyTarget(csrf, calendars, calendarID);
+      const update = await write();
       if (update) setCalendars(update);
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    }
-  };
-
-  const chooseBusyTarget = async (calendarID: number, label: string) => {
-    try {
-      const update = await writeBusyTarget(csrf, calendars, calendarID, label);
-      if (update) setCalendars(update);
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    }
-  };
-
-  const setBusyLabel = async (calendarID: number, label: string) => {
-    try {
-      setCalendars(await writeBusyLabel(csrf, calendarID, label));
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -1039,9 +1023,11 @@ export function CalendarView({
                 calendars={listedCalendars}
                 hiddenCount={calendars.length - listedCalendars.length}
                 onToggle={toggleCalendar}
-                onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
-                onChooseBusyTarget={(calendarID, label) => void chooseBusyTarget(calendarID, label)}
-                onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
+                onChooseCopyTarget={(calendarID) => void applyRole(() => writeCopyTarget(csrf, calendars, calendarID))}
+                onChooseBusyTarget={(calendarID, label) =>
+                  void applyRole(() => writeBusyTarget(csrf, calendars, calendarID, label))
+                }
+                onSetBusyLabel={(calendarID, label) => void applyRole(() => writeBusyLabel(csrf, calendarID, label))}
                 navigate={navigate}
               />
             )}
@@ -1783,11 +1769,7 @@ function CalendarPicker({
             {calendars.length === 0 ? (
               <p className="calendar-copy-target-hint">Every calendar is hidden.</p>
             ) : null}
-            {menuLink(
-              calendarSettingsPath,
-              "settings",
-              hiddenCount > 0 ? `Manage calendars (${hiddenCount} hidden)` : "Manage calendars"
-            )}
+            {menuLink(calendarSettingsPath, "settings", manageCalendarsLabel(hiddenCount))}
           </div>
         ) : (
           // Nothing connected yet: an empty box would say nothing, so the menu

@@ -2277,7 +2277,8 @@
   display: grid;
   gap: 12px;
 
-  select {
+  select,
+  .calendar-busy-label {
     max-width: 420px;
   }
 }
