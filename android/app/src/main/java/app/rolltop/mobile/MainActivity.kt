@@ -25,6 +25,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -202,9 +203,7 @@ class MainActivity : ComponentActivity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setBackgroundColor(SHELL_BACKGROUND)
             setPadding(dp(24), dp(24), dp(24), dp(24))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             addView(
                 TextView(context).apply {
                     text = title
@@ -214,9 +213,21 @@ class MainActivity : ComponentActivity() {
             )
         }
 
+    /**
+     * A shell screen scrolls. Centred in a view the height of the window, the
+     * server form with the keyboard up in landscape was taller than what was
+     * left of the window, and a centred column that does not fit is clipped at
+     * both ends - the button below the fold could not be reached. The viewport
+     * is still filled, so a column that fits stays centred.
+     */
     private fun showShellScreen(root: View) {
-        applySystemBarInsets(root, dp(24))
-        setContentView(root)
+        val scroller = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(SHELL_BACKGROUND)
+            addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        applySystemBarInsets(scroller)
+        setContentView(scroller)
     }
 
     private fun showWeb(
