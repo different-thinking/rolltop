@@ -51,7 +51,17 @@ func (s *Server) handlePluginAsset(w http.ResponseWriter, r *http.Request, rest 
 		http.NotFound(w, r)
 		return
 	}
-	if !s.pluginEnabled(r.Context(), pluginID) {
+	// A store that could not answer is not a disabled plugin. Answering 404
+	// there left the reader's list without the plugin's stylesheet until the
+	// app was restarted, with its markers drawn as bare words across the row.
+	enabled, err := s.pluginEnablement(r.Context(), pluginID)
+	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "plugin state is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !enabled {
 		http.NotFound(w, r)
 		return
 	}

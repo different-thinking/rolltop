@@ -18,27 +18,39 @@ import (
 )
 
 func (s *Server) pluginEnabled(ctx context.Context, pluginID string) bool {
+	enabled, err := s.pluginEnablement(ctx, pluginID)
+	return err == nil && enabled
+}
+
+// pluginEnablement is pluginEnabled with the store's failure kept apart from
+// "disabled". Most callers can treat the two alike; one that answers a browser
+// cannot, because a 404 for a plugin's stylesheet is taken as final and the
+// page goes on without it.
+func (s *Server) pluginEnablement(ctx context.Context, pluginID string) (bool, error) {
 	if s == nil || s.store == nil {
-		return false
+		return false, nil
 	}
 	enabled, err := s.store.PluginEnabled(ctx, pluginID)
-	if err != nil || enabled {
-		return err == nil && enabled
+	if err != nil {
+		return false, err
+	}
+	if enabled {
+		return true, nil
 	}
 	manifest, ok := s.pluginManifest(pluginID)
 	if !ok || !manifest.EnabledByDefault {
-		return false
+		return false, nil
 	}
 	settings, err := s.store.ListPluginSettings(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, setting := range settings {
 		if setting.ID == pluginID {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func (s *Server) languageSearchEnabled(ctx context.Context) bool {

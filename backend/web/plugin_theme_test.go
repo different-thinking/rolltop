@@ -218,3 +218,29 @@ func writeFrontendPlugin(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 }
+
+// A store that cannot answer must not read as a disabled plugin: the browser
+// takes a 404 for a stylesheet as final and draws the plugin's markup without it.
+func TestPluginAssetRouteReportsUnavailableStoreAsTransient(t *testing.T) {
+	db, err := storetest.Open(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := t.TempDir()
+	writeMatrixThemePlugin(t, pluginRoot)
+	server, err := New(Options{Store: db, PluginDir: pluginRoot, DisableBackgroundWorkers: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/plugins/matrix_theme/assets/frontend_dist/themes/matrix/theme.css", nil)
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+}
