@@ -104,6 +104,10 @@ App-Passwort. Hier ist es ein verbundenes Konto:
 - **Kalender mit Wochenansicht.** Google-Kalender werden gespiegelt, inklusive
   Rückschreiben von Terminen dort, wo die Zugriffsrolle es erlaubt; ein
   Schreibkonflikt wird bei dem Lesevorgang aufgelöst, der ihn findet.
+  Auf dem Handy, wo sieben Spalten nicht lesbar sind, gibt es statt der Woche
+  vier Ansichten: einen Tag mit einem Schalter je Kalender, drei Tage mit dem
+  angetippten breit, eine Agenda mit freien Zeiten und Überschneidungen, und
+  die Woche als Liste.
 - **Der richtige Einlieferungsport.** Ausgehende Google-Post geht über 587 mit
   STARTTLS, mit 465 als Alternative für Netze, die 587 sperren — der
   Verbindungstest sagt, welcher durchkommt.

@@ -26,7 +26,8 @@ import { Icon } from "../../components/Icon";
 import { messageFromError } from "../../lib/errors";
 import { EventDialog, responseOptions } from "../calendar/EventDialog";
 import type { EventPrefill } from "../calendar/EventDialog";
-import { calendarURL, startOfDay } from "../calendar/weekModel";
+import { startOfDay } from "../calendar/weekModel";
+import { calendarDayURL } from "../calendar/mobileModel";
 
 /** shownEvents bounds the card: an invitation holds one event, a shared
  * calendar of holidays may hold dozens, and the file is still attached. */
@@ -354,7 +355,8 @@ export function MessageCalendarCard({
                   <button
                     className="secondary"
                     type="button"
-                    onClick={() => navigate(calendarURL(calendarDay(done ? done.start : held?.start_at || event.start_at, event.all_day)))}
+                    // The event's day: a phone opens that day, the desktop its week.
+                    onClick={() => navigate(calendarDayURL(calendarDay(done ? done.start : held?.start_at || event.start_at, event.all_day)))}
                   >
                     <Icon name="calendar" />
                     Show in calendar

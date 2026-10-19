@@ -1376,3 +1376,567 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   margin-top: 10px;
   background: var(--surface);
 }
+
+// The calendar on a phone (`mobileModel.ts`, `MobileCalendarViews.tsx`). Seven
+// columns do not fit its width, so it draws a day, three days, an agenda or
+// the week as a list; the day and three-day views reuse the grid above with a
+// narrower gutter and fewer columns.
+$calendar-compact-gutter: 44px;
+
+.calendar-main.compact {
+  // One column that may not grow past the screen: a row of calendar chips
+  // that scrolls sideways would otherwise widen the whole view to its length.
+  grid-template-columns: minmax(0, 1fr);
+
+  .calendar-head {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  // The menu, sync and a new event share one row under the dates.
+  .calendar-head-actions {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+
+    > :last-child {
+      margin-left: auto;
+    }
+  }
+
+  // A button's own centring would put an appointment's text in the middle of
+  // a day that has the whole width.
+  .calendar-event {
+    justify-content: stretch;
+  }
+
+  .calendar-nav {
+    gap: 4px;
+  }
+
+  .calendar-daynames,
+  .calendar-allday,
+  .calendar-grid {
+    grid-template-columns: $calendar-compact-gutter $calendar-day-columns;
+  }
+
+  .calendar-gutter {
+    padding: 4px;
+  }
+
+  // Scrolling up and down stays the browser's; a sideways swipe is the view's
+  // own gesture and turns to the previous or next days.
+  // The three-day view's day names and all-day bar too: a sideways move there
+  // would otherwise be the browser's pan, which cancels the pointer before the
+  // swipe can end.
+  .calendar-grid,
+  .calendar-daynames,
+  .calendar-allday,
+  .calendar-agenda,
+  .calendar-weeklist {
+    touch-action: pan-y;
+  }
+
+  // The head of a phone view is taller than the desktop's -- the view switch
+  // is a row of its own -- so the scrolling region leaves it more room.
+  .calendar-grid {
+    max-height: max(320px, calc(100dvh - 300px));
+  }
+
+  &.view-day .calendar-grid {
+    max-height: max(320px, calc(100dvh - 380px));
+  }
+}
+
+.calendar-view-switch {
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+
+  button {
+    min-height: 36px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+
+    &.active {
+      background: var(--accent-soft);
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    &:focus-visible {
+      outline-offset: -2px;
+    }
+  }
+}
+
+// The three-day view: the tapped day is wide; the two beside it keep their
+// date, a start time per appointment and a bar per all-day event.
+.calendar-dayname.narrow .calendar-dayname-button {
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 6px 2px;
+}
+
+.calendar-allday-cell.narrow .calendar-chip {
+  height: 6px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 3px;
+  font-size: 0;
+}
+
+.calendar-chip-more {
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.calendar-day.narrow .calendar-event {
+  padding: 2px 3px;
+
+  .calendar-event-title,
+  .calendar-event-location {
+    display: none;
+  }
+}
+
+// The day view's head: the date, what the day holds, a chip per calendar and
+// the all-day events folded into one line.
+.calendar-mobile-day-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calendar-mobile-day-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.calendar-mobile-day-summary {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.calendar-mobile-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  // The row scrolls sideways under a finger; the page's swipe leaves it alone.
+  touch-action: pan-x;
+  scrollbar-width: none;
+}
+
+.calendar-mobile-chip {
+  flex: none;
+  min-height: 36px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+
+  &.on {
+    border-color: var(--accent-soft);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+// Filled while the calendar is shown, a ring in its colour while it is not.
+.calendar-mobile-chip-dot {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--chip-color);
+  border-radius: 50%;
+
+  .on > & {
+    background: var(--chip-color);
+  }
+}
+
+.calendar-mobile-allday-toggle {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+
+  .icon {
+    flex: none;
+    transition: transform 0.16s ease;
+  }
+
+  &[aria-expanded="true"] .icon {
+    transform: rotate(180deg);
+  }
+}
+
+.calendar-mobile-allday-dots {
+  display: inline-flex;
+  flex: none;
+
+  span {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--surface-subtle);
+
+    & + span {
+      margin-left: -4px;
+    }
+  }
+}
+
+.calendar-mobile-allday-text {
+  @include truncate;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.calendar-mobile-allday-list {
+  display: grid;
+  gap: 4px;
+
+  .calendar-chip {
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calendar-mobile-allday-toggle .icon {
+    transition: none;
+  }
+}
+
+// The agenda: the coming week as a list, a day at a time.
+.calendar-agenda,
+.calendar-weeklist {
+  max-height: max(320px, calc(100dvh - 240px));
+  overflow-y: auto;
+}
+
+.calendar-agenda-day {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calendar-agenda-day-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 6px;
+  background: var(--surface);
+
+  h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  span {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .today & h2 {
+    color: var(--accent);
+  }
+}
+
+.calendar-agenda-allday {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 6px;
+  overflow-x: auto;
+
+  .calendar-chip {
+    flex: none;
+    width: auto;
+    max-width: 70%;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+  }
+}
+
+.calendar-agenda-empty {
+  margin: 0;
+  padding: 6px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.calendar-agenda-row {
+  display: grid;
+  grid-template-columns: 76px 10px minmax(0, 1fr);
+  align-items: center;
+  justify-content: stretch;
+  column-gap: 8px;
+  width: 100%;
+  min-height: 50px;
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &.declined .calendar-agenda-title {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+}
+
+.calendar-agenda-time {
+  display: grid;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.calendar-agenda-time-end {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.calendar-agenda-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.calendar-agenda-text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.calendar-agenda-title {
+  @include truncate;
+  font-size: 15px;
+  font-weight: 600;
+
+  .icon {
+    width: 14px;
+    height: 14px;
+    margin-right: 4px;
+    vertical-align: -2px;
+  }
+}
+
+.calendar-agenda-meta {
+  @include truncate;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+// Free time between two appointments: a dashed line that starts a new event
+// there when tapped.
+.calendar-agenda-free {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: calc(100% - 28px);
+  min-height: 40px;
+  margin: 2px 14px;
+  padding: 0 6px 0 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.calendar-agenda-free-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+// Appointments at the same time, kept together as the one decision they are.
+.calendar-agenda-together {
+  margin: 6px 10px;
+  padding: 4px 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+
+  .calendar-agenda-row {
+    min-height: 46px;
+    padding: 2px 12px;
+  }
+}
+
+.calendar-agenda-together-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 2px;
+  font-size: 12px;
+  font-weight: 700;
+
+  .icon {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.calendar-agenda-now {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 14px;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+
+  &::after {
+    content: "";
+    flex: 1 1 auto;
+    height: 2px;
+    background: currentColor;
+  }
+}
+
+// The week as a list: a row per day, which opens the day.
+.calendar-weeklist-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  justify-content: stretch;
+  column-gap: 12px;
+  width: 100%;
+  padding: 10px 14px 10px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+
+  &:hover {
+    background: var(--hover);
+  }
+
+  &.today {
+    background: var(--accent-soft);
+  }
+}
+
+.calendar-weeklist-date {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+}
+
+.calendar-weeklist-weekday {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+
+  .today & {
+    color: var(--accent);
+  }
+}
+
+.calendar-weeklist-number {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+// The day's lines share columns -- dot, time, title -- so the times stand one
+// under another whatever the locale writes them as.
+.calendar-weeklist-body {
+  display: grid;
+  grid-template-columns: 8px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 8px;
+  min-width: 0;
+}
+
+.calendar-weeklist-allday {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.calendar-weeklist-allday-text {
+  @include truncate;
+  margin-left: 2px;
+}
+
+.calendar-weeklist-line {
+  display: contents;
+  font-size: 14px;
+}
+
+.calendar-weeklist-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.calendar-weeklist-time {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calendar-weeklist-title {
+  @include truncate;
+  font-size: 14px;
+}
+
+.calendar-weeklist-more {
+  grid-column: 2 / -1;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.calendar-weeklist-empty {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 13px;
+}
