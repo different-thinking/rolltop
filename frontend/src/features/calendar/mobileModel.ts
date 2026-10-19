@@ -167,7 +167,9 @@ export const agendaFreeMinutes = 60;
 
 /** AgendaItem is one line of a day in the agenda: an appointment, a stretch of
  * free time between two, or appointments that run at the same time, which the
- * agenda keeps together so they read as one decision rather than a list. */
+ * agenda keeps together so they read as one decision rather than a list. A
+ * together item's start and end are its appointments' own times, clipped to
+ * the day -- the journeys around them only decide what is grouped. */
 export type AgendaItem =
   | { kind: "event"; event: CalendarEvent }
   | { kind: "free"; start: Date; end: Date }
@@ -206,15 +208,26 @@ export function agendaDayItems(events: CalendarEvent[], day: Date): AgendaItem[]
       (a, b) => a.busyStart - b.busyStart || b.busyEnd - a.busyEnd || a.event.summary.localeCompare(b.event.summary)
     );
 
-  const groups: { start: number; end: number; events: CalendarEvent[] }[] = [];
+  // A group is joined and the free time around it measured by the busy time,
+  // journeys included; what it says on screen, and where the now line goes, is
+  // the appointments' own time, as for a single appointment.
+  const groups: { start: number; end: number; eventStart: number; eventEnd: number; events: CalendarEvent[] }[] = [];
   for (const span of spans) {
     const last = groups[groups.length - 1];
     if (last && span.busyStart < last.end) {
       last.events.push(span.event);
       last.end = Math.max(last.end, span.busyEnd);
+      last.eventStart = Math.min(last.eventStart, span.start);
+      last.eventEnd = Math.max(last.eventEnd, span.end);
       continue;
     }
-    groups.push({ start: span.busyStart, end: span.busyEnd, events: [span.event] });
+    groups.push({
+      start: span.busyStart,
+      end: span.busyEnd,
+      eventStart: span.start,
+      eventEnd: span.end,
+      events: [span.event]
+    });
   }
 
   const items: AgendaItem[] = [];
@@ -226,7 +239,12 @@ export function agendaDayItems(events: CalendarEvent[], day: Date): AgendaItem[]
     if (group.events.length === 1) {
       items.push({ kind: "event", event: group.events[0] });
     } else {
-      items.push({ kind: "together", start: new Date(group.start), end: new Date(group.end), events: group.events });
+      items.push({
+        kind: "together",
+        start: new Date(Math.max(group.eventStart, dayStart)),
+        end: new Date(Math.min(group.eventEnd, dayEnd)),
+        events: group.events
+      });
     }
   });
   return items;

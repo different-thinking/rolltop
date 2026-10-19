@@ -186,6 +186,19 @@ describe("agenda", () => {
     expect(agendaDayItems([call, visit], monday).map((item) => item.kind)).toEqual(["event", "event"]);
   });
 
+  it("groups by busy time but names the appointments' own time", () => {
+    // B's journey starts before A ends, so they are grouped; the group still
+    // says 10:00–12:00, the appointments' time, not 09:30 for B's journey.
+    const a = event(1, at(monday, 10), at(monday, 11), { summary: "A" });
+    const b = event(2, at(monday, 11, 15), at(monday, 12), { summary: "B", travel_before_minutes: 30 });
+    const visit = event(1, at(monday, 10), at(monday, 10, 30), { summary: "Visit", travel_before_minutes: 30 });
+    const [group] = agendaDayItems([a, b, visit], monday);
+    expect(group.kind).toBe("together");
+    if (group.kind !== "together") return;
+    expect(localTime(group.start)).toBe("10:00");
+    expect(localTime(group.end)).toBe("12:00");
+  });
+
   it("leaves out all-day events and other days", () => {
     const holiday = event(2, utcDate(monday), utcDate(tuesday), { all_day: true });
     const tomorrow = event(1, at(tuesday, 9), at(tuesday, 10));
