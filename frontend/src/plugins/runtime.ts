@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { AddToast, DatePrefs, LocationState, Navigate } from "../appTypes";
 import type { SettingsSectionID } from "../features/settings/SettingsUI";
 import type { FrontendPluginDefinition, Mailbox, Message, MessageAnnotation, User } from "../types";
+import { syncPluginStylesheets } from "./pluginStyles";
 
 export type RuntimePluginModule = {
   default?: unknown;
@@ -107,7 +108,7 @@ export function emptyRuntimePlugins(): RuntimePlugins {
 }
 
 export async function loadRuntimePlugins(definitions: readonly FrontendPluginDefinition[] = []): Promise<RuntimePlugins> {
-  syncPluginCSS(definitions);
+  if (typeof document !== "undefined") syncPluginStylesheets(definitions);
   const results = await Promise.all(definitions.map(async (definition) => {
     if (!definition.module_url) {
       return { definition, plugin: null, error: "Plugin module URL is missing." };
@@ -222,29 +223,4 @@ function settingsSection(value: unknown): SettingsSectionID {
 function runtimePluginErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message.trim();
   return "Plugin module could not be imported.";
-}
-
-function syncPluginCSS(definitions: readonly FrontendPluginDefinition[]) {
-  if (typeof document === "undefined") return;
-  const prefix = "runtime-plugin-css-";
-  const activeIDs = new Set(definitions.filter((definition) => definition.css_url).map((definition) => `${prefix}${definition.id}`));
-  document.querySelectorAll<HTMLLinkElement>(`link[id^="${prefix}"]`).forEach((link) => {
-    if (!activeIDs.has(link.id)) link.remove();
-  });
-  definitions.forEach((definition) => {
-    if (!definition.css_url) return;
-    const id = `${prefix}${definition.id}`;
-    const existing = document.getElementById(id) as HTMLLinkElement | null;
-    if (existing) {
-      if (existing.href !== new URL(definition.css_url, window.location.href).href) {
-        existing.href = definition.css_url;
-      }
-      return;
-    }
-    const link = document.createElement("link");
-    link.id = id;
-    link.rel = "stylesheet";
-    link.href = definition.css_url;
-    document.head.appendChild(link);
-  });
 }

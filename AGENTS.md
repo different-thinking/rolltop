@@ -344,6 +344,15 @@ site and in review.
   every claim in it, and a dispatch this process owns but never finished is not
   reconcilable by anything short of a restart — the messages behind it refuse
   every later move until then.
+- **A plugin's stylesheet is asked for until it arrives.** Its module and its
+  stylesheet are two requests, and a page can get the module without the
+  stylesheet - a dropped connection, a server busy for a moment. The module
+  then draws its markup unstyled for as long as the page lives, which on a
+  phone was the spam marker spelt out across every row. A `<link>` never
+  retries, so `syncPluginStylesheets` (`plugins/pluginStyles.ts`) replaces a
+  failed one with a new element on a backoff, when the connection comes back,
+  and on every plugin reload; and the asset route answers a store it could not
+  ask with a 503, never the 404 that means the plugin is off.
 - Do not accept `user_id` from normal browser routes.
 - Admin routes may manage local users, but must not expose other users' mail.
 - Do not log app passwords, IMAP passwords, OAuth access or refresh tokens,
