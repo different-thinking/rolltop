@@ -821,9 +821,14 @@ site and in review.
   journey as taken, as the week's layout does, and names only gaps between
   appointments: it does not know the reader's working hours. On a phone the
   calendar **is** the page: it fills the screen under the top bar and only its
-  grid or list scrolls (`.content:has(> .calendar-shell > .calendar-main.compact)`),
-  because a grid with a height of its own inside a page that also scrolls
-  carried the header and the date away before the day moved. Its head is two
+  grid or list scrolls, because a grid with a height of its own inside a page
+  that also scrolls carried the header and the date away before the day moved.
+  The shell decides that, not the calendar's styles: `screenFillingRoute`
+  names the views that fill a phone's screen, `AppShell` marks the layout
+  `fills-screen` for them, and the view only adapts to that mark -- a view's
+  stylesheet reaching up into `.content` broke the moment the nesting changed.
+  The top bar's height is one custom property, `--topbar-height`, for
+  everything that sits below it. Its head is two
   rows and the day view's date lives in the header's date button alone; every
   line added up there is a line of the day the reader cannot see.
 - **A drag in the week is the dialog's Save, not a write of its own.**

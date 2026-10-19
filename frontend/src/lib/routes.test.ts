@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { allMailRoute, contactsIntent, contactsURL, mailRoute, mailRouteView, organizerRoute, organizerURL } from "./routes";
+import { allMailRoute, contactsIntent, contactsURL, mailRoute, mailRouteView, organizerRoute, organizerURL, screenFillingRoute } from "./routes";
 
 describe("allMailRoute", () => {
   it("names the unnarrowed list, on its first page and its later ones", () => {
@@ -71,5 +71,15 @@ describe("contactsURL", () => {
     expect(contactsIntent("?contact=abc").contactID).toBe(0);
     expect(contactsIntent("?contact=0x10").contactID).toBe(0);
     expect(organizerRoute("/contacts", "contacts")).toBe(true);
+  });
+});
+
+describe("screenFillingRoute", () => {
+  it("claims the calendar and its days, and nothing else", () => {
+    expect(screenFillingRoute("/calendar")).toBe(true);
+    expect(screenFillingRoute("/calendar/2026-10-19")).toBe(true);
+    expect(screenFillingRoute("/calendarx")).toBe(false);
+    expect(screenFillingRoute("/contacts")).toBe(false);
+    expect(screenFillingRoute("/inbox")).toBe(false);
   });
 });

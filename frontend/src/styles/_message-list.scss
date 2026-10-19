@@ -177,12 +177,12 @@
 
 // The bar follows the page down while a selection is live. Selecting a row far
 // down a long list and then having to scroll back up to reach Delete was the
-// whole cost of the old static bar; it now parks under the 64px top bar, which
+// whole cost of the old static bar; it now parks under the top bar, which
 // is sticky itself, so the two read as one strip of chrome. Its ground is
 // opaque and it outranks .message-row's z-index so rows pass underneath it.
 .selection-action-bar {
   position: sticky;
-  top: 64px;
+  top: var(--topbar-height);
   z-index: 3;
   min-height: 48px;
   display: flex;
@@ -329,7 +329,7 @@
   // sticky chrome as already visible. The margin box reaches up past the top
   // bar, so the row the keyboard just moved to lands below it rather than
   // underneath it.
-  scroll-margin-top: 64px;
+  scroll-margin-top: var(--topbar-height);
 
   // The selection toolbar joins the top bar only where `overflow: clip` let
   // the list card give up the scrollport it used to claim (see
@@ -337,7 +337,7 @@
   // leaves with the list, and room reserved for it would send every jump 48px
   // or more past the row it was aiming at.
   @supports (overflow: clip) {
-    scroll-margin-top: calc(64px + var(--selection-bar-height, 0px));
+    scroll-margin-top: calc(var(--topbar-height) + var(--selection-bar-height, 0px));
   }
 
   position: relative;

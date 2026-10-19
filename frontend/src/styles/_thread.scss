@@ -6,7 +6,7 @@
 //
 // A long message pushes the header off the top of the page, and Reply, Archive
 // and Delete leave with it: reaching them meant scrolling the whole message
-// back. The header travels under the 64px top bar instead, the way the list's
+// back. The header travels under the top bar instead, the way the list's
 // selection toolbar does, and carries that bar's surface so the two read as one
 // strip. Its ground has to be opaque, because the message passes underneath it.
 //
@@ -17,7 +17,7 @@
 // strip's ground starts, never the subject.
 .thread-head {
   position: sticky;
-  top: 64px;
+  top: var(--topbar-height);
   z-index: 3;
   align-items: flex-start;
   gap: 8px;

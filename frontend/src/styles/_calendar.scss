@@ -1383,56 +1383,26 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 // narrower gutter and fewer columns.
 $calendar-compact-gutter: 44px;
 
-// On a phone the calendar is the page. It fills the screen under the top bar
-// and only its own grid or list scrolls: a grid with a height of its own inside
-// a page that also scrolls was two scrolling regions, and the first swipe
-// carried the head and the date off the screen before the day moved at all.
-// Without :has() the rules below still hold the grid to a height of its own.
-.content:has(> .calendar-shell > .calendar-main.compact) {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 64px);
-  height: calc(100dvh - 64px);
-  padding: 0;
-
-  // A banner above the calendar keeps the gutter the page would have given it.
-  > :not(.calendar-shell) {
-    flex: none;
-    margin: 8px;
-  }
-
-  > .calendar-shell {
-    flex: 1 1 auto;
-    min-height: 0;
+// On a phone the calendar is the page: the shell marks it `fills-screen`
+// (`screenFillingRoute`) and gives it the screen under the top bar, and only
+// the calendar's own grid or list scrolls. A grid with a height of its own
+// inside a page that also scrolled was two scrolling regions, and the first
+// swipe carried the head and the date off the screen before the day moved.
+@media (max-width: 760px) {
+  .fills-screen .calendar-shell {
     grid-template-rows: minmax(0, 1fr);
   }
-
-  .calendar-main.compact {
-    border: 0;
-    border-radius: 0;
-  }
-
-  .calendar-main.compact .calendar-grid,
-  .calendar-main.compact .calendar-agenda,
-  .calendar-main.compact .calendar-weeklist {
-    max-height: none;
-  }
-}
-
-// The app's own minimum is the large viewport (100vh), which on a phone
-// browser is taller than the screen while its toolbar shows; left in place it
-// kept the page scrollable by that difference and the head slid under the top
-// bar again.
-.app:has(> .content > .calendar-shell > .calendar-main.compact) {
-  min-height: 0;
 }
 
 .calendar-main.compact {
   // A column of rows, the last of which -- the grid, the agenda or the week
-  // list -- takes whatever height the rows above it leave.
+  // list -- takes whatever height the rows above it leave. The calendar is the
+  // whole page here, so it draws no card around itself.
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border: 0;
+  border-radius: 0;
 
   > * {
     flex: none;
@@ -1545,16 +1515,11 @@ $calendar-compact-gutter: 44px;
     touch-action: pan-y;
   }
 
-  // The fallback height when the calendar cannot fill the screen; with it the
-  // rule at the top of this section lifts the cap. What it leaves out is the
-  // top bar, the page's own padding, the two-row head and the chips -- and the
-  // day names, or in the day view its head -- so the page itself never scrolls.
-  .calendar-grid {
-    max-height: max(320px, calc(100dvh - 280px));
-  }
-
-  &.view-day .calendar-grid {
-    max-height: max(320px, calc(100dvh - 300px));
+  // The screen's height decides theirs, not a height of their own.
+  .calendar-grid,
+  .calendar-agenda,
+  .calendar-weeklist {
+    max-height: none;
   }
 
   // The Compose button floats over the bottom of the screen; the last hours

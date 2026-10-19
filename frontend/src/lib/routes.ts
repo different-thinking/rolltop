@@ -139,6 +139,18 @@ export function organizerRoute(path: string, route: OrganizerRoute): boolean {
 }
 
 /**
+ * screenFillingRoute reports whether a path is a view that, on a phone, is
+ * the whole page: it takes the screen under the top bar and scrolls inside
+ * itself, so the page never scrolls beside it. Only the calendar is: its time
+ * grid inside a page that also scrolled carried the header and the date away
+ * before the day moved. The shell marks the layout for these views
+ * (`fills-screen`) so the view's own styles never reach up into the shell.
+ */
+export function screenFillingRoute(path: string): boolean {
+  return organizerRoute(path, "calendar");
+}
+
+/**
  * ContactsIntent is what a link into the address book asks it to show: one
  * saved contact, or the editor open on a new one with the name and address a
  * message header already knew.

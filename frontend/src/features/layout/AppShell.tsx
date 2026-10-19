@@ -13,7 +13,7 @@ import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
 import { useServerReachable } from "../../lib/offline";
-import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
+import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, screenFillingRoute, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
 import { maxSidebarShortcuts, useSidebarShortcuts } from "../../lib/sidebarShortcuts";
 import { loadCollapsedAccounts, loadSidebarHidden, saveCollapsedAccounts, saveSidebarHidden } from "../../lib/sidebarLocal";
@@ -445,7 +445,9 @@ export function AppShell({
       />
       <div
         ref={appRef}
-        className={`app ${sidebarHidden ? "sidebar-hidden" : ""} ${messageDragActive ? "message-drag-active" : ""}`}
+        className={`app ${sidebarHidden ? "sidebar-hidden" : ""} ${messageDragActive ? "message-drag-active" : ""} ${
+          screenFillingRoute(location.path) ? "fills-screen" : ""
+        }`}
         onDragStart={beginMessageDrag}
         onDragEnd={endMessageDrag}
       >

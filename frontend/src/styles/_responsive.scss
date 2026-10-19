@@ -34,7 +34,7 @@
 
 @media (max-width: 760px) {
   .topbar {
-    height: 64px;
+    height: var(--topbar-height);
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) auto;
     align-items: center;
@@ -95,13 +95,41 @@
 
   .app {
     grid-template-columns: 1fr;
-    min-height: calc(100vh - 64px);
+    min-height: calc(100vh - var(--topbar-height));
+  }
+
+  // A view that is the whole page on a phone (`screenFillingRoute`): the
+  // content takes exactly the screen under the top bar and the view, its last
+  // child, takes what any banner above it leaves and scrolls inside itself.
+  // The app's own minimum goes too: 100vh is the large viewport, taller than
+  // the screen while a phone browser shows its toolbar, and it kept the page
+  // scrollable by that difference.
+  .app.fills-screen {
+    min-height: 0;
+
+    > .content {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - var(--topbar-height));
+      height: calc(100dvh - var(--topbar-height));
+      padding: 0;
+
+      > :not(:last-child) {
+        flex: none;
+        margin: 8px;
+      }
+
+      > :last-child {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+    }
   }
 
   .mobile-sidebar-scrim {
     display: block;
     position: fixed;
-    inset: 64px 0 0;
+    inset: var(--topbar-height) 0 0;
     z-index: 128;
     border: 0;
     background: var(--scrim);
@@ -110,7 +138,7 @@
 
   .sidebar {
     position: fixed;
-    top: 64px;
+    top: var(--topbar-height);
     left: 0;
     bottom: 0;
     z-index: 129;
@@ -730,7 +758,7 @@
   }
 
   .compose-popover {
-    inset: 64px 0 0;
+    inset: var(--topbar-height) 0 0;
     width: auto;
     max-height: none;
     z-index: 120;
@@ -753,7 +781,7 @@
 
   .compose-page {
     position: fixed;
-    inset: 64px 0 0;
+    inset: var(--topbar-height) 0 0;
     z-index: 120;
     min-height: 0;
     display: block;
@@ -764,9 +792,9 @@
     position: relative;
     top: var(--compose-viewport-top, 0px);
     width: 100%;
-    height: var(--compose-viewport-height, calc(100dvh - 64px));
+    height: var(--compose-viewport-height, calc(100dvh - var(--topbar-height)));
     min-height: 0;
-    max-height: var(--compose-viewport-height, calc(100dvh - 64px));
+    max-height: var(--compose-viewport-height, calc(100dvh - var(--topbar-height)));
     border: 0;
     border-radius: 0;
   }
