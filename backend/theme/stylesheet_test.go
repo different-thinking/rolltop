@@ -53,6 +53,7 @@ func componentStylesheets(t *testing.T) []string {
 // Custom properties the app sets from TypeScript rather than in a stylesheet.
 // They are still definitions, so a reference to them is not dangling.
 var scriptDefinedProperties = []string{
+	"--chip-color",
 	"--compose-viewport-height",
 	"--compose-viewport-top",
 	"--pull-distance",
