@@ -57,6 +57,25 @@ import {
   weekDays
 } from "./weekModel";
 import type { PositionedEvent, TimeRange } from "./weekModel";
+import {
+  calendarDayURL,
+  calendarLoadRange,
+  compactAllDayEvents,
+  compactTimedEvents,
+  mobileViewDays,
+  mobileViewStep,
+  threeDayColumns,
+  threeDayFocusIndex
+} from "./mobileModel";
+import type { MobileCalendarView } from "./mobileModel";
+import {
+  MobileAgenda,
+  MobileDayHead,
+  MobileViewSwitch,
+  MobileWeekList,
+  useCompactCalendar,
+  useMobileCalendarView
+} from "./MobileCalendarViews";
 
 /** nowLineInterval keeps the current-time marker roughly honest without
  * re-rendering the whole week every second. */
@@ -69,6 +88,15 @@ const calendarSettingsPath = "/settings/account/preferences/calendars";
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
 const initialScrollHour = 7;
+
+/** compactAllDayLimit is how many all-day events the wide day of the
+ * three-day view names before the rest go behind "+N": on a phone the all-day
+ * bar stacking four deep pushes the morning off the screen. */
+const compactAllDayLimit = 3;
+
+/** swipeDistance is how far, in pixels, a finger has to travel sideways across
+ * the phone views before it turns to the previous or next days. */
+const swipeDistance = 60;
 
 /** reminderPromptKey remembers, per user and browser, that the reader has
  * answered the question whether this device should remind them of their
@@ -114,7 +142,8 @@ type DialogState = {
   formKey: string;
 } | null;
 
-/** CalendarView renders one week of every visible calendar. */
+/** CalendarView renders one week of every visible calendar -- on a phone, a
+ * day, three days, an agenda or the week as a list (`mobileModel.ts`). */
 export function CalendarView({
   csrf,
   userID,
@@ -135,13 +164,23 @@ export function CalendarView({
   toggleNotifications: () => Promise<void>;
   addToast: AddToast;
 }) {
-  const anchor = useMemo(() => startOfWeek(calendarRouteDate(location.path)), [location.path]);
+  // The routed day. The desktop draws the week it falls in; a phone starts its
+  // views at the day itself.
+  const routeDay = useMemo(() => startOfDay(calendarRouteDate(location.path)), [location.path]);
+  const anchor = useMemo(() => startOfWeek(routeDay), [routeDay]);
+  const compact = useCompactCalendar();
+  const [mobileView, setMobileView] = useMobileCalendarView(userID);
+  // null on the desktop, where the week is the only view.
+  const view: MobileCalendarView | null = compact ? mobileView : null;
   // The reminder a notification asked to put off, from ?remind=. The picker
   // stays up until the reader chooses or dismisses; either clears the query.
   const remindEventID = reminderIntent(location.search);
   const [reminderPromptOpen, setReminderPromptOpen] = useState(() => !notificationsEnabled && !reminderPromptAnswered(userID));
   const [reminderPromptBusy, setReminderPromptBusy] = useState(false);
-  const days = useMemo(() => weekDays(anchor), [anchor]);
+  const days = useMemo(() => (view ? mobileViewDays(view, routeDay) : weekDays(anchor)), [view, routeDay, anchor]);
+  // The day and three-day views draw the week's own time grid over fewer days;
+  // the agenda and the week list draw no grid at all.
+  const gridded = view === null || view === "day" || view === "three";
   const [calendars, setCalendars] = useState<CalendarSummary[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   // Events entered while the server could not be reached. They are drawn with
@@ -167,6 +206,11 @@ export function CalendarView({
   // resolveLensIndex; "" is the reader having closed it, which holds until
   // they open a day again.
   const [lensDayKey, setLensDayKey] = useState<string | null>(null);
+  // The day the three-day view draws wide, the one whose name was tapped last.
+  const [focusDayKey, setFocusDayKey] = useState<string | null>(null);
+  // Whether the three-day view's all-day bar shows everything, past its limit.
+  const [allDayExpanded, setAllDayExpanded] = useState(false);
+  const swipeRef = useRef<{ x: number; y: number; pointer: number } | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
   // Each day's column in the time grid and its cell in the all-day bar, in the
@@ -176,8 +220,10 @@ export function CalendarView({
 
   // Memoized together with the days, because a fresh Date on every render would
   // give every loader a new identity, and a loader in an effect's dependencies
-  // that changes on every render is an unbounded refetch loop.
-  const range = useMemo(() => ({ start: days[0], end: addDays(days[6], 1) }), [days]);
+  // that changes on every render is an unbounded refetch loop. Whole weeks
+  // either way: the week itself on the desktop, the weeks a phone's days fall
+  // in otherwise.
+  const range = useMemo(() => calendarLoadRange(days), [days]);
 
   // One monotonically increasing token for every load, so a slow answer for a
   // week the user has already navigated away from is discarded instead of
@@ -246,12 +292,18 @@ export function CalendarView({
   }, [queued.length, reload]);
 
   // Only on the first render: scrolling back to the morning every time the week
-  // reloads would fight a user who scrolled to an evening appointment.
+  // reloads would fight a user who scrolled to an evening appointment. A phone
+  // switching from the agenda back to a day mounts a new grid, which opens on
+  // the morning again.
   useEffect(() => {
+    if (!gridded) {
+      scrolledRef.current = false;
+      return;
+    }
     if (scrolledRef.current || loading || !gridRef.current) return;
     gridRef.current.scrollTop = initialScrollHour * hourHeight;
     scrolledRef.current = true;
-  }, [loading]);
+  }, [loading, gridded]);
 
   const calendarsByID = useMemo(() => {
     const map = new Map<number, CalendarSummary>();
@@ -700,7 +752,39 @@ export function CalendarView({
   const listedCalendars = useMemo(() => calendars.filter((calendar) => calendar.listed), [calendars]);
   const writableCalendars = listedCalendars.filter((calendar) => calendar.can_write);
   const todayKey = localDateKey(now);
-  const weekLabel = weekRangeLabel(days[0], days[6]);
+  const weekLabel =
+    view === "day"
+      ? days[0].toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
+      : weekRangeLabel(days[0], days[days.length - 1]);
+  const focusIndex = view === "three" ? threeDayFocusIndex(days, focusDayKey, todayKey) : -1;
+
+  // The phone pages by the span its view shows and routes to the day itself;
+  // the desktop pages by the week.
+  const pageURL = (direction: number) =>
+    view ? calendarDayURL(addDays(routeDay, direction * mobileViewStep(view))) : calendarURL(addDays(anchor, direction * 7));
+  const todayURL = () => (view ? calendarDayURL(new Date()) : calendarURL(new Date()));
+
+  // A sideways swipe across a phone view turns to the previous or next days.
+  // Only a finger: a mouse drag in the grid draws an event. Rows that scroll
+  // sideways themselves -- the calendar chips -- and the open menus keep their
+  // own gestures.
+  const swipeStart = (pointerEvent: ReactPointerEvent) => {
+    if (!view || pointerEvent.pointerType !== "touch") return;
+    const target = pointerEvent.target as HTMLElement;
+    if (target.closest(".calendar-mobile-chips, .calendar-view-switch, .calendar-week-picker-panel, .calendar-picker-panel")) {
+      return;
+    }
+    swipeRef.current = { x: pointerEvent.clientX, y: pointerEvent.clientY, pointer: pointerEvent.pointerId };
+  };
+  const swipeEnd = (pointerEvent: ReactPointerEvent) => {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!start || start.pointer !== pointerEvent.pointerId) return;
+    const dx = pointerEvent.clientX - start.x;
+    const dy = pointerEvent.clientY - start.y;
+    if (Math.abs(dx) < swipeDistance || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    navigate(pageURL(dx < 0 ? 1 : -1));
+  };
 
   // The day lens, which is how the week is always drawn: one day opened up
   // with a lane per calendar, every other day sized by how much it has at
@@ -708,7 +792,16 @@ export function CalendarView({
   // size it, so the result is kept until the week, its events or the open day
   // change rather than redone on every render (the now-line ticks once a
   // minute).
+  // A phone draws no lens: its day already has the whole width, and of its
+  // three days the tapped one is wide instead.
   const { lensIndex, lensLanes, dayColumns } = useMemo(() => {
+    if (view) {
+      return {
+        lensIndex: -1,
+        lensLanes: [] as number[],
+        dayColumns: view === "three" ? threeDayColumns(focusIndex, days.length) : "minmax(0, 1fr)"
+      };
+    }
     const index = lensDayKey === "" ? -1 : resolveLensIndex(days, shownEvents, lensDayKey, todayKey);
     const lanes =
       index >= 0
@@ -718,7 +811,7 @@ export function CalendarView({
       .map((weight) => `minmax(0, ${weight.toFixed(2)}fr)`)
       .join(" ");
     return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
-  }, [lensDayKey, days, shownEvents, todayKey, listedCalendars]);
+  }, [view, focusIndex, lensDayKey, days, shownEvents, todayKey, listedCalendars]);
 
   const openEvent = (event: CalendarEvent, day: Date) => {
     // The release that ends a drag arrives as a click on the block it ended on.
@@ -918,33 +1011,49 @@ export function CalendarView({
   return (
     <div className="calendar-shell">
       <section
-        className={`calendar-main day-lens ${drag ? `dragging drag-${drag.kind}` : ""} ${
-          drag && "copy" in drag && drag.copy ? "drag-copy" : ""
-        }`}
+        className={`calendar-main day-lens ${view ? `compact view-${view}` : ""} ${
+          drag ? `dragging drag-${drag.kind}` : ""
+        } ${drag && "copy" in drag && drag.copy ? "drag-copy" : ""}`}
         style={{ "--calendar-day-columns": dayColumns } as CSSProperties}
+        // Captured, so a swipe that starts on an event block -- which stops its
+        // own presses from reaching the column -- still turns the page.
+        onPointerDownCapture={swipeStart}
+        onPointerUpCapture={swipeEnd}
+        onPointerCancelCapture={() => {
+          swipeRef.current = null;
+        }}
       >
         <header className="content-head calendar-head">
           <div className="calendar-nav">
             <button
               type="button"
               className="icon-button"
-              title="Previous week"
-              onClick={() => navigate(calendarURL(addDays(anchor, -7)))}
+              title={pageTitle(view, -1)}
+              aria-label={pageTitle(view, -1)}
+              onClick={() => navigate(pageURL(-1))}
             >
               <Icon name="chevron_left" />
             </button>
-            <button type="button" className="ghost" onClick={() => navigate(calendarURL(new Date()))}>
+            <button type="button" className="ghost" onClick={() => navigate(todayURL())}>
               Today
             </button>
             <button
               type="button"
               className="icon-button"
-              title="Next week"
-              onClick={() => navigate(calendarURL(addDays(anchor, 7)))}
+              title={pageTitle(view, 1)}
+              aria-label={pageTitle(view, 1)}
+              onClick={() => navigate(pageURL(1))}
             >
               <Icon name="chevron_right" />
             </button>
-            <WeekPicker anchor={anchor} label={weekLabel} todayKey={todayKey} navigate={navigate} />
+            <WeekPicker
+              anchor={anchor}
+              label={weekLabel}
+              todayKey={todayKey}
+              chooseURL={view ? calendarDayURL : calendarURL}
+              choosesDay={view !== null}
+              navigate={navigate}
+            />
           </div>
           <div className="calendar-head-actions">
             <CalendarPicker
@@ -956,23 +1065,39 @@ export function CalendarView({
               onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
               navigate={navigate}
             />
-            <button type="button" className="ghost" disabled={syncing || calendars.length === 0} onClick={() => void syncNow()}>
+            <button
+              type="button"
+              className="ghost"
+              disabled={syncing || calendars.length === 0}
+              // On a phone the button is its icon: the header has the width of
+              // one row of buttons, and the views need it.
+              aria-label={view ? (syncing ? "Syncing" : "Sync now") : undefined}
+              title={view ? (syncing ? "Syncing…" : "Sync now") : undefined}
+              onClick={() => void syncNow()}
+            >
               <Icon name="sync" />
-              {syncing ? "Syncing…" : "Sync now"}
+              {view ? null : syncing ? "Syncing…" : "Sync now"}
             </button>
             <button
               type="button"
               disabled={writableCalendars.length === 0}
-              title={writableCalendars.length === 0 ? "No calendar you can write to is connected" : undefined}
+              title={
+                writableCalendars.length === 0 ? "No calendar you can write to is connected" : view ? "New event" : undefined
+              }
+              // On a phone the button is its icon, like Sync beside it.
+              aria-label={view ? "New event" : undefined}
               onClick={() => {
+                // On the three-day view the new event starts on the wide day.
+                const day = days[Math.max(focusIndex, 0)];
                 setDialogProblem("");
-                setDialog({ event: null, day: days[0], formKey: `new-${days[0].getTime()}` });
+                setDialog({ event: null, day, formKey: `new-${day.getTime()}` });
               }}
             >
               <Icon name="add" />
-              New event
+              {view ? null : "New event"}
             </button>
           </div>
+          {view ? <MobileViewSwitch view={view} onChange={setMobileView} /> : null}
         </header>
 
         {reminderPromptOpen && canAskForReminders && !notificationsEnabled && calendars.length > 0 ? (
@@ -1005,167 +1130,243 @@ export function CalendarView({
           </p>
         ) : null}
 
-        <div className="calendar-daynames">
-          <div className="calendar-gutter" />
-          {days.map((day, index) => {
-            const today = localDateKey(day) === todayKey ? "today" : "";
-            const label = (
-              <>
-                <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
-                <span className="calendar-dayname-number">{day.getDate()}</span>
-              </>
-            );
-            const open = index === lensIndex;
-            return (
-              <div key={day.toISOString()} className={`calendar-dayname ${today} ${open ? "lens-open" : ""}`}>
-                <button
-                  type="button"
-                  className="calendar-dayname-button"
-                  aria-pressed={open}
-                  title={open ? "Close this day" : "Open this day with a column per calendar"}
-                  onClick={() => setLensDayKey(open ? "" : localDateKey(day))}
-                >
-                  {label}
-                </button>
-                {open && lensLanes.length > 0 ? (
-                  <div className="calendar-lens-lanes">
-                    {lensLanes.map((calendarID) => {
-                      const calendar = calendarsByID.get(calendarID);
-                      return (
-                        <span
-                          key={calendarID}
-                          title={calendar?.name}
-                          style={{ borderBottomColor: calendarColor(calendar) }}
-                        >
-                          {calendar?.name || "Calendar"}
-                        </span>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
+        {view === "day" ? (
+          <MobileDayHead
+            day={days[0]}
+            todayKey={todayKey}
+            calendars={listedCalendars}
+            events={shownEvents}
+            calendarsByID={calendarsByID}
+            onToggleCalendar={toggleCalendar}
+            onOpenEvent={openEvent}
+          />
+        ) : null}
 
-        <div className="calendar-allday">
-          <div className="calendar-gutter">All day</div>
-          {days.map((day, dayIndex) => (
-            <div
-              key={day.toISOString()}
-              className="calendar-allday-cell"
-              ref={(element) => {
-                allDayCellRefs.current[dayIndex] = element;
-              }}
-              onPointerDown={(pointerEvent) => {
-                if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
-                beginAllDayCreate(pointerEvent, dayIndex);
-              }}
-            >
-              {allDayEventsForDay(shownEvents, day).map((event) => {
-                const calendar = calendarsByID.get(event.calendar_id);
-                const color = calendarColor(calendar);
-                const draggable = eventDraggable(event, calendar);
-                return (
-                  <button
-                    key={`${event.id}-${localDateKey(day)}`}
-                    type="button"
-                    className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""} ${event.pending_offline ? "pending-offline" : ""}`}
-                    style={{ background: color, color: readableTextColor(color) }}
-                    title={pendingTooltip(event) || eventTooltip(event, calendar, calendarsByID)}
-                    onPointerDown={(pointerEvent) => {
-                      pointerEvent.stopPropagation();
-                      if (draggable) beginAllDayMove(pointerEvent, event, dayIndex, eventCopyable(event, calendar));
-                    }}
-                    onClick={() => openEvent(event, day)}
-                  >
-                    <CopyMarks event={event} calendarsByID={calendarsByID} />
-                    {event.summary || "(No title)"}
-                  </button>
-                );
-              })}
-              {drag && (drag.kind === "allday-move" || drag.kind === "allday-create") && allDayRangeCoversDay(drag.range, day) ? (
+        {view === "agenda" ? (
+          <MobileAgenda
+            days={days}
+            events={shownEvents}
+            calendarsByID={calendarsByID}
+            todayKey={todayKey}
+            now={now}
+            canCreate={writableCalendars.length > 0}
+            onOpenEvent={openEvent}
+            onNewEvent={(start, end) => openNewEvent({ start, end, allDay: false })}
+          />
+        ) : null}
+
+        {view === "week" ? (
+          <MobileWeekList
+            days={days}
+            events={shownEvents}
+            calendarsByID={calendarsByID}
+            todayKey={todayKey}
+            onOpenDay={(day) => {
+              setMobileView("day");
+              navigate(calendarDayURL(day));
+            }}
+          />
+        ) : null}
+
+        {gridded && view !== "day" ? (
+          <div className="calendar-daynames">
+            <div className="calendar-gutter" />
+            {days.map((day, index) => {
+              const today = localDateKey(day) === todayKey ? "today" : "";
+              const label = (
+                <>
+                  <span className="calendar-dayname-weekday">{weekdayLabel(day)}</span>
+                  <span className="calendar-dayname-number">{day.getDate()}</span>
+                </>
+              );
+              // On the three-day view the tapped day is the wide one, and stays so
+              // until another is tapped: there is nothing to close.
+              const open = view === "three" ? index === focusIndex : index === lensIndex;
+              return (
                 <div
-                  className="calendar-chip calendar-drag-ghost-chip"
-                  style={
-                    drag.kind === "allday-move"
-                      ? {
-                          background: calendarColor(calendarsByID.get(drag.event.calendar_id)),
-                          color: readableTextColor(calendarColor(calendarsByID.get(drag.event.calendar_id)))
-                        }
-                      : undefined
-                  }
-                  aria-hidden="true"
+                  key={day.toISOString()}
+                  className={`calendar-dayname ${today} ${open ? "lens-open" : ""} ${view === "three" && !open ? "narrow" : ""}`}
                 >
-                  {drag.kind === "allday-move" && drag.copy ? <Icon name="copy" /> : null}
-                  {drag.kind === "allday-move" ? drag.event.summary || "(No title)" : "New event"}
+                  <button
+                    type="button"
+                    className="calendar-dayname-button"
+                    aria-pressed={open}
+                    title={
+                      view === "three"
+                        ? open
+                          ? undefined
+                          : "Show this day wide"
+                        : open
+                          ? "Close this day"
+                          : "Open this day with a column per calendar"
+                    }
+                    onClick={() =>
+                      view === "three" ? setFocusDayKey(localDateKey(day)) : setLensDayKey(open ? "" : localDateKey(day))
+                    }
+                  >
+                    {label}
+                  </button>
+                  {open && lensLanes.length > 0 ? (
+                    <div className="calendar-lens-lanes">
+                      {lensLanes.map((calendarID) => {
+                        const calendar = calendarsByID.get(calendarID);
+                        return (
+                          <span
+                            key={calendarID}
+                            title={calendar?.name}
+                            style={{ borderBottomColor: calendarColor(calendar) }}
+                          >
+                            {calendar?.name || "Calendar"}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-
-        <div className="calendar-grid" ref={gridRef}>
-          <div className="calendar-gutter calendar-hours" style={{ height: dayHeight }}>
-            {Array.from({ length: 24 }, (_, hour) => (
-              <div key={hour} className="calendar-hour" style={{ top: hour * hourHeight }}>
-                {hour === 0 ? "" : formatHour(hour)}
-              </div>
-            ))}
+              );
+            })}
           </div>
-          {days.map((day, index) => {
-            const isToday = localDateKey(day) === todayKey;
-            const dayEvents = shownEvents.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
-            const lanes = index === lensIndex ? lensLanes : [];
-            return (
-              <div
-                key={day.toISOString()}
-                className={`calendar-day ${isToday ? "today" : ""}`}
-                style={{ height: dayHeight }}
-                ref={(element) => {
-                  dayColumnRefs.current[index] = element;
-                }}
-                onPointerDown={(pointerEvent) => {
-                  // Pressing empty time and pulling draws a new event; the
-                  // hour lines and the now line let the press through to here.
-                  if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
-                  beginCreate(
-                    pointerEvent,
-                    index,
-                    laneCalendarAt(index, pointerEvent.clientX, pointerEvent.currentTarget)
-                  );
-                }}
-                onDoubleClick={(mouseEvent) => {
-                  if (writableCalendars.length === 0) return;
-                  setDialogProblem("");
-                  const start = dayAtOffset(day, mouseEvent);
-                  setDialog({ event: null, day: start, formKey: `new-${start.getTime()}` });
-                }}
-              >
-                {Array.from({ length: 24 }, (_, hour) => (
-                  <div key={hour} className="calendar-slot" style={{ top: hour * hourHeight, height: hourHeight }} />
-                ))}
-                {lanes.length > 1
-                  ? lanes.flatMap((calendarID, lane) => [
-                      lane > 0 ? (
-                        <div
-                          key={`divider-${calendarID}`}
-                          className="calendar-lens-divider"
-                          style={{ left: `${(lane * 100) / lanes.length}%` }}
-                        />
-                      ) : null,
-                      ...layoutDayEvents(
-                        dayEvents.filter((event) => event.calendar_id === calendarID),
-                        day
-                      ).map((placed) => renderTimedEvent(placed, day, index, lane, lanes.length))
-                    ])
-                  : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, index, 0, 1))}
-                {renderTimedGhost(day, index, lanes)}
-                {isToday ? <div className="calendar-now" style={{ top: (minutesIntoDay(now) / 60) * hourHeight }} /> : null}
-              </div>
-            );
-          })}
-        </div>
+        ) : null}
+
+        {gridded && view !== "day" ? (
+          <div className="calendar-allday">
+            <div className="calendar-gutter">All day</div>
+            {days.map((day, dayIndex) => {
+              // A phone also draws here the timed events that fill the day, and
+              // the wide day of three names only the first few until asked.
+              const allDay = view ? compactAllDayEvents(shownEvents, day) : allDayEventsForDay(shownEvents, day);
+              const narrow = view === "three" && dayIndex !== focusIndex;
+              const capped = view === "three" && !allDayExpanded && allDay.length > compactAllDayLimit;
+              const shown = capped ? allDay.slice(0, narrow ? compactAllDayLimit : compactAllDayLimit - 1) : allDay;
+              return (
+                <div
+                  key={day.toISOString()}
+                  className={`calendar-allday-cell ${narrow ? "narrow" : ""}`}
+                  ref={(element) => {
+                    allDayCellRefs.current[dayIndex] = element;
+                  }}
+                  onPointerDown={(pointerEvent) => {
+                    if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
+                    beginAllDayCreate(pointerEvent, dayIndex);
+                  }}
+                >
+                  {shown.map((event) => {
+                    const calendar = calendarsByID.get(event.calendar_id);
+                    const color = calendarColor(calendar);
+                    // A timed event drawn here keeps its times: an all-day drag
+                    // would move it by whole dates and make it an all-day event.
+                    const draggable = event.all_day && eventDraggable(event, calendar);
+                    return (
+                      <button
+                        key={`${event.id}-${localDateKey(day)}`}
+                        type="button"
+                        className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""} ${event.pending_offline ? "pending-offline" : ""}`}
+                        style={{ background: color, color: readableTextColor(color) }}
+                        title={pendingTooltip(event) || eventTooltip(event, calendar, calendarsByID)}
+                        onPointerDown={(pointerEvent) => {
+                          pointerEvent.stopPropagation();
+                          if (draggable) beginAllDayMove(pointerEvent, event, dayIndex, eventCopyable(event, calendar));
+                        }}
+                        onClick={() => openEvent(event, day)}
+                      >
+                        <CopyMarks event={event} calendarsByID={calendarsByID} />
+                        {event.summary || "(No title)"}
+                      </button>
+                    );
+                  })}
+                  {capped && !narrow ? (
+                    <button type="button" className="calendar-chip calendar-chip-more" onClick={() => setAllDayExpanded(true)}>
+                      +{allDay.length - shown.length} more
+                    </button>
+                  ) : null}
+                  {drag && (drag.kind === "allday-move" || drag.kind === "allday-create") && allDayRangeCoversDay(drag.range, day) ? (
+                    <div
+                      className="calendar-chip calendar-drag-ghost-chip"
+                      style={
+                        drag.kind === "allday-move"
+                          ? {
+                              background: calendarColor(calendarsByID.get(drag.event.calendar_id)),
+                              color: readableTextColor(calendarColor(calendarsByID.get(drag.event.calendar_id)))
+                            }
+                          : undefined
+                      }
+                      aria-hidden="true"
+                    >
+                      {drag.kind === "allday-move" && drag.copy ? <Icon name="copy" /> : null}
+                      {drag.kind === "allday-move" ? drag.event.summary || "(No title)" : "New event"}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {gridded ? (
+          <div className="calendar-grid" ref={gridRef}>
+            <div className="calendar-gutter calendar-hours" style={{ height: dayHeight }}>
+              {Array.from({ length: 24 }, (_, hour) => (
+                <div key={hour} className="calendar-hour" style={{ top: hour * hourHeight }}>
+                  {hour === 0 ? "" : formatHour(hour)}
+                </div>
+              ))}
+            </div>
+            {days.map((day, index) => {
+              const isToday = localDateKey(day) === todayKey;
+              const dayEvents = view
+                ? compactTimedEvents(shownEvents, day)
+                : shownEvents.filter((event) => !event.all_day && timedEventTouchesDay(event, day));
+              const lanes = index === lensIndex ? lensLanes : [];
+              return (
+                <div
+                  key={day.toISOString()}
+                  className={`calendar-day ${isToday ? "today" : ""} ${view === "three" && index !== focusIndex ? "narrow" : ""}`}
+                  style={{ height: dayHeight }}
+                  ref={(element) => {
+                    dayColumnRefs.current[index] = element;
+                  }}
+                  onPointerDown={(pointerEvent) => {
+                    // Pressing empty time and pulling draws a new event; the
+                    // hour lines and the now line let the press through to here.
+                    if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
+                    beginCreate(
+                      pointerEvent,
+                      index,
+                      laneCalendarAt(index, pointerEvent.clientX, pointerEvent.currentTarget)
+                    );
+                  }}
+                  onDoubleClick={(mouseEvent) => {
+                    if (writableCalendars.length === 0) return;
+                    setDialogProblem("");
+                    const start = dayAtOffset(day, mouseEvent);
+                    setDialog({ event: null, day: start, formKey: `new-${start.getTime()}` });
+                  }}
+                >
+                  {Array.from({ length: 24 }, (_, hour) => (
+                    <div key={hour} className="calendar-slot" style={{ top: hour * hourHeight, height: hourHeight }} />
+                  ))}
+                  {lanes.length > 1
+                    ? lanes.flatMap((calendarID, lane) => [
+                        lane > 0 ? (
+                          <div
+                            key={`divider-${calendarID}`}
+                            className="calendar-lens-divider"
+                            style={{ left: `${(lane * 100) / lanes.length}%` }}
+                          />
+                        ) : null,
+                        ...layoutDayEvents(
+                          dayEvents.filter((event) => event.calendar_id === calendarID),
+                          day
+                        ).map((placed) => renderTimedEvent(placed, day, index, lane, lanes.length))
+                      ])
+                    : layoutDayEvents(dayEvents, day).map((placed) => renderTimedEvent(placed, day, index, 0, 1))}
+                  {renderTimedGhost(day, index, lanes)}
+                  {isToday ? <div className="calendar-now" style={{ top: (minutesIntoDay(now) / 60) * hourHeight }} /> : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </section>
 
       {dialog ? (
@@ -1222,11 +1423,17 @@ function WeekPicker({
   anchor,
   label,
   todayKey,
+  chooseURL,
+  choosesDay,
   navigate
 }: {
   anchor: Date;
   label: string;
   todayKey: string;
+  /** chooseURL is where a picked day leads: its week on the desktop, the day
+   * itself on a phone, whose views start at the day. */
+  chooseURL: (day: Date) => string;
+  choosesDay: boolean;
   navigate: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1338,7 +1545,7 @@ function WeekPicker({
     swipedRef.current = false;
     if (swiped && clickDetail !== 0) return;
     setOpen(false);
-    navigate(calendarURL(day));
+    navigate(chooseURL(day));
   };
 
   const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
@@ -1352,7 +1559,7 @@ function WeekPicker({
           className="calendar-week-picker-button"
           aria-expanded={open}
           aria-haspopup="dialog"
-          title="Choose a week"
+          title={choosesDay ? "Choose a day" : "Choose a week"}
           onClick={toggle}
         >
           <span>{label}</span>
@@ -1365,7 +1572,7 @@ function WeekPicker({
           ref={panelRef}
           tabIndex={-1}
           role="dialog"
-          aria-label="Choose a week"
+          aria-label={choosesDay ? "Choose a day" : "Choose a week"}
           onPointerDown={(pointerEvent) => {
             swipedRef.current = false;
             swipeRef.current = { x: pointerEvent.clientX, y: pointerEvent.clientY, pointer: pointerEvent.pointerId };
@@ -1733,6 +1940,13 @@ function dayAtOffset(day: Date, mouseEvent: { clientY: number; currentTarget: HT
   // Rounded to the half hour, which is how appointments are actually made.
   start.setMinutes(Math.round(minutes / 30) * 30);
   return start;
+}
+
+/** pageTitle names the previous and next buttons after the span they turn. */
+function pageTitle(view: MobileCalendarView | null, direction: number): string {
+  if (view === "day") return direction < 0 ? "Previous day" : "Next day";
+  if (view === "three") return direction < 0 ? "Previous three days" : "Next three days";
+  return direction < 0 ? "Previous week" : "Next week";
 }
 
 function weekdayLabel(day: Date): string {

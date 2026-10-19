@@ -782,6 +782,31 @@ site and in review.
   settings use, and a calendar the order does not know still gets a lane
   (`lensLaneCalendarIDs`): drawing an event in an unnamed lane is recoverable,
   dropping it is not.
+- **A phone draws the calendar as a day, three days, an agenda or a list --
+  never the seven columns.** Below the app's phone breakpoint
+  (`compactCalendarQuery`, the 760px the sidebar collapses at) the week's
+  seven columns leave each day a sliver, so `CalendarView` draws one of four
+  views instead (`mobileModel.ts` for the arithmetic, `MobileCalendarViews.tsx`
+  for the parts only a phone draws); the desktop week is untouched. The day and
+  three-day views are **the week's own grid over fewer days** -- the same
+  `--calendar-day-columns`, `layoutDayEvents` and drag code -- so a fix to the
+  grid reaches them without a second copy; the three-day view sizes the tapped
+  day wide (`threeDayColumns`) and draws no lens. The agenda and the week list
+  draw no grid. The route names a **day** on a phone (`calendarDayURL`): the
+  desktop reads the week it falls in, so the same address works on both.
+  Whatever the view shows, the load is **whole weeks** (`calendarLoadRange`),
+  the shape the offline store keeps -- a range starting mid-week would fall
+  back to a saved copy only by accident. Three rules keep the views honest.
+  A timed event that fills a day (`timedEventFillsDay`, twelve hours of it,
+  measured per day) is drawn with that day's all-day events, because an
+  absence entered as 00:00-00:00 is a column-high bar that takes half the
+  day's width from the appointments beside it -- and such a chip is **not
+  draggable**, since an all-day drag moves by whole dates and would turn it
+  into an all-day event. The day view's chips are the Calendars menu's own
+  switches laid flat (`toggleCalendar`, i.e. `selected`), never a filter of
+  their own, so the two cannot disagree. And the agenda's free time counts the
+  journey as taken, as the week's layout does, and names only gaps between
+  appointments: it does not know the reader's working hours.
 - **A drag in the week is the dialog's Save, not a write of its own.**
   Moving, copying (Ctrl, or Option on a Mac) and pulling an event's end
   (`useWeekDrag`, `weekModel`'s drag arithmetic) restate the event exactly as
