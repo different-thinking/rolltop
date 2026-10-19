@@ -34,10 +34,13 @@ export function syncPluginStylesheets(definitions: readonly { id: string; css_ur
     if (definition.css_url) wanted.set(`${linkPrefix}${definition.id}`, absoluteURL(definition.css_url, doc));
   });
   doc.querySelectorAll<HTMLLinkElement>(`link[id^="${linkPrefix}"]`).forEach((link) => {
-    if (!wanted.has(link.id)) {
-      cancelRetry(link.id, doc);
-      link.remove();
-    }
+    if (!wanted.has(link.id)) link.remove();
+  });
+  // Swept by id rather than by the links found: a retry outlives its link, and
+  // one whose link left the document some other way still holds a timer and an
+  // online listener.
+  Array.from(retries.keys()).forEach((id) => {
+    if (!wanted.has(id)) cancelRetry(id, doc);
   });
   wanted.forEach((href, id) => {
     const existing = doc.getElementById(id) as HTMLLinkElement | null;

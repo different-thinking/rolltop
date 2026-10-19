@@ -31,8 +31,11 @@ func (s *Server) pluginEnablement(ctx context.Context, pluginID string) (bool, e
 		return false, nil
 	}
 	enabled, err := s.store.PluginEnabled(ctx, pluginID)
-	if err != nil || enabled {
-		return err == nil && enabled, err
+	if err != nil {
+		return false, err
+	}
+	if enabled {
+		return true, nil
 	}
 	manifest, ok := s.pluginManifest(pluginID)
 	if !ok || !manifest.EnabledByDefault {
