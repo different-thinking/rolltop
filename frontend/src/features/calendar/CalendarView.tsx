@@ -757,7 +757,7 @@ export function CalendarView({
   const weekLabel =
     view === "day"
       ? days[0].toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
-      : weekRangeLabel(days[0], days[days.length - 1], view !== null);
+      : weekRangeLabel(days[0], days[days.length - 1], view !== null ? now.getFullYear() : undefined);
   const focusIndex = view === "three" ? threeDayFocusIndex(days, focusDayKey, todayKey) : -1;
 
   // The phone pages by the span its view shows and routes to the day itself;
@@ -1069,7 +1069,7 @@ export function CalendarView({
             />
             <button
               type="button"
-              className="ghost"
+              className="ghost calendar-sync-button"
               disabled={syncing || calendars.length === 0}
               // On a phone the button is its icon: the header has the width of
               // one row of buttons, and the views need it.
@@ -1082,6 +1082,7 @@ export function CalendarView({
             </button>
             <button
               type="button"
+              className="calendar-new-event-button"
               disabled={writableCalendars.length === 0}
               title={
                 writableCalendars.length === 0 ? "No calendar you can write to is connected" : view ? "New event" : undefined
@@ -2005,11 +2006,12 @@ function formatTravel(minutes: number | undefined): string {
 }
 
 // On a phone the range shares one row with the arrows, Today, sync and a new
-// event, so it leaves out the year while both ends fall in the current one.
-function weekRangeLabel(first: Date, last: Date, omitCurrentYear = false): string {
+// event, so the caller passes the current year and the label leaves it out
+// while both ends fall in it. The year comes from the view's own clock, the
+// one todayKey is read from, so the two cannot disagree around New Year.
+function weekRangeLabel(first: Date, last: Date, omitYear?: number): string {
   const sameMonth = first.getMonth() === last.getMonth() && first.getFullYear() === last.getFullYear();
-  const currentYear = new Date().getFullYear();
-  const yearShown = !(omitCurrentYear && first.getFullYear() === currentYear && last.getFullYear() === currentYear);
+  const yearShown = !(omitYear !== undefined && first.getFullYear() === omitYear && last.getFullYear() === omitYear);
   const firstLabel = first.toLocaleDateString(undefined, { day: "numeric", month: sameMonth ? undefined : "short" });
   const lastLabel = last.toLocaleDateString(undefined, {
     day: "numeric",

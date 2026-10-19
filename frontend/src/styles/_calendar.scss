@@ -1419,9 +1419,17 @@ $calendar-compact-gutter: 44px;
   }
 }
 
+// The app's own minimum is the large viewport (100vh), which on a phone
+// browser is taller than the screen while its toolbar shows; left in place it
+// kept the page scrollable by that difference and the head slid under the top
+// bar again.
+.app:has(> .content > .calendar-shell > .calendar-main.compact) {
+  min-height: 0;
+}
+
 .calendar-main.compact {
-  // One column that may not grow past the screen: a row of calendar chips
-  // that scrolls sideways would otherwise widen the whole view to its length.
+  // A column of rows, the last of which -- the grid, the agenda or the week
+  // list -- takes whatever height the rows above it leave.
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1466,11 +1474,11 @@ $calendar-compact-gutter: 44px;
       justify-self: end;
     }
 
-    > :nth-child(2) {
+    > .calendar-sync-button {
       grid-area: sync;
     }
 
-    > :nth-child(3) {
+    > .calendar-new-event-button {
       grid-area: add;
     }
   }
@@ -1503,7 +1511,6 @@ $calendar-compact-gutter: 44px;
   // The menu's button is its icon and its dots here; the menu itself still
   // names every calendar.
   .calendar-picker-summary {
-    min-height: 34px;
     padding: 4px 10px;
   }
 
@@ -1741,6 +1748,11 @@ $calendar-compact-gutter: 44px;
 .calendar-mobile-allday-list {
   display: grid;
   gap: 4px;
+  // The day's head does not scroll with the day, so a long list scrolls on
+  // its own instead of pushing the grid off a screen nothing else scrolls.
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 
   .calendar-chip {
     padding: 6px 10px;
