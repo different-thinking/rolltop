@@ -1425,7 +1425,12 @@ $calendar-compact-gutter: 44px;
 
   // Scrolling up and down stays the browser's; a sideways swipe is the view's
   // own gesture and turns to the previous or next days.
+  // The three-day view's day names and all-day bar too: a sideways move there
+  // would otherwise be the browser's pan, which cancels the pointer before the
+  // swipe can end.
   .calendar-grid,
+  .calendar-daynames,
+  .calendar-allday,
   .calendar-agenda,
   .calendar-weeklist {
     touch-action: pan-y;

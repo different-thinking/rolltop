@@ -208,8 +208,10 @@ export function CalendarView({
   const [lensDayKey, setLensDayKey] = useState<string | null>(null);
   // The day the three-day view draws wide, the one whose name was tapped last.
   const [focusDayKey, setFocusDayKey] = useState<string | null>(null);
-  // Whether the three-day view's all-day bar shows everything, past its limit.
-  const [allDayExpanded, setAllDayExpanded] = useState(false);
+  // The first day of the three days whose all-day bar was opened past its
+  // limit. Kept as the days it was opened on, so turning the page closes it
+  // again rather than leaving every later page uncapped.
+  const [allDayExpandedKey, setAllDayExpandedKey] = useState<string | null>(null);
   const swipeRef = useRef<{ x: number; y: number; pointer: number } | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledRef = useRef(false);
@@ -1236,8 +1238,11 @@ export function CalendarView({
               // the wide day of three names only the first few until asked.
               const allDay = view ? compactAllDayEvents(shownEvents, day) : allDayEventsForDay(shownEvents, day);
               const narrow = view === "three" && dayIndex !== focusIndex;
+              const allDayExpanded = allDayExpandedKey === localDateKey(days[0]);
               const capped = view === "three" && !allDayExpanded && allDay.length > compactAllDayLimit;
-              const shown = capped ? allDay.slice(0, narrow ? compactAllDayLimit : compactAllDayLimit - 1) : allDay;
+              // A narrow day keeps a bar for "more" as well, so it never hides
+              // events without a sign; tapping it widens that day and opens it.
+              const shown = capped ? allDay.slice(0, compactAllDayLimit - 1) : allDay;
               return (
                 <div
                   key={day.toISOString()}
@@ -1274,8 +1279,16 @@ export function CalendarView({
                       </button>
                     );
                   })}
-                  {capped && !narrow ? (
-                    <button type="button" className="calendar-chip calendar-chip-more" onClick={() => setAllDayExpanded(true)}>
+                  {capped ? (
+                    <button
+                      type="button"
+                      className="calendar-chip calendar-chip-more"
+                      title={`${allDay.length - shown.length} more`}
+                      onClick={() => {
+                        if (narrow) setFocusDayKey(localDateKey(day));
+                        setAllDayExpandedKey(localDateKey(days[0]));
+                      }}
+                    >
                       +{allDay.length - shown.length} more
                     </button>
                   ) : null}
