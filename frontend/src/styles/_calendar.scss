@@ -1447,14 +1447,15 @@ $calendar-compact-gutter: 44px;
   }
 
   // Two rows: the dates with sync and a new event beside them, then the view
-  // switch with the Calendars menu beside it. The actions wrapper steps aside
-  // so its three buttons can sit in those two rows.
+  // switch. The Calendars menu is not drawn here -- the chips under the head
+  // take its place -- and the actions wrapper steps aside so its two buttons
+  // can sit in the first row.
   .calendar-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
       "nav sync add"
-      "switch picker picker";
+      "switch switch switch";
     align-items: center;
     gap: 6px;
     margin: 0;
@@ -1468,11 +1469,6 @@ $calendar-compact-gutter: 44px;
 
   .calendar-head-actions {
     display: contents;
-
-    > .calendar-picker {
-      grid-area: picker;
-      justify-self: end;
-    }
 
     > .calendar-sync-button {
       grid-area: sync;
@@ -1508,27 +1504,16 @@ $calendar-compact-gutter: 44px;
     font-weight: 600;
   }
 
-  // The menu's button is its icon and its dots here; the menu itself still
-  // names every calendar.
-  .calendar-picker-summary {
-    padding: 4px 10px;
+  // The chips under the head, in every view. The day view's head follows
+  // them directly and draws the line under both.
+  > .calendar-mobile-chips {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
   }
 
-  .calendar-picker-label,
-  .calendar-picker-summary .icon:last-child {
-    display: none;
-  }
-
-  .calendar-picker-dots {
-    gap: 0;
-
-    span {
-      box-shadow: 0 0 0 1.5px var(--surface);
-
-      & + span {
-        margin-left: -2px;
-      }
-    }
+  &.view-day > .calendar-mobile-chips {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
 
   // A button's own centring would put an appointment's text in the middle of
@@ -1640,8 +1625,7 @@ $calendar-compact-gutter: 44px;
   }
 }
 
-// The day view's head: a chip per calendar and the all-day events folded
-// into one line. The date and the day's summary are for screen readers; the
+// The day view's head: the all-day events folded into one line. The date and the day's summary are for screen readers; the
 // header's date button already shows the day.
 .calendar-mobile-day-head {
   position: relative;
@@ -1651,11 +1635,10 @@ $calendar-compact-gutter: 44px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
 
-  // With no chips and nothing all day, only the hidden title is left: the
-  // head then takes no room, but still names the day to a screen reader.
+  // With nothing all day only the hidden title is left, which still names the
+  // day to a screen reader; the head then only closes off the chips above it.
   &:not(:has(> :not(.calendar-mobile-day-title))) {
-    padding: 0;
-    border-bottom: 0;
+    padding-top: 0;
   }
 }
 
@@ -1686,6 +1669,17 @@ $calendar-compact-gutter: 44px;
     border-color: var(--accent-soft);
     background: var(--accent-soft);
     color: var(--text);
+  }
+}
+
+// The last chip leads to the calendar settings: an icon beside the calendars,
+// and its name as well when no calendar is listed to sit beside.
+.calendar-mobile-chip-manage {
+  padding: 0 9px;
+
+  .icon {
+    width: 16px;
+    height: 16px;
   }
 }
 

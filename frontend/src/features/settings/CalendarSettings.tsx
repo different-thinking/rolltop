@@ -1,13 +1,17 @@
-// File overview: Which calendars the calendar view lists at all. With Google
-// and Microsoft 365 side by side a reader routinely has a dozen calendars, most
-// of which they never want to see; hiding one here takes it out of the calendar menu,
-// out of the week and out of the second- and busy-calendar choices in one step.
+// File overview: Which calendars the calendar view lists at all, and which of
+// them are the second and the busy calendar. With Google and Microsoft 365
+// side by side a reader routinely has a dozen calendars, most of which they
+// never want to see; hiding one here takes it out of the calendar's menu and
+// chips, out of the week and out of the second- and busy-calendar choices in
+// one step. This is the one place a phone chooses those roles: its calendar
+// shows chips instead of the menu.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import type { Toast } from "../../appTypes";
 import type { CalendarSummary } from "../../types";
 import { messageFromError } from "../../lib/errors";
+import { CalendarRoleChoices, writeBusyLabel, writeBusyTarget, writeCopyTarget } from "../calendar/CalendarRoles";
 import { calendarAccountGroups, calendarColor } from "../calendar/weekModel";
 
 /**
@@ -66,6 +70,15 @@ export function CalendarSettingsPanel({
     }
   };
 
+  const applyRole = async (write: () => ReturnType<typeof writeCopyTarget>) => {
+    try {
+      const update = await write();
+      if (update) setCalendars(update);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  };
+
   if (loading) {
     return <div className="panel calendar-settings" role="status" aria-label="Loading calendars">Loading calendars.</div>;
   }
@@ -79,11 +92,14 @@ export function CalendarSettingsPanel({
   }
 
   const listedCount = calendars.filter((calendar) => calendar.listed).length;
+  // The roles need a calendar to copy from and one to copy into.
+  const listedWritable = calendars.filter((calendar) => calendar.listed && calendar.can_write).length;
   return (
     <div className="panel calendar-settings">
       <p className="muted">
-        Only the calendars ticked here appear in the calendar's Calendars menu, in the week and as a choice for the second
-        calendar. A hidden calendar is not synced either; nothing is changed in Google or Microsoft 365.
+        Only the calendars ticked here appear in the calendar — in its Calendars menu, as its chips on a phone and in the
+        week — and as a choice for the second and the busy calendar. A hidden calendar is not synced either; nothing is
+        changed in Google or Microsoft 365.
       </p>
       <p className="muted">
         Reminders follow the calendar: the popup reminders set on an event in Google Calendar or Outlook (or a Google
@@ -98,7 +114,7 @@ export function CalendarSettingsPanel({
         <>
           <small className="muted">
             {listedCount} of {calendars.length} calendar{calendars.length === 1 ? "" : "s"} shown. A calendar shown again
-            starts switched off; tick it in the calendar's Calendars menu to draw it.
+            starts switched off; switch it on in the calendar to draw it.
           </small>
           {groups.map(([account, items]) => (
             <section key={account} className="calendar-settings-group">
@@ -123,6 +139,19 @@ export function CalendarSettingsPanel({
               ))}
             </section>
           ))}
+          {listedWritable >= 2 ? (
+            <section className="calendar-settings-roles" aria-label="Second and busy calendar">
+              <CalendarRoleChoices
+                calendars={calendars.filter((calendar) => calendar.listed)}
+                idPrefix="calendar-settings"
+                onChooseCopyTarget={(calendarID) => void applyRole(() => writeCopyTarget(csrf, calendars, calendarID))}
+                onChooseBusyTarget={(calendarID, label) =>
+                  void applyRole(() => writeBusyTarget(csrf, calendars, calendarID, label))
+                }
+                onSetBusyLabel={(calendarID, label) => void applyRole(() => writeBusyLabel(csrf, calendarID, label))}
+              />
+            </section>
+          ) : null}
         </>
       )}
     </div>

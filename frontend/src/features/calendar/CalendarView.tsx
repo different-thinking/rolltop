@@ -22,6 +22,7 @@ import {
   replaceQueuedCalendarEvent,
   useCalendarOutbox
 } from "../../lib/calendarOutbox";
+import { CalendarRoleChoices, writeBusyLabel, writeBusyTarget, writeCopyTarget } from "./CalendarRoles";
 import { EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 import { ReminderSnoozeDialog } from "./ReminderSnoozeDialog";
@@ -70,6 +71,7 @@ import {
 import type { MobileCalendarView } from "./mobileModel";
 import {
   MobileAgenda,
+  MobileCalendarChips,
   MobileDayHead,
   MobileViewSwitch,
   MobileWeekList,
@@ -331,48 +333,21 @@ export function CalendarView({
     }
   };
 
-  // Choosing a second calendar moves the mark off whichever calendar had it,
-  // so the whole list is updated from the one answer rather than reloaded.
+  // The roles' writes are shared with the calendar settings (CalendarRoles);
+  // each answers with an update of the whole list rather than a reload.
   const chooseCopyTarget = async (calendarID: number) => {
-    const previous = calendars.find((calendar) => calendar.copy_target);
-    if ((previous?.id || 0) === calendarID) return;
     try {
-      const data = calendarID
-        ? await api.setCalendarCopyTarget(csrf, calendarID, true)
-        : previous
-          ? await api.setCalendarCopyTarget(csrf, previous.id, false)
-          : null;
-      if (!data) return;
-      setCalendars((current) =>
-        current.map((item) => (item.id === data.calendar.id ? data.calendar : { ...item, copy_target: false }))
-      );
+      const update = await writeCopyTarget(csrf, calendars, calendarID);
+      if (update) setCalendars(update);
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
   };
 
-  // The busy calendar moves the same way, and takes its placeholder title
-  // along: the title is stored on the calendar, and moving the role should not
-  // quietly reset what the reader chose to call their blocked time. Becoming
-  // the busy calendar also stops a calendar being the second one.
-  // label is the title as the picker holds it, which may be a draft whose save
-  // has not answered yet; the stored one would carry the title from before it.
   const chooseBusyTarget = async (calendarID: number, label: string) => {
-    const previous = calendars.find((calendar) => calendar.busy_target);
-    if ((previous?.id || 0) === calendarID) return;
     try {
-      const data = calendarID
-        ? await api.setCalendarBusyTarget(csrf, calendarID, {
-            busy_target: true,
-            ...(previous ? { busy_label: label } : {})
-          })
-        : previous
-          ? await api.setCalendarBusyTarget(csrf, previous.id, { busy_target: false })
-          : null;
-      if (!data) return;
-      setCalendars((current) =>
-        current.map((item) => (item.id === data.calendar.id ? data.calendar : { ...item, busy_target: false }))
-      );
+      const update = await writeBusyTarget(csrf, calendars, calendarID, label);
+      if (update) setCalendars(update);
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -380,8 +355,7 @@ export function CalendarView({
 
   const setBusyLabel = async (calendarID: number, label: string) => {
     try {
-      const data = await api.setCalendarBusyTarget(csrf, calendarID, { busy_label: label });
-      setCalendars((current) => current.map((item) => (item.id === data.calendar.id ? data.calendar : item)));
+      setCalendars(await writeBusyLabel(csrf, calendarID, label));
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -1058,15 +1032,19 @@ export function CalendarView({
             />
           </div>
           <div className="calendar-head-actions">
-            <CalendarPicker
-              calendars={listedCalendars}
-              hiddenCount={calendars.length - listedCalendars.length}
-              onToggle={toggleCalendar}
-              onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
-              onChooseBusyTarget={(calendarID, label) => void chooseBusyTarget(calendarID, label)}
-              onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
-              navigate={navigate}
-            />
+            {/* A phone shows and hides calendars with the chips under the
+                header and chooses the rest in the calendar settings. */}
+            {view ? null : (
+              <CalendarPicker
+                calendars={listedCalendars}
+                hiddenCount={calendars.length - listedCalendars.length}
+                onToggle={toggleCalendar}
+                onChooseCopyTarget={(calendarID) => void chooseCopyTarget(calendarID)}
+                onChooseBusyTarget={(calendarID, label) => void chooseBusyTarget(calendarID, label)}
+                onSetBusyLabel={(calendarID, label) => void setBusyLabel(calendarID, label)}
+                navigate={navigate}
+              />
+            )}
             <button
               type="button"
               className="ghost calendar-sync-button"
@@ -1133,14 +1111,21 @@ export function CalendarView({
           </p>
         ) : null}
 
+        {view && calendars.length > 0 ? (
+          <MobileCalendarChips
+            calendars={listedCalendars}
+            hiddenCount={calendars.length - listedCalendars.length}
+            onToggleCalendar={toggleCalendar}
+            onManage={() => navigate(calendarSettingsPath)}
+          />
+        ) : null}
+
         {view === "day" ? (
           <MobileDayHead
             day={days[0]}
             todayKey={todayKey}
-            calendars={listedCalendars}
             events={shownEvents}
             calendarsByID={calendarsByID}
-            onToggleCalendar={toggleCalendar}
             onOpenEvent={openEvent}
           />
         ) : null}
@@ -1698,24 +1683,6 @@ function CalendarPicker({
   onSetBusyLabel: (calendarID: number, label: string) => void;
   navigate: (url: string) => void;
 }) {
-  const writable = calendars.filter((calendar) => calendar.can_write);
-  const copyTarget = calendars.find((calendar) => calendar.copy_target);
-  // A chosen calendar that has since become read-only stays listed, or the
-  // select would read "None" while the choice is still stored.
-  const copyOptions = calendars.filter((calendar) => calendar.can_write || calendar.copy_target);
-  const busyTarget = calendars.find((calendar) => calendar.busy_target);
-  const busyOptions = calendars.filter((calendar) => calendar.can_write || calendar.busy_target);
-  // The title is edited in place and saved when the field is left, so typing
-  // does not send a request per key. It is reseeded whenever the stored title
-  // or the busy calendar changes underneath it.
-  const [busyLabel, setBusyLabelDraft] = useState(busyTarget?.busy_label || "");
-  useEffect(() => {
-    setBusyLabelDraft(busyTarget?.busy_label || "");
-  }, [busyTarget?.id, busyTarget?.busy_label]);
-  const saveBusyLabel = () => {
-    if (!busyTarget || busyLabel.trim() === busyTarget.busy_label) return;
-    onSetBusyLabel(busyTarget.id, busyLabel.trim());
-  };
   const groups = useMemo(() => calendarAccountGroups(calendars), [calendars]);
   const shown = calendars.filter((calendar) => calendar.selected);
   const menuRef = useRef<HTMLDetailsElement | null>(null);
@@ -1770,7 +1737,7 @@ function CalendarPicker({
         title={shown.length > 0 ? `Shown: ${shown.map((calendar) => calendar.name).join(", ")}` : "No calendar shown"}
       >
         <Icon name="calendar" />
-        <span className="calendar-picker-label">Calendars</span>
+        Calendars
         <span className="calendar-picker-dots" aria-hidden="true">
           {shown.map((calendar) => (
             <span key={calendar.id} style={{ background: calendarColor(calendar) }} />
@@ -1804,75 +1771,13 @@ function CalendarPicker({
             })}
           </div>
         ))}
-        {writable.length > 1 ? (
-          <div className="calendar-sidebar-group calendar-copy-target">
-            <label className="calendar-sidebar-account" htmlFor="calendar-copy-target">
-              Second calendar
-            </label>
-            <select
-              id="calendar-copy-target"
-              value={copyTarget?.id || 0}
-              onChange={(changeEvent) => onChooseCopyTarget(Number(changeEvent.target.value))}
-            >
-              <option value={0}>None</option>
-              {copyOptions.map((calendar) => (
-                <option key={calendar.id} value={calendar.id}>
-                  {calendar.name}
-                  {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
-                </option>
-              ))}
-            </select>
-            <p className="calendar-copy-target-hint">
-              An event in any other calendar can be added here as well. It is shown once, marked with the other
-              calendar's colour.
-            </p>
-          </div>
-        ) : null}
-        {writable.length > 1 ? (
-          <div className="calendar-sidebar-group calendar-copy-target">
-            <label className="calendar-sidebar-account" htmlFor="calendar-busy-target">
-              Busy calendar
-            </label>
-            <select
-              id="calendar-busy-target"
-              value={busyTarget?.id || 0}
-              onChange={(changeEvent) => onChooseBusyTarget(Number(changeEvent.target.value), busyLabel.trim())}
-            >
-              <option value={0}>None</option>
-              {busyOptions.map((calendar) => (
-                <option key={calendar.id} value={calendar.id}>
-                  {calendar.name}
-                  {calendar.connection_email ? ` — ${calendar.connection_email}` : ""}
-                  {calendar.copy_target ? " (second calendar)" : ""}
-                </option>
-              ))}
-            </select>
-            {busyTarget ? (
-              <input
-                aria-label="Placeholder title"
-                className="calendar-busy-label"
-                value={busyLabel}
-                maxLength={60}
-                placeholder="Busy"
-                onChange={(changeEvent) => setBusyLabelDraft(changeEvent.target.value)}
-                onBlur={saveBusyLabel}
-                onKeyDown={(keyEvent) => {
-                  if (keyEvent.key === "Enter") {
-                    // Leaving the field saves it; saving here as well would
-                    // send the same title twice before the first answer.
-                    keyEvent.preventDefault();
-                    keyEvent.currentTarget.blur();
-                  }
-                }}
-              />
-            ) : null}
-            <p className="calendar-copy-target-hint">
-              {busyTarget
-                ? `An event in any other calendar can block its time here as “${busyTarget.busy_title}” — no title, notes, place or guests.`
-                : "An event in any other calendar can block its time here without any of its details, titled “Busy” or “Away”."}
-            </p>
-          </div>
-        ) : null}
+        <CalendarRoleChoices
+          calendars={calendars}
+          idPrefix="calendar-menu"
+          onChooseCopyTarget={onChooseCopyTarget}
+          onChooseBusyTarget={onChooseBusyTarget}
+          onSetBusyLabel={onSetBusyLabel}
+        />
         {calendars.length > 0 || hiddenCount > 0 ? (
           <div className="calendar-sidebar-manage">
             {calendars.length === 0 ? (

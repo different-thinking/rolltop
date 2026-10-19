@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent, CalendarSummary } from "../../types";
-import { MobileAgenda, MobileDayHead, MobileViewSwitch, MobileWeekList } from "./MobileCalendarViews";
+import { MobileAgenda, MobileCalendarChips, MobileDayHead, MobileViewSwitch, MobileWeekList } from "./MobileCalendarViews";
 import { mobileViewDays } from "./mobileModel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -112,6 +112,33 @@ describe("MobileViewSwitch", () => {
   });
 });
 
+describe("MobileCalendarChips", () => {
+  it("offers a chip per calendar that switches it the way the menu does", async () => {
+    const onToggle = vi.fn(async () => undefined);
+    const onManage = vi.fn();
+    await act(async () =>
+      root.render(
+        <MobileCalendarChips calendars={[work, family]} hiddenCount={2} onToggleCalendar={onToggle} onManage={onManage} />
+      )
+    );
+    expect(buttonNamed("Work").getAttribute("aria-pressed")).toBe("true");
+    expect(buttonNamed("Family").getAttribute("aria-pressed")).toBe("false");
+    await act(async () => buttonNamed("Family").click());
+    expect(onToggle).toHaveBeenCalledWith(family);
+    const manage = buttons().find((button) => button.getAttribute("aria-label") === "Manage calendars (2 hidden)");
+    expect(manage).toBeDefined();
+    await act(async () => manage?.click());
+    expect(onManage).toHaveBeenCalled();
+  });
+
+  it("still leads to the settings when every calendar is hidden", async () => {
+    await act(async () =>
+      root.render(<MobileCalendarChips calendars={[]} hiddenCount={3} onToggleCalendar={vi.fn()} onManage={vi.fn()} />)
+    );
+    expect(container.textContent).toContain("Manage calendars (3 hidden)");
+  });
+});
+
 describe("MobileDayHead", () => {
   const events = [
     event(1, at(monday, 9), at(monday, 10), { summary: "Standup" }),
@@ -119,26 +146,13 @@ describe("MobileDayHead", () => {
     event(1, at(monday, 0), at(tuesday, 0), { summary: "Away" })
   ];
 
-  it("offers a chip per calendar that switches it the way the menu does", async () => {
-    const onToggle = vi.fn(async () => undefined);
+  it("names the day and what it holds for a screen reader", async () => {
     await act(async () =>
       root.render(
-        <MobileDayHead
-          day={monday}
-          todayKey="2026-10-19"
-          calendars={[work, family]}
-          events={events}
-          calendarsByID={calendarsByID}
-          onToggleCalendar={onToggle}
-          onOpenEvent={vi.fn()}
-        />
+        <MobileDayHead day={monday} todayKey="2026-10-19" events={events} calendarsByID={calendarsByID} onOpenEvent={vi.fn()} />
       )
     );
-    expect(buttonNamed("Work").getAttribute("aria-pressed")).toBe("true");
-    expect(buttonNamed("Family").getAttribute("aria-pressed")).toBe("false");
-    await act(async () => buttonNamed("Family").click());
-    expect(onToggle).toHaveBeenCalledWith(family);
-    expect(container.textContent).toContain("Today · 1 event · 1 all day");
+    expect(container.querySelector("h2")?.textContent).toContain("Today · 1 event · 1 all day");
   });
 
   it("folds the all-day events into one line that opens", async () => {
@@ -148,10 +162,8 @@ describe("MobileDayHead", () => {
         <MobileDayHead
           day={monday}
           todayKey="2026-10-20"
-          calendars={[work]}
           events={events}
           calendarsByID={calendarsByID}
-          onToggleCalendar={vi.fn(async () => undefined)}
           onOpenEvent={onOpen}
         />
       )
