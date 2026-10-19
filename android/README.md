@@ -65,6 +65,7 @@ server that has served the app to this install before is shown as unreachable,
 with Try again and the server form as the second choice, instead of being sent
 back to the server form with "check the address".
 
+## Updates
 
 The updater checks:
 

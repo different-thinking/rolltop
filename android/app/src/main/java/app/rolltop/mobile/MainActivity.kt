@@ -140,20 +140,10 @@ class MainActivity : ComponentActivity() {
 
     private fun showSetup(initialUrl: String = RolltopPrefs.serverUrl(this), message: String = "") {
         cancelLoadingExperience()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(SHELL_BACKGROUND)
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        }
-        val title = TextView(this).apply {
-            text = "Rolltop"
-            textSize = 28f
-        }
+        val root = shellScreen("Rolltop")
         val feedback = TextView(this).apply {
             text = message
-            setTextColor(Color.rgb(151, 43, 43))
+            setTextColor(SHELL_ERROR_TEXT)
             visibility = if (message.isBlank()) View.GONE else View.VISIBLE
         }
         val input = EditText(this).apply {
@@ -175,7 +165,7 @@ class MainActivity : ComponentActivity() {
             input.isEnabled = false
             connect.isEnabled = false
             connect.text = "Checking..."
-            feedback.setTextColor(Color.rgb(74, 81, 78))
+            feedback.setTextColor(SHELL_MUTED_TEXT)
             feedback.text = "Checking the Rolltop server..."
             feedback.visibility = View.VISIBLE
 
@@ -187,7 +177,7 @@ class MainActivity : ComponentActivity() {
                     connect.isEnabled = true
                     connect.text = "Connect"
                     if (!result.valid) {
-                        feedback.setTextColor(Color.rgb(151, 43, 43))
+                        feedback.setTextColor(SHELL_ERROR_TEXT)
                         feedback.text = result.message
                         return@runOnUiThread
                     }
@@ -200,11 +190,31 @@ class MainActivity : ComponentActivity() {
             text = "Set as default mail app"
             setOnClickListener { RoleHelper.requestDefaultMailRole(this@MainActivity) }
         }
-        root.addView(title, spacedLayoutParams(top = 0, bottom = 12))
         root.addView(feedback, spacedLayoutParams(bottom = 12))
         root.addView(input, spacedLayoutParams(bottom = 8))
         root.addView(connect, spacedLayoutParams(bottom = 4))
         root.addView(role, spacedLayoutParams())
+        showShellScreen(root)
+    }
+
+    /** The root of a screen drawn in place of the web app, carrying its title. */
+    private fun shellScreen(title: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(SHELL_BACKGROUND)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            addView(
+                TextView(context).apply {
+                    text = title
+                    textSize = 28f
+                },
+                spacedLayoutParams(top = 0, bottom = 12)
+            )
+        }
+
+    private fun showShellScreen(root: View) {
         applySystemBarInsets(root, dp(24))
         setContentView(root)
     }
@@ -312,11 +322,11 @@ class MainActivity : ComponentActivity() {
 
             override fun onPageCommitVisible(view: WebView, url: String) {
                 mainFrameCommitted = true
-                RolltopPrefs.rememberVisitedUrl(this@MainActivity, url)
+                rememberServedLocation(url)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                RolltopPrefs.rememberVisitedUrl(this@MainActivity, url)
+                rememberServedLocation(url)
                 NativePushRegistration.maybeRegister(this@MainActivity)
                 PushSubscriptionWorker.schedule(this@MainActivity)
                 if (RolltopPrefs.internalLocation(serverOrigin, url) != null) {
@@ -334,6 +344,16 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                rememberServedLocation(url)
+            }
+
+            /** A failed first load still commits an error page and finishes like
+             * any other, and serverReachedBefore reads the remembered location as
+             * proof that this server once served the app - so a load that has
+             * already failed leaves none behind, or the first failure would
+             * promote every later one to "offline". */
+            private fun rememberServedLocation(url: String) {
+                if (failureHandled) return
                 RolltopPrefs.rememberVisitedUrl(this@MainActivity, url)
             }
 
@@ -344,19 +364,22 @@ class MainActivity : ComponentActivity() {
             // call - a server that has answered before is unreachable, not wrong.
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (!request.isForMainFrame) return
-                val action = ConnectionFailurePolicy.forLoadError(error.errorCode, serverReachedBefore())
-                failInitialLoad(view, connectionFailureMessage(action), action)
+                failInitialLoad(
+                    view,
+                    ConnectionFailurePolicy.forLoadError(error.errorCode, serverReachedBefore()),
+                    offlineMessage = "You are offline, or the Rolltop server cannot be reached from this network.",
+                    setupMessage = "Could not connect to this Rolltop server. Check the address and try again."
+                )
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
                 if (!request.isForMainFrame || errorResponse.statusCode < 400) return
-                val action = ConnectionFailurePolicy.forHttpError(errorResponse.statusCode, serverReachedBefore())
-                val message = if (action == ConnectionFailureAction.OFFLINE_RETRY) {
-                    "The Rolltop server is not answering right now. Try again in a moment."
-                } else {
-                    "The server did not recognize Rolltop at this address. Check the URL and try again."
-                }
-                failInitialLoad(view, message, action)
+                failInitialLoad(
+                    view,
+                    ConnectionFailurePolicy.forHttpError(errorResponse.statusCode, serverReachedBefore()),
+                    offlineMessage = "The Rolltop server is not answering right now. Try again in a moment.",
+                    setupMessage = "The server did not recognize Rolltop at this address. Check the URL and try again."
+                )
             }
 
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
@@ -364,12 +387,16 @@ class MainActivity : ComponentActivity() {
                 failInitialLoad(view, "Rolltop could not verify this server's HTTPS certificate. Check the URL and certificate, then try again.")
             }
 
-            private fun connectionFailureMessage(action: ConnectionFailureAction): String =
-                if (action == ConnectionFailureAction.OFFLINE_RETRY) {
-                    "You are offline, or the Rolltop server cannot be reached from this network."
-                } else {
-                    "Could not connect to this Rolltop server. Check the address and try again."
-                }
+            private fun failInitialLoad(
+                view: WebView,
+                action: ConnectionFailureAction,
+                offlineMessage: String,
+                setupMessage: String
+            ) = failInitialLoad(
+                view,
+                if (action == ConnectionFailureAction.OFFLINE_RETRY) offlineMessage else setupMessage,
+                action
+            )
 
             private fun failInitialLoad(
                 view: WebView,
@@ -470,7 +497,9 @@ class MainActivity : ComponentActivity() {
     }
 
     /** serverReachedBefore says whether this server has ever served the app to
-     * this install: a location is remembered only once a page has committed. */
+     * this install. A location is remembered from the pages the WebView drew and
+     * never from a first load that failed (`rememberServedLocation`), so a
+     * failed attempt cannot turn the next one into "offline". */
     private fun serverReachedBefore(): Boolean = RolltopPrefs.lastVisitedUrl(this).isNotBlank()
 
     /**
@@ -481,20 +510,10 @@ class MainActivity : ComponentActivity() {
      */
     private fun showOffline(message: String) {
         cancelLoadingExperience()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(SHELL_BACKGROUND)
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        }
-        val title = TextView(this).apply {
-            text = "Rolltop is offline"
-            textSize = 28f
-        }
+        val root = shellScreen("Rolltop is offline")
         val feedback = TextView(this).apply {
             text = message
-            setTextColor(Color.rgb(74, 81, 78))
+            setTextColor(SHELL_MUTED_TEXT)
         }
         val retry = Button(this).apply {
             text = "Try again"
@@ -504,12 +523,10 @@ class MainActivity : ComponentActivity() {
             text = "Change server"
             setOnClickListener { showSetup() }
         }
-        root.addView(title, spacedLayoutParams(top = 0, bottom = 12))
         root.addView(feedback, spacedLayoutParams(bottom = 12))
         root.addView(retry, spacedLayoutParams(bottom = 4))
         root.addView(changeServer, spacedLayoutParams())
-        applySystemBarInsets(root, dp(24))
-        setContentView(root)
+        showShellScreen(root)
     }
 
     private fun cancelLoadingExperience() {
@@ -669,5 +686,7 @@ class MainActivity : ComponentActivity() {
         // token in frontend/src/styles/mixins/_classic-theme.scss. A stale value
         // here shows as a coloured seam around the web content on startup.
         private val SHELL_BACKGROUND = Color.rgb(246, 248, 252)
+        private val SHELL_MUTED_TEXT = Color.rgb(74, 81, 78)
+        private val SHELL_ERROR_TEXT = Color.rgb(151, 43, 43)
     }
 }

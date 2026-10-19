@@ -51,15 +51,15 @@ class ConnectionFailurePolicyTest {
     }
 
     @Test
-    fun aGatewayAnsweringForADownBackendIsOfflineOnlyOnAKnownServer() {
-        listOf(502, 503, 504).forEach { status ->
+    fun aServerErrorIsOfflineOnlyOnAKnownServer() {
+        listOf(500, 502, 503, 504).forEach { status ->
             assertEquals(
                 "Expected $status on a known server to offer Retry",
                 ConnectionFailureAction.OFFLINE_RETRY,
                 ConnectionFailurePolicy.forHttpError(status, serverReachedBefore = true)
             )
         }
-        listOf(400, 401, 404, 500).forEach { status ->
+        listOf(400, 401, 404).forEach { status ->
             assertEquals(
                 "Expected $status to go back to the server form",
                 ConnectionFailureAction.SETUP,

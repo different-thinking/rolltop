@@ -35,10 +35,6 @@ internal object ConnectionFailurePolicy {
         WebViewClient.ERROR_UNKNOWN
     )
 
-    /** The gateway answers a reverse proxy gives while the backend behind it is
-     * down or restarting; the address is right and the server will be back. */
-    private val gatewayStatuses = setOf(502, 503, 504)
-
     fun forLoadError(errorCode: Int, serverReachedBefore: Boolean): ConnectionFailureAction =
         if (serverReachedBefore && errorCode in connectivityErrors) {
             ConnectionFailureAction.OFFLINE_RETRY
@@ -46,8 +42,12 @@ internal object ConnectionFailurePolicy {
             ConnectionFailureAction.SETUP
         }
 
+    /** A 5xx from a server that has served the app before is the server having
+     * a bad moment - a proxy answering for a backend that is restarting, or the
+     * backend itself failing - never a wrong address; a 4xx says the address
+     * reached something that is not this Rolltop, or no longer is. */
     fun forHttpError(statusCode: Int, serverReachedBefore: Boolean): ConnectionFailureAction =
-        if (serverReachedBefore && statusCode in gatewayStatuses) {
+        if (serverReachedBefore && statusCode in 500..599) {
             ConnectionFailureAction.OFFLINE_RETRY
         } else {
             ConnectionFailureAction.SETUP
