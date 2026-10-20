@@ -1,6 +1,7 @@
 package app.rolltop.mobile
 
 import android.content.Context
+import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -41,10 +42,8 @@ internal object AgendaWidgetStore {
     fun generation(): Long = dropGeneration
 
     fun load(context: Context): AgendaSnapshot? = synchronized(lock) {
-        val file = file(context)
-        if (!file.exists()) return null
         try {
-            val json = JSONObject(file.readText())
+            val json = JSONObject(String(file(context).readFully(), Charsets.UTF_8))
             AgendaSnapshot(
                 serverUrl = json.optString("server", ""),
                 fetchedAt = json.optLong("fetched_at", 0),
@@ -54,6 +53,7 @@ internal object AgendaWidgetStore {
                 events = json.optJSONArray("events") ?: JSONArray()
             )
         } catch (_: Exception) {
+            // No copy yet (FileNotFoundException), or one that cannot be read.
             null
         }
     }
@@ -99,14 +99,18 @@ internal object AgendaWidgetStore {
             put("calendars", snapshot.calendars)
             put("events", snapshot.events)
         }
+        // AtomicFile keeps the previous copy until the new one is complete, so
+        // a process killed mid-write leaves a copy rather than half of one.
         val target = file(context)
-        val temporary = File(target.parentFile, "$FILE_NAME.tmp")
-        temporary.writeText(json.toString())
-        if (!temporary.renameTo(target)) {
-            target.writeText(json.toString())
-            temporary.delete()
+        val stream = target.startWrite()
+        try {
+            stream.write(json.toString().toByteArray(Charsets.UTF_8))
+            target.finishWrite(stream)
+        } catch (error: Exception) {
+            target.failWrite(stream)
+            throw error
         }
     }
 
-    private fun file(context: Context): File = File(context.noBackupFilesDir, FILE_NAME)
+    private fun file(context: Context): AtomicFile = AtomicFile(File(context.noBackupFilesDir, FILE_NAME))
 }

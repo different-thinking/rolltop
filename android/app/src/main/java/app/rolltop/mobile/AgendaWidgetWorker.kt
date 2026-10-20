@@ -29,7 +29,13 @@ class AgendaWidgetWorker(context: Context, params: WorkerParameters) : Worker(co
     override fun doWork(): Result {
         val context = applicationContext
         if (!AgendaWidget.hasWidgets(context)) return Result.success()
-        val outcome = synchronized(REFRESH_LOCK) { refresh(context) }
+        // A copy that could not be written is a refresh that did not happen;
+        // the stored copy is still whole (AtomicFile) and is drawn as it was.
+        val outcome = try {
+            synchronized(REFRESH_LOCK) { refresh(context) }
+        } catch (_: java.io.IOException) {
+            Outcome.RETRY
+        }
         AgendaWidget.render(context)
         return if (outcome == Outcome.RETRY && runAttemptCount < MAX_RETRY_ATTEMPTS) Result.retry() else Result.success()
     }

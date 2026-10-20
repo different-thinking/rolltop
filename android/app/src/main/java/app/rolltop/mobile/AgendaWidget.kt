@@ -26,6 +26,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /**
  * The agenda widget: the coming fortnight on the home screen, dark, in the
@@ -44,9 +45,11 @@ import java.util.Locale
  */
 class AgendaWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
-        AgendaWidget.render(context, appWidgetIds)
-        AgendaWidgetWorker.schedule(context)
-        AgendaWidget.requestRefresh(context)
+        inBackground {
+            AgendaWidget.render(context, appWidgetIds)
+            AgendaWidgetWorker.schedule(context)
+            AgendaWidget.requestRefresh(context)
+        }
     }
 
     override fun onAppWidgetOptionsChanged(
@@ -55,7 +58,7 @@ class AgendaWidgetProvider : AppWidgetProvider() {
         appWidgetId: Int,
         newOptions: android.os.Bundle
     ) {
-        AgendaWidget.render(context, intArrayOf(appWidgetId))
+        inBackground { AgendaWidget.render(context, intArrayOf(appWidgetId)) }
     }
 
     override fun onEnabled(context: Context) {
@@ -63,19 +66,34 @@ class AgendaWidgetProvider : AppWidgetProvider() {
     }
 
     override fun onDisabled(context: Context) {
-        AgendaWidgetWorker.cancel(context)
-        AgendaWidget.cancelTick(context)
-        AgendaWidgetStore.clear(context)
+        inBackground {
+            AgendaWidgetWorker.cancel(context)
+            AgendaWidget.cancelTick(context)
+            AgendaWidgetStore.clear(context)
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
-            AgendaWidget.ACTION_REFRESH -> AgendaWidget.requestRefresh(context)
+            AgendaWidget.ACTION_REFRESH -> inBackground { AgendaWidget.requestRefresh(context) }
             AgendaWidget.ACTION_TICK,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
-            Intent.ACTION_LOCALE_CHANGED -> AgendaWidget.render(context)
+            Intent.ACTION_LOCALE_CHANGED -> inBackground { AgendaWidget.render(context) }
             else -> super.onReceive(context, intent)
+        }
+    }
+
+    /** inBackground keeps the broadcast alive while the stored copy is read and
+     * drawn off the main thread, where a receiver's own work would block it. */
+    private fun inBackground(block: () -> Unit) {
+        val pending = goAsync()
+        AgendaWidget.post {
+            try {
+                block()
+            } finally {
+                pending.finish()
+            }
         }
     }
 }
@@ -116,8 +134,25 @@ internal object AgendaWidget {
      * home screen does not keep showing it to whoever holds the phone next. */
     fun signedOut(context: Context) {
         val server = RolltopPrefs.serverUrl(context)
-        if (server.isBlank()) AgendaWidgetStore.clear(context) else AgendaWidgetStore.markSignedOut(context, server)
-        if (hasWidgets(context)) render(context)
+        // Dropping the copy stays on the caller's thread: it has to happen
+        // before the sign-out request goes out, or a refresh in flight could
+        // save the old session's answer after it (see AgendaWidgetStore).
+        try {
+            if (server.isBlank()) AgendaWidgetStore.clear(context) else AgendaWidgetStore.markSignedOut(context, server)
+        } catch (_: java.io.IOException) {
+            // The marker could not be written; deleting the copy still takes
+            // the previous user's calendar off the home screen.
+            AgendaWidgetStore.clear(context)
+        }
+        post { if (hasWidgets(context)) render(context) }
+    }
+
+    /** One thread draws the widget, so two redraws never interleave and none of
+     * them runs on the main thread. */
+    private val drawing = Executors.newSingleThreadExecutor()
+
+    fun post(task: () -> Unit) {
+        drawing.execute(task)
     }
 
     fun render(context: Context, ids: IntArray = widgetIds(context)) {

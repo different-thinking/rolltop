@@ -231,6 +231,8 @@ class AgendaWidgetModelTest {
         assertEquals(0x809FE1E7.toInt(), AgendaWidgetModel.parseColor("#9fe1e780"))
         assertNull(AgendaWidgetModel.parseColor("blue"))
         assertNull(AgendaWidgetModel.parseColor("#12345"))
+        // Digits outside ASCII are digits to Char.isDigit, not hex.
+        assertNull(AgendaWidgetModel.parseColor("#\u0663\u0663\u0663"))
 
         val calendars = AgendaWidgetModel.parseCalendars(
             JSONArray().put(JSONObject().put("id", 4).put("name", "Arbeit").put("color", ""))

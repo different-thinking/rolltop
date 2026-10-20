@@ -399,7 +399,7 @@ internal object AgendaWidgetModel {
      * #rrggbbaa. Anything else answers null and the caller falls back. */
     fun parseColor(value: String): Int? {
         val hex = value.trim().removePrefix("#")
-        if (hex.isEmpty() || hex.length !in setOf(3, 6, 8) || !hex.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+        if (hex.isEmpty() || hex.length !in setOf(3, 6, 8) || !hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
             return null
         }
         return when (hex.length) {
