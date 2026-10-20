@@ -9,11 +9,11 @@ import type { AppShellProps, LocationState, MailCategoryTarget, MessageTransferA
 import type { Bootstrap, Mailbox, MailCategorySummary, SyncRun, User } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/androidNative";
-import { appAreaForPath } from "../../lib/appIcon";
+import { appAreaForPath, appManifestURL } from "../../lib/appIcon";
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { promptInstall, useInstallOffered } from "../../lib/installPrompt";
+import { promptInstall, useInstallOffer } from "../../lib/installPrompt";
 import { useServerReachable } from "../../lib/offline";
 import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
@@ -773,8 +773,13 @@ function Topbar({
   // only there when something is coming is the notice it is meant to be.
   const expectedDeliveries = useExpectedDeliveries(mailGeneration);
   const dueInvoices = useDueInvoices(mailGeneration);
-  const installOffered = useInstallOffered();
-  const installsCalendar = appAreaForPath(location.path) === "calendar";
+  // Named after the manifest the offer was made for, not the route: the route
+  // changes a render before the manifest link follows it and drops the offer.
+  const installOffer = useInstallOffer();
+  const installOffered = installOffer !== null;
+  const installsCalendar = installOffer
+    ? installOffer === appManifestURL("calendar")
+    : appAreaForPath(location.path) === "calendar";
   const autocomplete = useSearchAutocomplete({
     query,
     focused,

@@ -13,12 +13,20 @@ type BeforeInstallPromptEvent = Event & {
 };
 
 let offer: BeforeInstallPromptEvent | null = null;
+// The manifest the page linked when the offer was made: the app it installs,
+// which is what the menu names, whatever route the reader is on by then.
+let offerManifest: string | null = null;
 const listeners = new Set<() => void>();
 
-function changed(next: BeforeInstallPromptEvent | null) {
+function changed(next: BeforeInstallPromptEvent | null, manifest: string | null = null) {
   if (offer === next) return;
   offer = next;
+  offerManifest = next ? manifest : null;
   for (const listener of listeners) listener();
+}
+
+function linkedManifest(target: Window): string | null {
+  return target.document?.querySelector<HTMLLinkElement>('link[rel="manifest"]')?.getAttribute("href") ?? null;
 }
 
 /**
@@ -30,7 +38,7 @@ export function watchInstallPrompt(target: Window = window): void {
   target.addEventListener("beforeinstallprompt", (event) => {
     // Held rather than shown: the reader asks for it from the account menu.
     event.preventDefault();
-    changed(event as BeforeInstallPromptEvent);
+    changed(event as BeforeInstallPromptEvent, linkedManifest(target));
   });
   target.addEventListener("appinstalled", () => changed(null));
 }
@@ -75,7 +83,16 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** useInstallOffered re-renders when the browser makes or withdraws an offer. */
-export function useInstallOffered(): boolean {
-  return useSyncExternalStore(subscribe, installOffered, () => false);
+/** installOfferManifest is the manifest the held offer installs, or null. */
+export function installOfferManifest(): string | null {
+  return offer ? offerManifest : null;
+}
+
+/**
+ * useInstallOffer re-renders when the browser makes or withdraws an offer, and
+ * answers with the manifest it installs: "" for an offer whose manifest could
+ * not be read, null for none.
+ */
+export function useInstallOffer(): string | null {
+  return useSyncExternalStore(subscribe, () => (offer ? offerManifest ?? "" : null), () => null);
 }

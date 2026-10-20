@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { syncDocumentManifest } from "./appIcon";
-import { forgetInstallPrompt, installOffered, promptInstall, watchInstallPrompt } from "./installPrompt";
+import { forgetInstallPrompt, installOfferManifest, installOffered, promptInstall, watchInstallPrompt } from "./installPrompt";
 
 function installEvent(outcome: "accepted" | "dismissed" = "accepted") {
   const event = new Event("beforeinstallprompt", { cancelable: true }) as Event & {
@@ -61,5 +61,16 @@ describe("install prompt", () => {
     expect(installOffered()).toBe(true);
     syncDocumentManifest("/mail/relevant");
     expect(installOffered()).toBe(false);
+  });
+
+  it("remembers which manifest the offer installs", () => {
+    document.head.innerHTML = '<link rel="manifest" href="/calendar.webmanifest">';
+    const page = new EventTarget() as unknown as Window & { document: Document };
+    Object.defineProperty(page, "document", { value: document });
+    watchInstallPrompt(page);
+    page.dispatchEvent(installEvent());
+    expect(installOfferManifest()).toBe("/calendar.webmanifest");
+    forgetInstallPrompt();
+    expect(installOfferManifest()).toBe(null);
   });
 });
