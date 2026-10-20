@@ -9,9 +9,11 @@ import type { AppShellProps, LocationState, MailCategoryTarget, MessageTransferA
 import type { Bootstrap, Mailbox, MailCategorySummary, SyncRun, User } from "../../types";
 import { Icon, LogoMark } from "../../components/Icon";
 import { androidNativeAvailable, shouldAdvertiseAndroidApp } from "../../lib/androidNative";
+import { appAreaForPath, appManifestURL } from "../../lib/appIcon";
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
+import { promptInstall, useInstallMenu, useInstallOffer } from "../../lib/installPrompt";
 import { useServerReachable } from "../../lib/offline";
 import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
@@ -771,6 +773,14 @@ function Topbar({
   // only there when something is coming is the notice it is meant to be.
   const expectedDeliveries = useExpectedDeliveries(mailGeneration);
   const dueInvoices = useDueInvoices(mailGeneration);
+  // Named after the manifest the offer was made for, not the route: the route
+  // changes a render before the manifest link follows it and drops the offer.
+  useInstallMenu();
+  const installOffer = useInstallOffer();
+  const installOffered = installOffer !== null;
+  const installsCalendar = installOffer
+    ? installOffer === appManifestURL("calendar")
+    : appAreaForPath(location.path) === "calendar";
   const autocomplete = useSearchAutocomplete({
     query,
     focused,
@@ -817,6 +827,11 @@ function Topbar({
   async function menuToggleNotifications() {
     await toggleNotifications();
     closeAccountMenu();
+  }
+
+  async function menuInstall() {
+    closeAccountMenu();
+    await promptInstall();
   }
 
   async function menuLogout() {
@@ -924,6 +939,19 @@ function Topbar({
                 <Icon name="notifications" weight={notificationsEnabled ? "bold" : "regular"} />
                 <span><strong>Browser notifications</strong><small>{notificationsEnabled ? "New mail and calendar reminders" : "Paused for this browser"}</small></span>
                 <span className="notification-toggle-track"><span /></span>
+              </button>
+            ) : null}
+            {/* The browser offers the app this page installs - the calendar
+                on a calendar page, the mail app everywhere else - and only
+                while it is not installed. Chrome's own menu entry refuses a
+                second app on one origin up to Chrome 157; this one does not. */}
+            {installOffered ? (
+              <button className="account-menu-row" type="button" role="menuitem" onClick={() => void menuInstall()}>
+                <Icon name="download" />
+                <span>
+                  <strong>{installsCalendar ? "Install calendar app" : "Install mail app"}</strong>
+                  <small>{installsCalendar ? "The calendar in a window of its own" : "Mail on your home screen"}</small>
+                </span>
               </button>
             ) : null}
             {/* Background work is a question about the whole installation, not
