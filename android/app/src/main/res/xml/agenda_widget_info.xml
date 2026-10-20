@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The agenda is meant to fill a home screen page: 4 x 5 cells when placed,
+     resizable both ways down to a short list. It is never refreshed by the
+     launcher's own timer (updatePeriodMillis="0"); AgendaWidgetWorker and the
+     redraw alarm in AgendaWidget keep it current. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_agenda_description"
+    android:initialLayout="@layout/widget_agenda"
+    android:minWidth="250dp"
+    android:minHeight="180dp"
+    android:minResizeWidth="180dp"
+    android:minResizeHeight="110dp"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellWidth="4"
+    android:targetCellHeight="5"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

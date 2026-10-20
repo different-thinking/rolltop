@@ -62,6 +62,7 @@ kotlin {
 dependencies {
     implementation("androidx.activity:activity:1.10.1")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.core:core-remoteviews:1.1.0")
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.work:work-runtime:2.11.2")
     implementation("org.unifiedpush.android:connector:3.3.3")

@@ -106,6 +106,12 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        // Whatever was just entered in the calendar belongs on the home screen.
+        AgendaWidget.requestRefresh(this)
+        super.onStop()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         rememberCurrentLocation()
         outState.putInt(STATE_PROMPTED_UPDATE_CODE, updatePromptPolicy.lastPromptedVersionCode)
@@ -459,6 +465,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun explicitUrlForIntent(sourceIntent: Intent?): String? {
+        sourceIntent?.getStringExtra(AgendaWidget.EXTRA_PATH)?.let { path ->
+            return AgendaWidgetModel.calendarTarget(RolltopPrefs.serverUrl(this), path)
+        }
         if (sourceIntent?.hasExtra(NotificationIntentPolicy.EXTRA_TARGET_PATH) == true) {
             val expectedServer = sourceIntent.getStringExtra(
                 NotificationIntentPolicy.EXTRA_EXPECTED_SERVER_URL

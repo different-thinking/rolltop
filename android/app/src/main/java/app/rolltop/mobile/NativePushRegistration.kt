@@ -98,6 +98,9 @@ internal object NativePushRegistration {
     }
 
     fun unregister(context: android.content.Context) {
+        // Signing out, or another user taking over this device: the agenda on
+        // the home screen is the previous user's calendar.
+        AgendaWidget.signedOut(context)
         generation.incrementAndGet()
         registrationInFlightAttempt.set(NO_REGISTRATION)
         bootstrapRetryCount.set(0)
