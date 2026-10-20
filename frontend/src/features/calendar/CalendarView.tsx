@@ -132,6 +132,18 @@ function reminderIntent(search: string): number {
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
+/** openIntent reads what a link into the calendar asked to have open: one
+ * event (?event=<id>) or a new one (?new=1). The Android agenda widget opens
+ * the calendar this way, on the day the reader tapped. */
+function openIntent(search: string): { eventID: number; create: boolean } {
+  const params = new URLSearchParams(search);
+  const value = Number(params.get("event") || 0);
+  return {
+    eventID: Number.isSafeInteger(value) && value > 0 ? value : 0,
+    create: params.get("new") === "1"
+  };
+}
+
 type DialogState = {
   event: CalendarEvent | null;
   day: Date;
@@ -152,6 +164,7 @@ export function CalendarView({
   userID,
   location,
   navigate,
+  replaceRoute,
   notificationsEnabled,
   toggleNotifications,
   addToast
@@ -160,6 +173,9 @@ export function CalendarView({
   userID: number;
   location: LocationState;
   navigate: (url: string) => void;
+  /** replaceRoute drops a link's one-time query without a history entry of
+   * its own, which Back would return to and open the dialog again from. */
+  replaceRoute: (url: string) => void;
   /** notificationsEnabled and toggleNotifications are the browser
    * notification switch the account menu owns; the calendar asks the question
    * once and hands the answer to the same switch. */
@@ -711,6 +727,23 @@ export function CalendarView({
   // rest are still loaded so a copy mark can name the calendar it stands for.
   const listedCalendars = useMemo(() => calendars.filter((calendar) => calendar.listed), [calendars]);
   const writableCalendars = listedCalendars.filter((calendar) => calendar.can_write);
+
+  // A link that named an event or asked for a new one opens its dialog once the
+  // routed days have loaded, then drops the query so a reload does not open it
+  // again. An event the loaded days do not hold is just the day it was on.
+  const { eventID: intentEventID, create: intentCreate } = openIntent(location.search);
+  useEffect(() => {
+    if (loading || (intentEventID === 0 && !intentCreate)) return;
+    const target = intentEventID > 0 ? shownEvents.find((item) => item.id === intentEventID) : undefined;
+    if (target) {
+      setDialogProblem("");
+      setDialog({ event: target, day: routeDay, formKey: `event-${target.id}` });
+    } else if (intentCreate && writableCalendars.length > 0) {
+      setDialogProblem("");
+      setDialog({ event: null, day: routeDay, formKey: `new-${routeDay.getTime()}` });
+    }
+    replaceRoute(location.path);
+  }, [loading, intentEventID, intentCreate, shownEvents, writableCalendars.length, routeDay, replaceRoute, location.path]);
   const todayKey = localDateKey(now);
   const weekLabel =
     view === "day"

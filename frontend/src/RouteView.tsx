@@ -123,6 +123,7 @@ export function RouteView({
           userID={user.id}
           location={location}
           navigate={navigate}
+          replaceRoute={replaceRoute}
           notificationsEnabled={notificationsEnabled}
           toggleNotifications={toggleNotifications}
           addToast={addToast}

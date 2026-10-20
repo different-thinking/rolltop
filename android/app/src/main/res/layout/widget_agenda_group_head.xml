@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/agenda_row"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:baselineAligned="false"
+    tools:ignore="NestedWeights"
+    android:orientation="horizontal">
+
+    <include layout="@layout/widget_agenda_day" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_agenda_group_top"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="2dp">
+
+        <ImageView
+            android:layout_width="14dp"
+            android:layout_height="14dp"
+            android:layout_marginEnd="6dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_widget_clash" />
+
+        <TextView
+            android:id="@+id/agenda_group_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:fontFamily="sans-serif-medium"
+            android:maxLines="1"
+            android:textColor="@color/widget_agenda_clash"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/agenda_group_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:maxLines="1"
+            android:textColor="@color/widget_agenda_muted"
+            android:textSize="12sp" />
+    </LinearLayout>
+</LinearLayout>

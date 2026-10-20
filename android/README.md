@@ -65,6 +65,36 @@ server that has served the app to this install before is shown as unreachable,
 with Try again and the server form as the second choice, instead of being sent
 back to the server form with "check the address".
 
+## Agenda Widget
+
+The app ships a home-screen widget, **Agenda**, meant to fill a page: the
+coming two weeks in the shape of the calendar's phone agenda, drawn dark. It
+shows only what is there. A day with nothing on it is left out, an all-day
+event is named once on the first day the widget shows it (a week's holiday is
+one line, "Sat 24 – Sat 31", not seven), and appointments whose time overlaps
+-- the journey around them included -- are kept together in one box that says
+how many there are, across how many calendars, with a bar under each showing
+its share of the overlap. A timed event filling twelve hours of a day is drawn
+with that day's all-day events, as the app does.
+
+`AgendaWidgetModel` holds that arithmetic and mirrors
+`frontend/src/features/calendar/mobileModel.ts`; change the two together. The
+widget reads the same routes the calendar does with the WebView's session
+cookie (`/api/calendar/calendars`, `/api/calendar/events`), so it shows the
+calendars switched on in the app, with linked copies and travel blocks already
+folded by the server. `AgendaWidgetWorker` renews the copy every 30 minutes,
+when the refresh button is pressed and whenever the app is left; an inexact
+alarm redraws it from the stored copy when it next changes on its own (an
+appointment beginning or ending, midnight). The copy is the current user's
+only: it keeps the fields the widget shows and nothing else, is never drawn for
+another server, and is dropped on sign-out (where the push endpoint is
+unregistered) and whenever the server answers that nobody is signed in.
+
+Tapping an appointment opens the calendar on that day with the event's dialog
+up (`/calendar/<day>?event=<id>`); the plus opens a new event
+(`/calendar/<day>?new=1`). The app only follows a widget path that names a
+calendar page of the configured server.
+
 ## Updates
 
 The updater checks:

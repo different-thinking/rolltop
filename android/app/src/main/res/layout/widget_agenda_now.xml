@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:baselineAligned="false"
+    android:orientation="horizontal">
+
+    <include layout="@layout/widget_agenda_day" />
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="10dp"
+        android:layout_marginStart="2dp"
+        android:layout_weight="1">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="2dp"
+            android:layout_gravity="center_vertical"
+            android:background="@color/widget_agenda_now" />
+
+        <FrameLayout
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:layout_gravity="center_vertical"
+            android:background="@drawable/widget_agenda_now_dot" />
+    </FrameLayout>
+</LinearLayout>
