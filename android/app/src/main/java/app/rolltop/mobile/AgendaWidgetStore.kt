@@ -31,6 +31,15 @@ internal object AgendaWidgetStore {
     private const val FILE_NAME = "agenda_widget.json"
     private val lock = Any()
 
+    /** generation moves whenever the copy is dropped for a sign-out. A refresh
+     * reads it before its requests go out and saves only if it has not moved:
+     * a request sent with the previous user's cookie can still answer after
+     * the sign-out, and must not put their calendar back on the home screen. */
+    @Volatile
+    private var dropGeneration = 0L
+
+    fun generation(): Long = dropGeneration
+
     fun load(context: Context): AgendaSnapshot? = synchronized(lock) {
         val file = file(context)
         if (!file.exists()) return null
@@ -49,8 +58,19 @@ internal object AgendaWidgetStore {
         }
     }
 
-    fun saveFetched(context: Context, serverUrl: String, calendars: JSONArray, events: JSONArray, at: Long) {
+    /** saveFetched replaces the copy, unless the copy was dropped since the
+     * refresh began ([generation]); it answers whether it did. */
+    fun saveFetched(
+        context: Context,
+        serverUrl: String,
+        calendars: JSONArray,
+        events: JSONArray,
+        at: Long,
+        expectedGeneration: Long
+    ): Boolean = synchronized(lock) {
+        if (dropGeneration != expectedGeneration) return false
         write(context, AgendaSnapshot(serverUrl, at, 0, false, calendars, events))
+        true
     }
 
     /** markFailed keeps the copy and notes that it could not be renewed. */
@@ -60,11 +80,13 @@ internal object AgendaWidgetStore {
     }
 
     /** markSignedOut drops every event and remembers why the widget is empty. */
-    fun markSignedOut(context: Context, serverUrl: String) {
+    fun markSignedOut(context: Context, serverUrl: String) = synchronized(lock) {
+        dropGeneration += 1
         write(context, AgendaSnapshot(serverUrl, 0, 0, true, JSONArray(), JSONArray()))
     }
 
     fun clear(context: Context) = synchronized(lock) {
+        dropGeneration += 1
         file(context).delete()
     }
 

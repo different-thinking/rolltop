@@ -26,6 +26,9 @@ class PushSubscriptionWorker(context: Context, params: WorkerParameters) : Worke
         }
         if (owner > 0 && owner != baseline.userId) {
             NativePushRegistration.unregister(context)
+            // Somebody else is signed in now, not nobody: unregistering
+            // dropped the previous user's agenda, so read this user's.
+            AgendaWidget.requestRefresh(context)
             return Result.success()
         }
 

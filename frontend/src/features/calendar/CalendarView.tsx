@@ -164,6 +164,7 @@ export function CalendarView({
   userID,
   location,
   navigate,
+  replaceRoute,
   notificationsEnabled,
   toggleNotifications,
   addToast
@@ -172,6 +173,9 @@ export function CalendarView({
   userID: number;
   location: LocationState;
   navigate: (url: string) => void;
+  /** replaceRoute drops a link's one-time query without a history entry of
+   * its own, which Back would return to and open the dialog again from. */
+  replaceRoute: (url: string) => void;
   /** notificationsEnabled and toggleNotifications are the browser
    * notification switch the account menu owns; the calendar asks the question
    * once and hands the answer to the same switch. */
@@ -738,8 +742,8 @@ export function CalendarView({
       setDialogProblem("");
       setDialog({ event: null, day: routeDay, formKey: `new-${routeDay.getTime()}` });
     }
-    navigate(location.path);
-  }, [loading, intentEventID, intentCreate, shownEvents, writableCalendars.length, routeDay, navigate, location.path]);
+    replaceRoute(location.path);
+  }, [loading, intentEventID, intentCreate, shownEvents, writableCalendars.length, routeDay, replaceRoute, location.path]);
   const todayKey = localDateKey(now);
   const weekLabel =
     view === "day"

@@ -42,6 +42,7 @@ class AgendaWidgetWorker(context: Context, params: WorkerParameters) : Worker(co
             AgendaWidgetStore.clear(context)
             return Outcome.DONE
         }
+        val generation = AgendaWidgetStore.generation()
         val calendars = fetchArray(context, "$base/api/calendar/calendars", "calendars")
         val events = when (calendars) {
             is Fetch.Ok -> fetchArray(context, eventsUrl(base), "events")
@@ -60,8 +61,10 @@ class AgendaWidgetWorker(context: Context, params: WorkerParameters) : Worker(co
                 }
                 // The server may have been changed while the requests were out;
                 // a copy read from the old one is not this server's calendar.
+                // So may the user have signed out: the answer then belongs to
+                // the session that ended, and saveFetched refuses it.
                 if (RolltopPrefs.serverUrl(context) == base) {
-                    AgendaWidgetStore.saveFetched(context, base, keptCalendars, keptEvents, now)
+                    AgendaWidgetStore.saveFetched(context, base, keptCalendars, keptEvents, now, generation)
                 }
                 Outcome.DONE
             }

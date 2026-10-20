@@ -108,7 +108,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         // Whatever was just entered in the calendar belongs on the home screen.
-        AgendaWidget.requestRefresh(this)
+        // A rotation stops the activity too, and leaves nothing.
+        if (!isChangingConfigurations) AgendaWidget.requestRefresh(this)
         super.onStop()
     }
 

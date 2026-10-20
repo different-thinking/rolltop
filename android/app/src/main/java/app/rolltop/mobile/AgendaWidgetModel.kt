@@ -290,7 +290,18 @@ internal object AgendaWidgetModel {
      * an intent is not where the app takes a destination from on trust. */
     fun calendarTarget(baseUrl: String, path: String): String? {
         if (!path.startsWith("/calendar/") && path != "/calendar") return null
-        return RolltopPrefs.resolveInternalUrl(baseUrl, path)
+        val resolved = RolltopPrefs.resolveInternalUrl(baseUrl, path) ?: return null
+        // Asked again of the normalized address: a browser removes dot
+        // segments, so "/calendar/../settings" passes the prefix and lands
+        // elsewhere.
+        val normalized = try {
+            java.net.URI(resolved).normalize()
+        } catch (_: Exception) {
+            return null
+        }
+        val normalizedPath = normalized.path.orEmpty()
+        if (!normalizedPath.startsWith("/calendar/") && normalizedPath != "/calendar") return null
+        return normalized.toASCIIString()
     }
 
     fun dayStart(day: LocalDate, zone: ZoneId): Instant = day.atStartOfDay(zone).toInstant()

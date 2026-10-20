@@ -247,6 +247,7 @@ class AgendaWidgetModelTest {
             AgendaWidgetModel.calendarTarget(base, "/calendar/2026-10-20?event=7")
         )
         assertNull(AgendaWidgetModel.calendarTarget(base, "/mail/relevant"))
+        assertNull(AgendaWidgetModel.calendarTarget(base, "/calendar/../settings"))
         assertNull(AgendaWidgetModel.calendarTarget(base, "//evil.example/calendar/x"))
         assertNull(AgendaWidgetModel.calendarTarget(base, "https://evil.example/calendar/x"))
         assertNull(AgendaWidgetModel.calendarTarget("", "/calendar/2026-10-20"))

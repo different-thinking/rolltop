@@ -24,6 +24,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.Locale
 
 /**
@@ -177,7 +178,14 @@ internal object AgendaWidget {
         }
         if (snapshot.failedAt > 0 && snapshot.fetchedAt > 0) {
             val fetched = Instant.ofEpochMilli(snapshot.fetchedAt).atZone(ZoneId.systemDefault())
-            parts += resources.getString(R.string.widget_agenda_stale, formats.time.format(fetched))
+            // A copy from an earlier day names the day too: "as of 14:00" on a
+            // copy three days old reads as this afternoon's.
+            val at = formats.time.format(fetched)
+            val day = fetched.toLocalDate()
+            parts += resources.getString(
+                R.string.widget_agenda_stale,
+                if (day == plan.today) at else "${formats.dayName(day)} ${day.dayOfMonth} $at"
+            )
         }
         return parts.joinToString(" · ")
     }
@@ -361,18 +369,23 @@ internal object AgendaWidget {
     /** spanBar draws where one appointment sits inside its box's span. It is a
      * bitmap because a layout cannot be given a weight from a RemoteViews. */
     private fun spanBar(from: Float, to: Float, color: Int): Bitmap {
-        val width = 240
-        val height = 8
+        // Small on purpose: every row of an update travels in one parcel, and
+        // the image view stretches it to the row's width anyway.
+        val width = 96
+        val height = 4
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         val radius = height / 2f
         paint.color = COLOR_TRACK
         canvas.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), radius, radius, paint)
-        val left = (from * width).coerceIn(0f, width.toFloat())
+        // The left edge leaves room for the bar's minimum width, or an
+        // appointment starting in the last few percent of its box (a short one
+        // at the end of a long one) would ask coerceIn for an empty range.
+        val left = (from * width).coerceIn(0f, (width - height).toFloat())
         val right = (to * width).coerceIn(left + height, width.toFloat())
         paint.color = color
-        canvas.drawRoundRect(RectF(left.coerceAtMost(right - height), 0f, right, height.toFloat()), radius, radius, paint)
+        canvas.drawRoundRect(RectF(left, 0f, right, height.toFloat()), radius, radius, paint)
         return bitmap
     }
 
@@ -443,15 +456,25 @@ internal object AgendaWidget {
         context.resources.configuration.locales.get(0) ?: Locale.getDefault()
 
     private class Formats(context: Context, private val locale: Locale) {
-        val time: DateTimeFormatter = DateTimeFormatter.ofPattern(
-            DateFormat.getBestDateTimePattern(locale, if (DateFormat.is24HourFormat(context)) "Hm" else "hm"),
-            locale
+        val time: DateTimeFormatter = bestPattern(
+            if (DateFormat.is24HourFormat(context)) "Hm" else "hm",
+            DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
         )
-        val title: DateTimeFormatter = DateTimeFormatter.ofPattern(
-            DateFormat.getBestDateTimePattern(locale, "EEEEdMMMM"),
-            locale
+        val title: DateTimeFormatter = bestPattern(
+            "EEEEdMMMM",
+            DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL)
         )
         private val weekday: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", locale)
+
+        /** bestPattern asks ICU for the locale's pattern and falls back when
+         * java.time cannot read it: ICU answers some locales with letters
+         * (the day period "B") that older java.time rejects, and a widget that
+         * throws while it is drawn is a widget that is never drawn again. */
+        private fun bestPattern(skeleton: String, fallback: DateTimeFormatter): DateTimeFormatter = try {
+            DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, skeleton), locale)
+        } catch (_: IllegalArgumentException) {
+            fallback.withLocale(locale)
+        }
 
         /** dayName is the short weekday in capitals, without the full stop
          * German puts after it: "DI", "MON". */
