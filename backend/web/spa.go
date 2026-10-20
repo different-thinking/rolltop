@@ -34,6 +34,9 @@ const immutableFrontendAssetCacheControl = "public, max-age=31536000, immutable"
 // install whichever manifest the page links, keyed by that manifest's id, so the
 // calendar's pages link their own manifest and every other page keeps the mail
 // one. Both are per-user (handleWebManifest) and served from the same table.
+// The calendar's scope is /calendar, not the origin: Chrome on Android treats a
+// page as already installed when any installed app's scope covers its
+// start_url, so two apps that both claim / can never both be installed there.
 const (
 	mailWebManifestPath     = "/manifest.webmanifest"
 	calendarWebManifestPath = "/calendar.webmanifest"

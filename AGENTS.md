@@ -283,6 +283,18 @@ site and in review.
   a server that has served the app to this install before is unreachable, not
   wrong, so the reader gets "offline" with Try again, and the form only as the
   second choice.
+- **The calendar installs as an app of its own, and its scope is what lets it.**
+  `calendar.webmanifest` (id `/calendar`) is linked from the calendar's pages
+  (`webManifestPathForRoute`, `syncDocumentManifest`). Its scope is
+  `/calendar`, never `/`: Chrome on Android counts a page as already installed
+  when any installed app's scope covers its start_url, so with both apps
+  claiming the origin the second one can never be installed there. The mail
+  app keeps `/` because its pages share no narrower prefix, which means on
+  Android the calendar has to be installed before the mail app - a reader who
+  already has the mail app removes it, installs the calendar from `/calendar`,
+  then installs the mail app again. The same scope is why the calendar's
+  manifest carries no shortcuts to mail or contacts: a browser drops a
+  shortcut outside its manifest's scope.
 - **A calendar reminder is the provider's reminder, delivered; Rolltop never
   invents one and never writes one back.** `calendar_events.reminders` mirrors
   the popup reminders an event asks for (`store.EncodeCalendarReminders`:

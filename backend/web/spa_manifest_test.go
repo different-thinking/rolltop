@@ -157,10 +157,26 @@ func TestShippedManifestsAreTwoAppsWithTheirOwnIcons(t *testing.T) {
 	if webManifestPathForRoute(mail.StartURL) != mailWebManifestPath {
 		t.Fatalf("mail start_url %q does not link the mail manifest", mail.StartURL)
 	}
+	// Chrome on Android refuses to install an app whose start_url an installed
+	// app's scope already covers, and the mail app's scope is the whole origin.
+	// The calendar can only ever be the second app there if its own scope stays
+	// clear of the mail app's start_url, so installing it first and the mail app
+	// second gives two apps.
+	if !strings.HasPrefix(calendar.StartURL, calendar.Scope) {
+		t.Fatalf("calendar start_url %q is outside its scope %q", calendar.StartURL, calendar.Scope)
+	}
+	if calendar.Scope == "/" || strings.HasPrefix(mail.StartURL, calendar.Scope) {
+		t.Fatalf("calendar scope %q covers the mail app's start_url %q", calendar.Scope, mail.StartURL)
+	}
 	for name, m := range map[string]manifest{"manifest.webmanifest": mail, "calendar.webmanifest": calendar} {
 		var png512, maskable bool
 		icons := append([]icon{}, m.Icons...)
 		for _, shortcut := range m.Shortcuts {
+			// Browsers drop a shortcut whose url lies outside the manifest's
+			// scope, so one there is a shortcut nobody ever sees.
+			if !strings.HasPrefix(shortcut.URL, m.Scope) {
+				t.Fatalf("%s shortcut %q is outside its scope %q", name, shortcut.URL, m.Scope)
+			}
 			icons = append(icons, shortcut.Icons...)
 		}
 		for _, ic := range icons {
