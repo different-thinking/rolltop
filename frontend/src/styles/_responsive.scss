@@ -670,7 +670,8 @@
     display: contents;
   }
 
-  .thread-summary > :first-child {
+  .thread-summary > .avatar,
+  .thread-summary > .thread-brand-icon {
     grid-column: 1;
     grid-row: 1;
   }
@@ -704,6 +705,12 @@
     grid-row: 1;
     align-self: start;
     gap: 2px;
+  }
+
+  // A collapsed card is one line beside the avatar, so the date lines up with
+  // the name the way the collapsed card's own centring puts it.
+  .thread-card.collapsed .thread-meta {
+    align-self: center;
   }
 
   .thread-chips {
