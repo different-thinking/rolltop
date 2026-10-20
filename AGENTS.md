@@ -292,7 +292,9 @@ site and in review.
   app keeps `/` because its pages share no narrower prefix, which means on
   Android the calendar has to be installed before the mail app - a reader who
   already has the mail app removes it, installs the calendar from `/calendar`,
-  then installs the mail app again.
+  then installs the mail app again. The same scope is why the calendar's
+  manifest carries no shortcuts to mail or contacts: a browser drops a
+  shortcut outside its manifest's scope.
 - **A calendar reminder is the provider's reminder, delivered; Rolltop never
   invents one and never writes one back.** `calendar_events.reminders` mirrors
   the popup reminders an event asks for (`store.EncodeCalendarReminders`:

@@ -172,6 +172,11 @@ func TestShippedManifestsAreTwoAppsWithTheirOwnIcons(t *testing.T) {
 		var png512, maskable bool
 		icons := append([]icon{}, m.Icons...)
 		for _, shortcut := range m.Shortcuts {
+			// Browsers drop a shortcut whose url lies outside the manifest's
+			// scope, so one there is a shortcut nobody ever sees.
+			if !strings.HasPrefix(shortcut.URL, m.Scope) {
+				t.Fatalf("%s shortcut %q is outside its scope %q", name, shortcut.URL, m.Scope)
+			}
 			icons = append(icons, shortcut.Icons...)
 		}
 		for _, ic := range icons {

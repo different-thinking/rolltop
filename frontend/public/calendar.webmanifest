@@ -39,29 +39,5 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ],
-  "shortcuts": [
-    {
-      "name": "Mail",
-      "url": "/mail/relevant",
-      "icons": [
-        {
-          "src": "/icons/mail.svg",
-          "sizes": "any",
-          "type": "image/svg+xml"
-        }
-      ]
-    },
-    {
-      "name": "Contacts",
-      "url": "/contacts",
-      "icons": [
-        {
-          "src": "/icons/contacts.svg",
-          "sizes": "any",
-          "type": "image/svg+xml"
-        }
-      ]
-    }
   ]
 }
