@@ -3,6 +3,7 @@
 // mail without reading its title, and the manifest the browser would install
 // from there, so the calendar installs as an app of its own.
 
+import { forgetInstallPrompt } from "./installPrompt";
 import { organizerRoute } from "./routes";
 
 /** AppArea is one of the three areas that carry an icon of their own. */
@@ -73,5 +74,7 @@ export function syncDocumentManifest(path: string): void {
   const link = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
   if (!link) return;
   const href = appManifestURL(appAreaForPath(path));
-  if (link.getAttribute("href") !== href) link.setAttribute("href", href);
+  if (link.getAttribute("href") === href) return;
+  link.setAttribute("href", href);
+  forgetInstallPrompt();
 }

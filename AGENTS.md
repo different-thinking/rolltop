@@ -294,7 +294,14 @@ site and in review.
   already has the mail app removes it, installs the calendar from `/calendar`,
   then installs the mail app again. The same scope is why the calendar's
   manifest carries no shortcuts to mail or contacts: a browser drops a
-  shortcut outside its manifest's scope.
+  shortcut outside its manifest's scope. Chrome's own menu entry is not enough
+  for the second app either: up to Chrome 157 it calls an origin "already
+  installed" as soon as any app on it is, whatever the scopes say. The page's
+  own prompt is decided by the manifest's start_url instead, so the account
+  menu offers it (`lib/installPrompt.ts`): the offer is held from before the
+  first render, spent on one prompt, and dropped whenever
+  `syncDocumentManifest` swaps the manifest, because an offer made for the
+  other app would install the one the reader just left.
 - **A calendar reminder is the provider's reminder, delivered; Rolltop never
   invents one and never writes one back.** `calendar_events.reminders` mirrors
   the popup reminders an event asks for (`store.EncodeCalendarReminders`:
