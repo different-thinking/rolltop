@@ -4,7 +4,7 @@
 // any second app on an origin that already has one, while the page's own
 // prompt is decided by the manifest it links and installs it.
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 /** BeforeInstallPromptEvent is the part of Chrome's event this file uses. */
 type BeforeInstallPromptEvent = Event & {
@@ -17,6 +17,9 @@ let offer: BeforeInstallPromptEvent | null = null;
 // which is what the menu names, whatever route the reader is on by then.
 let offerManifest: string | null = null;
 const listeners = new Set<() => void>();
+// Whether this page shows the account menu, the only place the held offer can
+// be made from. Chrome's own install banner is left alone everywhere else.
+let menuShown = false;
 
 function changed(next: BeforeInstallPromptEvent | null, manifest: string | null = null) {
   if (offer === next) return;
@@ -32,15 +35,34 @@ function linkedManifest(target: Window): string | null {
 /**
  * watchInstallPrompt starts listening before the app renders, because Chrome
  * fires the offer once per manifest as soon as it has checked the page, which
- * can be before React has mounted anything that could ask for it.
+ * can be before React has mounted anything that could ask for it. Until the
+ * menu mounts, menuExpected says whether it will: the startup data naming a
+ * signed-in reader is what puts the account menu on the page.
  */
-export function watchInstallPrompt(target: Window = window): void {
+export function watchInstallPrompt(target: Window = window, menuExpected = false): void {
+  menuShown = menuExpected;
   target.addEventListener("beforeinstallprompt", (event) => {
+    // A page without the account menu - the sign-in, setup and password reset
+    // pages - has nowhere to offer it, so Chrome's own banner stays.
+    if (!menuShown) return;
     // Held rather than shown: the reader asks for it from the account menu.
     event.preventDefault();
     changed(event as BeforeInstallPromptEvent, linkedManifest(target));
   });
   target.addEventListener("appinstalled", () => changed(null));
+}
+
+/**
+ * useInstallMenu marks the page as showing the account menu for as long as
+ * the calling component is mounted, so the next offer is held for it.
+ */
+export function useInstallMenu(): void {
+  useEffect(() => {
+    menuShown = true;
+    return () => {
+      menuShown = false;
+    };
+  }, []);
 }
 
 /**

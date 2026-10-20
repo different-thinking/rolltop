@@ -14,7 +14,7 @@ function installEvent(outcome: "accepted" | "dismissed" = "accepted") {
 }
 
 const target = new EventTarget() as unknown as Window;
-watchInstallPrompt(target);
+watchInstallPrompt(target, true);
 
 afterEach(() => {
   forgetInstallPrompt();
@@ -63,11 +63,20 @@ describe("install prompt", () => {
     expect(installOffered()).toBe(false);
   });
 
+  it("leaves Chrome's own banner alone on a page without the account menu", () => {
+    const page = new EventTarget() as unknown as Window;
+    watchInstallPrompt(page, false);
+    const event = installEvent();
+    page.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(installOffered()).toBe(false);
+  });
+
   it("remembers which manifest the offer installs", () => {
     document.head.innerHTML = '<link rel="manifest" href="/calendar.webmanifest">';
     const page = new EventTarget() as unknown as Window & { document: Document };
     Object.defineProperty(page, "document", { value: document });
-    watchInstallPrompt(page);
+    watchInstallPrompt(page, true);
     page.dispatchEvent(installEvent());
     expect(installOfferManifest()).toBe("/calendar.webmanifest");
     forgetInstallPrompt();

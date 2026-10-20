@@ -13,7 +13,7 @@ import { appAreaForPath, appManifestURL } from "../../lib/appIcon";
 import { folderTree, folderTreeUnreadCount, nodeContainsMailbox, type FolderNode } from "../../lib/folders";
 import { messageCountLabel } from "../../lib/format";
 import { shouldIgnoreMailShortcut } from "../../lib/keyboard";
-import { promptInstall, useInstallOffer } from "../../lib/installPrompt";
+import { promptInstall, useInstallMenu, useInstallOffer } from "../../lib/installPrompt";
 import { useServerReachable } from "../../lib/offline";
 import { mailRoute, mailRouteView, mailURL, organizerRoute, organizerURL, searchRoute, searchURL, currentLocation } from "../../lib/routes";
 import type { OrganizerRoute } from "../../lib/routes";
@@ -775,6 +775,7 @@ function Topbar({
   const dueInvoices = useDueInvoices(mailGeneration);
   // Named after the manifest the offer was made for, not the route: the route
   // changes a render before the manifest link follows it and drops the offer.
+  useInstallMenu();
   const installOffer = useInstallOffer();
   const installOffered = installOffer !== null;
   const installsCalendar = installOffer

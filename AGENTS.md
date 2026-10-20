@@ -301,7 +301,11 @@ site and in review.
   menu offers it (`lib/installPrompt.ts`): the offer is held from before the
   first render, spent on one prompt, and dropped whenever
   `syncDocumentManifest` swaps the manifest, because an offer made for the
-  other app would install the one the reader just left.
+  other app would install the one the reader just left. It is held only on a
+  page that shows the account menu (`useInstallMenu`, and the startup data
+  naming a reader before it mounts): on the sign-in, setup and reset pages
+  Chrome's own banner is the only way to install, and cancelling it there
+  would leave none.
 - **A calendar reminder is the provider's reminder, delivered; Rolltop never
   invents one and never writes one back.** `calendar_events.reminders` mirrors
   the popup reminders an event asks for (`store.EncodeCalendarReminders`:

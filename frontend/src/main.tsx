@@ -8,6 +8,7 @@ import "@fontsource/fraunces/latin-700.css";
 import App from "./App";
 import { Icon, LogoMark } from "./components/Icon";
 import { watchInstallPrompt } from "./lib/installPrompt";
+import { embeddedBootstrap } from "./lib/startup";
 import { installRolltopPluginIconRuntime } from "./plugins/shared/iconRuntime";
 import { installRolltopPluginReactRuntime } from "./plugins/shared/reactRuntime";
 import "./styles.scss";
@@ -18,7 +19,7 @@ installRolltopPluginReactRuntime({ React, ReactDOM: { createPortal } });
 installRolltopPluginIconRuntime({ Icon, LogoMark });
 // Before the first render: Chrome makes its install offer once per manifest,
 // and may make it before anything in the app is mounted to hear it.
-watchInstallPrompt();
+watchInstallPrompt(window, Boolean(embeddedBootstrap()?.user));
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
