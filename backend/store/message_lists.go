@@ -301,7 +301,10 @@ func (s *Store) archivedMailboxExclusion(ctx context.Context, userID int64, excl
 
 // allMailSource and snoozeJoin are the FROM text every "mail still in play"
 // query shares. Keeping them in one place is what lets a list and the whole-view
-// selection made from it stay over the same rows.
+// selection made from it stay over the same rows. ListMailboxesForUser states
+// the snooze match a second time, split into its keyed and keyless halves so
+// each can use an index; a change to the match here has to be made there too,
+// or the folder counts stop agreeing with the lists they count.
 const allMailSource = "\n\t\t\tJOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id"
 
 const snoozeJoin = `LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id

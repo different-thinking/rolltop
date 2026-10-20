@@ -447,30 +447,66 @@ func (s *Store) GetMailboxByRoleForAccount(ctx context.Context, userID, accountI
 }
 
 // ListMailboxesForUser returns folder summaries with local, remote, and indexing counters for chrome/settings.
+//
+// This is on the path of every app start - the shell embeds the folder list
+// before its first byte leaves the server - so each counter is aggregated on
+// its own and joined to the folders afterwards. Joining blobs and snoozes to
+// every message row and grouping once carried all of a tenant's mail through
+// three joins to read five numbers, which was most of a second for a mailbox
+// of a few hundred thousand messages. The hidden rows are found from the few
+// that can be hidden (active snoozes, duplicate pointers) rather than by
+// testing every row. The snooze match is the one snoozeJoin states - a row's
+// thread key, or "id:<id>" for a row without one - split into those two halves
+// so each can use an index, and the UNION counts a row that is both snoozed
+// and a duplicate once.
 func (s *Store) ListMailboxesForUser(ctx context.Context, userID int64) ([]MailboxSummary, error) {
+	now := nowUnix()
 	rows, err := s.mustDataDB(ctx, userID).QueryContext(ctx, `SELECT mb.id, mb.user_id, mb.account_id, mb.name, mb.sync_mode, mb.role, mb.icon,
 			mb.show_in_sidebar, mb.show_in_all_mail, mb.include_in_search, mb.search_index_purged, mb.search_index_state_known, mb.uidvalidity, mb.last_uid, mb.created_at, mb.updated_at,
 			mb.remote_message_count, mb.remote_unread_count, mb.remote_uid_next, mb.status_checked_at,
 				ma.email, ma.label,
-				count(m.id),
-				COALESCE(sum(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(sum(CASE WHEN m.blob_path != '' AND b.kind IN ('message', 'message-cache') AND b.size > 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(sum(CASE WHEN sn.id IS NOT NULL OR m.duplicate_of_message_id <> 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(sum(CASE WHEN (sn.id IS NOT NULL OR m.duplicate_of_message_id <> 0) AND m.is_read = 0 THEN 1 ELSE 0 END), 0)
+				COALESCE(local_counts.total, 0),
+				COALESCE(local_counts.unread, 0),
+				COALESCE(cached_counts.total, 0),
+				COALESCE(hidden_counts.total, 0),
+				COALESCE(hidden_counts.unread, 0)
 			FROM mailboxes mb
 			JOIN mail_accounts ma ON ma.id = mb.account_id AND ma.user_id = mb.user_id
-			LEFT JOIN messages m ON m.user_id = mb.user_id AND m.mailbox_id = mb.id
-			LEFT JOIN blobs b ON b.id = m.blob_id AND b.user_id = m.user_id
-			LEFT JOIN message_snoozes sn ON sn.user_id = m.user_id
-				AND sn.thread_key = COALESCE(NULLIF(m.thread_key, ''), 'id:' || m.id)
-				AND sn.snoozed_until > ?
+			LEFT JOIN (
+				SELECT m.mailbox_id, count(*) AS total, sum(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END) AS unread
+				FROM messages m
+				WHERE m.user_id = ?
+				GROUP BY m.mailbox_id
+			) local_counts ON local_counts.mailbox_id = mb.id
+			LEFT JOIN (
+				SELECT m.mailbox_id, count(*) AS total
+				FROM messages m
+				JOIN blobs b ON b.id = m.blob_id AND b.user_id = m.user_id
+				WHERE m.user_id = ? AND m.blob_path <> '' AND b.kind IN ('message', 'message-cache') AND b.size > 0
+				GROUP BY m.mailbox_id
+			) cached_counts ON cached_counts.mailbox_id = mb.id
+			LEFT JOIN (
+				SELECT h.mailbox_id, count(*) AS total, sum(CASE WHEN h.is_read = 0 THEN 1 ELSE 0 END) AS unread
+				FROM (
+					SELECT m.id, m.mailbox_id, m.is_read
+					FROM messages m
+					WHERE m.user_id = ? AND m.duplicate_of_message_id <> 0
+					UNION
+					SELECT m.id, m.mailbox_id, m.is_read
+					FROM message_snoozes sn
+					JOIN messages m ON m.user_id = sn.user_id AND m.thread_key = sn.thread_key
+					WHERE sn.user_id = ? AND sn.snoozed_until > ? AND sn.thread_key <> ''
+					UNION
+					SELECT m.id, m.mailbox_id, m.is_read
+					FROM message_snoozes sn
+					JOIN messages m ON m.user_id = sn.user_id AND m.thread_key = '' AND sn.thread_key = 'id:' || m.id
+					WHERE sn.user_id = ? AND sn.snoozed_until > ?
+				) h
+				GROUP BY h.mailbox_id
+			) hidden_counts ON hidden_counts.mailbox_id = mb.id
 			WHERE mb.user_id = ?
-			-- ma.id joins the grouping so the account columns above are
-			-- functionally dependent on it. PostgreSQL derives that dependency
-			-- only from a grouped primary key, and only per table: grouping by
-			-- mb.id alone covers every mb column and none of ma's.
-			GROUP BY mb.id, ma.id
-			ORDER BY CASE WHEN mb.role = 'inbox' OR lower(mb.name) = 'inbox' THEN 0 ELSE 1 END, ma.email, lower(mb.name)`, nowUnix(), userID)
+			ORDER BY CASE WHEN mb.role = 'inbox' OR lower(mb.name) = 'inbox' THEN 0 ELSE 1 END, ma.email, lower(mb.name)`,
+		userID, userID, userID, userID, now, userID, now, userID)
 	if err != nil {
 		return nil, err
 	}
