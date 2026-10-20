@@ -646,8 +646,93 @@
     }
   }
 
+  // The date, star and menu keep about a third of a phone's width beside the
+  // sender, and everything under the name used to share the column left over:
+  // the address, each chip and the recipient line arrived one to a line, cut
+  // to a few characters. Only the name and address stay beside the avatar
+  // now; the chips and the recipient line take lines of their own under them,
+  // the card's full width, starting where the body below them starts. The
+  // wrappers dissolve so their parts can be placed on the card's own grid.
   .thread-summary {
     position: relative;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    column-gap: 10px;
+    row-gap: 0;
+    padding: 12px 12px 6px;
+  }
+
+  .thread-card.collapsed .thread-summary {
+    padding: 10px 12px;
+  }
+
+  .thread-person,
+  .thread-from {
+    display: contents;
+  }
+
+  .thread-summary > :first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  // Name above address, each one line: a long name no longer pushes the
+  // address off the card, and the full address is one tap away on its card.
+  // A button sizes to its content rather than to its grid area, so it is told
+  // the width it has, or a long name runs on under the date. It is a block
+  // rather than a flex column because Chromium lays a button's children out
+  // inside an anonymous box of its own, which a flex stretch never reaches.
+  .thread-sender {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+    width: 100%;
+    display: block;
+
+    > span {
+      display: block;
+      @include truncate;
+    }
+
+    .thread-email {
+      margin-top: 1px;
+      font-size: 13px;
+    }
+  }
+
+  .thread-meta {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: start;
+    gap: 2px;
+  }
+
+  .thread-chips {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+
+    // The row's gap spaces the chips; a plugin's badge brings margins of its
+    // own for sitting in running text, which here only push the last chip
+    // onto a second line. Plugin stylesheets load after this one, hence the
+    // extra class to outrank a single-class rule of theirs.
+    .thread-summary & > * {
+      margin-inline: 0;
+    }
+
+    &:empty {
+      display: none;
+    }
+  }
+
+  .thread-recipients {
+    grid-column: 1 / -1;
+  }
+
+  .thread-collapsed-snippet {
+    grid-column: 2 / -1;
   }
 
   .thread-body {

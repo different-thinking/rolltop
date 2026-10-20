@@ -167,6 +167,12 @@
   min-width: 0;
 }
 
+// The chips are a group only so a phone can move them as one (see
+// _responsive.scss); here they are items of the sender line like the name.
+.thread-chips {
+  display: contents;
+}
+
 .reported-authentication {
   display: inline-flex;
   align-items: center;
@@ -1094,6 +1100,9 @@
   display: inline-flex;
   flex-wrap: wrap;
   align-items: baseline;
+  // The base button centres its content, which put a wrapped name in the
+  // middle of the line above its address.
+  justify-content: flex-start;
   gap: 4px;
   min-width: 0;
   max-width: 100%;

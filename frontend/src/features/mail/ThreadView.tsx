@@ -2238,30 +2238,36 @@ export function ThreadView({
                           <HighlightedText text={item.sender_email} query={highlightQuery} terms={highlightTerms} />
                         </span>
                       </AddressLink>
-                      <MessageSenderSecurityCaution indicators={item.security_indicators} />
-                      <MessageCategoryPill category={item.message.category} categories={mailCategories} />
-                      {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
-                      {item.message.invoice ? <InvoiceChip invoice={item.message.invoice} /> : null}
-                      {annotationNodes}
-                      <OneClickUnsubscribeInlineAction
-                        item={item}
-                        plugins={pluginSet}
-                        busy={unsubscribingID === item.message.id}
-                        sentLabel={unsubscribeSent}
-                        onRequest={requestUnsubscribe}
-                      />
-                      <ReportedAuthenticationIndicators indicators={item.security_indicators} />
-                      {securityEnabled && item.message.is_encrypted ? (
-                        <PGPEncryptionPill
-                          state={pgpBody}
-                          hasUnlockedKey={hasUnlockedSecurityKey}
-                          onOpen={() => {
-                            if (!hasUnlockedSecurityKey) void openSecurityUnlockForMessage(item);
-                            else void openPGPMessage(item);
-                          }}
+                      {/* The chips are one group so a phone can give them a line
+                          of their own under the sender; on a wide screen the
+                          group is display: contents and they stay on the sender
+                          line beside the name. */}
+                      <div className="thread-chips">
+                        <MessageSenderSecurityCaution indicators={item.security_indicators} />
+                        <MessageCategoryPill category={item.message.category} categories={mailCategories} />
+                        {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
+                        {item.message.invoice ? <InvoiceChip invoice={item.message.invoice} /> : null}
+                        {annotationNodes}
+                        <OneClickUnsubscribeInlineAction
+                          item={item}
+                          plugins={pluginSet}
+                          busy={unsubscribingID === item.message.id}
+                          sentLabel={unsubscribeSent}
+                          onRequest={requestUnsubscribe}
                         />
-                      ) : null}
-                      {pgpSignatureVisible ? <PGPSignaturePill encrypted={item.message.is_encrypted} state={pgpBody} /> : null}
+                        <ReportedAuthenticationIndicators indicators={item.security_indicators} />
+                        {securityEnabled && item.message.is_encrypted ? (
+                          <PGPEncryptionPill
+                            state={pgpBody}
+                            hasUnlockedKey={hasUnlockedSecurityKey}
+                            onOpen={() => {
+                              if (!hasUnlockedSecurityKey) void openSecurityUnlockForMessage(item);
+                              else void openPGPMessage(item);
+                            }}
+                          />
+                        ) : null}
+                        {pgpSignatureVisible ? <PGPSignaturePill encrypted={item.message.is_encrypted} state={pgpBody} /> : null}
+                      </div>
                     </div>
                     <MessageDetailsToggle
                       recipients={<RecipientLine item={item} actions={addressCardActions} highlightQuery={highlightQuery} highlightTerms={highlightTerms} />}
