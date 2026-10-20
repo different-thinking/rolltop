@@ -38,6 +38,16 @@ describe("install prompt", () => {
     expect(await promptInstall()).toBe(false);
   });
 
+  it("answers a prompt the browser refuses as not installed", async () => {
+    const event = installEvent();
+    event.prompt = vi.fn(async () => {
+      throw new DOMException("The prompt() method may only be called once.", "InvalidStateError");
+    });
+    target.dispatchEvent(event);
+    expect(await promptInstall()).toBe(false);
+    expect(installOffered()).toBe(false);
+  });
+
   it("withdraws the offer once the app is installed", () => {
     target.dispatchEvent(installEvent());
     target.dispatchEvent(new Event("appinstalled"));

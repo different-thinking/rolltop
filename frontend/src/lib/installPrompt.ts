@@ -51,15 +51,21 @@ export function installOffered(): boolean {
 
 /**
  * promptInstall shows the browser's install dialog. An offer is good for one
- * prompt, so it is spent whatever the reader answers.
+ * prompt, so it is spent whatever the reader answers - and whether or not the
+ * browser still honours it: Chrome rejects the prompt of an offer it has since
+ * withdrawn, which installs nothing, and that is all the caller needs to know.
  */
 export async function promptInstall(): Promise<boolean> {
   const current = offer;
   if (!current) return false;
   changed(null);
-  await current.prompt();
-  const choice = await current.userChoice;
-  return choice.outcome === "accepted";
+  try {
+    await current.prompt();
+    const choice = await current.userChoice;
+    return choice.outcome === "accepted";
+  } catch {
+    return false;
+  }
 }
 
 function subscribe(listener: () => void) {
