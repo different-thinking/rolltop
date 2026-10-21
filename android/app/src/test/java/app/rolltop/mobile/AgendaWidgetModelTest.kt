@@ -69,9 +69,10 @@ class AgendaWidgetModelTest {
             now
         )
 
-        val days = plan.rows.filterIsInstance<AgendaRow.Single>().map { it.day }
+        val days = plan.rows.filterIsInstance<AgendaRow.Event>().map { it.day }
         assertEquals(listOf(LocalDate.of(2026, 10, 20), LocalDate.of(2026, 10, 23)), days)
-        assertEquals(1, plan.rows.count { it is AgendaRow.Divider })
+        // Today is the widget's own title; only the days after it are headed.
+        assertEquals(listOf(LocalDate.of(2026, 10, 23)), plan.rows.filterIsInstance<AgendaRow.Heading>().map { it.day })
     }
 
     @Test
@@ -129,31 +130,19 @@ class AgendaWidgetModelTest {
     }
 
     @Test
-    fun appointmentsAtTheSameTimeAreOneBoxWithTheirShareOfIt() {
-        val review = timed("Sprint-Review", "2026-10-20T10:00", "2026-10-20T11:00", calendarId = 1)
-        val kita = timed("Elterngespräch Kita", "2026-10-20T10:30", "2026-10-20T11:30", calendarId = 2)
-        val call = timed("Rückruf Steuerberater", "2026-10-20T11:00", "2026-10-20T11:15", calendarId = 3)
-        val dentist = timed("Zahnarzt", "2026-10-20T16:30", "2026-10-20T17:15", calendarId = 3)
+    fun appointmentsThatBeginWhileAnotherRunsAreMarkedNotBoxed() {
+        val block = timed("Buchhaltung", "2026-10-21T13:00", "2026-10-21T16:00", calendarId = 1)
+        val call = timed("comTeam", "2026-10-21T13:30", "2026-10-21T15:15", calendarId = 2)
+        val talk = timed("HaloPSA", "2026-10-21T14:35", "2026-10-21T15:05", calendarId = 2)
+        val climbing = timed("Klettern", "2026-10-21T16:00", "2026-10-21T19:00", calendarId = 3)
 
-        val plan = AgendaWidgetModel.plan(listOf(dentist, call, kita, review), now)
+        val plan = AgendaWidgetModel.plan(listOf(climbing, talk, call, block), now)
 
-        val head = plan.rows.filterIsInstance<AgendaRow.GroupHead>().single()
-        assertEquals(3, head.count)
-        assertEquals(3, head.calendarCount)
-        assertEquals(review.start, head.start)
-        assertEquals(kita.end, head.end)
-        val members = plan.rows.filterIsInstance<AgendaRow.GroupMember>()
-        assertEquals(listOf(review, kita, call), members.map { it.event })
-        assertEquals(listOf(false, false, true), members.map { it.last })
-        assertEquals(0f, members[0].from, 0.001f)
-        assertEquals(2f / 3f, members[0].to, 0.001f)
-        assertEquals(1f / 3f, members[1].from, 0.001f)
-        assertEquals(1f, members[1].to, 0.001f)
-        assertEquals(2f / 3f, members[2].from, 0.001f)
-        assertEquals(5f / 6f, members[2].to, 0.001f)
-        assertEquals(4, plan.todayEvents)
-        assertEquals(1, plan.todayOverlaps)
-        assertEquals(dentist, plan.rows.filterIsInstance<AgendaRow.Single>().single().event)
+        val rows = plan.rows.filterIsInstance<AgendaRow.Event>()
+        assertEquals(listOf(block, call, talk, climbing), rows.map { it.event })
+        // The block itself is drawn plainly; what begins inside it is marked,
+        // and an appointment that starts as it ends overlaps nothing.
+        assertEquals(listOf(false, true, true, false), rows.map { it.clash })
     }
 
     @Test
@@ -163,7 +152,7 @@ class AgendaWidgetModelTest {
 
         val plan = AgendaWidgetModel.plan(listOf(lunch, client), now)
 
-        assertEquals(2, plan.rows.filterIsInstance<AgendaRow.GroupMember>().size)
+        assertEquals(listOf(false, true), plan.rows.filterIsInstance<AgendaRow.Event>().map { it.clash })
     }
 
     @Test
@@ -174,12 +163,9 @@ class AgendaWidgetModelTest {
         val plan = AgendaWidgetModel.plan(listOf(early, standup), now)
 
         val kinds = plan.rows.map { it::class.simpleName }
-        assertEquals(listOf("Single", "Now", "Single"), kinds)
-        val first = plan.rows[0] as AgendaRow.Single
-        assertTrue(first.past)
-        assertTrue(first.label?.isToday == true)
-        assertNull((plan.rows[2] as AgendaRow.Single).label)
-        assertFalse((plan.rows[2] as AgendaRow.Single).past)
+        assertEquals(listOf("Event", "Now", "Event"), kinds)
+        assertTrue((plan.rows[0] as AgendaRow.Event).past)
+        assertFalse((plan.rows[2] as AgendaRow.Event).past)
         assertEquals(standup.start, plan.nextChange)
     }
 

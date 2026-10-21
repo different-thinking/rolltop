@@ -7,7 +7,7 @@
     <string name="notification_reminder_title">Erinnerung: %1$s</string>
     <string name="notification_reminders_title">%1$d Erinnerungen</string>
     <string name="widget_agenda_label">Agenda</string>
-    <string name="widget_agenda_description">Deine nächsten zwei Wochen: nur die Tage, an denen etwas ansteht, Überschneidungen zusammengefasst.</string>
+    <string name="widget_agenda_description">Deine nächsten zwei Wochen auf einen Blick: eine Zeile pro Termin, nur die Tage, an denen etwas ansteht.</string>
     <string name="widget_agenda_refresh">Aktualisieren</string>
     <string name="widget_agenda_new">Neuer Termin</string>
     <string name="widget_agenda_today_none">Heute nichts geplant</string>
@@ -15,23 +15,12 @@
         <item quantity="one">%d Termin heute</item>
         <item quantity="other">%d Termine heute</item>
     </plurals>
-    <plurals name="widget_agenda_overlaps">
-        <item quantity="one">%d Überschneidung</item>
-        <item quantity="other">%d Überschneidungen</item>
-    </plurals>
-    <plurals name="widget_agenda_together">
-        <item quantity="one">%d gleichzeitig</item>
-        <item quantity="other">%d gleichzeitig</item>
-    </plurals>
-    <plurals name="widget_agenda_calendars">
-        <item quantity="one">%d Kalender</item>
-        <item quantity="other">%d Kalender</item>
-    </plurals>
     <string name="widget_agenda_stale">Stand %1$s</string>
-    <string name="widget_agenda_until">Bis %1$s</string>
-    <string name="widget_agenda_past_midnight">über Mitternacht</string>
-    <string name="widget_agenda_leave_at">Abfahrt %1$s</string>
-    <string name="widget_agenda_online">Online</string>
+    <string name="widget_agenda_until">bis %1$s</string>
+    <plurals name="widget_agenda_more_all_day">
+        <item quantity="one">+%d ganztägig</item>
+        <item quantity="other">+%d ganztägig</item>
+    </plurals>
     <string name="widget_agenda_travel">Fahrzeit</string>
     <string name="widget_agenda_no_title">(Ohne Titel)</string>
     <string name="widget_agenda_empty">In den nächsten zwei Wochen steht nichts an</string>

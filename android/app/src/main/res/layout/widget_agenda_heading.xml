@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/agenda_row"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingTop="14dp"
+    android:paddingBottom="2dp">
+
+    <TextView
+        android:id="@+id/agenda_heading"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-medium"
+        android:letterSpacing="0.04"
+        android:maxLines="1"
+        android:textColor="@color/widget_agenda_muted"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+</FrameLayout>

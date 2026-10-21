@@ -67,15 +67,18 @@ back to the server form with "check the address".
 
 ## Agenda Widget
 
-The app ships a home-screen widget, **Agenda**, meant to fill a page: the
-coming two weeks in the shape of the calendar's phone agenda, drawn dark. It
-shows only what is there. A day with nothing on it is left out, an all-day
-event is named once on the first day the widget shows it (a week's holiday is
-one line, "Sat 24 – Sat 31", not seven), and appointments whose time overlaps
--- the journey around them included -- are kept together in one box that says
-how many there are, across how many calendars, with a bar under each showing
-its share of the overlap. A timed event filling twelve hours of a day is drawn
-with that day's all-day events, as the app does.
+The app ships a home-screen widget, **Agenda**, meant to fill a page and to be
+read at a glance: the coming two weeks, drawn dark, one line per appointment
+with its start and its title in large type. It shows only what is there. A day
+with nothing on it is left out, an all-day event is named once on the first day
+the widget shows it (a week's holiday is one line, "Sat 24 – Sat 31", not
+seven) and a day's all-day line names one of them and counts the rest. An
+appointment that begins while another is still running -- the journey around
+them included -- has its time drawn in red; the one it overlaps is drawn
+plainly, so a long block with meetings inside it reads as the block and what
+happens during it. An appointment of two hours or more says when it ends. A
+timed event filling twelve hours of a day is drawn with that day's all-day
+events, as the app does.
 
 `AgendaWidgetModel` holds that arithmetic and mirrors
 `frontend/src/features/calendar/mobileModel.ts`; change the two together. The
