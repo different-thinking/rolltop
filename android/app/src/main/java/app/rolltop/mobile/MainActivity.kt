@@ -693,6 +693,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotificationPermission() {
+        // Hosting the agenda widget for the server's PWA asks for nothing: the
+        // PWA has notifications of its own.
+        if (PwaHandoff.isWidgetHost(this)) return
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }

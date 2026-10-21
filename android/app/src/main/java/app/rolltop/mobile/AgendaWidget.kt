@@ -40,8 +40,11 @@ import java.util.concurrent.Executors
  * reader: the refresh button, and leaving the app, where they may have just
  * entered something ([requestRefresh] from MainActivity).
  *
- * A tap opens the calendar in the app on that day, with the event's dialog up
- * (`/calendar/<day>?event=<id>`); the plus opens a new event there.
+ * A tap opens the calendar on that day, with the event's dialog up
+ * (`/calendar/<day>?event=<id>`); the plus opens a new event there. It opens in
+ * the server's installed PWA when there is one and in this app otherwise
+ * ([WidgetOpenActivity]); a widget that has no calendar to show because nobody
+ * is signed in opens this app, where signing in is what it needs.
  */
 class AgendaWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
@@ -112,6 +115,7 @@ internal object AgendaWidget {
     private const val REQUEST_REFRESH = 302
     private const val REQUEST_ROW = 303
     private const val REQUEST_TICK = 304
+    private const val REQUEST_EMPTY = 305
 
     /** The layouts the list can hold; the count has to cover all of them. */
     private const val VIEW_TYPES = 7
@@ -170,8 +174,11 @@ internal object AgendaWidget {
             val views = RemoteViews(context.packageName, R.layout.widget_agenda)
             views.setTextViewText(R.id.agenda_title, formats.title.format(now))
             views.setTextViewText(R.id.agenda_subtitle, subtitle(context, plan, snapshot, formats))
-            views.setOnClickPendingIntent(R.id.agenda_header, openPending(context, REQUEST_OPEN, calendarPath(plan.today, null)))
-            views.setOnClickPendingIntent(R.id.agenda_new, openPending(context, REQUEST_NEW, "${calendarPath(plan.today, null)}?new=1"))
+            val needsSignIn = snapshot == null || snapshot.signedOut
+            val today = calendarPath(plan.today, null)
+            views.setOnClickPendingIntent(R.id.agenda_header, openPending(context, REQUEST_OPEN, today, inApp = needsSignIn))
+            views.setOnClickPendingIntent(R.id.agenda_empty, openPending(context, REQUEST_EMPTY, today, inApp = needsSignIn))
+            views.setOnClickPendingIntent(R.id.agenda_new, openPending(context, REQUEST_NEW, "$today?new=1", inApp = needsSignIn))
             views.setOnClickPendingIntent(R.id.agenda_refresh, refreshPending(context))
             views.setPendingIntentTemplate(R.id.agenda_list, rowTemplate(context))
             views.setEmptyView(R.id.agenda_list, R.id.agenda_empty)
@@ -430,13 +437,15 @@ internal object AgendaWidget {
     }
 
     private fun openIntent(context: Context): Intent =
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        Intent(context, WidgetOpenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-    private fun openPending(context: Context, requestCode: Int, path: String): PendingIntent =
+    private fun openPending(context: Context, requestCode: Int, path: String, inApp: Boolean): PendingIntent =
         PendingIntent.getActivity(
             context,
             requestCode,
-            openIntent(context).putExtra(EXTRA_PATH, path),
+            openIntent(context)
+                .putExtra(EXTRA_PATH, path)
+                .putExtra(WidgetOpenActivity.EXTRA_IN_APP, inApp),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

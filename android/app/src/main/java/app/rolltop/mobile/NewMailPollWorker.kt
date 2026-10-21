@@ -28,6 +28,10 @@ internal data class NewMailPollResult(
 
 class NewMailPollWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
+        // A poll scheduled before the server's PWA was installed: the PWA
+        // notifies now, and announcing the same mail from here as well would
+        // say everything twice.
+        if (PwaHandoff.isWidgetHost(applicationContext)) return Result.success()
         val result = synchronized(POLL_LOCK) {
             pollNotifications(applicationContext)
         }
@@ -41,6 +45,10 @@ class NewMailPollWorker(context: Context, params: WorkerParameters) : Worker(con
         private val POLL_LOCK = Any()
 
         fun schedule(context: Context) {
+            if (PwaHandoff.isWidgetHost(context)) {
+                WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
+                return
+            }
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()

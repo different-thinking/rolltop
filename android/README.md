@@ -95,6 +95,26 @@ up (`/calendar/<day>?event=<id>`); the plus opens a new event
 (`/calendar/<day>?new=1`). The app only follows a widget path that names a
 calendar page of the configured server.
 
+### With the PWA
+
+A reader who uses Rolltop as an installed web app (PWA) can keep this app for
+the widget alone, because Chrome on Android gives a PWA no widgets of its own.
+Install the app, sign in once, and place the widget; the app need not be opened
+again while the session lasts. `PwaHandoff` finds the server's PWA among the
+apps that open its links: Chrome installs a PWA as a WebAPK that names the
+server's host, and a browser names none. Two things follow while it is
+installed:
+
+- A tap on the widget opens the page in the PWA (`WidgetOpenActivity`), in the
+  calendar app when it is installed (scope `/calendar`), otherwise in the mail
+  app. A widget that is signed out opens this app instead, where signing in is
+  what it needs.
+- This app is only the widget's host. It asks for no notification permission,
+  registers no push endpoint and polls for no mail, because the PWA notifies
+  and both would announce every message twice. A device that was registered
+  before the PWA was installed keeps its endpoint until notifications for this
+  app are switched off in the system settings; the poll stops on the next run.
+
 ## Updates
 
 The updater checks:
