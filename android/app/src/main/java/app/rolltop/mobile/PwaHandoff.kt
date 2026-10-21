@@ -67,10 +67,19 @@ internal object PwaHandoff {
     fun isWidgetHost(context: Context): Boolean {
         val server = RolltopPrefs.serverUrl(context)
         if (server.isBlank()) return false
+        // Asked on the main thread at every page the app loads, and answered
+        // by a package-manager query; the answer changes only when an app is
+        // installed or removed, so a few seconds of it are reused.
+        val now = System.currentTimeMillis()
+        hostAnswer?.let { (cachedServer, at, answer) ->
+            if (cachedServer == server && now - at in 0 until HOST_ANSWER_TTL_MS) return answer
+        }
         // Only the mail app's scope covers the root, and only the mail app is
         // what notifies of mail: a reader with the calendar app alone still
         // gets their mail notifications from here.
-        return installedWebApp(context, RolltopPrefs.buildUrl(context, "/")) != null
+        val answer = installedWebApp(context, RolltopPrefs.buildUrl(context, "/")) != null
+        hostAnswer = Triple(server, now, answer)
+        return answer
     }
 
     /** open shows url in the installed web app; false when there is none. */
@@ -124,4 +133,9 @@ internal object PwaHandoff {
     }
 
     private const val UNMATCHABLE_PATH = "\u0000"
+
+    private const val HOST_ANSWER_TTL_MS = 10_000L
+
+    @Volatile
+    private var hostAnswer: Triple<String, Long, Boolean>? = null
 }
