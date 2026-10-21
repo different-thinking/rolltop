@@ -174,7 +174,9 @@ internal object AgendaWidget {
             val views = RemoteViews(context.packageName, R.layout.widget_agenda)
             views.setTextViewText(R.id.agenda_title, formats.title.format(now))
             views.setTextViewText(R.id.agenda_subtitle, subtitle(context, plan, snapshot, formats))
-            val needsSignIn = snapshot == null || snapshot.signedOut
+            // A widget still loading its first copy opens the PWA like any
+            // other; only one that is signed out needs this app.
+            val needsSignIn = server.isBlank() || snapshot?.signedOut == true
             val today = calendarPath(plan.today, null)
             views.setOnClickPendingIntent(R.id.agenda_header, openPending(context, REQUEST_OPEN, today, inApp = needsSignIn))
             views.setOnClickPendingIntent(R.id.agenda_empty, openPending(context, REQUEST_EMPTY, today, inApp = needsSignIn))

@@ -25,8 +25,8 @@ internal data class WebAppFilter(val packageName: String, val hosts: List<String
  * app of its own (scope `/calendar`) beside the mail app (scope `/`), so the
  * longest scope that covers a page is the app that opens it.
  *
- * The same answer decides whether this app is only the widget's host: with the
- * server's PWA installed, the PWA is the reader's app and has its own
+ * The same question decides whether this app is only the widget's host: with
+ * the server's mail PWA installed, the PWA is the reader's app and has its own
  * notifications, so this one asks for none and polls for none
  * ([isWidgetHost]); notifying from both would announce every message twice.
  */
@@ -62,13 +62,15 @@ internal object PwaHandoff {
     fun installedWebApp(context: Context, url: String): String? =
         pick(webAppFilters(context, url), url, context.packageName)
 
-    /** isWidgetHost reports whether the configured server's PWA is installed,
-     * which makes this app the widget's host and nothing else. */
+    /** isWidgetHost reports whether the configured server's mail PWA is
+     * installed, which makes this app the widget's host and nothing else. */
     fun isWidgetHost(context: Context): Boolean {
         val server = RolltopPrefs.serverUrl(context)
         if (server.isBlank()) return false
-        return installedWebApp(context, RolltopPrefs.buildUrl(context, "/")) != null ||
-            installedWebApp(context, RolltopPrefs.buildUrl(context, "/calendar/")) != null
+        // Only the mail app's scope covers the root, and only the mail app is
+        // what notifies of mail: a reader with the calendar app alone still
+        // gets their mail notifications from here.
+        return installedWebApp(context, RolltopPrefs.buildUrl(context, "/")) != null
     }
 
     /** open shows url in the installed web app; false when there is none. */

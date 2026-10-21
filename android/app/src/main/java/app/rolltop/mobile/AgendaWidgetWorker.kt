@@ -29,6 +29,10 @@ class AgendaWidgetWorker(context: Context, params: WorkerParameters) : Worker(co
     override fun doWork(): Result {
         val context = applicationContext
         if (!AgendaWidget.hasWidgets(context)) return Result.success()
+        // The mail poll stops while the server's PWA is installed and has to
+        // come back when it is removed, also for a reader who never opens this
+        // app again; this worker runs either way.
+        NewMailPollWorker.schedule(context)
         // A copy that could not be written is a refresh that did not happen;
         // the stored copy is still whole (AtomicFile) and is drawn as it was.
         val outcome = try {

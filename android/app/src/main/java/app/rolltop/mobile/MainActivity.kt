@@ -68,7 +68,9 @@ class MainActivity : ComponentActivity() {
         NotificationChannels.ensure(this)
         NewMailPollWorker.schedule(this)
         UpdateCheckWorker.schedule(this)
-        requestNotificationPermission()
+        // Whether to ask depends on the server (its installed PWA notifies
+        // instead), so a first start asks once the server is known.
+        if (RolltopPrefs.serverUrl(this).isNotBlank()) requestNotificationPermission()
         if (RolltopPrefs.serverUrl(this).isBlank()) {
             showSetup()
         } else {
@@ -190,6 +192,8 @@ class MainActivity : ComponentActivity() {
                         return@runOnUiThread
                     }
                     RolltopPrefs.setServerUrl(this@MainActivity, normalized)
+                    NewMailPollWorker.schedule(this@MainActivity)
+                    requestNotificationPermission()
                     showWeb(intent)
                 }
             }, "rolltop-server-check").start()

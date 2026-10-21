@@ -102,18 +102,19 @@ the widget alone, because Chrome on Android gives a PWA no widgets of its own.
 Install the app, sign in once, and place the widget; the app need not be opened
 again while the session lasts. `PwaHandoff` finds the server's PWA among the
 apps that open its links: Chrome installs a PWA as a WebAPK that names the
-server's host, and a browser names none. Two things follow while it is
-installed:
+server's host, and a browser names none.
 
 - A tap on the widget opens the page in the PWA (`WidgetOpenActivity`), in the
   calendar app when it is installed (scope `/calendar`), otherwise in the mail
   app. A widget that is signed out opens this app instead, where signing in is
   what it needs.
-- This app is only the widget's host. It asks for no notification permission,
+- With the mail app installed (scope `/`), this app is only the widget's host.
+  The calendar app alone does not count, because it notifies of no mail. It asks for no notification permission,
   registers no push endpoint and polls for no mail, because the PWA notifies
   and both would announce every message twice. A device that was registered
   before the PWA was installed keeps its endpoint until notifications for this
-  app are switched off in the system settings; the poll stops on the next run.
+  app are switched off in the system settings; the poll stops on its next run,
+and the widget's refresh starts it again once the mail app is removed.
 
 ## Updates
 
