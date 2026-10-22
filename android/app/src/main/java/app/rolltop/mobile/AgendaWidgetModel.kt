@@ -219,13 +219,17 @@ internal object AgendaWidgetModel {
                     .minOrNull()
                     ?.let { nextChange = it }
             }
+            // The now line goes before the first appointment that has not begun,
+            // looked for line by line: with every appointment on a line of its
+            // own, one that starts this afternoon inside a block running since
+            // the morning is still ahead of now.
             var nowDrawn = !isToday
             for (group in groups) {
-                if (!nowDrawn && group.eventStart.isAfter(nowInstant)) {
-                    rows += AgendaRow.Now(nowInstant)
-                    nowDrawn = true
-                }
                 group.events.forEachIndexed { index, event ->
+                    if (!nowDrawn && event.start.isAfter(nowInstant)) {
+                        rows += AgendaRow.Now(nowInstant)
+                        nowDrawn = true
+                    }
                     rows += AgendaRow.Event(day, event, past = !event.end.isAfter(nowInstant), clash = index > 0)
                 }
             }

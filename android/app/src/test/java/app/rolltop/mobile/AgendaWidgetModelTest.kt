@@ -170,6 +170,28 @@ class AgendaWidgetModelTest {
     }
 
     @Test
+    fun theNowLineFallsInsideABlockThatIsStillRunning() {
+        // Thursday 09:57: the conference block began at 08:00, the talk inside
+        // it begins at 16:00, so now lies between the two lines.
+        val thursday = ZonedDateTime.of(2026, 10, 22, 9, 57, 0, 0, berlin)
+        val podcast = timed("Podcast!", "2026-10-22T07:00", "2026-10-22T08:00")
+        val conference = timed("MSP-Global", "2026-10-22T08:00", "2026-10-22T17:00")
+        val talk = timed("Following: XChange", "2026-10-22T16:00", "2026-10-22T16:30")
+        val football = timed("Fußball Marek", "2026-10-22T17:00", "2026-10-22T19:30")
+
+        val plan = AgendaWidgetModel.plan(listOf(football, talk, conference, podcast), thursday)
+
+        val order = plan.rows.map { row ->
+            when (row) {
+                is AgendaRow.Now -> "now"
+                is AgendaRow.Event -> row.event.summary
+                else -> row::class.simpleName
+            }
+        }
+        assertEquals(listOf("Podcast!", "MSP-Global", "now", "Following: XChange", "Fußball Marek"), order)
+    }
+
+    @Test
     fun withNothingLeftTodayTheNextChangeIsMidnight() {
         val plan = AgendaWidgetModel.plan(listOf(timed("Laufen", "2026-10-20T07:00", "2026-10-20T08:00")), now)
 
