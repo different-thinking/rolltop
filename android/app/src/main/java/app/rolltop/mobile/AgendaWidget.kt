@@ -300,10 +300,16 @@ internal object AgendaWidget {
         val title = SpannableStringBuilder(title(context, event))
         if (event.declined) title.setSpan(StrikethroughSpan(), 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         val minutes = (event.end.toEpochMilli() - event.start.toEpochMilli()) / 60_000
-        if (!startsBefore && minutes >= LONG_EVENT_MINUTES) {
+        // An appointment running past midnight says so whatever its length:
+        // "until 10" on a line that began at 20:00 would read as the morning
+        // before it, so the end names its day.
+        val endsLater = event.end.isAfter(AgendaWidgetModel.dayStart(row.day.plusDays(1), zone))
+        if (!startsBefore && (minutes >= LONG_EVENT_MINUTES || endsLater)) {
+            val end = event.end.atZone(zone)
+            val until = if (endsLater) "${formats.dayName(end.toLocalDate())} ${formats.until(end)}" else formats.until(end)
             val from = title.length
             title.append("  ")
-            title.append(context.getString(R.string.widget_agenda_until, formats.until(event.end.atZone(zone))))
+            title.append(context.getString(R.string.widget_agenda_until, until))
             title.setSpan(ForegroundColorSpan(if (row.past) COLOR_PAST else COLOR_MUTED), from, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         views.setTextViewText(R.id.agenda_event_title, title)
@@ -423,9 +429,10 @@ internal object AgendaWidget {
         fun heading(date: LocalDate): String = dayHeading.format(date).uppercase(locale)
 
         /** until is an end time as short as it reads: "17" for 17:00 on a
-         * 24-hour clock, the full time otherwise. */
+         * 24-hour clock, the full time otherwise -- midnight included, which
+         * shortened would read "until 0". */
         fun until(at: ZonedDateTime): String =
-            if (twentyFourHour && at.minute == 0) at.hour.toString() else time.format(at)
+            if (twentyFourHour && at.minute == 0 && at.hour != 0) at.hour.toString() else time.format(at)
 
         /** bestPattern asks ICU for the locale's pattern and falls back when
          * java.time cannot read it: ICU answers some locales with letters

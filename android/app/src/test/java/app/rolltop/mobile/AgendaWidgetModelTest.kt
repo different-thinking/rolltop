@@ -156,6 +156,27 @@ class AgendaWidgetModelTest {
     }
 
     @Test
+    fun linesFollowTheAppointmentsOwnTimesNotTheirJourneys() {
+        // 09:45: the meeting began at 09:30; the visit starts at 10:00 but its
+        // journey began at 09:00, which is what grouped the two.
+        val at = ZonedDateTime.of(2026, 10, 20, 9, 45, 0, 0, berlin)
+        val meeting = timed("Jour fixe", "2026-10-20T09:30", "2026-10-20T10:30")
+        val visit = timed("Kunde vor Ort", "2026-10-20T10:00", "2026-10-20T11:00", travelBefore = 60)
+
+        val plan = AgendaWidgetModel.plan(listOf(visit, meeting), at)
+
+        val order = plan.rows.map { row ->
+            when (row) {
+                is AgendaRow.Now -> "now"
+                is AgendaRow.Event -> row.event.summary
+                else -> row::class.simpleName
+            }
+        }
+        assertEquals(listOf("Jour fixe", "now", "Kunde vor Ort"), order)
+        assertEquals(listOf(false, true), plan.rows.filterIsInstance<AgendaRow.Event>().map { it.clash })
+    }
+
+    @Test
     fun theNowLineComesBeforeTheFirstAppointmentNotYetBegun() {
         val early = timed("Laufen", "2026-10-20T07:00", "2026-10-20T08:00")
         val standup = timed("Standup", "2026-10-20T09:00", "2026-10-20T09:15")

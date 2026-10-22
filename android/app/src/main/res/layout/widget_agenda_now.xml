@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The now line starts where the titles do, so it reads as a place in the
-     list rather than a divider. -->
+<!-- The now line starts at the appointments' colour bars, past the time
+     column, so it reads as a place in the list rather than a divider. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"

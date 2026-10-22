@@ -225,7 +225,12 @@ internal object AgendaWidgetModel {
             // the morning is still ahead of now.
             var nowDrawn = !isToday
             for (group in groups) {
-                group.events.forEachIndexed { index, event ->
+                // A group comes ordered by when each journey begins, but a line
+                // is read by its own time: an appointment with a long journey
+                // before it would otherwise be drawn above one that starts
+                // earlier, and the now line could fall above one already begun.
+                val ordered = group.events.sortedWith(compareBy<AgendaEvent> { it.start }.thenByDescending { it.end })
+                ordered.forEachIndexed { index, event ->
                     if (!nowDrawn && event.start.isAfter(nowInstant)) {
                         rows += AgendaRow.Now(nowInstant)
                         nowDrawn = true
