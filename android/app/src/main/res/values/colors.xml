@@ -4,14 +4,9 @@
 
     <!-- The agenda widget is dark: the web app's dark tokens. -->
     <color name="widget_agenda_surface">#1E1F20</color>
-    <color name="widget_agenda_raised">#2A2B2D</color>
     <color name="widget_agenda_text">#E3E3E3</color>
     <color name="widget_agenda_muted">#A2A9B0</color>
-    <color name="widget_agenda_separator">#333537</color>
-    <color name="widget_agenda_accent">#A8C7FA</color>
     <color name="widget_agenda_accent_soft">#0842A0</color>
     <color name="widget_agenda_on_accent_soft">#D3E3FD</color>
     <color name="widget_agenda_now">#F28B82</color>
-    <color name="widget_agenda_clash">#F2B8B5</color>
-    <color name="widget_agenda_clash_surface">#2E2627</color>
 </resources>

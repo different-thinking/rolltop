@@ -67,15 +67,18 @@ back to the server form with "check the address".
 
 ## Agenda Widget
 
-The app ships a home-screen widget, **Agenda**, meant to fill a page: the
-coming two weeks in the shape of the calendar's phone agenda, drawn dark. It
-shows only what is there. A day with nothing on it is left out, an all-day
-event is named once on the first day the widget shows it (a week's holiday is
-one line, "Sat 24 – Sat 31", not seven), and appointments whose time overlaps
--- the journey around them included -- are kept together in one box that says
-how many there are, across how many calendars, with a bar under each showing
-its share of the overlap. A timed event filling twelve hours of a day is drawn
-with that day's all-day events, as the app does.
+The app ships a home-screen widget, **Agenda**, meant to fill a page and to be
+read at a glance: the coming two weeks, drawn dark, one line per appointment
+with its start and its title in large type. It shows only what is there. A day
+with nothing on it is left out, an all-day event is named once on the first day
+the widget shows it (a week's holiday is one line, "Sat 24 – Sat 31", not
+seven) and a day's all-day line names one of them and counts the rest. An
+appointment that begins while another is still running -- the journey around
+them included -- has its time drawn in red; the one it overlaps is drawn
+plainly, so a long block with meetings inside it reads as the block and what
+happens during it. An appointment of two hours or more says when it ends. A
+timed event filling twelve hours of a day is drawn with that day's all-day
+events, as the app does.
 
 `AgendaWidgetModel` holds that arithmetic and mirrors
 `frontend/src/features/calendar/mobileModel.ts`; change the two together. The
@@ -94,6 +97,27 @@ Tapping an appointment opens the calendar on that day with the event's dialog
 up (`/calendar/<day>?event=<id>`); the plus opens a new event
 (`/calendar/<day>?new=1`). The app only follows a widget path that names a
 calendar page of the configured server.
+
+### With the PWA
+
+A reader who uses Rolltop as an installed web app (PWA) can keep this app for
+the widget alone, because Chrome on Android gives a PWA no widgets of its own.
+Install the app, sign in once, and place the widget; the app need not be opened
+again while the session lasts. `PwaHandoff` finds the server's PWA among the
+apps that open its links: Chrome installs a PWA as a WebAPK that names the
+server's host, and a browser names none.
+
+- A tap on the widget opens the page in the PWA (`WidgetOpenActivity`), in the
+  calendar app when it is installed (scope `/calendar`), otherwise in the mail
+  app. A widget that is signed out opens this app instead, where signing in is
+  what it needs.
+- With the mail app installed (scope `/`), this app is only the widget's host.
+  The calendar app alone does not count, because it notifies of no mail. It asks for no notification permission,
+  registers no push endpoint and polls for no mail, because the PWA notifies
+  and both would announce every message twice. A device that was registered
+  before the PWA was installed keeps its endpoint until notifications for this
+  app are switched off in the system settings; the poll stops on its next run,
+and the widget's refresh starts it again once the mail app is removed.
 
 ## Updates
 

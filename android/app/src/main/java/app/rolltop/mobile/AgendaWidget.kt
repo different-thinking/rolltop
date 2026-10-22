@@ -7,16 +7,11 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.RectF
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.format.DateFormat
 import android.text.style.ForegroundColorSpan
 import android.text.style.StrikethroughSpan
-import android.view.View
 import android.widget.RemoteViews
 import androidx.core.widget.RemoteViewsCompat
 import java.time.Instant
@@ -40,8 +35,11 @@ import java.util.concurrent.Executors
  * reader: the refresh button, and leaving the app, where they may have just
  * entered something ([requestRefresh] from MainActivity).
  *
- * A tap opens the calendar in the app on that day, with the event's dialog up
- * (`/calendar/<day>?event=<id>`); the plus opens a new event there.
+ * A tap opens the calendar on that day, with the event's dialog up
+ * (`/calendar/<day>?event=<id>`); the plus opens a new event there. It opens in
+ * the server's installed PWA when there is one and in this app otherwise
+ * ([WidgetOpenActivity]); a widget that has no calendar to show because nobody
+ * is signed in opens this app, where signing in is what it needs.
  */
 class AgendaWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
@@ -112,17 +110,15 @@ internal object AgendaWidget {
     private const val REQUEST_REFRESH = 302
     private const val REQUEST_ROW = 303
     private const val REQUEST_TICK = 304
+    private const val REQUEST_EMPTY = 305
 
     /** The layouts the list can hold; the count has to cover all of them. */
-    private const val VIEW_TYPES = 7
+    private const val VIEW_TYPES = 5
 
     private const val COLOR_TEXT = 0xFFE3E3E3.toInt()
     private const val COLOR_MUTED = 0xFFA2A9B0.toInt()
     private const val COLOR_PAST = 0xFF80868B.toInt()
-    private const val COLOR_ACCENT = 0xFFA8C7FA.toInt()
-    private const val COLOR_TODAY_TEXT = 0xFF062E6F.toInt()
     private const val COLOR_CLASH = 0xFFF2B8B5.toInt()
-    private const val COLOR_TRACK = 0xFF333537.toInt()
 
     fun hasWidgets(context: Context): Boolean = widgetIds(context).isNotEmpty()
 
@@ -170,8 +166,13 @@ internal object AgendaWidget {
             val views = RemoteViews(context.packageName, R.layout.widget_agenda)
             views.setTextViewText(R.id.agenda_title, formats.title.format(now))
             views.setTextViewText(R.id.agenda_subtitle, subtitle(context, plan, snapshot, formats))
-            views.setOnClickPendingIntent(R.id.agenda_header, openPending(context, REQUEST_OPEN, calendarPath(plan.today, null)))
-            views.setOnClickPendingIntent(R.id.agenda_new, openPending(context, REQUEST_NEW, "${calendarPath(plan.today, null)}?new=1"))
+            // A widget still loading its first copy opens the PWA like any
+            // other; only one that is signed out needs this app.
+            val needsSignIn = server.isBlank() || snapshot?.signedOut == true
+            val today = calendarPath(plan.today, null)
+            views.setOnClickPendingIntent(R.id.agenda_header, openPending(context, REQUEST_OPEN, today, inApp = needsSignIn))
+            views.setOnClickPendingIntent(R.id.agenda_empty, openPending(context, REQUEST_EMPTY, today, inApp = needsSignIn))
+            views.setOnClickPendingIntent(R.id.agenda_new, openPending(context, REQUEST_NEW, "$today?new=1", inApp = needsSignIn))
             views.setOnClickPendingIntent(R.id.agenda_refresh, refreshPending(context))
             views.setPendingIntentTemplate(R.id.agenda_list, rowTemplate(context))
             views.setEmptyView(R.id.agenda_list, R.id.agenda_empty)
@@ -208,9 +209,6 @@ internal object AgendaWidget {
         } else {
             resources.getQuantityString(R.plurals.widget_agenda_today_events, plan.todayEvents, plan.todayEvents)
         }
-        if (plan.todayOverlaps > 0) {
-            parts += resources.getQuantityString(R.plurals.widget_agenda_overlaps, plan.todayOverlaps, plan.todayOverlaps)
-        }
         if (snapshot.failedAt > 0 && snapshot.fetchedAt > 0) {
             val fetched = Instant.ofEpochMilli(snapshot.fetchedAt).atZone(ZoneId.systemDefault())
             // A copy from an earlier day names the day too: "as of 14:00" on a
@@ -239,14 +237,21 @@ internal object AgendaWidget {
         formats: Formats,
         zone: ZoneId
     ): RemoteViews = when (row) {
-        is AgendaRow.Divider -> RemoteViews(context.packageName, R.layout.widget_agenda_divider)
+        is AgendaRow.Heading -> RemoteViews(context.packageName, R.layout.widget_agenda_heading).also { views ->
+            views.setTextViewText(R.id.agenda_heading, formats.heading(row.day))
+            views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.day, null)))
+        }
         is AgendaRow.AllDay -> RemoteViews(context.packageName, R.layout.widget_agenda_allday).also { views ->
-            bindDay(views, row.label, formats)
+            // One name and a count: the line is read at a glance, and a list of
+            // every holiday and bin day was the part nobody could read.
+            val first = row.events.first()
             val text = SpannableStringBuilder()
-            row.events.forEachIndexed { index, event ->
-                if (index > 0) text.append("   ")
-                appendSwatch(text, colorOf(event, calendars))
-                text.append(title(context, event))
+            appendSwatch(text, colorOf(first, calendars))
+            text.append(title(context, first))
+            if (row.events.size > 1) {
+                val more = row.events.size - 1
+                text.append(" · ")
+                text.append(context.resources.getQuantityString(R.plurals.widget_agenda_more_all_day, more, more))
             }
             views.setTextViewText(R.id.agenda_allday_text, text)
             views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.day, null)))
@@ -255,141 +260,76 @@ internal object AgendaWidget {
             val first = formats.dayName(row.first) + " " + row.first.dayOfMonth
             views.setTextViewText(
                 R.id.agenda_span_dates,
-                if (row.last == row.first) first else "$first\n– ${formats.dayName(row.last)} ${row.last.dayOfMonth}"
+                if (row.last == row.first) first else "$first – ${formats.dayName(row.last)} ${row.last.dayOfMonth}"
             )
-            views.setTextColor(R.id.agenda_span_dates, if (row.isToday) COLOR_ACCENT else COLOR_MUTED)
             val text = SpannableStringBuilder()
             appendSwatch(text, colorOf(row.event, calendars))
             text.append(title(context, row.event))
             views.setTextViewText(R.id.agenda_span_title, text)
             views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.first, row.event.id)))
         }
-        is AgendaRow.Now -> RemoteViews(context.packageName, R.layout.widget_agenda_now).also { views ->
-            bindDay(views, row.label, formats)
-        }
-        is AgendaRow.Single -> RemoteViews(context.packageName, R.layout.widget_agenda_event).also { views ->
-            bindDay(views, row.label, formats)
-            bindEvent(context, views, row.event, row.day, row.past, calendars, formats, zone)
-            views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.day, row.event.id)))
-        }
-        is AgendaRow.GroupHead -> RemoteViews(context.packageName, R.layout.widget_agenda_group_head).also { views ->
-            bindDay(views, row.label, formats)
-            val resources = context.resources
-            val count = resources.getQuantityString(R.plurals.widget_agenda_together, row.count, row.count)
-            val text = if (row.calendarCount > 1) {
-                count + " · " + resources.getQuantityString(
-                    R.plurals.widget_agenda_calendars,
-                    row.calendarCount,
-                    row.calendarCount
-                )
-            } else {
-                count
-            }
-            views.setTextViewText(R.id.agenda_group_text, text)
-            views.setTextViewText(
-                R.id.agenda_group_time,
-                formats.time.format(row.start.atZone(zone)) + "–" + formats.time.format(row.end.atZone(zone))
-            )
-            views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.day, null)))
-        }
-        is AgendaRow.GroupMember -> RemoteViews(context.packageName, R.layout.widget_agenda_group_event).also { views ->
-            bindEvent(context, views, row.event, row.day, row.past, calendars, formats, zone)
-            views.setInt(
-                R.id.agenda_group_box,
-                "setBackgroundResource",
-                if (row.last) R.drawable.widget_agenda_group_bottom else R.drawable.widget_agenda_group_middle
-            )
-            views.setImageViewBitmap(
-                R.id.agenda_event_span,
-                spanBar(row.from, row.to, if (row.past) COLOR_PAST else colorOf(row.event, calendars))
-            )
+        is AgendaRow.Now -> RemoteViews(context.packageName, R.layout.widget_agenda_now)
+        is AgendaRow.Event -> RemoteViews(context.packageName, R.layout.widget_agenda_event).also { views ->
+            bindEvent(context, views, row, calendars, formats, zone)
             views.setOnClickFillInIntent(R.id.agenda_row, openFill(calendarPath(row.day, row.event.id)))
         }
     }
 
-    private fun bindDay(views: RemoteViews, label: AgendaDayLabel?, formats: Formats) {
-        if (label == null) {
-            views.setViewVisibility(R.id.agenda_day_name, View.GONE)
-            views.setViewVisibility(R.id.agenda_day_number, View.GONE)
-            return
-        }
-        views.setViewVisibility(R.id.agenda_day_name, View.VISIBLE)
-        views.setViewVisibility(R.id.agenda_day_number, View.VISIBLE)
-        views.setTextViewText(R.id.agenda_day_name, formats.dayName(label.date))
-        views.setTextViewText(R.id.agenda_day_number, label.date.dayOfMonth.toString())
-        views.setTextColor(R.id.agenda_day_name, if (label.isToday) COLOR_ACCENT else COLOR_MUTED)
-        views.setTextColor(R.id.agenda_day_number, if (label.isToday) COLOR_TODAY_TEXT else COLOR_TEXT)
-        views.setInt(
-            R.id.agenda_day_number,
-            "setBackgroundResource",
-            if (label.isToday) R.drawable.widget_agenda_today else 0
-        )
-    }
+    /** longEventMinutes is how long an appointment runs before its line also
+     * says when it ends: "MSP-Global until 17" tells a day apart from an hour. */
+    private const val LONG_EVENT_MINUTES = 120L
 
     private fun bindEvent(
         context: Context,
         views: RemoteViews,
-        event: AgendaEvent,
-        day: LocalDate,
-        past: Boolean,
+        row: AgendaRow.Event,
         calendars: Map<Long, AgendaCalendar>,
         formats: Formats,
         zone: ZoneId
     ) {
-        val dayStart = AgendaWidgetModel.dayStart(day, zone)
-        val dayEnd = AgendaWidgetModel.dayStart(day.plusDays(1), zone)
+        val event = row.event
+        val dayStart = AgendaWidgetModel.dayStart(row.day, zone)
         val startsBefore = event.start.isBefore(dayStart)
-        val endsAfter = event.end.isAfter(dayEnd)
-        val first = if (startsBefore) {
-            context.getString(R.string.widget_agenda_until, formats.time.format(event.end.atZone(zone)))
-        } else {
-            formats.time.format(event.start.atZone(zone))
-        }
-        val second = when {
-            startsBefore -> ""
-            endsAfter -> context.getString(R.string.widget_agenda_past_midnight)
-            else -> formats.time.format(event.end.atZone(zone))
-        }
-        views.setTextViewText(R.id.agenda_event_start, first)
-        views.setTextViewText(R.id.agenda_event_end, second)
-        views.setViewVisibility(R.id.agenda_event_end, if (second.isEmpty()) View.GONE else View.VISIBLE)
+        // One time per line: when it starts, or for an appointment carried over
+        // from yesterday, when it ends.
+        views.setTextViewText(
+            R.id.agenda_event_time,
+            if (startsBefore) "–" + formats.time.format(event.end.atZone(zone)) else formats.time.format(event.start.atZone(zone))
+        )
 
         val title = SpannableStringBuilder(title(context, event))
         if (event.declined) title.setSpan(StrikethroughSpan(), 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val minutes = (event.end.toEpochMilli() - event.start.toEpochMilli()) / 60_000
+        // An appointment running past midnight says so whatever its length:
+        // "until 10" on a line that began at 20:00 would read as the morning
+        // before it, so the end names its day.
+        val endsLater = event.end.isAfter(AgendaWidgetModel.dayStart(row.day.plusDays(1), zone))
+        if (!startsBefore && (minutes >= LONG_EVENT_MINUTES || endsLater)) {
+            val end = event.end.atZone(zone)
+            val until = if (endsLater) "${formats.dayName(end.toLocalDate())} ${formats.until(end)}" else formats.until(end)
+            val from = title.length
+            title.append("  ")
+            title.append(context.getString(R.string.widget_agenda_until, until))
+            title.setSpan(ForegroundColorSpan(if (row.past) COLOR_PAST else COLOR_MUTED), from, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
         views.setTextViewText(R.id.agenda_event_title, title)
 
-        val meta = ArrayList<String>()
-        if (event.travelBeforeMinutes > 0 && !startsBefore) {
-            val leave = event.start.minusSeconds(event.travelBeforeMinutes * 60L).atZone(zone)
-            meta += context.getString(R.string.widget_agenda_leave_at, formats.time.format(leave))
-        }
-        if (event.location.isNotBlank()) {
-            meta += event.location.trim()
-        } else if (event.onlineMeeting) {
-            meta += event.onlineMeetingProvider.takeIf { it.isNotBlank() }?.let(::meetingName)
-                ?: context.getString(R.string.widget_agenda_online)
-        }
-        views.setTextViewText(R.id.agenda_event_meta, meta.joinToString(" · "))
-        views.setViewVisibility(R.id.agenda_event_meta, if (meta.isEmpty()) View.GONE else View.VISIBLE)
-
-        val color = colorOf(event, calendars)
-        views.setInt(R.id.agenda_event_bar, "setColorFilter", if (past) COLOR_PAST else color)
-        views.setTextColor(R.id.agenda_event_title, if (past) COLOR_PAST else COLOR_TEXT)
-        views.setTextColor(R.id.agenda_event_start, if (past) COLOR_PAST else COLOR_TEXT)
-        views.setTextColor(R.id.agenda_event_end, if (past) COLOR_PAST else COLOR_MUTED)
-        views.setTextColor(R.id.agenda_event_meta, if (past) COLOR_PAST else COLOR_MUTED)
+        views.setInt(R.id.agenda_event_bar, "setColorFilter", if (row.past) COLOR_PAST else colorOf(event, calendars))
+        views.setTextColor(R.id.agenda_event_title, if (row.past) COLOR_PAST else COLOR_TEXT)
+        views.setTextColor(
+            R.id.agenda_event_time,
+            when {
+                row.past -> COLOR_PAST
+                row.clash -> COLOR_CLASH
+                else -> COLOR_TEXT
+            }
+        )
     }
 
     private fun title(context: Context, event: AgendaEvent): String = when {
         event.summary.isNotBlank() -> event.summary.trim()
         event.travel.isNotBlank() -> context.getString(R.string.widget_agenda_travel)
         else -> context.getString(R.string.widget_agenda_no_title)
-    }
-
-    private fun meetingName(provider: String): String = when (provider.lowercase(Locale.ROOT)) {
-        "teams", "teamsforbusiness" -> "Teams"
-        "meet", "hangoutsmeet", "google_meet" -> "Google Meet"
-        else -> provider
     }
 
     private fun colorOf(event: AgendaEvent, calendars: Map<Long, AgendaCalendar>): Int =
@@ -401,42 +341,21 @@ internal object AgendaWidget {
         text.setSpan(ForegroundColorSpan(color), start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
-    /** spanBar draws where one appointment sits inside its box's span. It is a
-     * bitmap because a layout cannot be given a weight from a RemoteViews. */
-    private fun spanBar(from: Float, to: Float, color: Int): Bitmap {
-        // Small on purpose: every row of an update travels in one parcel, and
-        // the image view stretches it to the row's width anyway.
-        val width = 96
-        val height = 4
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        val radius = height / 2f
-        paint.color = COLOR_TRACK
-        canvas.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), radius, radius, paint)
-        // The left edge leaves room for the bar's minimum width, or an
-        // appointment starting in the last few percent of its box (a short one
-        // at the end of a long one) would ask coerceIn for an empty range.
-        val left = (from * width).coerceIn(0f, (width - height).toFloat())
-        val right = (to * width).coerceIn(left + height, width.toFloat())
-        paint.color = color
-        canvas.drawRoundRect(RectF(left, 0f, right, height.toFloat()), radius, radius, paint)
-        return bitmap
-    }
-
     private fun calendarPath(day: LocalDate, eventId: Long?): String {
         val path = "/calendar/$day"
         return if (eventId != null && eventId > 0) "$path?event=$eventId" else path
     }
 
     private fun openIntent(context: Context): Intent =
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        Intent(context, WidgetOpenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-    private fun openPending(context: Context, requestCode: Int, path: String): PendingIntent =
+    private fun openPending(context: Context, requestCode: Int, path: String, inApp: Boolean): PendingIntent =
         PendingIntent.getActivity(
             context,
             requestCode,
-            openIntent(context).putExtra(EXTRA_PATH, path),
+            openIntent(context)
+                .putExtra(EXTRA_PATH, path)
+                .putExtra(WidgetOpenActivity.EXTRA_IN_APP, inApp),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -491,15 +410,29 @@ internal object AgendaWidget {
         context.resources.configuration.locales.get(0) ?: Locale.getDefault()
 
     private class Formats(context: Context, private val locale: Locale) {
+        private val twentyFourHour = DateFormat.is24HourFormat(context)
         val time: DateTimeFormatter = bestPattern(
-            if (DateFormat.is24HourFormat(context)) "Hm" else "hm",
+            if (twentyFourHour) "Hm" else "hm",
             DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
         )
         val title: DateTimeFormatter = bestPattern(
-            "EEEEdMMMM",
+            "EEEdMMMM",
+            DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL)
+        )
+        private val dayHeading: DateTimeFormatter = bestPattern(
+            "EEEEd",
             DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL)
         )
         private val weekday: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", locale)
+
+        /** heading names a day above its appointments: "DONNERSTAG, 22.". */
+        fun heading(date: LocalDate): String = dayHeading.format(date).uppercase(locale)
+
+        /** until is an end time as short as it reads: "17" for 17:00 on a
+         * 24-hour clock, the full time otherwise -- midnight included, which
+         * shortened would read "until 0". */
+        fun until(at: ZonedDateTime): String =
+            if (twentyFourHour && at.minute == 0 && at.hour != 0) at.hour.toString() else time.format(at)
 
         /** bestPattern asks ICU for the locale's pattern and falls back when
          * java.time cannot read it: ICU answers some locales with letters

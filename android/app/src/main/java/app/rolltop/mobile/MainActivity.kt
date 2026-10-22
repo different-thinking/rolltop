@@ -68,7 +68,9 @@ class MainActivity : ComponentActivity() {
         NotificationChannels.ensure(this)
         NewMailPollWorker.schedule(this)
         UpdateCheckWorker.schedule(this)
-        requestNotificationPermission()
+        // Whether to ask depends on the server (its installed PWA notifies
+        // instead), so a first start asks once the server is known.
+        if (RolltopPrefs.serverUrl(this).isNotBlank()) requestNotificationPermission()
         if (RolltopPrefs.serverUrl(this).isBlank()) {
             showSetup()
         } else {
@@ -190,6 +192,8 @@ class MainActivity : ComponentActivity() {
                         return@runOnUiThread
                     }
                     RolltopPrefs.setServerUrl(this@MainActivity, normalized)
+                    NewMailPollWorker.schedule(this@MainActivity)
+                    requestNotificationPermission()
                     showWeb(intent)
                 }
             }, "rolltop-server-check").start()
@@ -693,6 +697,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotificationPermission() {
+        // Hosting the agenda widget for the server's PWA asks for nothing: the
+        // PWA has notifications of its own.
+        if (PwaHandoff.isWidgetHost(this)) return
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }

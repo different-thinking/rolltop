@@ -7,7 +7,7 @@
     <string name="notification_reminder_title">Reminder: %1$s</string>
     <string name="notification_reminders_title">%1$d reminders</string>
     <string name="widget_agenda_label">Agenda</string>
-    <string name="widget_agenda_description">Your next two weeks: only the days that have something on, overlaps kept together.</string>
+    <string name="widget_agenda_description">Your next two weeks at a glance: one line per appointment, only the days that have something on.</string>
     <string name="widget_agenda_refresh">Refresh</string>
     <string name="widget_agenda_new">New event</string>
     <string name="widget_agenda_today_none">Nothing scheduled today</string>
@@ -15,23 +15,12 @@
         <item quantity="one">%d event today</item>
         <item quantity="other">%d events today</item>
     </plurals>
-    <plurals name="widget_agenda_overlaps">
-        <item quantity="one">%d overlap</item>
-        <item quantity="other">%d overlaps</item>
-    </plurals>
-    <plurals name="widget_agenda_together">
-        <item quantity="one">%d at the same time</item>
-        <item quantity="other">%d at the same time</item>
-    </plurals>
-    <plurals name="widget_agenda_calendars">
-        <item quantity="one">%d calendar</item>
-        <item quantity="other">%d calendars</item>
-    </plurals>
     <string name="widget_agenda_stale">as of %1$s</string>
-    <string name="widget_agenda_until">Until %1$s</string>
-    <string name="widget_agenda_past_midnight">past midnight</string>
-    <string name="widget_agenda_leave_at">Leave at %1$s</string>
-    <string name="widget_agenda_online">Online</string>
+    <string name="widget_agenda_until">until %1$s</string>
+    <plurals name="widget_agenda_more_all_day">
+        <item quantity="one">+%d all day</item>
+        <item quantity="other">+%d all day</item>
+    </plurals>
     <string name="widget_agenda_travel">Travel</string>
     <string name="widget_agenda_no_title">(No title)</string>
     <string name="widget_agenda_empty">Nothing scheduled in the next two weeks</string>

@@ -1,22 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- One appointment, one line: its start and its title, sized to be read at a
+     glance from arm's length. The row grows with a large font scale rather than
+     clipping the title, and the time shrinks to its column rather than losing
+     the AM/PM a 12-hour clock puts after it. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/agenda_row"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:baselineAligned="false"
+    android:gravity="center_vertical"
+    android:minHeight="46dp"
     android:orientation="horizontal">
 
-    <include layout="@layout/widget_agenda_day" />
+    <TextView
+        android:id="@+id/agenda_event_time"
+        android:layout_width="64dp"
+        android:layout_height="match_parent"
+        android:autoSizeMaxTextSize="18sp"
+        android:autoSizeMinTextSize="11sp"
+        android:autoSizeTextType="uniform"
+        android:fontFamily="sans-serif-medium"
+        android:fontFeatureSettings="tnum"
+        android:gravity="center_vertical"
+        android:maxLines="1"
+        android:textColor="@color/widget_agenda_text"
+        android:textSize="18sp" />
 
-    <LinearLayout
+    <ImageView
+        android:id="@+id/agenda_event_bar"
+        android:layout_width="5dp"
+        android:layout_height="26dp"
+        android:layout_marginEnd="12dp"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/widget_agenda_bar" />
+
+    <TextView
+        android:id="@+id/agenda_event_title"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="6dp"
         android:layout_weight="1"
-        android:orientation="horizontal"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp">
-
-        <include layout="@layout/widget_agenda_event_body" />
-    </LinearLayout>
+        android:ellipsize="end"
+        android:fontFamily="sans-serif-medium"
+        android:maxLines="1"
+        android:textColor="@color/widget_agenda_text"
+        android:textSize="19sp" />
 </LinearLayout>

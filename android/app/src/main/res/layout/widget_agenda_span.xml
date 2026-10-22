@@ -3,34 +3,29 @@
     android:id="@+id/agenda_row"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:baselineAligned="false"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:paddingTop="2dp"
-    android:paddingBottom="2dp">
+    android:orientation="vertical"
+    android:paddingTop="14dp"
+    android:paddingBottom="4dp">
 
     <TextView
         android:id="@+id/agenda_span_dates"
-        android:layout_width="52dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:fontFamily="sans-serif-medium"
-        android:gravity="center"
+        android:letterSpacing="0.04"
+        android:maxLines="1"
         android:textColor="@color/widget_agenda_muted"
-        android:textSize="12sp" />
+        android:textSize="14sp"
+        android:textStyle="bold" />
 
     <TextView
         android:id="@+id/agenda_span_title"
-        android:layout_width="0dp"
-        android:layout_height="40dp"
-        android:layout_marginStart="6dp"
-        android:layout_weight="1"
-        android:background="@drawable/widget_agenda_pill"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
         android:ellipsize="end"
         android:fontFamily="sans-serif-medium"
-        android:gravity="center_vertical"
         android:maxLines="1"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
         android:textColor="@color/widget_agenda_text"
-        android:textSize="14sp" />
+        android:textSize="19sp" />
 </LinearLayout>

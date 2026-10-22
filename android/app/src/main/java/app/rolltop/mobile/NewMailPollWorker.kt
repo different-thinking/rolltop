@@ -41,6 +41,10 @@ class NewMailPollWorker(context: Context, params: WorkerParameters) : Worker(con
         private val POLL_LOCK = Any()
 
         fun schedule(context: Context) {
+            if (PwaHandoff.isWidgetHost(context)) {
+                WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
+                return
+            }
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
@@ -78,6 +82,14 @@ class NewMailPollWorker(context: Context, params: WorkerParameters) : Worker(con
             synchronized(POLL_LOCK) { pollNotifications(context) }
 
         private fun pollNotifications(context: Context): NewMailPollResult {
+            // With the server's PWA installed the PWA notifies, and announcing
+            // the same mail from here as well would say everything twice. Every
+            // poll comes through here -- the periodic one, one a push asked
+            // for, and the baseline a push subscription takes on every start
+            // (prepareForPushRegistration) -- so this is the one gate; and
+            // answering "not signed in" keeps a subscription made before the
+            // PWA was installed from being uploaded again.
+            if (PwaHandoff.isWidgetHost(context)) return NewMailPollResult()
             val mail = NewMailPoller.poll(context)
             val reminders = SnoozeReminderPoller.poll(context)
             return NewMailPollResult(

@@ -144,8 +144,11 @@ internal object NativePushRegistration {
         }
     }
 
+    // With the server's PWA installed, the PWA notifies; this app is only the
+    // agenda widget's host and registers no endpoint of its own.
     private fun notificationsAllowed(activity: Activity): Boolean =
-        (Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+        !PwaHandoff.isWidgetHost(activity) &&
+            (Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED) &&
             NotificationManagerCompat.from(activity).areNotificationsEnabled()
 }

@@ -1,28 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- The now line starts at the appointments' colour bars, past the time
+     column, so it reads as a place in the list rather than a divider. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:baselineAligned="false"
-    android:orientation="horizontal">
-
-    <include layout="@layout/widget_agenda_day" />
+    android:layout_height="12dp"
+    android:paddingStart="62dp"
+    tools:ignore="RtlSymmetry">
 
     <FrameLayout
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:layout_gravity="center_vertical"
+        android:background="@color/widget_agenda_now" />
+
+    <FrameLayout
+        android:layout_width="10dp"
         android:layout_height="10dp"
-        android:layout_marginStart="2dp"
-        android:layout_weight="1">
-
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="2dp"
-            android:layout_gravity="center_vertical"
-            android:background="@color/widget_agenda_now" />
-
-        <FrameLayout
-            android:layout_width="8dp"
-            android:layout_height="8dp"
-            android:layout_gravity="center_vertical"
-            android:background="@drawable/widget_agenda_now_dot" />
-    </FrameLayout>
-</LinearLayout>
+        android:layout_gravity="center_vertical"
+        android:background="@drawable/widget_agenda_now_dot" />
+</FrameLayout>

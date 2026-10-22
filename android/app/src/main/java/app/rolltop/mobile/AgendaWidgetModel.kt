@@ -16,12 +16,14 @@ import java.time.ZonedDateTime
  * app cannot disagree about a day: an all-day event counts in the dates Google
  * named, read in UTC; a timed event that fills twelve hours of a day is drawn
  * with that day's all-day events; and appointments whose time overlaps --
- * counting the journey around them -- are kept together as one entry.
+ * counting the journey around them -- are recognised as running together.
  *
- * What the widget adds is that it shows only what is there. A day with nothing
- * on it is left out rather than drawn empty, and an all-day event is named once,
- * on the first day the widget shows it, instead of on every day it covers: a
- * week's holiday is one line, not seven.
+ * What the widget adds is that it is read at a glance. A day with nothing on it
+ * is left out rather than drawn empty, an all-day event is named once, on the
+ * first day the widget shows it, instead of on every day it covers (a week's
+ * holiday is one line, not seven), and every appointment is one line: its start
+ * and its title. Appointments that run together are not boxed; the ones that
+ * begin while another is running carry a mark on their time.
  *
  * Everything here is pure, so it is tested on the JVM without a device.
  */
@@ -47,67 +49,45 @@ internal data class AgendaEvent(
     val travel: String
 )
 
-/** AgendaDayLabel heads the first row of a day in the widget's date column. */
-internal data class AgendaDayLabel(val date: LocalDate, val isToday: Boolean)
-
 internal sealed class AgendaRow {
     /** key identifies a row across renders, so the launcher keeps its place. */
     abstract val key: String
 
-    /** Divider separates two days. */
-    data class Divider(override val key: String) : AgendaRow()
+    /** Heading names a day other than today; today is the widget's own title. */
+    data class Heading(val day: LocalDate) : AgendaRow() {
+        override val key = "heading-$day"
+    }
 
     /** AllDay is one line naming a day's all-day events above its appointments. */
-    data class AllDay(val label: AgendaDayLabel?, val day: LocalDate, val events: List<AgendaEvent>) : AgendaRow() {
+    data class AllDay(val day: LocalDate, val events: List<AgendaEvent>) : AgendaRow() {
         override val key = "allday-$day"
     }
 
     /** Span is an all-day event on a day that has no appointments, with the
      * dates it covers as its label: a holiday reads "Sat 24 - Sat 31" once. */
-    data class Span(val first: LocalDate, val last: LocalDate, val isToday: Boolean, val event: AgendaEvent) : AgendaRow() {
+    data class Span(val first: LocalDate, val last: LocalDate, val event: AgendaEvent) : AgendaRow() {
         override val key = "span-$first-${event.id}"
     }
 
     /** Now is the line drawn before the first appointment that has not begun. */
-    data class Now(val label: AgendaDayLabel?, val at: Instant) : AgendaRow() {
+    data class Now(val at: Instant) : AgendaRow() {
         override val key = "now"
     }
 
-    /** Single is an appointment that overlaps nothing. */
-    data class Single(
-        val label: AgendaDayLabel?,
-        val day: LocalDate,
-        val event: AgendaEvent,
-        val past: Boolean
-    ) : AgendaRow() {
-        override val key = "event-$day-${event.id}"
-    }
-
-    /** GroupHead opens a box of appointments that run at the same time. */
-    data class GroupHead(
-        val label: AgendaDayLabel?,
-        val day: LocalDate,
-        val count: Int,
-        val calendarCount: Int,
-        val start: Instant,
-        val end: Instant
-    ) : AgendaRow() {
-        override val key = "group-$day-${start.epochSecond}"
-    }
-
-    /** GroupMember is one appointment in that box. from and to are where its
-     * own time sits inside the box's span, 0 to 1, which is what the bar under
-     * it draws: three appointments at once read as a clash, and the bars say
-     * how much of one. */
-    data class GroupMember(
+    /**
+     * Event is one appointment on one line. clash marks one that begins while
+     * another is still running -- the journey around them counted, as the app's
+     * agenda counts it. The first of such a run is drawn plainly, so a long
+     * block with appointments inside it reads as the block and what happens
+     * during it, not as a conflict box around all of them.
+     */
+    data class Event(
         val day: LocalDate,
         val event: AgendaEvent,
         val past: Boolean,
-        val last: Boolean,
-        val from: Float,
-        val to: Float
+        val clash: Boolean
     ) : AgendaRow() {
-        override val key = "member-$day-${event.id}"
+        override val key = "event-$day-${event.id}"
     }
 }
 
@@ -115,8 +95,6 @@ internal data class AgendaPlan(
     val today: LocalDate,
     /** todayEvents counts the appointments of today, all-day events aside. */
     val todayEvents: Int,
-    /** todayOverlaps counts today's boxes of appointments at the same time. */
-    val todayOverlaps: Int,
     val rows: List<AgendaRow>,
     /** nextChange is the next moment the widget looks different without new
      * data: an appointment beginning or ending, or midnight. */
@@ -211,7 +189,6 @@ internal object AgendaWidgetModel {
         val rows = ArrayList<AgendaRow>()
         val named = HashSet<Long>()
         var todayEvents = 0
-        var todayOverlaps = 0
         var nextChange = dayStart(today.plusDays(1), zone)
 
         for (offset in 0 until DAYS) {
@@ -225,64 +202,44 @@ internal object AgendaWidgetModel {
             val timed = events.filter { !it.allDay && touches(it, start, end) && !fillsDay(it, start, end) }
             if (fresh.isEmpty() && timed.isEmpty()) continue
 
-            if (rows.isNotEmpty()) rows += AgendaRow.Divider("divider-$day")
             if (timed.isEmpty()) {
-                fresh.forEachIndexed { index, event ->
-                    rows += AgendaRow.Span(day, lastDay(event, zone).coerceAtLeast(day), isToday && index == 0, event)
+                fresh.forEach { event ->
+                    rows += AgendaRow.Span(day, lastDay(event, zone).coerceAtLeast(day), event)
                 }
                 continue
             }
 
-            var label: AgendaDayLabel? = AgendaDayLabel(day, isToday)
-            fun takeLabel(): AgendaDayLabel? = label.also { label = null }
-
-            if (fresh.isNotEmpty()) rows += AgendaRow.AllDay(takeLabel(), day, fresh)
+            if (!isToday) rows += AgendaRow.Heading(day)
+            if (fresh.isNotEmpty()) rows += AgendaRow.AllDay(day, fresh)
             val groups = groupOverlapping(timed, start, end)
             if (isToday) {
                 todayEvents = timed.size
-                todayOverlaps = groups.count { it.events.size > 1 }
                 timed.flatMap { listOf(it.start, it.end) }
                     .filter { it.isAfter(nowInstant) && it.isBefore(nextChange) }
                     .minOrNull()
                     ?.let { nextChange = it }
             }
+            // The now line goes before the first appointment that has not begun,
+            // looked for line by line: with every appointment on a line of its
+            // own, one that starts this afternoon inside a block running since
+            // the morning is still ahead of now.
             var nowDrawn = !isToday
             for (group in groups) {
-                if (!nowDrawn && group.eventStart.isAfter(nowInstant)) {
-                    rows += AgendaRow.Now(takeLabel(), nowInstant)
-                    nowDrawn = true
-                }
-                if (group.events.size == 1) {
-                    val event = group.events[0]
-                    rows += AgendaRow.Single(takeLabel(), day, event, past = !event.end.isAfter(nowInstant))
-                    continue
-                }
-                val boxStart = maxOf(group.eventStart, start)
-                val boxEnd = minOf(group.eventEnd, end)
-                rows += AgendaRow.GroupHead(
-                    takeLabel(),
-                    day,
-                    group.events.size,
-                    group.events.map { it.calendarId }.distinct().size,
-                    boxStart,
-                    boxEnd
-                )
-                val span = (boxEnd.toEpochMilli() - boxStart.toEpochMilli()).coerceAtLeast(1).toFloat()
-                group.events.forEachIndexed { index, event ->
-                    val from = (maxOf(event.start, boxStart).toEpochMilli() - boxStart.toEpochMilli()) / span
-                    val to = (minOf(event.end, boxEnd).toEpochMilli() - boxStart.toEpochMilli()) / span
-                    rows += AgendaRow.GroupMember(
-                        day,
-                        event,
-                        past = !event.end.isAfter(nowInstant),
-                        last = index == group.events.size - 1,
-                        from = from.coerceIn(0f, 1f),
-                        to = to.coerceIn(0f, 1f)
-                    )
+                // A group comes ordered by when each journey begins, but a line
+                // is read by its own time: an appointment with a long journey
+                // before it would otherwise be drawn above one that starts
+                // earlier, and the now line could fall above one already begun.
+                val ordered = group.events.sortedWith(compareBy<AgendaEvent> { it.start }.thenByDescending { it.end })
+                ordered.forEachIndexed { index, event ->
+                    if (!nowDrawn && event.start.isAfter(nowInstant)) {
+                        rows += AgendaRow.Now(nowInstant)
+                        nowDrawn = true
+                    }
+                    rows += AgendaRow.Event(day, event, past = !event.end.isAfter(nowInstant), clash = index > 0)
                 }
             }
         }
-        return AgendaPlan(today, todayEvents, todayOverlaps, rows.take(MAX_ROWS), nextChange)
+        return AgendaPlan(today, todayEvents, rows.take(MAX_ROWS), nextChange)
     }
 
     /** calendarTarget resolves what a tap on the widget opens. Only calendar
