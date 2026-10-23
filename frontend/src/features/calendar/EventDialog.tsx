@@ -300,6 +300,33 @@ function parseUTCDate(value: string): Date | null {
   return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
 }
 
+type DraftBounds = Pick<DraftState, "allDay" | "startDate" | "startTime" | "endDate" | "endTime">;
+
+/** withStartMoved applies a change to the start and carries the end along by
+ * the same distance, so moving an appointment keeps its length -- the way every
+ * calendar's dialog behaves. Only the start pulls the end: editing the end is
+ * how the length is changed. A form whose bounds do not parse, or already end
+ * before they start, gets the change alone, since there is no length to keep. */
+export function withStartMoved<T extends DraftBounds>(
+  current: T,
+  patch: Partial<Pick<DraftBounds, "startDate" | "startTime">>
+): T {
+  const next = { ...current, ...patch };
+  if (current.allDay) {
+    const start = parseUTCDate(current.startDate);
+    const end = parseUTCDate(current.endDate || current.startDate);
+    const moved = parseUTCDate(next.startDate);
+    if (!start || !end || !moved || end < start) return next;
+    return { ...next, endDate: utcDateValue(new Date(moved.getTime() + (end.getTime() - start.getTime()))) };
+  }
+  const start = parseLocalDateTime(current.startDate, current.startTime);
+  const end = parseLocalDateTime(current.endDate || current.startDate, current.endTime);
+  const moved = parseLocalDateTime(next.startDate, next.startTime);
+  if (!start || !end || !moved || end <= start) return next;
+  const movedEnd = new Date(moved.getTime() + (end.getTime() - start.getTime()));
+  return { ...next, endDate: localDateValue(movedEnd), endTime: localTimeValue(movedEnd) };
+}
+
 function parseLocalDateTime(date: string, time: string): Date | null {
   const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   const timeMatch = /^(\d{2}):(\d{2})$/.exec(time);
@@ -544,7 +571,7 @@ export function EventDialog({
                   type="date"
                   value={draft.startDate}
                   disabled={!editable || saving}
-                  onChange={(changeEvent) => update({ startDate: changeEvent.target.value })}
+                  onChange={(changeEvent) => setDraft((current) => withStartMoved(current, { startDate: changeEvent.target.value }))}
                 />
                 {draft.allDay ? null : (
                   <input
@@ -552,7 +579,7 @@ export function EventDialog({
                     aria-label="Start time"
                     value={draft.startTime}
                     disabled={!editable || saving}
-                    onChange={(changeEvent) => update({ startTime: changeEvent.target.value })}
+                    onChange={(changeEvent) => setDraft((current) => withStartMoved(current, { startTime: changeEvent.target.value }))}
                   />
                 )}
               </div>
