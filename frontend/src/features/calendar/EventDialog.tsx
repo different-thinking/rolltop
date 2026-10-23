@@ -79,8 +79,15 @@ function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+/** yearValue renders a year as the four digits a date input reads. A browser
+ * reports every keystroke of a typed year as a whole date -- 0002, 0020, 0202,
+ * 2027 -- and a three-digit year is a value the input cannot show. */
+function yearValue(year: number): string {
+  return String(year).padStart(4, "0");
+}
+
 function localDateValue(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${yearValue(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function localTimeValue(date: Date): string {
@@ -88,7 +95,7 @@ function localTimeValue(date: Date): string {
 }
 
 function utcDateValue(date: Date): string {
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  return `${yearValue(date.getUTCFullYear())}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
 /** draftFromEvent fills the form from an existing event, reading an all-day
@@ -297,7 +304,38 @@ function blankInput(): CalendarEventInput {
 function parseUTCDate(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return null;
-  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  // Date.UTC reads years 0-99 as 1900-1999; setting the year afterwards keeps
+  // the year that was typed, so a date and its value round-trip.
+  const parsed = new Date(Date.UTC(2000, 0, 1));
+  parsed.setUTCFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return parsed;
+}
+
+type DraftBounds = Pick<DraftState, "allDay" | "startDate" | "startTime" | "endDate" | "endTime">;
+
+/** withStartMoved applies a change to the start and carries the end along by
+ * the same distance, so moving an appointment keeps its length -- the way every
+ * calendar's dialog behaves. Only the start pulls the end: editing the end is
+ * how the length is changed. A form whose bounds do not parse, or already end
+ * before they start, gets the change alone, since there is no length to keep. */
+export function withStartMoved<T extends DraftBounds>(
+  current: T,
+  patch: Partial<Pick<DraftBounds, "startDate" | "startTime">>
+): T {
+  const next = { ...current, ...patch };
+  if (current.allDay) {
+    const start = parseUTCDate(current.startDate);
+    const end = parseUTCDate(current.endDate || current.startDate);
+    const moved = parseUTCDate(next.startDate);
+    if (!start || !end || !moved || end < start) return next;
+    return { ...next, endDate: utcDateValue(new Date(moved.getTime() + (end.getTime() - start.getTime()))) };
+  }
+  const start = parseLocalDateTime(current.startDate, current.startTime);
+  const end = parseLocalDateTime(current.endDate || current.startDate, current.endTime);
+  const moved = parseLocalDateTime(next.startDate, next.startTime);
+  if (!start || !end || !moved || end <= start) return next;
+  const movedEnd = new Date(moved.getTime() + (end.getTime() - start.getTime()));
+  return { ...next, endDate: localDateValue(movedEnd), endTime: localTimeValue(movedEnd) };
 }
 
 function parseLocalDateTime(date: string, time: string): Date | null {
@@ -311,6 +349,8 @@ function parseLocalDateTime(date: string, time: string): Date | null {
     Number(timeMatch[1]),
     Number(timeMatch[2])
   );
+  // As in parseUTCDate: the constructor reads years 0-99 as 1900-1999.
+  parsed.setFullYear(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
@@ -544,7 +584,10 @@ export function EventDialog({
                   type="date"
                   value={draft.startDate}
                   disabled={!editable || saving}
-                  onChange={(changeEvent) => update({ startDate: changeEvent.target.value })}
+                  onChange={(changeEvent) => {
+                    const startDate = changeEvent.target.value;
+                    setDraft((current) => withStartMoved(current, { startDate }));
+                  }}
                 />
                 {draft.allDay ? null : (
                   <input
@@ -552,7 +595,10 @@ export function EventDialog({
                     aria-label="Start time"
                     value={draft.startTime}
                     disabled={!editable || saving}
-                    onChange={(changeEvent) => update({ startTime: changeEvent.target.value })}
+                    onChange={(changeEvent) => {
+                      const startTime = changeEvent.target.value;
+                      setDraft((current) => withStartMoved(current, { startTime }));
+                    }}
                   />
                 )}
               </div>
