@@ -37,4 +37,17 @@ describe("withStartMoved", () => {
     });
     expect(withStartMoved(timed, { startDate: "" })).toMatchObject({ startDate: "", endDate: "2026-10-23" });
   });
+
+  it("keeps the length while a year is typed one digit at a time", () => {
+    // A date input reports each keystroke of a typed year as a whole date.
+    let timedDraft = timed;
+    let allDayDraft = allDay;
+    for (const startDate of ["0002-10-23", "0020-10-23", "0202-10-23", "2027-10-23"]) {
+      timedDraft = withStartMoved(timedDraft, { startDate });
+      allDayDraft = withStartMoved(allDayDraft, { startDate });
+      expect(timedDraft.endDate).toBe(startDate);
+      expect(allDayDraft.endDate).toBe(startDate.replace(/-23$/, "-25"));
+    }
+    expect(timedDraft).toMatchObject({ startDate: "2027-10-23", endDate: "2027-10-23", endTime: "10:30" });
+  });
 });

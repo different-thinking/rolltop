@@ -79,8 +79,15 @@ function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+/** yearValue renders a year as the four digits a date input reads. A browser
+ * reports every keystroke of a typed year as a whole date -- 0002, 0020, 0202,
+ * 2027 -- and a three-digit year is a value the input cannot show. */
+function yearValue(year: number): string {
+  return String(year).padStart(4, "0");
+}
+
 function localDateValue(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${yearValue(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function localTimeValue(date: Date): string {
@@ -88,7 +95,7 @@ function localTimeValue(date: Date): string {
 }
 
 function utcDateValue(date: Date): string {
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  return `${yearValue(date.getUTCFullYear())}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
 /** draftFromEvent fills the form from an existing event, reading an all-day
@@ -297,7 +304,11 @@ function blankInput(): CalendarEventInput {
 function parseUTCDate(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return null;
-  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  // Date.UTC reads years 0-99 as 1900-1999; setting the year afterwards keeps
+  // the year that was typed, so a date and its value round-trip.
+  const parsed = new Date(Date.UTC(2000, 0, 1));
+  parsed.setUTCFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return parsed;
 }
 
 type DraftBounds = Pick<DraftState, "allDay" | "startDate" | "startTime" | "endDate" | "endTime">;
@@ -338,6 +349,8 @@ function parseLocalDateTime(date: string, time: string): Date | null {
     Number(timeMatch[1]),
     Number(timeMatch[2])
   );
+  // As in parseUTCDate: the constructor reads years 0-99 as 1900-1999.
+  parsed.setFullYear(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
@@ -571,7 +584,10 @@ export function EventDialog({
                   type="date"
                   value={draft.startDate}
                   disabled={!editable || saving}
-                  onChange={(changeEvent) => setDraft((current) => withStartMoved(current, { startDate: changeEvent.target.value }))}
+                  onChange={(changeEvent) => {
+                    const startDate = changeEvent.target.value;
+                    setDraft((current) => withStartMoved(current, { startDate }));
+                  }}
                 />
                 {draft.allDay ? null : (
                   <input
@@ -579,7 +595,10 @@ export function EventDialog({
                     aria-label="Start time"
                     value={draft.startTime}
                     disabled={!editable || saving}
-                    onChange={(changeEvent) => setDraft((current) => withStartMoved(current, { startTime: changeEvent.target.value }))}
+                    onChange={(changeEvent) => {
+                      const startTime = changeEvent.target.value;
+                      setDraft((current) => withStartMoved(current, { startTime }));
+                    }}
                   />
                 )}
               </div>
