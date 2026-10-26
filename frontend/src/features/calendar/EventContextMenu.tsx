@@ -44,6 +44,11 @@ export function EventContextMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const keepRef = useRef<HTMLButtonElement | null>(null);
+  // What had focus when the menu opened, read while rendering: the effects
+  // below move focus into the menu, so by the time any effect ran it would
+  // read one of the menu's own items.
+  const openerRef = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const [position, setPosition] = useState({ left: x, top: y });
   const [confirming, setConfirming] = useState(false);
   const calendar = calendars.find((item) => item.id === event.calendar_id);
@@ -64,9 +69,26 @@ export function EventContextMenu({
     });
   }, [x, y, confirming]);
 
+  // The question lands on Keep, never on Delete: Enter on "Delete…" repeats
+  // while it is held, and a repeat landing on Delete would cancel the meeting
+  // for every guest without the question ever having been read.
   useEffect(() => {
-    focusItem(menuRef.current, 0);
+    if (confirming) keepRef.current?.focus();
+    else focusItem(menuRef.current, 0);
   }, [confirming]);
+
+  // Closing hands focus back to what had it, so the context-menu key leaves a
+  // keyboard reader on the event rather than at the top of the page. Anything
+  // that moved focus on purpose -- a dialog the menu opened -- keeps it.
+  useEffect(() => {
+    const opener = openerRef.current;
+    const menu = menuRef.current;
+    return () => {
+      const focused = document.activeElement;
+      const lost = !focused || focused === document.body || Boolean(menu?.contains(focused));
+      if (lost && opener?.isConnected) opener.focus();
+    };
+  }, []);
 
   // Anything that moves what the menu points at closes it: a press anywhere
   // else, a scroll of the week under it, a resize, leaving the window.
@@ -147,7 +169,14 @@ export function EventContextMenu({
             <button type="button" role="menuitem" className="danger" disabled={busy} onClick={onDelete}>
               {busy ? "Deleting…" : "Delete"}
             </button>
-            <button type="button" role="menuitem" className="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+            <button
+              ref={keepRef}
+              type="button"
+              role="menuitem"
+              className="ghost"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
               Keep
             </button>
           </div>

@@ -173,10 +173,19 @@ describe("copyPrefill", () => {
     expect(prefill.attendees?.map((attendee) => attendee.email)).toEqual(["boss@example.com", "reader@example.com"]);
   });
 
-  it("keeps the notes as they are when the event is not an online meeting", () => {
+  it("takes the join block out of an event that is not an online meeting itself", () => {
+    // An Outlook invitation kept in a Google calendar, or the copy of a Teams
+    // meeting in the second calendar: not a meeting, but the block is there.
     const prefill = copyPrefill(meeting({ online_meeting: false, online_meeting_url: "" }), range, [summary(1)]);
-    expect(prefill.description).toContain("teams.microsoft.com");
+    expect(prefill.description).toBe("Agenda");
+    expect(prefill.onlineMeeting).toBe(false);
     expect(prefill.duplicate).toBeUndefined();
+  });
+
+  it("keeps notes without a join block as they are", () => {
+    const notes = "Agenda\n__________\nSigned, the team\n__________";
+    const prefill = copyPrefill(meeting({ description: notes, online_meeting: false, online_meeting_url: "" }), range, [summary(1)]);
+    expect(prefill.description).toBe(notes);
   });
 });
 

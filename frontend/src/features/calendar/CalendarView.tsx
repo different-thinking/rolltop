@@ -223,8 +223,15 @@ export function CalendarView({
   const [dialog, setDialog] = useState<DialogState>(null);
   // The menu a right-click opens on an event, at the point it was asked for.
   const [eventMenu, setEventMenu] = useState<{ event: CalendarEvent; x: number; y: number } | null>(null);
-  const [eventMenuBusy, setEventMenuBusy] = useState(false);
+  // The event a delete started from the menu is waiting on, 0 for none: it
+  // belongs to that event, so a menu opened on another one meanwhile is
+  // neither disabled by it nor closed when it answers.
+  const [eventMenuBusyID, setEventMenuBusyID] = useState(0);
   const closeEventMenu = useCallback(() => setEventMenu(null), []);
+  const closeEventMenuFor = useCallback(
+    (eventID: number) => setEventMenu((current) => (current && current.event.id === eventID ? null : current)),
+    []
+  );
   const [now, setNow] = useState(() => new Date());
   // The day the lens is open on, as a date key. null leaves the choice to
   // resolveLensIndex; "" is the reader having closed it, which holds until
@@ -562,20 +569,30 @@ export function CalendarView({
   // The menu has no form to keep a refusal in, so it says what went wrong in a
   // toast, and a delete the provider refused redraws the week as it stands.
   const deleteFromMenu = async (event: CalendarEvent) => {
-    setEventMenuBusy(true);
+    setEventMenuBusyID(event.id);
     try {
-      await removeEvent(event, closeEventMenu);
+      await removeEvent(event, () => closeEventMenuFor(event.id));
     } catch (err) {
-      closeEventMenu();
-      if (err instanceof ApiError && err.status === 409) {
+      closeEventMenuFor(event.id);
+      reportMenuRefusal(err);
+    } finally {
+      setEventMenuBusyID((current) => (current === event.id ? 0 : current));
+    }
+  };
+
+  // A refusal the menu reports: the version that won is drawn when the
+  // provider named one, and the week is read again whenever it did not, the
+  // way the dialog adopts it -- the menu has no form to show it in.
+  const reportMenuRefusal = (err: unknown) => {
+    if (err instanceof ApiError && err.status === 409) {
+      const winner = err.payload.event as CalendarEvent | undefined;
+      if (winner) setEvents((current) => current.map((item) => (item.id === winner.id ? winner : item)));
+      else
         void reload("events").catch(() => {
           // The message below is what the reader acts on.
         });
-      }
-      addToast(messageFromError(err), "error");
-    } finally {
-      setEventMenuBusy(false);
     }
+    addToast(messageFromError(err), "error");
   };
 
   const respondFromMenu = async (event: CalendarEvent, response: string) => {
@@ -585,7 +602,7 @@ export function CalendarView({
       const data = await api.respondToCalendarEvent(csrf, event.id, response);
       setEvents((current) => current.map((item) => (item.id === data.event.id ? data.event : item)));
     } catch (err) {
-      addToast(messageFromError(err), "error");
+      reportMenuRefusal(err);
     }
   };
 
@@ -658,13 +675,14 @@ export function CalendarView({
   // not created on the spot -- that would send invitations, or book a meeting,
   // on a drop -- but opened as a new event for the reader to look over first.
   const copyEvent = async (event: CalendarEvent, range: TimeRange) => {
-    const { copy, busyCopy } = copyPrefill(event, range, calendars);
+    const prefill = copyPrefill(event, range, calendars);
+    const { copy, busyCopy } = prefill;
     if ((event.attendees || []).length > 0 || event.online_meeting) {
       setDialogProblem("");
       setDialog({
         event: null,
         day: startOfDay(range.start),
-        prefill: copyPrefill(event, range, calendars),
+        prefill,
         formKey: `copy-${event.id}-${range.start.getTime()}`
       });
       return;
@@ -1469,7 +1487,7 @@ export function CalendarView({
           y={eventMenu.y}
           calendars={calendars}
           writable={writableCalendars}
-          busy={eventMenuBusy}
+          busy={eventMenuBusyID === eventMenu.event.id}
           onOpen={() => {
             const { event } = eventMenu;
             closeEventMenu();

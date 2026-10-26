@@ -207,7 +207,10 @@ export type EventPrefill = {
  * Duplicate both start from it, so a copy means the same thing either way.
  * It never carries the original's meeting link: an online meeting is asked
  * for anew and gets a link of its own when saved, so the join details the
- * provider wrote into the original's notes would point at the wrong call. */
+ * provider wrote into the original's notes would point at the wrong call.
+ * That holds for events that are not online meetings themselves too -- the
+ * copy of a Teams meeting in the second calendar, an Outlook invitation kept
+ * in a Google calendar -- since their notes carry the same block. */
 export function copyPrefill(
   event: CalendarEvent,
   range: { start: Date; end: Date },
@@ -226,9 +229,7 @@ export function copyPrefill(
     calendarID: event.calendar_id,
     summary: event.summary,
     location: event.location,
-    description: event.online_meeting
-      ? withoutMeetingJoinDetails(event.description, event.online_meeting_url)
-      : event.description,
+    description: withoutMeetingJoinDetails(event.description, event.online_meeting_url),
     attendees: event.attendees,
     copy: keptIn(calendars.find((calendar) => calendar.copy_target && calendar.can_write)),
     busyCopy: keptIn(calendars.find((calendar) => calendar.busy_target && calendar.can_write)),

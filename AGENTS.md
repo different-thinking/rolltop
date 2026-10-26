@@ -872,7 +872,9 @@ site and in review.
   is what makes carrying a guest list safe; and the original's join details
   are taken out of the notes (`withoutMeetingJoinDetails`), because the new
   meeting gets a link of its own and the old block would send its guests into
-  the wrong call. Placeholders, travel blocks and events still waiting in the
+  the wrong call -- whether or not the original is an online meeting itself,
+  since an Outlook invitation kept in a Google calendar and the second
+  calendar's copy of a Teams meeting carry the block without being one. Placeholders, travel blocks and events still waiting in the
   offline outbox offer no Duplicate.
 - **An event's context menu offers what its dialog would, and nothing else.**
   A right-click, a long press or the context-menu key on any drawn event opens

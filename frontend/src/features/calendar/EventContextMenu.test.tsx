@@ -136,6 +136,8 @@ describe("EventContextMenu", () => {
     act(() => item("Delete…").click());
     expect(handlers.onDelete).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Delete this event in Google too? The guests are told it is cancelled.");
+    // The question lands on Keep, so a held Enter cannot answer it.
+    expect(document.activeElement?.textContent?.trim()).toBe("Keep");
     act(() => item("Keep").click());
     expect(labels()).toContain("Delete…");
     act(() => item("Delete…").click());
@@ -181,6 +183,17 @@ describe("EventContextMenu", () => {
       document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     });
     expect(handlers.onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives focus back to the event it was opened on when it closes", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    render(event(), [calendar(1)]);
+    expect(document.activeElement?.textContent?.trim()).toBe("Open");
+    act(() => root.render(<></>));
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
   });
 
   it("moves through its items with the arrow keys", () => {
