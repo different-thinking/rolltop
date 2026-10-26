@@ -411,6 +411,7 @@ function AgendaRow({
     <button
       type="button"
       className={`calendar-agenda-row ${declined ? "declined" : ""} ${event.pending_offline ? "pending-offline" : ""}`}
+      data-event-id={event.id}
       onClick={() => onOpenEvent(event, day)}
     >
       <AgendaTime event={event} day={day} />
@@ -522,6 +523,7 @@ function EventChip({
       type="button"
       className={`calendar-chip ${event.pending_offline ? "pending-offline" : ""}`}
       style={{ background: color, color: readableTextColor(color) }}
+      data-event-id={event.id}
       onClick={() => onOpenEvent(event, day)}
     >
       {event.summary || "(No title)"}

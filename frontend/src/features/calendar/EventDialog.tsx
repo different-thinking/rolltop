@@ -9,7 +9,15 @@ import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
 import { pendingReason } from "../../lib/calendarOutbox";
 import { Icon } from "../../components/Icon";
-import { calendarColor, eventEditable, providerName, travelMinutes } from "./weekModel";
+import {
+  calendarColor,
+  deleteQuestion,
+  eventDuplicable,
+  eventEditable,
+  eventRemoval,
+  providerName,
+  travelMinutes
+} from "./weekModel";
 import { reminderLabel } from "../../lib/calendarReminders";
 
 /** responseOptions are the answers an invitee can give. */
@@ -550,13 +558,10 @@ export function EventDialog({
   // A placeholder has no journey of its own -- it moves the event's -- and a
   // travel block standing alone is a journey, not something to travel to.
   const offerTravel = editable && !placeholder && !travelBlock && !draft.allDay;
-  // Anything the reader can open can be duplicated into a calendar they may
-  // write to -- a meeting somebody else organizes and an event in a calendar
-  // shared read-only included, since the duplicate is the reader's own. Not a
-  // placeholder or a travel block, which are only time taken for an event
-  // entered elsewhere, and not an event still waiting to be sent.
-  const offerDuplicate =
-    Boolean(onDuplicate) && Boolean(event) && !event?.pending_offline && !placeholder && !travelBlock && writable.length > 0;
+  // The context menu asks the same two questions, so what it offers on an
+  // event is what this dialog would.
+  const offerDuplicate = Boolean(onDuplicate) && event !== null && eventDuplicable(event, writable);
+  const removal = event ? eventRemoval(event, calendar) : null;
   const travelTimes = useMemo(() => {
     if (draft.allDay) return { leave: "", back: "" };
     const start = parseLocalDateTime(draft.startDate, draft.startTime);
@@ -921,23 +926,14 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-footer">
-          {event?.pending_offline ? (
+          {removal === "discard" ? (
             <button type="button" className="ghost" disabled={saving} onClick={onDelete}>
               Discard
             </button>
-          ) : event && editable && !placeholderOfEvent ? (
+          ) : event && removal === "delete" ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
-                <span>
-                  {alsoIn.length > 0
-                      ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
-                      : event.attendees.length > 0 && !event.my_response
-                        ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
-                        : `Delete this event in ${provider} too?`}
-                  {(event.travel_before_minutes || 0) > 0 || (event.travel_after_minutes || 0) > 0
-                    ? " Its travel time goes with it."
-                    : ""}
-                </span>
+                <span>{deleteQuestion(event, calendars)}</span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete
                 </button>

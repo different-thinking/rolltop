@@ -6,8 +6,11 @@ import {
   busiestColumns,
   calendarAccountGroups,
   dayColumnWeights,
+  deleteQuestion,
   drawnRange,
+  eventDuplicable,
   eventEditable,
+  eventRemoval,
   hourHeight,
   isoWeekNumber,
   layoutDayEvents,
@@ -385,5 +388,37 @@ describe("layoutDayEvents with travel", () => {
     const [drawn] = layoutDayEvents([event(1, at(tuesday, 10), at(tuesday, 11))], tuesday);
     expect(drawn.travelBefore).toBe(0);
     expect(drawn.travelAfter).toBe(0);
+  });
+});
+
+describe("event menu gates", () => {
+  const google = calendar(1, "reader@example.test");
+  const microsoft = calendar(2, "reader@example.test", "microsoft");
+
+  it("duplicates anything with a calendar to go into, but not placeholders, travel or waiting events", () => {
+    expect(eventDuplicable(event(2, at(tuesday, 9), at(tuesday, 10), { my_response: "accepted" }), [google])).toBe(true);
+    expect(eventDuplicable(event(1, at(tuesday, 9), at(tuesday, 10)), [])).toBe(false);
+    expect(eventDuplicable(event(1, at(tuesday, 9), at(tuesday, 10), { link_masked: true }), [google])).toBe(false);
+    expect(eventDuplicable(event(1, at(tuesday, 9), at(tuesday, 10), { travel: "before" }), [google])).toBe(false);
+    expect(eventDuplicable(event(1, at(tuesday, 9), at(tuesday, 10), { pending_offline: true }), [google])).toBe(false);
+  });
+
+  it("deletes what the dialog may change, discards what waits, and leaves a placeholder of a live event", () => {
+    expect(eventRemoval(event(1, at(tuesday, 9), at(tuesday, 10)), google)).toBe("delete");
+    expect(eventRemoval(event(2, at(tuesday, 9), at(tuesday, 10), { my_response: "accepted" }), microsoft)).toBeNull();
+    expect(eventRemoval(event(1, at(tuesday, 9), at(tuesday, 10), { pending_offline: true }), google)).toBe("discard");
+    const placeholder = { link_masked: true, also_in: [{ calendar_id: 2, event_id: 9 }] };
+    expect(eventRemoval(event(1, at(tuesday, 9), at(tuesday, 10), placeholder), google)).toBeNull();
+    expect(eventRemoval(event(1, at(tuesday, 9), at(tuesday, 10), { link_masked: true }), google)).toBe("delete");
+  });
+
+  it("names the copies and the journey in the delete question", () => {
+    const item = event(1, at(tuesday, 9), at(tuesday, 10), {
+      also_in: [{ calendar_id: 2, event_id: 9 }],
+      travel_before_minutes: 15
+    });
+    expect(deleteQuestion(item, [google, microsoft])).toBe(
+      "Delete this event in Google too, including the copy in Calendar 2? Its travel time goes with it."
+    );
   });
 });

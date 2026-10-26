@@ -424,6 +424,45 @@ export function eventEditable(event: CalendarEvent, calendar: CalendarSummary | 
   return !(Boolean(event.my_response) && calendar.provider === "microsoft");
 }
 
+/** eventDuplicable says whether an event offers Duplicate, in its dialog and
+ * in its context menu alike. Anything the reader can open can be duplicated
+ * into a calendar they may write to -- a meeting somebody else organizes and
+ * an event in a calendar shared read-only included, since the duplicate is the
+ * reader's own. Not a placeholder or a travel block, which are only time taken
+ * for an event entered elsewhere, and not an event still waiting to be sent.
+ * writable is the calendars a new event may go into: listed and writable. */
+export function eventDuplicable(event: CalendarEvent, writable: CalendarSummary[]): boolean {
+  return !event.pending_offline && !event.link_masked && !event.travel && writable.length > 0;
+}
+
+/** eventRemoval says how an event can be taken away, the same in its dialog
+ * and in its context menu: a waiting event is discarded from the browser's
+ * queue, an event the reader may change is deleted at its provider, and a
+ * placeholder whose event still exists is neither -- it leaves when the box on
+ * that event is unticked or the event is deleted. */
+export function eventRemoval(event: CalendarEvent, calendar: CalendarSummary | undefined): "discard" | "delete" | null {
+  if (event.pending_offline) return "discard";
+  if (event.link_masked && (event.also_in || []).length > 0) return null;
+  return eventEditable(event, calendar) ? "delete" : null;
+}
+
+/** deleteQuestion is what is asked before an event is deleted: where it goes
+ * besides here, and who is told. */
+export function deleteQuestion(event: CalendarEvent, calendars: CalendarSummary[]): string {
+  const provider = providerName(calendars.find((item) => item.id === event.calendar_id));
+  const alsoIn = (event.also_in || [])
+    .map((item) => calendars.find((option) => option.id === item.calendar_id)?.name)
+    .filter((name): name is string => Boolean(name));
+  const question =
+    alsoIn.length > 0
+      ? `Delete this event in ${provider} too, including the copy in ${alsoIn.join(", ")}?`
+      : (event.attendees || []).length > 0 && !event.my_response
+        ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
+        : `Delete this event in ${provider} too?`;
+  const travel = (event.travel_before_minutes || 0) > 0 || (event.travel_after_minutes || 0) > 0;
+  return travel ? `${question} Its travel time goes with it.` : question;
+}
+
 /** TimeRange is a dragged appointment's new bounds. */
 export type TimeRange = { start: Date; end: Date };
 
