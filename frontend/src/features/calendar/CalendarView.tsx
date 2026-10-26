@@ -23,7 +23,7 @@ import {
   useCalendarOutbox
 } from "../../lib/calendarOutbox";
 import { CalendarRoleChoices, writeBusyLabel, writeBusyTarget, writeCopyTarget } from "./CalendarRoles";
-import { EventDialog } from "./EventDialog";
+import { copyPrefill, EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 import { ReminderSnoozeDialog } from "./ReminderSnoozeDialog";
 import { useWeekDrag } from "./useWeekDrag";
@@ -617,34 +617,13 @@ export function CalendarView({
   // not created on the spot -- that would send invitations, or book a meeting,
   // on a drop -- but opened as a new event for the reader to look over first.
   const copyEvent = async (event: CalendarEvent, range: TimeRange) => {
-    const copyTarget = calendars.find((calendar) => calendar.copy_target && calendar.can_write);
-    const busyTarget = calendars.find((calendar) => calendar.busy_target && calendar.can_write);
-    const keptIn = (target: CalendarSummary | undefined) =>
-      Boolean(target) &&
-      target?.id !== event.calendar_id &&
-      (event.also_in || []).some((copy) => copy.calendar_id === target?.id);
-    const copy = keptIn(copyTarget);
-    const busyCopy = keptIn(busyTarget);
+    const { copy, busyCopy } = copyPrefill(event, range, calendars);
     if ((event.attendees || []).length > 0 || event.online_meeting) {
       setDialogProblem("");
       setDialog({
         event: null,
         day: startOfDay(range.start),
-        prefill: {
-          start: range.start,
-          end: range.end,
-          allDay: event.all_day,
-          calendarID: event.calendar_id,
-          summary: event.summary,
-          location: event.location,
-          description: event.description,
-          attendees: event.attendees,
-          copy,
-          busyCopy,
-          onlineMeeting: event.online_meeting,
-          travelBefore: travelMinutes(event).before,
-          travelAfter: travelMinutes(event).after
-        },
+        prefill: copyPrefill(event, range, calendars),
         formKey: `copy-${event.id}-${range.start.getTime()}`
       });
       return;
@@ -679,6 +658,21 @@ export function CalendarView({
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
+  };
+
+  // Duplicate, from an event's dialog: the same event as a new one, at the
+  // same time to begin with. Nothing is written until the reader saves it,
+  // which is what makes carrying the guests and the meeting safe -- the dialog
+  // is where they choose the new date and add or drop people first.
+  const duplicateEvent = (event: CalendarEvent) => {
+    const range = { start: new Date(event.start_at), end: new Date(event.end_at) };
+    setDialogProblem("");
+    setDialog({
+      event: null,
+      day: startOfDay(range.start),
+      prefill: copyPrefill(event, range, calendars, true),
+      formKey: `duplicate-${event.id}-${Date.now()}`
+    });
   };
 
   const openNewEvent = (prefill: EventPrefill) => {
@@ -1399,6 +1393,7 @@ export function CalendarView({
           onSave={(input) => void saveEvent(input)}
           onDelete={() => void deleteEvent()}
           onRespond={(response) => void respond(response)}
+          onDuplicate={dialog.event ? () => duplicateEvent(dialog.event as CalendarEvent) : undefined}
           onClose={closeDialog}
         />
       ) : null}
