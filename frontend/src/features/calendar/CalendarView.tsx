@@ -5,7 +5,7 @@
 // first.
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { ApiError, api } from "../../api";
 import type { CalendarEvent, CalendarEventInput, CalendarSummary } from "../../types";
 import type { AddToast, LocationState } from "../../appTypes";
@@ -23,7 +23,8 @@ import {
   useCalendarOutbox
 } from "../../lib/calendarOutbox";
 import { CalendarRoleChoices, writeBusyLabel, writeBusyTarget, writeCopyTarget } from "./CalendarRoles";
-import { EventDialog } from "./EventDialog";
+import { EventContextMenu } from "./EventContextMenu";
+import { copyPrefill, EventDialog } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 import { ReminderSnoozeDialog } from "./ReminderSnoozeDialog";
 import { useWeekDrag } from "./useWeekDrag";
@@ -220,6 +221,17 @@ export function CalendarView({
   const [saving, setSaving] = useState(false);
   const [dialogProblem, setDialogProblem] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
+  // The menu a right-click opens on an event, at the point it was asked for.
+  const [eventMenu, setEventMenu] = useState<{ event: CalendarEvent; x: number; y: number } | null>(null);
+  // The event a delete started from the menu is waiting on, 0 for none: it
+  // belongs to that event, so a menu opened on another one meanwhile is
+  // neither disabled by it nor closed when it answers.
+  const [eventMenuBusyID, setEventMenuBusyID] = useState(0);
+  const closeEventMenu = useCallback(() => setEventMenu(null), []);
+  const closeEventMenuFor = useCallback(
+    (eventID: number) => setEventMenu((current) => (current && current.event.id === eventID ? null : current)),
+    []
+  );
   const [now, setNow] = useState(() => new Date());
   // The day the lens is open on, as a date key. null leaves the choice to
   // resolveLensIndex; "" is the reader having closed it, which holds until
@@ -530,23 +542,69 @@ export function CalendarView({
       }
     });
 
+  // Deleting -- or discarding a waiting event -- from the dialog or from the
+  // context menu; done closes whichever asked once the week shows the result.
+  const removeEvent = async (event: CalendarEvent, done: () => void) => {
+    const pendingID = queuedLocalID(event);
+    if (pendingID) {
+      await removeQueuedCalendarEvent(userID, pendingID);
+      done();
+      addToast("The event was discarded. It had not reached your calendar.", "success");
+      return;
+    }
+    const provider = providerName(calendarsByID.get(event.calendar_id));
+    const data = await api.deleteCalendarEvent(csrf, event.id);
+    await reload("events");
+    done();
+    if (data.warnings && data.warnings.length > 0) reportWarnings(data.warnings);
+    else addToast(`Event deleted in ${provider} too.`, "success");
+  };
+
   const deleteEvent = () =>
     runWrite(async () => {
       if (!dialog?.event) return;
-      const pendingID = queuedLocalID(dialog.event);
-      if (pendingID) {
-        await removeQueuedCalendarEvent(userID, pendingID);
-        closeDialog();
-        addToast("The event was discarded. It had not reached your calendar.", "success");
-        return;
-      }
-      const provider = providerName(calendarsByID.get(dialog.event.calendar_id));
-      const data = await api.deleteCalendarEvent(csrf, dialog.event.id);
-      await reload("events");
-      closeDialog();
-      if (data.warnings && data.warnings.length > 0) reportWarnings(data.warnings);
-      else addToast(`Event deleted in ${provider} too.`, "success");
+      await removeEvent(dialog.event, closeDialog);
     });
+
+  // The menu has no form to keep a refusal in, so it says what went wrong in a
+  // toast, and a delete the provider refused redraws the week as it stands.
+  const deleteFromMenu = async (event: CalendarEvent) => {
+    setEventMenuBusyID(event.id);
+    try {
+      await removeEvent(event, () => closeEventMenuFor(event.id));
+    } catch (err) {
+      closeEventMenuFor(event.id);
+      reportMenuRefusal(err);
+    } finally {
+      setEventMenuBusyID((current) => (current === event.id ? 0 : current));
+    }
+  };
+
+  // A refusal the menu reports: the version that won is drawn when the
+  // provider named one, and the week is read again whenever it did not, the
+  // way the dialog adopts it -- the menu has no form to show it in.
+  const reportMenuRefusal = (err: unknown) => {
+    if (err instanceof ApiError && err.status === 409) {
+      const winner = err.payload.event as CalendarEvent | undefined;
+      if (winner) setEvents((current) => current.map((item) => (item.id === winner.id ? winner : item)));
+      else
+        void reload("events").catch(() => {
+          // The message below is what the reader acts on.
+        });
+    }
+    addToast(messageFromError(err), "error");
+  };
+
+  const respondFromMenu = async (event: CalendarEvent, response: string) => {
+    closeEventMenu();
+    if (event.my_response === response) return;
+    try {
+      const data = await api.respondToCalendarEvent(csrf, event.id, response);
+      setEvents((current) => current.map((item) => (item.id === data.event.id ? data.event : item)));
+    } catch (err) {
+      reportMenuRefusal(err);
+    }
+  };
 
   const respond = (response: string) =>
     runWrite(async () => {
@@ -617,34 +675,14 @@ export function CalendarView({
   // not created on the spot -- that would send invitations, or book a meeting,
   // on a drop -- but opened as a new event for the reader to look over first.
   const copyEvent = async (event: CalendarEvent, range: TimeRange) => {
-    const copyTarget = calendars.find((calendar) => calendar.copy_target && calendar.can_write);
-    const busyTarget = calendars.find((calendar) => calendar.busy_target && calendar.can_write);
-    const keptIn = (target: CalendarSummary | undefined) =>
-      Boolean(target) &&
-      target?.id !== event.calendar_id &&
-      (event.also_in || []).some((copy) => copy.calendar_id === target?.id);
-    const copy = keptIn(copyTarget);
-    const busyCopy = keptIn(busyTarget);
+    const prefill = copyPrefill(event, range, calendars);
+    const { copy, busyCopy } = prefill;
     if ((event.attendees || []).length > 0 || event.online_meeting) {
       setDialogProblem("");
       setDialog({
         event: null,
         day: startOfDay(range.start),
-        prefill: {
-          start: range.start,
-          end: range.end,
-          allDay: event.all_day,
-          calendarID: event.calendar_id,
-          summary: event.summary,
-          location: event.location,
-          description: event.description,
-          attendees: event.attendees,
-          copy,
-          busyCopy,
-          onlineMeeting: event.online_meeting,
-          travelBefore: travelMinutes(event).before,
-          travelAfter: travelMinutes(event).after
-        },
+        prefill,
         formKey: `copy-${event.id}-${range.start.getTime()}`
       });
       return;
@@ -679,6 +717,21 @@ export function CalendarView({
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
+  };
+
+  // Duplicate, from an event's dialog: the same event as a new one, at the
+  // same time to begin with. Nothing is written until the reader saves it,
+  // which is what makes carrying the guests and the meeting safe -- the dialog
+  // is where they choose the new date and add or drop people first.
+  const duplicateEvent = (event: CalendarEvent) => {
+    const range = { start: new Date(event.start_at), end: new Date(event.end_at) };
+    setDialogProblem("");
+    setDialog({
+      event: null,
+      day: startOfDay(range.start),
+      prefill: copyPrefill(event, range, calendars, true),
+      formKey: `duplicate-${event.id}-${Date.now()}`
+    });
   };
 
   const openNewEvent = (prefill: EventPrefill) => {
@@ -806,6 +859,26 @@ export function CalendarView({
     return { lensIndex: index, lensLanes: lanes, dayColumns: columns };
   }, [view, focusIndex, lensDayKey, days, shownEvents, todayKey, listedCalendars]);
 
+  // One handler for every event the calendar draws, in the week and in the
+  // phone's views alike: each carries its id, and a right-click, a long press
+  // or the context-menu key on one opens its menu. Anywhere else keeps the
+  // browser's own menu.
+  const openEventMenu = (mouseEvent: ReactMouseEvent) => {
+    const target = (mouseEvent.target as HTMLElement).closest<HTMLElement>("[data-event-id]");
+    if (!target || drag) return;
+    const event = shownEvents.find((item) => String(item.id) === target.dataset.eventId);
+    if (!event) return;
+    mouseEvent.preventDefault();
+    let { clientX: x, clientY: y } = mouseEvent;
+    // The context-menu key has no pointer to open at; the event itself is.
+    if (x === 0 && y === 0) {
+      const bounds = target.getBoundingClientRect();
+      x = bounds.left + 8;
+      y = bounds.top + Math.min(bounds.height, 24);
+    }
+    setEventMenu({ event, x, y });
+  };
+
   const openEvent = (event: CalendarEvent, day: Date) => {
     // The release that ends a drag arrives as a click on the block it ended on.
     if (consumeClick()) return;
@@ -848,6 +921,7 @@ export function CalendarView({
           }
           title={tooltip}
           aria-hidden="true"
+          data-event-id={placed.event.id}
           onPointerDown={press}
           onClick={() => openEvent(placed.event, day)}
         >
@@ -888,6 +962,7 @@ export function CalendarView({
             } as CSSProperties
           }
           title={tooltip}
+          data-event-id={placed.event.id}
           onPointerDown={press}
           onClick={() => openEvent(placed.event, day)}
         >
@@ -1002,7 +1077,7 @@ export function CalendarView({
   };
 
   return (
-    <div className="calendar-shell">
+    <div className="calendar-shell" onContextMenu={openEventMenu}>
       <section
         className={`calendar-main day-lens ${view ? `compact view-${view}` : ""} ${
           drag ? `dragging drag-${drag.kind}` : ""
@@ -1273,6 +1348,7 @@ export function CalendarView({
                         className={`calendar-chip ${draggable ? "draggable" : ""} ${dragSource(drag, event) ? "drag-source" : ""} ${event.pending_offline ? "pending-offline" : ""}`}
                         style={{ background: color, color: readableTextColor(color) }}
                         title={pendingTooltip(event) || eventTooltip(event, calendar, calendarsByID)}
+                        data-event-id={event.id}
                         onPointerDown={(pointerEvent) => {
                           pointerEvent.stopPropagation();
                           if (draggable) beginAllDayMove(pointerEvent, event, dayIndex, eventCopyable(event, calendar));
@@ -1399,7 +1475,32 @@ export function CalendarView({
           onSave={(input) => void saveEvent(input)}
           onDelete={() => void deleteEvent()}
           onRespond={(response) => void respond(response)}
+          onDuplicate={dialog.event ? () => duplicateEvent(dialog.event as CalendarEvent) : undefined}
           onClose={closeDialog}
+        />
+      ) : null}
+      {eventMenu ? (
+        <EventContextMenu
+          key={eventMenu.event.id}
+          event={eventMenu.event}
+          x={eventMenu.x}
+          y={eventMenu.y}
+          calendars={calendars}
+          writable={writableCalendars}
+          busy={eventMenuBusyID === eventMenu.event.id}
+          onOpen={() => {
+            const { event } = eventMenu;
+            closeEventMenu();
+            setDialogProblem("");
+            setDialog({ event, day: startOfDay(new Date(event.start_at)), formKey: `event-${event.id}` });
+          }}
+          onDuplicate={() => {
+            closeEventMenu();
+            duplicateEvent(eventMenu.event);
+          }}
+          onRespond={(response) => void respondFromMenu(eventMenu.event, response)}
+          onDelete={() => void deleteFromMenu(eventMenu.event)}
+          onClose={closeEventMenu}
         />
       ) : null}
       {remindEventID > 0 ? (

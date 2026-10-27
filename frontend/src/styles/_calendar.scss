@@ -904,6 +904,114 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
   }
 }
 
+// The menu a right-click opens on an event. Fixed to the window rather than to
+// the week, because it opens at the pointer and the week scrolls under it.
+.calendar-event-menu {
+  position: fixed;
+  z-index: 80;
+  width: min(260px, calc(100vw - 16px));
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+.calendar-event-menu-title {
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-event-menu-row {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  text-align: left;
+  text-decoration: none;
+  font: inherit;
+  box-shadow: none;
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--hover);
+    color: var(--accent-strong);
+  }
+
+  .icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+  }
+
+  &.danger,
+  &.danger:hover,
+  &.danger:focus-visible {
+    color: var(--danger);
+  }
+}
+
+.calendar-event-menu-rsvp {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 8px;
+
+  > span {
+    flex: 1;
+    color: var(--muted);
+  }
+
+  button {
+    min-height: 30px;
+    padding: 4px 8px;
+  }
+
+  .active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.calendar-event-menu-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 6px 8px 4px;
+
+  p {
+    margin: 0;
+    line-height: 1.4;
+  }
+}
+
+.calendar-event-menu-confirm-actions {
+  display: flex;
+  gap: 6px;
+
+  .danger {
+    background: var(--danger);
+    color: var(--on-danger);
+  }
+}
+
 .calendar-attendees {
   display: grid;
   gap: 6px;

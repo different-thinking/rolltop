@@ -861,6 +861,34 @@ site and in review.
   the wrist. What moves is the distance travelled, snapped to the quarter hour,
   not the start snapped to the grid, and all-day events shift in UTC dates.
   Drawing a new event only opens the dialog. Touch is left to scrolling.
+- **Duplicate is a new event the reader looks over, never a write of its own.**
+  The event dialog's Duplicate (any provider, including a meeting somebody
+  else organizes or an event in a read-only calendar, since the duplicate is
+  the reader's own) opens a new event seeded by `copyPrefill` -- the one seed
+  the copy drag uses too -- at the original's time with the date focused.
+  Guests carry over without their answers, the original organizer becomes a
+  guest and the reader the organizer, and an online meeting is asked for anew.
+  Two properties keep it honest: nothing reaches the provider until Save, which
+  is what makes carrying a guest list safe; and the original's join details
+  are taken out of the notes (`withoutMeetingJoinDetails`), because the new
+  meeting gets a link of its own and the old block would send its guests into
+  the wrong call -- whether or not the original is an online meeting itself,
+  since an Outlook invitation kept in a Google calendar and the second
+  calendar's copy of a Teams meeting carry the block without being one. Placeholders, travel blocks and events still waiting in the
+  offline outbox offer no Duplicate.
+- **An event's context menu offers what its dialog would, and nothing else.**
+  A right-click, a long press or the context-menu key on any drawn event opens
+  `EventContextMenu` -- Open, Duplicate, joining its meeting, the invitation
+  answer, the provider's own page, Delete or Discard. It is one delegated
+  handler on `.calendar-shell` that finds the event by the `data-event-id`
+  every drawn event carries, so a new place that draws events gets the menu by
+  carrying the attribute, not by wiring a handler. The gates are the dialog's
+  (`eventDuplicable`, `eventRemoval`, both in `weekModel`), and Delete asks
+  the dialog's own question (`deleteQuestion`) before anything is sent --
+  a menu item is one click from cancelling a meeting for every guest. A menu
+  write has no form to keep a refusal in, so it reports in a toast and a
+  refused delete redraws the week. Anywhere outside an event keeps the
+  browser's own menu.
 - **A mailed invitation is shown, and adding it is the dialog's Save.** A
   message carrying a calendar object -- an `.ics` attachment, or the
   `text/calendar` alternative Outlook and Exchange send instead, which never

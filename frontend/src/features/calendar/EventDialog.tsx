@@ -9,7 +9,15 @@ import { api } from "../../api";
 import type { CalendarAttendee, CalendarEvent, CalendarEventInput, CalendarSummary, ContactAutocomplete } from "../../types";
 import { pendingReason } from "../../lib/calendarOutbox";
 import { Icon } from "../../components/Icon";
-import { calendarColor, eventEditable, providerName } from "./weekModel";
+import {
+  calendarColor,
+  deleteQuestion,
+  eventDuplicable,
+  eventEditable,
+  eventRemoval,
+  providerName,
+  travelMinutes
+} from "./weekModel";
 import { reminderLabel } from "../../lib/calendarReminders";
 
 /** responseOptions are the answers an invitee can give. */
@@ -186,7 +194,84 @@ export type EventPrefill = {
   /** travelBefore and travelAfter are the journey's minutes, 0 for none. */
   travelBefore?: number;
   travelAfter?: number;
+  /** duplicate marks the reader's own "Duplicate" of an event, which the
+   * dialog names as such: it opens at the original's time, and choosing a new
+   * one is the point of opening it. */
+  duplicate?: boolean;
 };
+
+/** copyPrefill seeds a new event with everything of an existing one at the
+ * given bounds: the title, place, notes, guests, online meeting and journey,
+ * in the same calendar, and in the second and busy calendars when the
+ * original is kept there too. A drag with the copy key and the dialog's
+ * Duplicate both start from it, so a copy means the same thing either way.
+ * It never carries the original's meeting link: an online meeting is asked
+ * for anew and gets a link of its own when saved, so the join details the
+ * provider wrote into the original's notes would point at the wrong call.
+ * That holds for events that are not online meetings themselves too -- the
+ * copy of a Teams meeting in the second calendar, an Outlook invitation kept
+ * in a Google calendar -- since their notes carry the same block. */
+export function copyPrefill(
+  event: CalendarEvent,
+  range: { start: Date; end: Date },
+  calendars: CalendarSummary[],
+  duplicate = false
+): EventPrefill {
+  const keptIn = (target: CalendarSummary | undefined) =>
+    Boolean(target) &&
+    target?.id !== event.calendar_id &&
+    (event.also_in || []).some((copy) => copy.calendar_id === target?.id);
+  const journey = travelMinutes(event);
+  return {
+    start: range.start,
+    end: range.end,
+    allDay: event.all_day,
+    calendarID: event.calendar_id,
+    summary: event.summary,
+    location: event.location,
+    description: withoutMeetingJoinDetails(event.description, event.online_meeting_url),
+    attendees: event.attendees,
+    copy: keptIn(calendars.find((calendar) => calendar.copy_target && calendar.can_write)),
+    busyCopy: keptIn(calendars.find((calendar) => calendar.busy_target && calendar.can_write)),
+    onlineMeeting: event.online_meeting,
+    travelBefore: journey.before,
+    travelAfter: journey.after,
+    ...(duplicate ? { duplicate: true } : {})
+  };
+}
+
+/** meetingRule is the line of underscores Teams fences its join details in. */
+const meetingRule = /^\s*_{10,}\s*$/;
+
+/** meetingLinkPattern recognises a join link inside such a fence. */
+const meetingLinkPattern = /teams\.microsoft\.com|teams\.live\.com|meet\.google\.com/i;
+
+/** withoutMeetingJoinDetails takes the join details of an online meeting out
+ * of its notes: the block between two underscore rules that Teams writes into
+ * the body, recognised by the meeting link in it, or one left open at the end.
+ * A fenced block without a meeting link is the reader's own text and stays. */
+export function withoutMeetingJoinDetails(notes: string, joinURL: string): string {
+  const lines = notes.split(/\r?\n/);
+  const rules = lines.flatMap((line, index) => (meetingRule.test(line) ? [index] : []));
+  const namesMeeting = (from: number, to: number) => {
+    const block = lines.slice(from, to).join("\n");
+    return meetingLinkPattern.test(block) || (joinURL !== "" && block.includes(joinURL));
+  };
+  const drop = new Set<number>();
+  for (let index = 0; index < rules.length; index++) {
+    const open = rules[index];
+    const close = index + 1 < rules.length ? rules[index + 1] : lines.length;
+    if (!namesMeeting(open + 1, close)) continue;
+    for (let line = open; line <= Math.min(close, lines.length - 1); line++) drop.add(line);
+    index++;
+  }
+  if (drop.size === 0) return notes;
+  return lines
+    .filter((_, index) => !drop.has(index))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 /** draftFromPrefill fills the form for a new event from a prefill. */
 function draftFromPrefill(prefill: EventPrefill, calendarID: number): DraftState {
@@ -369,6 +454,7 @@ export function EventDialog({
   onSave,
   onDelete,
   onRespond,
+  onDuplicate,
   onClose
 }: {
   /** event is null when creating. */
@@ -383,6 +469,9 @@ export function EventDialog({
   onSave: (input: CalendarEventInput) => void;
   onDelete: () => void;
   onRespond: (response: string) => void;
+  /** onDuplicate opens a new event seeded with this one; left out, the
+   * dialog offers no Duplicate. */
+  onDuplicate?: () => void;
   onClose: () => void;
 }) {
   // A new event goes only into a calendar the calendar view lists: one hidden
@@ -405,9 +494,13 @@ export function EventDialog({
   const [localProblem, setLocalProblem] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const titleRef = useRef<HTMLInputElement | null>(null);
+  const startDateRef = useRef<HTMLInputElement | null>(null);
+  const duplicating = !event && Boolean(prefill?.duplicate);
 
   useEffect(() => {
-    titleRef.current?.focus();
+    // A duplicate already has its title; the new date is what it was opened for.
+    (duplicating ? startDateRef : titleRef).current?.focus();
+    // On mount only, like the draft: the dialog is remounted to start over.
   }, []);
 
   useEffect(() => {
@@ -466,6 +559,10 @@ export function EventDialog({
   // A placeholder has no journey of its own -- it moves the event's -- and a
   // travel block standing alone is a journey, not something to travel to.
   const offerTravel = editable && !placeholder && !travelBlock && !draft.allDay;
+  // The context menu asks the same two questions, so what it offers on an
+  // event is what this dialog would.
+  const offerDuplicate = Boolean(onDuplicate) && event !== null && eventDuplicable(event, writable);
+  const removal = event ? eventRemoval(event, calendar) : null;
   const travelTimes = useMemo(() => {
     if (draft.allDay) return { leave: "", back: "" };
     const start = parseLocalDateTime(draft.startDate, draft.startTime);
@@ -518,15 +615,26 @@ export function EventDialog({
         if (mouseEvent.target === mouseEvent.currentTarget) onClose();
       }}
     >
-      <form className="calendar-dialog" onSubmit={submit} aria-label={event ? "Edit event" : "New event"}>
+      <form
+        className="calendar-dialog"
+        onSubmit={submit}
+        aria-label={event ? "Edit event" : duplicating ? "Duplicate event" : "New event"}
+      >
         <div className="calendar-dialog-header">
-          <h2>{event ? "Event" : "New event"}</h2>
+          <h2>{event ? "Event" : duplicating ? "Duplicate event" : "New event"}</h2>
           <button type="button" className="icon-button" onClick={onClose} title="Close">
             <Icon name="close" />
           </button>
         </div>
 
         <div className="calendar-dialog-body">
+          {duplicating ? (
+            <p className="calendar-dialog-note">
+              A new event with everything of the original. Choose its date and time
+              {draft.attendees.length > 0 ? "; saving invites the guests below from your account" : ""}
+              {offerOnlineMeeting && draft.onlineMeeting ? " and creates a meeting link of its own" : ""}.
+            </p>
+          ) : null}
           {event?.pending_offline ? (
             <p className="calendar-dialog-note calendar-dialog-pending">
               {event.pending_error
@@ -581,6 +689,7 @@ export function EventDialog({
               <div className="calendar-dialog-when">
                 <input
                   id="calendar-event-start-date"
+                  ref={startDateRef}
                   type="date"
                   value={draft.startDate}
                   disabled={!editable || saving}
@@ -818,23 +927,14 @@ export function EventDialog({
         </div>
 
         <div className="calendar-dialog-footer">
-          {event?.pending_offline ? (
+          {removal === "discard" ? (
             <button type="button" className="ghost" disabled={saving} onClick={onDelete}>
               Discard
             </button>
-          ) : event && editable && !placeholderOfEvent ? (
+          ) : event && removal === "delete" ? (
             confirmingDelete ? (
               <div className="calendar-dialog-confirm">
-                <span>
-                  {alsoIn.length > 0
-                      ? `Delete this event in ${provider} too, including the copy in ${alsoIn.map((item) => item.name).join(", ")}?`
-                      : event.attendees.length > 0 && !event.my_response
-                        ? `Delete this event in ${provider} too? The guests are told it is cancelled.`
-                        : `Delete this event in ${provider} too?`}
-                  {(event.travel_before_minutes || 0) > 0 || (event.travel_after_minutes || 0) > 0
-                    ? " Its travel time goes with it."
-                    : ""}
-                </span>
+                <span>{deleteQuestion(event, calendars)}</span>
                 <button type="button" className="danger" disabled={saving} onClick={onDelete}>
                   Delete
                 </button>
@@ -851,6 +951,18 @@ export function EventDialog({
             <span />
           )}
           <div className="calendar-dialog-actions">
+            {offerDuplicate ? (
+              <button
+                type="button"
+                className="ghost"
+                disabled={saving}
+                onClick={onDuplicate}
+                title="Open a new event with this one's title, notes, guests and meeting"
+              >
+                <Icon name="copy" />
+                Duplicate
+              </button>
+            ) : null}
             <button type="button" className="ghost" disabled={saving} onClick={onClose}>
               Close
             </button>
