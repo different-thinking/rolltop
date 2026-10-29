@@ -303,6 +303,12 @@
   overflow-wrap: anywhere;
 }
 
+/* The heading takes focus when a recipe opens, so a screen reader starts at
+   its name; it is not a control, and a ring around it says it is one. */
+.recipe-detail-heading h1:focus {
+  outline: none;
+}
+
 .recipe-detail-source {
   margin: 0;
   color: var(--muted);
