@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { AddToast, DatePrefs, LocationState, Navigate } from "../appTypes";
 import type { SettingsSectionID } from "../features/settings/SettingsUI";
 import type { FrontendPluginDefinition, Mailbox, Message, MessageAnnotation, User } from "../types";
+import { appViewPrefix } from "../lib/routes";
 import { syncPluginStylesheets } from "./pluginStyles";
 
 export type RuntimePluginModule = {
@@ -36,6 +37,70 @@ export type AccountSettingsRoute = {
 export type AccountSettingsRuntimePlugin = RuntimePlugin & {
   accountSettingsRoutes?: readonly AccountSettingsRoute[];
 };
+
+/**
+ * RuntimeAppViewContext is what a plugin's own page gets. It is the slice of
+ * the shell an organizer view such as Parcels is handed: who is reading, how to
+ * move and report, and the mail generation, which changes whenever mail does,
+ * so a view built from mail can reload on it instead of polling.
+ */
+export type RuntimeAppViewContext = {
+  csrf: string;
+  user: User;
+  mailboxes: Mailbox[];
+  location: LocationState;
+  mailGeneration: number;
+  datePrefs: DatePrefs;
+  navigate: Navigate;
+  addToast: AddToast;
+};
+
+/**
+ * RuntimeAppView is a page of a plugin's own, listed under the sidebar's
+ * Organizer heading beside Parcels and Invoices. Its path lives under
+ * `appViewPrefix` (`/apps/...`) and is claimed with everything below it, so a
+ * view can grow detail routes without a second registration.
+ */
+export type RuntimeAppView = {
+  path: string;
+  label: string;
+  icon: string;
+  render: (context: RuntimeAppViewContext) => ReactNode;
+};
+
+export type RuntimeAppViewPlugin = RuntimePlugin & {
+  appViews?: readonly RuntimeAppView[];
+};
+
+/** appViews returns every plugin page whose path lies inside the claimed subtree, in plugin order. */
+export function appViews(plugins: RuntimePlugins | readonly RuntimePlugin[]): RuntimeAppView[] {
+  const list: readonly RuntimePlugin[] = Array.isArray(plugins) ? plugins : (plugins as RuntimePlugins).all;
+  const seen = new Set<string>();
+  return (list as readonly RuntimeAppViewPlugin[]).flatMap((plugin) => {
+    const views = Array.isArray(plugin.appViews) ? plugin.appViews : [];
+    return views.flatMap((view) => {
+      if (!view || typeof view.render !== "function" || typeof view.path !== "string") return [];
+      const path = normalizedSettingsPath(view.path);
+      // A path outside the subtree would be mail to the router and a plugin
+      // page to the sidebar; two plugins claiming one path would make plugin
+      // order decide which one renders. Both are refused rather than guessed.
+      if (!path.startsWith(`${appViewPrefix}/`) || seen.has(path)) return [];
+      seen.add(path);
+      return [{
+        path,
+        label: cleanSettingsText(view.label, settingsLabelFromPath(path)),
+        icon: cleanSettingsText(view.icon, "folder"),
+        render: view.render
+      }];
+    });
+  });
+}
+
+/** matchAppView finds the plugin page serving a path, its own subtree included. */
+export function matchAppView(plugins: RuntimePlugins | readonly RuntimePlugin[], path: string): RuntimeAppView | null {
+  const candidate = normalizedSettingsPath(path);
+  return appViews(plugins).find((view) => candidate === view.path || candidate.startsWith(`${view.path}/`)) || null;
+}
 
 /** RuntimeMessageDetailsContext is the stable, read-only input for plugin rows
  * rendered inside a message's expanded header details. */

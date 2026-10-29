@@ -1,0 +1,149 @@
+// File overview: The background loop that runs scan, fetch and file for every
+// reader who switched the box on.
+
+package main
+
+import (
+	"context"
+	"database/sql"
+	"log"
+	"time"
+
+	"rolltop/backend/plugins"
+	"rolltop/backend/store"
+)
+
+const (
+	// idleInterval is how long the loop sleeps with nothing to do. New mail
+	// wakes it sooner through the stored-message hook; this is for the links
+	// whose retry came due and for a hook that never fired.
+	idleInterval = 2 * time.Minute
+	// busyPause is the breath between two rounds while a backfill is running,
+	// so the walk never becomes a tight loop against the database the reader's
+	// own requests are using.
+	busyPause = 2 * time.Second
+)
+
+func (p *recipeBoxBackend) loop(ctx context.Context, host plugins.BackendHost) {
+	// A start is often the server starting: give the sync and the first page
+	// loads the database before the box asks anything of it.
+	if !sleep(ctx, 20*time.Second, p.wake) {
+		return
+	}
+	for {
+		more := p.round(ctx, host)
+		wait := idleInterval
+		if more {
+			wait = busyPause
+		}
+		if !sleep(ctx, wait, p.wake) {
+			return
+		}
+	}
+}
+
+// sleep waits for the duration or a wake-up and reports false when the
+// context ended instead.
+func sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	case <-wake:
+		// A burst of new mail sends a burst of wake-ups; one round answers all
+		// of them.
+		return sleep(ctx, time.Second, nil)
+	}
+}
+
+// round gives every enabled reader one turn and reports whether any of them
+// has more work waiting.
+func (p *recipeBoxBackend) round(ctx context.Context, host plugins.BackendHost) bool {
+	st, ok := host.Store().(*store.Store)
+	if !ok || st == nil {
+		return false
+	}
+	userIDs, err := st.ListUserIDsWithAccounts(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("recipe box: list users failed error_type=%T", err)
+		}
+		return false
+	}
+	more := false
+	for _, userID := range userIDs {
+		if ctx.Err() != nil {
+			return false
+		}
+		userMore, err := p.runUser(ctx, host, userID)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("recipe box: pass failed user_id=%d error_type=%T error=%v", userID, err, err)
+		}
+		more = more || userMore
+	}
+	return more
+}
+
+// runUser is one reader's turn: scan, then fetch, then file. Each step is
+// bounded, so a reader in the middle of a backfill takes a slice of the round
+// and the rest of it comes on the next one.
+func (p *recipeBoxBackend) runUser(ctx context.Context, host plugins.BackendHost, userID int64) (bool, error) {
+	db, err := userDB(ctx, host, userID)
+	if err != nil {
+		return false, err
+	}
+	settings, err := loadSettings(ctx, db, userID)
+	if err != nil || !settings.Enabled {
+		return false, err
+	}
+	_, scanMore, err := scanUser(ctx, db, userID, settings)
+	if err != nil {
+		return false, err
+	}
+	resolved, fetchMore, err := p.resolveLinks(ctx, db, userID)
+	if err != nil {
+		return scanMore, err
+	}
+	if err := p.fillMissingImages(ctx, db, userID); err != nil {
+		return scanMore || fetchMore, err
+	}
+	_, fileMore, err := fileMails(ctx, host, db, userID, settings)
+	if resolved > 0 {
+		// The cookbook and the folder list both read what this round changed.
+		if notifier, ok := host.(plugins.UserChangeHost); ok {
+			notifier.NotifyUserChanged(userID)
+		}
+	}
+	return scanMore || fetchMore || fileMore, err
+}
+
+// fillMissingImages fetches the pictures of recipes that never had one tried:
+// a page the reader filed by hand, whose preview named a picture the request
+// that filed it did not wait for.
+func (p *recipeBoxBackend) fillMissingImages(ctx context.Context, db *sql.DB, userID int64) error {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM plugin_recipe_box_recipes WHERE user_id = ? AND image_status = '' AND dismissed = 0 ORDER BY id LIMIT 5`, userID)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := p.ensureImage(ctx, db, userID, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}

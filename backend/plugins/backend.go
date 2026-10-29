@@ -257,6 +257,17 @@ type StoredMessageHost interface {
 	ArchiveMailboxID(context.Context, int64, int64) (int64, error)
 }
 
+// MailFolderHost is an optional capability for plugins that file mail into a
+// folder of their own. EnsureMailFolder answers the folder named name in one of
+// the user's accounts, creating it on the IMAP server first when the account
+// has no folder of that name. Created reports whether this call made it, which
+// is the one moment a plugin may set the new folder's display defaults: a
+// folder that already existed carries the reader's own settings.
+type MailFolderHost interface {
+	BackendHost
+	EnsureMailFolder(ctx context.Context, userID, accountID int64, name string) (mailboxID int64, created bool, err error)
+}
+
 // APIHost adds the HTTP helpers needed by plugin-owned API routes.
 type APIHost interface {
 	BackendHost

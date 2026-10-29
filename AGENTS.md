@@ -367,6 +367,32 @@ site and in review.
   every claim in it, and a dispatch this process owns but never finished is not
   reconcilable by anything short of a restart — the messages behind it refuse
   every later move until then.
+- **A frontend plugin may draw a page of its own, and only under `/apps/`.**
+  `RuntimeAppView` (`appViews` in `frontend/src/plugins/runtime.ts`) lists a
+  page under the sidebar's Organizer heading and renders it through RouteView.
+  The whole `/apps` subtree is claimed by `mailRouteView` and by the server's
+  `spaRoutes` rather than each plugin's path, because plugins load after the
+  first render: a path that is mail until its plugin arrives would draw the mail
+  list and then swap it out. A view outside the subtree, or a second claim on a
+  path, is refused rather than guessed.
+- **The recipe box reads only what the reader sent themselves, and believes only
+  what the page says about itself** (`plugins/recipe_box`). A mail is read for
+  links only when one of the reader's own addresses sent it and -- unless they
+  relaxed it -- only their own addresses received it (`isNoteToSelf`); mail from
+  anybody else is never read, whatever it links to, and Sent, Drafts, Trash,
+  Junk and Gmail's system folders are never read at all. A link is a recipe only
+  when its page publishes a schema.org `Recipe` (JSON-LD or microdata); a page
+  that does not is a preview the reader can file by hand, never a guess. Every
+  fetch goes through `remoteimages.SafeDialContext` with no proxy, cookie or
+  referrer and is bounded in time and bytes, a picture is stored only as a
+  raster type sniffed from its bytes and served with `nosniff` and a sandboxing
+  CSP, and the fetch never runs inside a sync turn -- the stored-message hook
+  only wakes the plugin's own loop. Filing is a move into the account's own
+  recipe folder, created through `MailFolderHost` and taken out of All Mail
+  only when the box created it; a mail is filed once and never again, because a
+  reader who drags it back has answered for it. Nothing runs for a reader
+  without a settings row: switching the plugin on for an installation moves
+  nobody's mail.
 - **A plugin's stylesheet is asked for until it arrives.** Its module and its
   stylesheet are two requests, and a page can get the module without the
   stylesheet - a dropped connection, a server busy for a moment. The module

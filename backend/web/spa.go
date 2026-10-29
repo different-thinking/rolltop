@@ -407,6 +407,10 @@ var spaRoutes = []spaRoute{
 	// single parcel is a row in it rather than a page of its own.
 	{path: "/deliveries", exact: true},
 	{path: "/invoices", exact: true},
+	// Views a frontend plugin contributes (RuntimeAppView). The subtree is
+	// claimed as a whole because the plugin, not this table, decides what lives
+	// below it, and an unclaimed path would be answered with a 404 on reload.
+	{path: "/apps", prefix: true},
 	{path: "/settings/account", exact: true, prefix: true},
 	{path: "/admin/users", exact: true},
 	{path: "/admin/database", exact: true},

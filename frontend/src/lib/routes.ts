@@ -181,6 +181,19 @@ export function contactsIntent(search: string): ContactsIntent {
   };
 }
 
+/**
+ * appViewPrefix is the subtree frontend plugins draw their own views under
+ * (RuntimeAppView). The whole subtree is claimed here and on the server, not
+ * each plugin's path: plugins load after the first render, and a path that is
+ * mail until a plugin turns up would draw the mail list and then swap it out.
+ */
+export const appViewPrefix = "/apps";
+
+/** appViewRoute reports whether a path belongs to a plugin's own view. */
+export function appViewRoute(path: string): boolean {
+  return path === appViewPrefix || path.startsWith(`${appViewPrefix}/`);
+}
+
 /** The names above, read once: mailRouteView asks this on every render. */
 const organizerRouteNames = Object.keys(organizerRoutes) as OrganizerRoute[];
 
@@ -206,6 +219,7 @@ function anyOrganizerRoute(path: string): boolean {
 export function mailRouteView(path: string, isAdmin: boolean): boolean {
   const claimed = path === "/compose"
     || anyOrganizerRoute(path)
+    || appViewRoute(path)
     || path === "/settings/account" || path.startsWith("/settings/account/")
     || ((path === "/admin/users" || path === "/admin/database") && isAdmin)
     || path === "/activity"

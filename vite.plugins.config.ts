@@ -90,6 +90,10 @@ const pluginConfig: Record<string, { entry: string; outDir: string }> = {
     entry: "plugins/remote_imap_sync/frontend/index.tsx",
     outDir: "plugins/remote_imap_sync/frontend_dist"
   },
+  recipe_box: {
+    entry: "plugins/recipe_box/frontend/index.tsx",
+    outDir: "plugins/recipe_box/frontend_dist"
+  },
   experimental_spam_filter: {
     entry: "plugins/experimental_spam_filter/frontend/index.tsx",
     outDir: "plugins/experimental_spam_filter/frontend_dist"

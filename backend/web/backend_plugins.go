@@ -15,6 +15,8 @@ import (
 	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
+	"rolltop/backend/store"
+	"rolltop/backend/syncer"
 )
 
 var errBackendPluginHostClosed = errors.New("backend plugin host is closed")
@@ -254,6 +256,38 @@ func (s *Server) ArchiveMailboxID(ctx context.Context, userID, accountID int64) 
 	}
 	return s.store.ArchiveMailboxIDForAccount(ctx, userID, accountID)
 }
+
+// EnsureMailFolder answers a folder of one of the user's accounts by name and
+// creates it on the server when that account has none. The account is resolved
+// through the user scope before anything is created, so a plugin cannot reach
+// another tenant's account by naming its id.
+func (s *Server) EnsureMailFolder(ctx context.Context, userID, accountID int64, name string) (int64, bool, error) {
+	if s == nil || s.store == nil || s.syncer == nil {
+		return 0, false, errors.New("sync service is not configured")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, false, errors.New("folder name is required")
+	}
+	if _, err := s.store.GetMailAccountForUser(ctx, userID, accountID); err != nil {
+		return 0, false, err
+	}
+	if existing, err := s.store.GetMailbox(ctx, userID, accountID, name); err == nil {
+		return existing.ID, false, nil
+	} else if !store.IsNotFound(err) {
+		return 0, false, err
+	}
+	mb, err := s.syncer.CreateRemoteFolder(ctx, userID, accountID, name)
+	if errors.Is(err, syncer.ErrFolderExists) && mb.ID > 0 {
+		return mb.ID, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return mb.ID, true, nil
+}
+
+var _ plugins.MailFolderHost = (*Server)(nil)
 
 func (s *Server) ForwardMessage(ctx context.Context, userID, messageID int64, to string, headers []plugins.MailHeader) error {
 	if s == nil || s.syncer == nil {

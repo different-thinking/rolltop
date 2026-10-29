@@ -28,6 +28,7 @@
     "plugins/mail_mcp/frontend",
     "plugins/matrix_theme/frontend",
     "plugins/one_click_unsubscribe/frontend",
+    "plugins/recipe_box/frontend",
     "plugins/remote_image_blocklist/frontend",
     "plugins/remote_imap_sync/frontend",
     "plugins/trusted_image_sources/frontend"
