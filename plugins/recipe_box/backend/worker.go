@@ -153,16 +153,19 @@ func (p *recipeBoxBackend) fillMissingImages(ctx context.Context, db *sql.DB, us
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
 			return err
 		}
 		ids = append(ids, id)
 	}
-	if err := rows.Close(); err != nil {
+	// The pictures are fetched after the read has finished: Next returning
+	// false has already given the connection back, so the queries below do not
+	// wait on it.
+	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, id := range ids {

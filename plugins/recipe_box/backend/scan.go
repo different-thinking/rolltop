@@ -180,16 +180,16 @@ func recordCandidates(ctx context.Context, db *sql.DB, userID int64, candidates 
 	if err != nil {
 		return 0, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var id int64
 		var text, markup string
 		if err := rows.Scan(&id, &text, &markup); err != nil {
-			rows.Close()
 			return 0, err
 		}
 		bodies[id] = [2]string{text, markup}
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		return 0, err
 	}
 	recorded := 0
