@@ -15,7 +15,6 @@ import (
 	"rolltop/backend/logging"
 	"rolltop/backend/plugins"
 	"rolltop/backend/search"
-	"rolltop/backend/store"
 	"rolltop/backend/syncer"
 )
 
@@ -272,19 +271,35 @@ func (s *Server) EnsureMailFolder(ctx context.Context, userID, accountID int64, 
 	if _, err := s.store.GetMailAccountForUser(ctx, userID, accountID); err != nil {
 		return 0, false, err
 	}
-	if existing, err := s.store.GetMailbox(ctx, userID, accountID, name); err == nil {
-		return existing.ID, false, nil
-	} else if !store.IsNotFound(err) {
-		return 0, false, err
-	}
+	// CreateRemoteFolder answers a folder the account already has with that
+	// folder and ErrFolderExists, so it is the one lookup as well as the create.
 	mb, err := s.syncer.CreateRemoteFolder(ctx, userID, accountID, name)
 	if errors.Is(err, syncer.ErrFolderExists) && mb.ID > 0 {
 		return mb.ID, false, nil
+	}
+	if err != nil && remoteFolderAlreadyExists(err) {
+		// The server has the folder and the mirror does not know it yet: an
+		// account that syncs only some folders, or one created elsewhere since
+		// the last discovery. Recording it locally is what discovery would do.
+		existing, lookupErr := s.store.GetOrCreateMailbox(ctx, userID, accountID, name)
+		if lookupErr != nil {
+			return 0, false, lookupErr
+		}
+		return existing.ID, false, nil
 	}
 	if err != nil {
 		return 0, false, err
 	}
 	return mb.ID, true, nil
+}
+
+// remoteFolderAlreadyExists reads an IMAP CREATE refusal for the folder being
+// there already. go-imap does not surface the RFC 5530 ALREADYEXISTS code, so
+// the server's wording is all there is: the response code itself where the
+// server prints it, and the phrasing Dovecot, Exchange and Gmail use.
+func remoteFolderAlreadyExists(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "alreadyexists") || strings.Contains(text, "already exists") || strings.Contains(text, "duplicate folder")
 }
 
 var _ plugins.MailFolderHost = (*Server)(nil)

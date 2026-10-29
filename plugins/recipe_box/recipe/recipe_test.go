@@ -200,15 +200,6 @@ func TestNormalizeLinkKeepsPortsThatMatter(t *testing.T) {
 	}
 }
 
-func TestSameLinkIgnoresSpellings(t *testing.T) {
-	if !SameLink("https://www.example.test/cake/", "http://example.test/cake") {
-		t.Fatal("same page compared different")
-	}
-	if SameLink("https://example.test/cake", "https://example.test/pie") {
-		t.Fatal("two pages compared equal")
-	}
-}
-
 func TestNoteTextKeepsTheReadersOwnLine(t *testing.T) {
 	note := NoteText("weniger Zucker nehmen\nhttps://example.test/kuchen\n> zitiert\n--\nSignatur", 100)
 	if note != "weniger Zucker nehmen" {
@@ -259,5 +250,17 @@ func TestFetchPageFollowsRedirectsAndDecodesCharset(t *testing.T) {
 		t.Fatal("a 404 was read as a page")
 	} else if status, ok := err.(HTTPStatusError); !ok || !status.Permanent() {
 		t.Fatalf("404 error = %#v", err)
+	}
+}
+
+func TestParsePageSurvivesUndeclaredLatin1(t *testing.T) {
+	// Lowercasing turns every invalid byte into a three-byte U+FFFD, so an
+	// offset found in a lowercased copy slices the original out of range.
+	markup := "<html><head><title>" + strings.Repeat("\xe9", 100) + "</title></head>"
+	_ = ParsePage(markup, "https://example.test/")
+	micro := `<div itemscope itemtype="https://schema.org/Recipe"><SPAN itemprop="name">Kuchen <abbr>z.B.</abbr> ` + strings.Repeat("\xe9", 80) + `</span></div>`
+	_ = ParsePage(micro, "https://example.test/")
+	if got := elementText(`<a>x<abbr>y</abbr>z</a>`, 3, "a"); got != "x<abbr>y</abbr>z" {
+		t.Fatalf("elementText = %q", got)
 	}
 }

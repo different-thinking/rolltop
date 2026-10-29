@@ -82,17 +82,17 @@ func (h *fakeHost) MoveMessage(ctx context.Context, userID, messageID, destID in
 	}
 	db := h.store.DB()
 	var accountID int64
-	var header, subject, from, to, body string
+	var header, subject, from, to, body, sha string
 	var date int64
-	if err := db.QueryRowContext(ctx, `SELECT account_id, message_id_header, subject, from_addr, to_addr, body_text, date_unix FROM messages WHERE user_id = ? AND id = ?`,
-		userID, messageID).Scan(&accountID, &header, &subject, &from, &to, &body, &date); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT account_id, message_id_header, subject, from_addr, to_addr, body_text, date_unix, canonical_sha256 FROM messages WHERE user_id = ? AND id = ?`,
+		userID, messageID).Scan(&accountID, &header, &subject, &from, &to, &body, &date, &sha); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, userID, messageID); err != nil {
 		return err
 	}
 	h.moved = append(h.moved, messageID)
-	createMessage(h.t, h.store, userID, accountID, destID, header, from, to, subject, body, time.Unix(date, 0))
+	createMessageWithSHA(h.t, h.store, userID, accountID, destID, header, sha, from, to, subject, body, time.Unix(date, 0))
 	return nil
 }
 
@@ -140,6 +140,11 @@ var messageSeq int
 
 func createMessage(t *testing.T, st *store.Store, userID, accountID, mailboxID int64, header, from, to, subject, body string, date time.Time) store.MessageRecord {
 	t.Helper()
+	return createMessageWithSHA(t, st, userID, accountID, mailboxID, header, "", from, to, subject, body, date)
+}
+
+func createMessageWithSHA(t *testing.T, st *store.Store, userID, accountID, mailboxID int64, header, sha, from, to, subject, body string, date time.Time) store.MessageRecord {
+	t.Helper()
 	ctx := context.Background()
 	messageSeq++
 	path := fmt.Sprintf("users/%d/recipe-test/%d.eml", userID, messageSeq)
@@ -148,7 +153,7 @@ func createMessage(t *testing.T, st *store.Store, userID, accountID, mailboxID i
 		t.Fatal(err)
 	}
 	msg, err := st.CreateMessage(ctx, store.CreateMessage{
-		UserID: userID, AccountID: accountID, MailboxID: mailboxID, BlobID: blob.ID, MessageIDHeader: header,
+		UserID: userID, AccountID: accountID, MailboxID: mailboxID, BlobID: blob.ID, MessageIDHeader: header, CanonicalSHA256: sha,
 		UID: uint32(messageSeq), BlobPath: path, Subject: subject, FromAddr: from, ToAddr: to, BodyText: body, Date: date,
 	})
 	if err != nil {
@@ -218,6 +223,7 @@ func testBackend() *recipeBoxBackend {
 	// The tests serve every page from one host and should not wait out the
 	// politeness spacing between them.
 	backend.hostSpacing = 0
+	backend.scanSettle = 0
 	return backend
 }
 
@@ -546,5 +552,67 @@ func TestPreviewFiledByHandNeverOverwritesAStructuredRecipe(t *testing.T) {
 	}
 	if second != first || detail.Title != "Carbonara" || len(detail.Ingredients) != 1 || detail.Origin != "structured" {
 		t.Fatalf("recipe after a manual filing = %d/%d %#v", first, second, detail.RecipeSummary)
+	}
+}
+
+func TestScanDoesNotPassRowsThatHaveNotSettled(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	server := recipeServer(t)
+	f := newFixture(t, st, "settle@example.test")
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<s@example.test>", "settle@example.test", "settle@example.test", "x", server.URL+"/carbonara", time.Now())
+	db := st.DB()
+	settings, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A row written this second may still have a sibling in an open
+	// transaction below it: the cursor stays put until it has settled.
+	if _, more, err := scanUser(ctx, db, f.user.ID, settings, time.Now().Add(-time.Minute).Unix()); err != nil || more {
+		t.Fatalf("scan = more %v, err %v", more, err)
+	}
+	after, err := loadSettings(ctx, db, f.user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ScanCursor != 0 || after.ScanFinishedAt != 0 {
+		t.Fatalf("cursor %d finished %d after a scan of only unsettled rows", after.ScanCursor, after.ScanFinishedAt)
+	}
+	if found, _, err := scanUser(ctx, db, f.user.ID, after, time.Now().Add(time.Minute).Unix()); err != nil || found != 1 {
+		t.Fatalf("settled scan found %d, err %v", found, err)
+	}
+}
+
+func TestHeaderlessNoteDraggedBackIsNotFiledAgain(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	server := recipeServer(t)
+	f := newFixture(t, st, "nohdr@example.test")
+	createMessageWithSHA(t, st, f.user.ID, f.account.ID, f.inbox.ID, "", "content-sha-1", "nohdr@example.test", "nohdr@example.test", "x", server.URL+"/carbonara", time.Now())
+	db := st.DB()
+	if _, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true, MoveEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	if len(host.moved) != 1 {
+		t.Fatalf("moved = %v", host.moved)
+	}
+	// The reader drags it back into the Inbox.
+	var filed int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM messages WHERE user_id = ? AND canonical_sha256 = 'content-sha-1'`, f.user.ID).Scan(&filed); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.MoveMessage(ctx, f.user.ID, filed, f.inbox.ID); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, p, host, f.user.ID)
+	if len(host.moved) != 2 {
+		t.Fatalf("the box filed a mail the reader took back: moved = %v", host.moved)
+	}
+	var mails int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails WHERE user_id = ?`, f.user.ID).Scan(&mails); err != nil || mails != 1 {
+		t.Fatalf("mails = %d err %v", mails, err)
 	}
 }

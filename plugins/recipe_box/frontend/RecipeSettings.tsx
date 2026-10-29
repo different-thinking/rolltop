@@ -159,7 +159,7 @@ export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRout
             <dl className="recipe-facts">
               <div><dt>Notes to self with links</dt><dd>{status.notes_found.toLocaleString()}</dd></div>
               <div><dt>Recipes</dt><dd>{status.recipes.toLocaleString()}</dd></div>
-              <div><dt>Pages still to read</dt><dd>{(status.links.pending || 0).toLocaleString()}</dd></div>
+              <div><dt>Pages still to read</dt><dd>{((status.links.pending || 0) + (status.links.retrying || 0)).toLocaleString()}</dd></div>
               <div><dt>Not a recipe</dt><dd>{(status.links.page || 0).toLocaleString()}</dd></div>
               <div><dt>Could not be read</dt><dd>{(status.links.failed || 0).toLocaleString()}</dd></div>
               <div><dt>Mails filed</dt><dd>{(status.mails.moved || 0).toLocaleString()}</dd></div>

@@ -33,17 +33,19 @@ const (
 )
 
 type pendingMail struct {
-	ID       int64
-	Key      string
-	Message  int64
-	Header   string
-	Attempts int
+	ID         int64
+	Key        string
+	Message    int64
+	Header     string
+	ContentSHA string
+	AccountID  int64
+	Attempts   int
 }
 
 // mailsToFile lists the mails that carried a recipe the reader has not
 // dismissed and that are not filed yet.
 func mailsToFile(ctx context.Context, db *sql.DB, userID int64, limit int) ([]pendingMail, error) {
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.move_attempts
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.move_state = '' AND m.move_next_at <= ?
 		AND EXISTS (
@@ -60,7 +62,7 @@ func mailsToFile(ctx context.Context, db *sql.DB, userID int64, limit int) ([]pe
 	var out []pendingMail
 	for rows.Next() {
 		var mail pendingMail
-		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.Attempts); err != nil {
+		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID, &mail.Attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, mail)
@@ -84,10 +86,17 @@ func storedCopies(ctx context.Context, db *sql.DB, userID int64, mail pendingMai
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		WHERE m.user_id = ? AND `
 	args := []any{userID}
-	if strings.HasPrefix(mail.Key, "mid:") && mail.Header != "" {
+	switch {
+	case strings.HasPrefix(mail.Key, "mid:") && mail.Header != "":
 		query += `m.message_id_header = ?`
 		args = append(args, mail.Header)
-	} else {
+	case strings.HasPrefix(mail.Key, "sha:") && mail.ContentSHA != "":
+		// A mail without a Message-ID is followed by its content inside its
+		// own account: the same bytes in another account are a delivery there
+		// that this note-to-self does not speak for.
+		query += `m.account_id = ? AND m.canonical_sha256 = ?`
+		args = append(args, mail.AccountID, mail.ContentSHA)
+	default:
 		query += `m.id = ?`
 		args = append(args, mail.Message)
 	}
@@ -223,11 +232,32 @@ func recipeFolder(ctx context.Context, folders plugins.MailFolderHost, db *sql.D
 		return 0, err
 	}
 	if created {
-		if _, err := db.ExecContext(ctx, `UPDATE mailboxes SET show_in_all_mail = 0, updated_at = ? WHERE user_id = ? AND id = ?`, time.Now().UTC().Unix(), userID, id); err != nil {
+		if _, err := hideFolderFromAllMail(ctx, folders, db, userID, id, name); err != nil {
 			return 0, err
 		}
 	}
 	return id, nil
+}
+
+// hideFolderFromAllMail takes the recipe folder named name out of All Mail and
+// the other whole-account lists, and reports whether there was such a folder.
+// Its duplicate pointers are refreshed in the same step, exactly as the folder
+// settings page does (Store.UpdateMailboxSettings): a copy hidden behind a row
+// of this folder would otherwise stay hidden behind a row no list shows.
+func hideFolderFromAllMail(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID, mailboxID int64, name string) (bool, error) {
+	res, err := db.ExecContext(ctx, `UPDATE mailboxes SET show_in_all_mail = 0, updated_at = ? WHERE user_id = ? AND id = ? AND LOWER(name) = LOWER(?)`,
+		time.Now().UTC().Unix(), userID, mailboxID, name)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	st, ok := host.Store().(*store.Store)
+	if !ok || st == nil {
+		return true, errors.New("plugin host store is unavailable")
+	}
+	return true, st.RefreshDuplicateCopiesForMailbox(ctx, userID, mailboxID)
 }
 
 func moveErrorText(err error) string {

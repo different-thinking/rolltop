@@ -111,30 +111,46 @@ func elementText(markup string, start int, name string) string {
 	if end-start > limit {
 		end = start + limit
 	}
-	lower := strings.ToLower(markup[start:end])
+	// The tags are matched in the markup itself, ASCII case folded per byte:
+	// lowercasing a copy would cost a 64 KiB allocation per property, and its
+	// offsets need not be the original's (an invalid byte becomes U+FFFD).
+	segment := markup[start:end]
 	open := "<" + name
 	closing := "</" + name
 	depth := 1
-	for i := 0; i < len(lower); {
-		next := strings.IndexByte(lower[i:], '<')
+	for i := 0; i < len(segment); {
+		next := strings.IndexByte(segment[i:], '<')
 		if next < 0 {
 			break
 		}
 		i += next
+		rest := segment[i:]
 		switch {
-		case strings.HasPrefix(lower[i:], closing):
+		case tagNameAt(rest, closing):
 			depth--
 			if depth == 0 {
-				return markup[start : start+i]
+				return segment[:i]
 			}
-		case strings.HasPrefix(lower[i:], open) && len(lower) > i+len(open) && !isNameChar(lower[i+len(open)]):
+		case tagNameAt(rest, open):
 			depth++
 		}
 		i++
 	}
-	return markup[start:end]
+	return segment
+}
+
+// tagNameAt reports whether s starts with prefix, ASCII case-insensitively,
+// and the tag name ends there -- so "</a" does not match "</abbr>".
+func tagNameAt(s, prefix string) bool {
+	if len(s) <= len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return false
+	}
+	return !isNameChar(s[len(prefix)])
 }
 
 func isNameChar(b byte) bool {
+	if b >= 'A' && b <= 'Z' {
+		b += 'a' - 'A'
+	}
 	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-'
 }

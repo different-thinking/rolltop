@@ -67,4 +67,11 @@ The work is one background loop per process:
 
 A mail is followed by its Message-ID, because a move deletes the row and the
 destination's sync stores it again under a new id; the recipe's "Shared in"
-list always links to where the mail is now.
+list always links to where the mail is now. A mail without a Message-ID is
+followed by its content hash inside its account, so it is still filed only once.
+
+The scan never passes a row younger than a minute (`scanSettle`): ids are
+handed out on insert and become visible on commit, so a cursor that ran ahead
+of a still-open sync transaction would skip the rows it was writing. While a
+backfill keeps the loop busy, rounds revisit only the readers with work left;
+everyone else is asked again on new mail and once per idle interval.

@@ -24,6 +24,14 @@ const (
 	// a large mailbox being backfilled does not hold everyone else's new mail.
 	scanPagesPerRound = 6
 	noteLimit         = 280
+	// scanSettle is how old a row has to be before the scan walks past it.
+	// Message ids are handed out when a row is inserted and become visible when
+	// its transaction commits, so a sync still writing ids below one that just
+	// committed would have those rows land behind a cursor that already moved
+	// on. Rows that have stood this long are past any transaction that wrote
+	// them, and a note-to-self reaching the cookbook a minute later costs
+	// nothing.
+	scanSettle = time.Minute
 )
 
 // excludedRoles are folders whose mail the box never reads. Sent and Drafts
@@ -56,11 +64,15 @@ type scanRow struct {
 	From, To, CC    string
 	DateUnix        int64
 	Encrypted       bool
+	ContentSHA      string
+	CreatedAt       int64
 }
 
 // scanUser advances one reader's cursor by up to scanPagesPerRound pages and
-// reports whether there is more to read.
-func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings) (int, bool, error) {
+// reports whether there is more to read. It stops at the first row created
+// after settledBefore, so the cursor never passes a row a still-open
+// transaction could put behind it.
+func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings, settledBefore int64) (int, bool, error) {
 	own, err := ownAddresses(ctx, db, userID)
 	if err != nil {
 		return 0, false, err
@@ -82,6 +94,19 @@ func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings) 
 				_, err = db.ExecContext(ctx, `UPDATE plugin_recipe_box_settings SET scan_finished_at = ? WHERE user_id = ?`, time.Now().UTC().Unix(), userID)
 			}
 			return found, false, err
+		}
+		settled := len(rows)
+		for i, row := range rows {
+			if row.CreatedAt > settledBefore {
+				settled = i
+				break
+			}
+		}
+		full := len(rows) == scanBatch && settled == len(rows)
+		rows = rows[:settled]
+		if len(rows) == 0 {
+			// Only rows too new to pass are left; the next round reads them.
+			return found, false, nil
 		}
 		var candidates []scanRow
 		for _, row := range rows {
@@ -106,8 +131,8 @@ func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings) 
 		if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_settings SET scan_cursor = ? WHERE user_id = ?`, cursor, userID); err != nil {
 			return found, false, err
 		}
-		if len(rows) < scanBatch {
-			_, err = db.ExecContext(ctx, `UPDATE plugin_recipe_box_settings SET scan_finished_at = ? WHERE user_id = ?`, time.Now().UTC().Unix(), userID)
+		if !full {
+			_, err = db.ExecContext(ctx, `UPDATE plugin_recipe_box_settings SET scan_finished_at = ? WHERE user_id = ? AND scan_finished_at = 0`, time.Now().UTC().Unix(), userID)
 			return found, false, err
 		}
 	}
@@ -116,7 +141,7 @@ func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings) 
 
 func scanPage(ctx context.Context, db *sql.DB, userID, cursor int64) ([]scanRow, error) {
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id, mb.name, mb.role, m.message_id_header, m.subject,
-			m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.is_encrypted
+			m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.is_encrypted, m.canonical_sha256, m.created_at
 		FROM messages m
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		WHERE m.user_id = ? AND m.id > ?
@@ -130,7 +155,7 @@ func scanPage(ctx context.Context, db *sql.DB, userID, cursor int64) ([]scanRow,
 		var row scanRow
 		var encrypted int
 		if err := rows.Scan(&row.ID, &row.AccountID, &row.MailboxID, &row.MailboxName, &row.MailboxRole, &row.MessageIDHeader, &row.Subject,
-			&row.From, &row.To, &row.CC, &row.DateUnix, &encrypted); err != nil {
+			&row.From, &row.To, &row.CC, &row.DateUnix, &encrypted, &row.ContentSHA, &row.CreatedAt); err != nil {
 			return nil, err
 		}
 		row.Encrypted = encrypted != 0
@@ -185,10 +210,17 @@ func recordCandidates(ctx context.Context, db *sql.DB, userID int64, candidates 
 // messageKey identifies one mail across the rows it is stored as. A move
 // deletes the row and the destination folder's sync creates a new one, and two
 // accounts can hold copies of the same delivery; the Message-ID is what all of
-// those share. A message without one is known by its row.
-func messageKey(accountID, messageID int64, header string) string {
+// those share. A message without one is known by its content inside its
+// account, which a move does not change either -- known by its row, it would
+// come back from every move as a mail the box had never filed, and a reader who
+// dragged it back to the Inbox would see it filed away again. Only a message
+// with neither is known by its row.
+func messageKey(accountID, messageID int64, header, contentSHA string) string {
 	if header = strings.TrimSpace(header); header != "" {
 		return "mid:" + header
+	}
+	if contentSHA = strings.TrimSpace(contentSHA); contentSHA != "" {
+		return fmt.Sprintf("sha:%d:%s", accountID, contentSHA)
 	}
 	return fmt.Sprintf("row:%d:%d", accountID, messageID)
 }
@@ -203,11 +235,12 @@ func recordMail(ctx context.Context, db *sql.DB, userID int64, row scanRow, link
 	var mailID int64
 	// The row the mail is stored as now is always the newest one the scan
 	// reached, so the link back to the mail follows it into its new folder.
-	err = tx.QueryRowContext(ctx, `INSERT INTO plugin_recipe_box_mails (user_id, message_key, message_id, message_id_header, account_id, subject, date_unix, note, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	err = tx.QueryRowContext(ctx, `INSERT INTO plugin_recipe_box_mails (user_id, message_key, message_id, message_id_header, content_sha, account_id, subject, date_unix, note, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (user_id, message_key) DO UPDATE SET message_id = excluded.message_id, account_id = excluded.account_id, updated_at = excluded.updated_at
 		RETURNING id`,
-		userID, messageKey(row.AccountID, row.ID, row.MessageIDHeader), row.ID, strings.TrimSpace(row.MessageIDHeader), row.AccountID,
+		userID, messageKey(row.AccountID, row.ID, row.MessageIDHeader, row.ContentSHA), row.ID, strings.TrimSpace(row.MessageIDHeader),
+		strings.TrimSpace(row.ContentSHA), row.AccountID,
 		mailparse.SanitizeText(row.Subject), row.DateUnix, mailparse.SanitizeText(note), now, now).Scan(&mailID)
 	if err != nil {
 		return err

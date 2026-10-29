@@ -27,64 +27,89 @@ const (
 func (p *recipeBoxBackend) loop(ctx context.Context, host plugins.BackendHost) {
 	// A start is often the server starting: give the sync and the first page
 	// loads the database before the box asks anything of it.
-	if !sleep(ctx, 20*time.Second, p.wake) {
+	if _, ok := sleep(ctx, 20*time.Second, p.wake); !ok {
 		return
 	}
+	var busy []int64
+	lastSweep := time.Time{}
 	for {
-		more := p.round(ctx, host)
-		wait := idleInterval
-		if more {
-			wait = busyPause
+		// A busy round revisits only the readers that still have work: a
+		// backfill keeps the loop on a two-second pace, and asking every
+		// reader of the installation for their settings at that pace is a
+		// cost the readers who never switched the box on would be paying.
+		// Everyone is asked again on a wake-up and once per idle interval.
+		if busy == nil || time.Since(lastSweep) >= idleInterval {
+			busy = p.round(ctx, host, nil)
+			lastSweep = time.Now()
+		} else {
+			busy = p.round(ctx, host, busy)
 		}
-		if !sleep(ctx, wait, p.wake) {
+		wait := idleInterval
+		if len(busy) > 0 {
+			wait = busyPause
+		} else {
+			busy = nil
+		}
+		woke, ok := sleep(ctx, wait, p.wake)
+		if !ok {
 			return
+		}
+		if woke {
+			busy = nil
 		}
 	}
 }
 
-// sleep waits for the duration or a wake-up and reports false when the
-// context ended instead.
-func sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
+// sleep waits for the duration or a wake-up. It reports whether a wake-up
+// ended it, and false as its second value when the context ended instead.
+func sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) (bool, bool) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return false
+		return false, false
 	case <-timer.C:
-		return true
+		return false, true
 	case <-wake:
 		// A burst of new mail sends a burst of wake-ups; one round answers all
 		// of them.
-		return sleep(ctx, time.Second, nil)
+		_, ok := sleep(ctx, time.Second, nil)
+		return true, ok
 	}
 }
 
-// round gives every enabled reader one turn and reports whether any of them
-// has more work waiting.
-func (p *recipeBoxBackend) round(ctx context.Context, host plugins.BackendHost) bool {
-	st, ok := host.Store().(*store.Store)
-	if !ok || st == nil {
-		return false
-	}
-	userIDs, err := st.ListUserIDsWithAccounts(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("recipe box: list users failed error_type=%T", err)
+// round gives every enabled reader one turn -- or, given a list, only those
+// readers -- and returns the readers that have more work waiting.
+func (p *recipeBoxBackend) round(ctx context.Context, host plugins.BackendHost, only []int64) []int64 {
+	userIDs := only
+	if userIDs == nil {
+		st, ok := host.Store().(*store.Store)
+		if !ok || st == nil {
+			return nil
 		}
-		return false
+		listed, err := st.ListUserIDsWithAccounts(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("recipe box: list users failed error_type=%T", err)
+			}
+			return nil
+		}
+		userIDs = listed
 	}
-	more := false
+	var busy []int64
 	for _, userID := range userIDs {
 		if ctx.Err() != nil {
-			return false
+			return nil
 		}
 		userMore, err := p.runUser(ctx, host, userID)
 		if err != nil && ctx.Err() == nil {
 			log.Printf("recipe box: pass failed user_id=%d error_type=%T error=%v", userID, err, err)
 		}
-		more = more || userMore
+		if userMore {
+			busy = append(busy, userID)
+		}
 	}
-	return more
+	return busy
 }
 
 // runUser is one reader's turn: scan, then fetch, then file. Each step is
@@ -99,7 +124,7 @@ func (p *recipeBoxBackend) runUser(ctx context.Context, host plugins.BackendHost
 	if err != nil || !settings.Enabled {
 		return false, err
 	}
-	_, scanMore, err := scanUser(ctx, db, userID, settings)
+	_, scanMore, err := scanUser(ctx, db, userID, settings, time.Now().Add(-p.scanSettle).Unix())
 	if err != nil {
 		return false, err
 	}

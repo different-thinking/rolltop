@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS plugin_recipe_box_mails (
   message_key TEXT NOT NULL,
   message_id BIGINT NOT NULL DEFAULT 0,
   message_id_header TEXT NOT NULL DEFAULT '',
+  content_sha TEXT NOT NULL DEFAULT '',
   account_id BIGINT NOT NULL DEFAULT 0,
   subject TEXT NOT NULL DEFAULT '',
   date_unix BIGINT NOT NULL DEFAULT 0,

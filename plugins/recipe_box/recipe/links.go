@@ -145,23 +145,6 @@ func NormalizeLink(raw string) (string, bool) {
 	return u.String(), true
 }
 
-// SameLink reports whether two normalized links name one page, ignoring the
-// difference between http and https, a leading www and a trailing slash. Shops
-// and blogs serve every one of those spellings, and a reader who shared one
-// recipe twice from two apps should still find it once.
-func SameLink(a, b string) bool {
-	return linkIdentity(a) == linkIdentity(b)
-}
-
-func linkIdentity(link string) string {
-	u, err := url.Parse(link)
-	if err != nil {
-		return link
-	}
-	host := strings.TrimPrefix(strings.ToLower(u.Host), "www.")
-	return host + strings.TrimSuffix(u.EscapedPath(), "/") + "?" + u.RawQuery
-}
-
 func unwrapRedirect(u *url.URL) (*url.URL, bool) {
 	host := strings.ToLower(u.Hostname())
 	for _, rule := range redirectParams {

@@ -123,15 +123,21 @@ func recipeFromNode(node map[string]any, pageURL string) *Recipe {
 	r.Instructions = instructionSections(node["recipeInstructions"])
 	if rating, ok := node["aggregateRating"].(map[string]any); ok {
 		r.RatingValue = numberOf(rating["ratingValue"])
-		r.RatingCount = int(numberOf(rating["ratingCount"]))
-		if r.RatingCount == 0 {
-			r.RatingCount = int(numberOf(rating["reviewCount"]))
+		count := numberOf(rating["ratingCount"])
+		if count == 0 {
+			count = numberOf(rating["reviewCount"])
 		}
 		if best := numberOf(rating["bestRating"]); best > 0 && best != 5 && r.RatingValue > 0 {
 			r.RatingValue = r.RatingValue / best * 5
 		}
 		if r.RatingValue < 0 || r.RatingValue > 5 || math.IsNaN(r.RatingValue) {
 			r.RatingValue = 0
+		}
+		// The count is stored in an INTEGER column: a page claiming more votes
+		// than that holds would fail the write on every retry and hold up the
+		// reader's whole queue behind one link.
+		if count > 0 && count <= math.MaxInt32 {
+			r.RatingCount = int(count)
 		}
 	}
 	if nutrition, ok := node["nutrition"].(map[string]any); ok {

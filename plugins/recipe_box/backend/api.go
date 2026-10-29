@@ -158,7 +158,11 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0`, userID).Scan(&status.Recipes); err != nil {
 		return status, err
 	}
-	if err := countInto(ctx, db, status.Links, `SELECT status, COUNT(*) FROM plugin_recipe_box_links WHERE user_id = ? GROUP BY status`, userID); err != nil {
+	// A pending link whose retry is not due yet is counted apart as
+	// "retrying": the pages poll while anything is pending, and a link waiting
+	// out a day's back-off is not work the loop is doing now.
+	if err := countInto(ctx, db, status.Links, `SELECT CASE WHEN status = 'pending' AND next_attempt_at > ? THEN 'retrying' ELSE status END AS state, COUNT(*)
+		FROM plugin_recipe_box_links WHERE user_id = ? GROUP BY state`, time.Now().UTC().Unix(), userID); err != nil {
 		return status, err
 	}
 	if err := countInto(ctx, db, status.Mails, `SELECT move_state, COUNT(*) FROM plugin_recipe_box_mails WHERE user_id = ? GROUP BY move_state`, userID); err != nil {
@@ -184,8 +188,8 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	return status, rows.Err()
 }
 
-func countInto(ctx context.Context, db *sql.DB, into map[string]int, query string, userID int64) error {
-	rows, err := db.QueryContext(ctx, query, userID)
+func countInto(ctx context.Context, db *sql.DB, into map[string]int, query string, args ...any) error {
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -220,13 +224,12 @@ func (p *recipeBoxBackend) apiHideFolder(host plugins.APIHost, db *sql.DB, userI
 		host.ServerError(w, err)
 		return
 	}
-	res, err := db.ExecContext(r.Context(), `UPDATE mailboxes SET show_in_all_mail = 0, updated_at = ? WHERE user_id = ? AND id = ? AND LOWER(name) = LOWER(?)`,
-		time.Now().UTC().Unix(), userID, in.MailboxID, settings.FolderName)
+	found, err := hideFolderFromAllMail(r.Context(), host, db, userID, in.MailboxID, settings.FolderName)
 	if err != nil {
 		host.ServerError(w, err)
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if !found {
 		host.WriteAPIError(w, http.StatusNotFound, "recipe folder not found")
 		return
 	}

@@ -80,6 +80,7 @@ var (
 	blockTagRE   = regexp.MustCompile(`(?is)</?(p|div|br|li|ul|ol|h[1-6]|tr|td|th|dt|dd|table|section|article|header|footer|blockquote)\b[^>]*>`)
 	scriptBodyRE = regexp.MustCompile(`(?is)<(script|style|noscript|template)\b[^>]*>.*?</(script|style|noscript|template)>`)
 	spaceRE      = regexp.MustCompile(`[ \t\f\v\r\x{00a0}]+`)
+	headEndRE    = regexp.MustCompile(`(?i)</head>`)
 )
 
 // ParsePage reads a page's markup. It never fails: a page that says nothing
@@ -87,8 +88,12 @@ var (
 func ParsePage(markup string, pageURL string) Page {
 	page := Page{}
 	head := markup
-	if index := strings.Index(strings.ToLower(markup), "</head>"); index > 0 {
-		head = markup[:index]
+	// The end of the head is found in the markup itself, not in a lowercased
+	// copy: lowercasing can change a string's length (every invalid byte of an
+	// undeclared Latin-1 page becomes a three-byte U+FFFD), and an offset into
+	// the copy then slices the original out of range.
+	if loc := headEndRE.FindStringIndex(markup); loc != nil && loc[0] > 0 {
+		head = markup[:loc[0]]
 	}
 	meta := metaValues(head)
 	page.Title = firstNonEmpty(meta["og:title"], meta["twitter:title"], cleanText(titleText(head), maxShortRunes))

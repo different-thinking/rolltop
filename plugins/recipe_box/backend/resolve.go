@@ -102,11 +102,10 @@ func (p *recipeBoxBackend) resolveLinks(ctx context.Context, db *sql.DB, userID 
 
 // waitForHost spaces requests to one site out by sameHostSpacing.
 func (p *recipeBoxBackend) waitForHost(ctx context.Context, link string) {
-	u, err := url.Parse(link)
-	if err != nil {
+	host := hostLabel(link)
+	if host == "" {
 		return
 	}
-	host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 	p.mu.Lock()
 	if p.lastFetch == nil {
 		p.lastFetch = map[string]time.Time{}

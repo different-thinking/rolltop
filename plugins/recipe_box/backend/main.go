@@ -50,6 +50,9 @@ type recipeBoxBackend struct {
 	// lastFetch is when each site may next be asked for a page, guarded by mu.
 	lastFetch   map[string]time.Time
 	hostSpacing time.Duration
+	// scanSettle is how old a message row must be before the scan passes it;
+	// tests, which write rows and scan them at once, set it to zero.
+	scanSettle time.Duration
 }
 
 // RolltopPlugin is the symbol loaded by plugin.Open.
@@ -58,7 +61,7 @@ func RolltopPlugin() plugins.BackendPlugin {
 }
 
 func newBackend(fetcher *recipe.Fetcher) *recipeBoxBackend {
-	return &recipeBoxBackend{wake: make(chan struct{}, 1), fetcher: fetcher, hostSpacing: sameHostSpacing}
+	return &recipeBoxBackend{wake: make(chan struct{}, 1), fetcher: fetcher, hostSpacing: sameHostSpacing, scanSettle: scanSettle}
 }
 
 func (*recipeBoxBackend) ID() string { return pluginID }
