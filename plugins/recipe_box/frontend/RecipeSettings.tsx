@@ -108,7 +108,7 @@ export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRout
                 <strong>Collect recipes from my mail</strong>
                 <small>
                   Mail is read only when one of your own addresses sent it. Every link in it is opened once, from this
-                  server, to see whether the page publishes a recipe. Newsletters and mail from anybody else are never read.
+                  server, to see whether the page publishes a recipe. Newsletters and mail from other addresses are never read.
                 </small>
               </span>
             </label>

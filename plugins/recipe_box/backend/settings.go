@@ -205,8 +205,10 @@ func headerAddresses(value string) []string {
 // reader's addresses, exactly one, and -- unless the reader relaxed it --
 // every recipient must be one too. A mail with no visible recipient at all
 // reached the reader by Bcc, which is still the reader writing to themselves.
-// Mail from anybody else never qualifies, whatever it links to: a newsletter
-// full of recipes is somebody else's selection, not the reader's.
+// Mail from any other address never qualifies, whatever it links to: a
+// newsletter full of recipes is somebody else's selection, not the reader's.
+// The From header is taken at its word; a forged one the provider did not
+// send to Junk passes (see the README for why that limit was accepted).
 func isNoteToSelf(own map[string]bool, from, to, cc string, ownRecipientsOnly bool) bool {
 	senders := headerAddresses(from)
 	if len(senders) != 1 || !own[senders[0]] {

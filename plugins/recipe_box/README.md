@@ -25,8 +25,15 @@ themselves is a note, sorted onto shelves under **Organizer → Notes**
 Only mail **one of the reader's own addresses sent**, and by default only when
 every recipient is one of their own addresses too (a note-to-self; a mail with
 no visible recipient reached them by Bcc and counts). Own addresses are the
-connected accounts and the sending identities. Newsletters and mail from anybody
-else are never read, whatever they link to. Sent, Drafts, Trash, Junk and
+connected accounts and the sending identities. Newsletters and mail from any
+other address are never read, whatever they link to.
+
+The test reads the `From` header, which nothing proves: a forged mail claiming
+to come from the reader and not filed as Junk by their provider is accepted.
+That is a decided limit. Requiring proof, such as a copy of the same mail in a
+Sent folder, would miss notes from clients that keep no Sent copy. What such a
+mail can cause is bounded: one guarded fetch per link, a recipe card of text
+and a sniffed raster image, and the move of that mail. Sent, Drafts, Trash, Junk and
 Gmail's system folders are never read either: the Sent copy is the reader's own
 record of writing the note, and moving it would empty their Sent folder.
 
