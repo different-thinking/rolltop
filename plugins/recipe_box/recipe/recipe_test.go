@@ -179,10 +179,13 @@ func TestExtractLinksUnwrapsRedirectsAndDropsPlumbing(t *testing.T) {
 	markup := `<a href="https://www.google.com/url?q=https%3A%2F%2Fexample.test%2Fcake%3Ffbclid%3Dx&amp;sa=D">Kuchen</a>
 <a href="https://news.example.test/unsubscribe?id=1">Abmelden</a>
 <a href="mailto:me@example.test">Mail</a>
+<a href="https://meet.google.com/abc-defg-hij">Call</a>
 <a href="https://docs.google.com/document/d/1">Doc</a>
 <img src="https://example.test/pic.jpg">`
 	links := ExtractLinks("", markup)
-	if len(links) != 1 || links[0] != "https://example.test/cake" {
+	// A call to join is plumbing; a document the reader mailed themselves is
+	// something they kept, for the notes overview.
+	if len(links) != 2 || links[0] != "https://example.test/cake" || links[1] != "https://docs.google.com/document/d/1" {
 		t.Fatalf("links = %#v", links)
 	}
 }
@@ -283,5 +286,48 @@ func TestMicrodataReadIsBoundedOnHostilePages(t *testing.T) {
 	// item is read to the element bound, so fewer of them fit.
 	if page.Recipe == nil || len(page.Recipe.Ingredients) == 0 || len(page.Recipe.Ingredients) > maxListItems {
 		t.Fatalf("recipe = %v ingredients", page.Recipe != nil)
+	}
+}
+
+func TestClassifyReadsWhatThePageSaysAboutItself(t *testing.T) {
+	cases := []struct {
+		name, markup, link, kind, detail string
+	}{
+		{"recipe", chefkochPage, "https://www.chefkoch.de/rezepte/1/x.html", KindRecipe, ""},
+		{"product with price", `<script type="application/ld+json">{"@graph":[{"@type":"WebPage"},{"@type":"Product","name":"Pfanne","offers":{"@type":"Offer","price":"49.90","priceCurrency":"eur"}}]}</script>`,
+			"https://shop.example.test/pfanne", KindProduct, "49.90 EUR"},
+		{"og product", `<head><meta property="og:type" content="product"><meta property="product:price:amount" content="19,99"><meta property="product:price:currency" content="EUR"></head>`,
+			"https://shop.example.test/x", KindProduct, "19,99 EUR"},
+		{"event", `<script type="application/ld+json">{"@type":"MusicEvent","name":"Konzert","startDate":"2026-11-03T20:00"}</script>`,
+			"https://club.example.test/konzert", KindEvent, "2026-11-03T20:00"},
+		{"news article", `<script type="application/ld+json">{"@type":["NewsArticle"],"headline":"x"}</script>`, "https://news.example.test/a", KindArticle, ""},
+		{"og article", `<head><meta property="og:type" content="article"></head>`, "https://blog.example.test/a", KindArticle, ""},
+		{"youtube is a video whatever it says", `<script type="application/ld+json">{"@type":"Person"}</script>`, "https://www.youtube.com/watch?v=x", KindVideo, ""},
+		{"youtube music is music", ``, "https://music.youtube.com/watch?v=x", KindMusic, ""},
+		{"microdata place", `<div itemscope itemtype="https://schema.org/Restaurant"></div>`, "https://trattoria.example.test/", KindPlace, ""},
+		{"amazon page without data", ``, "https://www.amazon.de/dp/B0", KindProduct, ""},
+		{"nothing said", `<html><head><title>x</title></head></html>`, "https://example.test/x", KindLink, ""},
+	}
+	for _, c := range cases {
+		page := ParsePage(c.markup, c.link)
+		kind, detail := Classify(page, c.link)
+		if kind != c.kind || detail != c.detail {
+			t.Errorf("%s: Classify = %q %q, want %q %q", c.name, kind, detail, c.kind, c.detail)
+		}
+	}
+}
+
+func TestHostKindAndNoFetch(t *testing.T) {
+	if got := HostKind("https://www.google.com/maps/place/x"); got != KindPlace {
+		t.Fatalf("google maps = %q", got)
+	}
+	if got := HostKind("https://github.com/acme/tool"); got != KindTech {
+		t.Fatalf("github = %q", got)
+	}
+	if !NoFetch("https://docs.google.com/document/d/1") || !NoFetch("https://maps.app.goo.gl/abc") {
+		t.Fatal("a document or a map link would be fetched")
+	}
+	if NoFetch("https://www.booking.com/hotel/x") || NoFetch("https://github.com/acme/tool") {
+		t.Fatal("a public page is not fetched")
 	}
 }

@@ -81,6 +81,14 @@ func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.R
 			return
 		}
 		p.apiRecipeImage(host, db, userID, id, w, r)
+	case rest == "notes" && r.Method == http.MethodGet:
+		p.apiListNotes(host, db, userID, w, r)
+	case len(parts) == 2 && parts[0] == "notes" && r.Method == http.MethodPost:
+		id, ok := parseID(host, w, parts[1])
+		if !ok {
+			return
+		}
+		p.apiUpdateNote(host, db, userID, id, w, r)
 	case rest == "links" && r.Method == http.MethodGet:
 		p.apiListLinks(host, db, userID, w, r)
 	case len(parts) == 3 && parts[0] == "links" && r.Method == http.MethodPost:
@@ -113,18 +121,24 @@ func parseID(host plugins.APIHost, w http.ResponseWriter, raw string) (int64, bo
 // Status is what the settings page shows of the box at work: how far the scan
 // has come, what the links turned out to be, and what was filed.
 type Status struct {
-	MessagesTotal   int64          `json:"messages_total"`
-	MessagesScanned int64          `json:"messages_scanned"`
-	NotesFound      int64          `json:"notes_found"`
-	Links           map[string]int `json:"links"`
-	Recipes         int64          `json:"recipes"`
-	Mails           map[string]int `json:"mails"`
-	Folders         []FolderStatus `json:"folders"`
+	MessagesTotal   int64 `json:"messages_total"`
+	MessagesScanned int64 `json:"messages_scanned"`
+	NotesFound      int64 `json:"notes_found"`
+	// Notes counts the open notes: what the Notes tab still has to show.
+	Notes   int64          `json:"notes"`
+	Links   map[string]int `json:"links"`
+	Recipes int64          `json:"recipes"`
+	Mails   map[string]int `json:"mails"`
+	Folders []FolderStatus `json:"folders"`
 }
 
 // FolderStatus is one account's recipe folder, and whether All Mail still
 // lists it -- the one setting the box offers to change for the reader.
 type FolderStatus struct {
+	// Shelf says which folder this is: "recipes" or "notes".
+	Shelf string `json:"shelf"`
+	// Wanted is the name the folder is created under when it does not exist.
+	Wanted        string `json:"wanted"`
 	AccountID     int64  `json:"account_id"`
 	Account       string `json:"account"`
 	MailboxID     int64  `json:"mailbox_id"`
@@ -158,6 +172,9 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0`, userID).Scan(&status.Recipes); err != nil {
 		return status, err
 	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails m WHERE m.user_id = ? AND m.note_dismissed = 0 AND m.done_at = 0 AND NOT `+carriesRecipe, userID).Scan(&status.Notes); err != nil {
+		return status, err
+	}
 	// A pending link whose retry is not due yet is counted apart as
 	// "retrying": the pages poll while anything is pending, and a link waiting
 	// out a day's back-off is not work the loop is doing now.
@@ -168,24 +185,44 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	if err := countInto(ctx, db, status.Mails, `SELECT move_state, COUNT(*) FROM plugin_recipe_box_mails WHERE user_id = ? GROUP BY move_state`, userID); err != nil {
 		return status, err
 	}
+	shelves := []struct {
+		shelf, name string
+		on          bool
+	}{{"recipes", settings.FolderName, settings.MoveEnabled}, {"notes", settings.NotesFolderName, settings.NotesMoveEnabled}}
+	for _, shelf := range shelves {
+		if !shelf.on {
+			continue
+		}
+		folders, err := folderStatuses(ctx, db, userID, shelf.shelf, shelf.name)
+		if err != nil {
+			return status, err
+		}
+		status.Folders = append(status.Folders, folders...)
+	}
+	return status, nil
+}
+
+// folderStatuses is one shelf's folder in every account of the reader.
+func folderStatuses(ctx context.Context, db *sql.DB, userID int64, shelf, name string) ([]FolderStatus, error) {
 	rows, err := db.QueryContext(ctx, `SELECT a.id, CASE WHEN a.label <> '' THEN a.label ELSE a.email END, COALESCE(mb.id, 0), COALESCE(mb.name, ''), COALESCE(mb.show_in_all_mail, 0)
 		FROM mail_accounts a
 		LEFT JOIN mailboxes mb ON mb.account_id = a.id AND mb.user_id = a.user_id AND LOWER(mb.name) = LOWER(?)
-		WHERE a.user_id = ? ORDER BY a.id`, settings.FolderName, userID)
+		WHERE a.user_id = ? ORDER BY a.id`, name, userID)
 	if err != nil {
-		return status, err
+		return nil, err
 	}
 	defer rows.Close()
+	var out []FolderStatus
 	for rows.Next() {
-		var folder FolderStatus
+		folder := FolderStatus{Shelf: shelf, Wanted: name}
 		var show int
 		if err := rows.Scan(&folder.AccountID, &folder.Account, &folder.MailboxID, &folder.Name, &show); err != nil {
-			return status, err
+			return nil, err
 		}
 		folder.ShowInAllMail = show != 0
-		status.Folders = append(status.Folders, folder)
+		out = append(out, folder)
 	}
-	return status, rows.Err()
+	return out, rows.Err()
 }
 
 func countInto(ctx context.Context, db *sql.DB, into map[string]int, query string, args ...any) error {
@@ -225,6 +262,9 @@ func (p *recipeBoxBackend) apiHideFolder(host plugins.APIHost, db *sql.DB, userI
 		return
 	}
 	found, err := hideFolderFromAllMail(r.Context(), host, db, userID, in.MailboxID, settings.FolderName)
+	if err == nil && !found {
+		found, err = hideFolderFromAllMail(r.Context(), host, db, userID, in.MailboxID, settings.NotesFolderName)
+	}
 	if err != nil {
 		host.ServerError(w, err)
 		return
@@ -259,6 +299,9 @@ type RecipeSummary struct {
 	Origin          string   `json:"origin"`
 	Dismissed       bool     `json:"dismissed"`
 	FirstSeenAt     int64    `json:"first_seen_at"`
+	// CookedAt is when the reader marked the dish as cooked, zero while it is
+	// still one to try.
+	CookedAt int64 `json:"cooked_at"`
 }
 
 // RecipeDetail is a recipe opened.
@@ -284,7 +327,7 @@ type RecipeMail struct {
 }
 
 const recipeColumns = `r.id, r.title, r.description, r.site_name, r.canonical_url, r.yield, r.total_minutes, r.rating_value, r.rating_count,
-	r.categories_json, r.cuisines_json, r.keywords_json, r.ingredients_json, r.image_status, r.updated_at, r.origin, r.dismissed, r.first_seen_at,
+	r.categories_json, r.cuisines_json, r.keywords_json, r.ingredients_json, r.image_status, r.updated_at, r.origin, r.dismissed, r.first_seen_at, r.cooked_at,
 	COALESCE((SELECT m.note FROM plugin_recipe_box_mails m
 		JOIN plugin_recipe_box_mail_links ml ON ml.mail_id = m.id AND ml.user_id = m.user_id
 		JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
@@ -300,7 +343,7 @@ func scanSummary(row rowScanner, extra ...any) (RecipeSummary, []string, error) 
 	var updatedAt int64
 	var dismissed int
 	dest := []any{&s.ID, &s.Title, &s.Description, &s.SiteName, &s.URL, &s.Yield, &s.TotalMinutes, &s.RatingValue, &s.RatingCount,
-		&categories, &cuisines, &keywords, &ingredients, &imageStatus, &updatedAt, &s.Origin, &dismissed, &s.FirstSeenAt, &s.Note}
+		&categories, &cuisines, &keywords, &ingredients, &imageStatus, &updatedAt, &s.Origin, &dismissed, &s.FirstSeenAt, &s.CookedAt, &s.Note}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return s, nil, err
 	}
@@ -326,12 +369,18 @@ func jsonList(raw string) []string {
 // every word against what the dish is called, what goes in it and how the site
 // files it, and against the reader's own note on the mail that shared it.
 func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
-	query := `SELECT ` + recipeColumns + ` FROM plugin_recipe_box_recipes r WHERE r.user_id = ? AND r.dismissed = ?`
-	dismissed := 0
-	if r.URL.Query().Get("view") == "dismissed" {
-		dismissed = 1
+	query := `SELECT ` + recipeColumns + ` FROM plugin_recipe_box_recipes r WHERE r.user_id = ? `
+	view := r.URL.Query().Get("view")
+	switch view {
+	case "dismissed":
+		query += `AND r.dismissed = 1`
+	case "cooked":
+		query += `AND r.dismissed = 0 AND r.cooked_at > 0`
+	default:
+		view = ""
+		query += `AND r.dismissed = 0 AND r.cooked_at = 0`
 	}
-	args := []any{userID, dismissed}
+	args := []any{userID}
 	for _, term := range strings.Fields(strings.ToLower(r.URL.Query().Get("q"))) {
 		if len(args) > 12 {
 			break
@@ -344,7 +393,12 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 			WHERE l.user_id = r.user_id AND l.recipe_id = r.id AND LOWER(m.note || ' ' || m.subject) LIKE ? ESCAPE '\'))`
 		args = append(args, pattern, pattern)
 	}
-	query += ` ORDER BY r.first_seen_at DESC, r.id DESC LIMIT ?`
+	if view == "cooked" {
+		// What was made most recently is what a reader looks for there.
+		query += ` ORDER BY r.cooked_at DESC, r.id DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY r.first_seen_at DESC, r.id DESC LIMIT ?`
+	}
 	args = append(args, recipeListLimit)
 	rows, err := db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -365,7 +419,13 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 		host.ServerError(w, err)
 		return
 	}
-	host.WriteJSON(w, map[string]any{"recipes": out})
+	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0}
+	if err := countInto(r.Context(), db, counts, `SELECT CASE WHEN dismissed <> 0 THEN 'dismissed' WHEN cooked_at > 0 THEN 'cooked' ELSE 'to_cook' END AS shelf, COUNT(*)
+		FROM plugin_recipe_box_recipes WHERE user_id = ? GROUP BY shelf`, userID); err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	host.WriteJSON(w, map[string]any{"recipes": out, "counts": counts})
 }
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
@@ -435,15 +495,34 @@ func recipeMails(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]Rec
 	return out, rows.Err()
 }
 
-// apiUpdateRecipe takes a recipe out of the cookbook or puts it back. Taking it
-// out also stops the box filing the mail behind it; mail it already filed
-// stays where it is, because moving mail back is the reader's own act.
+// apiUpdateRecipe marks a recipe cooked or not, and takes it out of the
+// cookbook or puts it back. Taking it out also stops the box filing the mail
+// behind it; mail it already filed stays where it is, because moving mail back
+// is the reader's own act.
 func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Dismissed *bool `json:"dismissed"`
+		Cooked    *bool `json:"cooked"`
 	}
 	if !host.DecodeJSON(w, r, &in) {
 		return
+	}
+	if in.Cooked != nil {
+		// updated_at is left alone: it versions the picture URL, and marking a
+		// dish cooked does not change its picture.
+		cookedAt := int64(0)
+		if *in.Cooked {
+			cookedAt = time.Now().UTC().Unix()
+		}
+		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET cooked_at = ? WHERE user_id = ? AND id = ?`, cookedAt, userID, id)
+		if err != nil {
+			host.ServerError(w, err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
+			return
+		}
 	}
 	if in.Dismissed != nil {
 		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET dismissed = ?, updated_at = ? WHERE user_id = ? AND id = ?`,

@@ -24,6 +24,9 @@ const (
 	// a large mailbox being backfilled does not hold everyone else's new mail.
 	scanPagesPerRound = 6
 	noteLimit         = 280
+	// noteBodyLimit bounds the text kept for a note to read: a page of
+	// writing, not a whole mail thread pasted into a note to self.
+	noteBodyLimit = 8000
 	// scanSettle is how old a row has to be before the scan walks past it.
 	// Message ids are handed out when a row is inserted and become visible when
 	// its transaction commits, so a sync still writing ids below one that just
@@ -66,6 +69,7 @@ type scanRow struct {
 	Encrypted       bool
 	ContentSHA      string
 	CreatedAt       int64
+	HasAttachments  bool
 }
 
 // scanUser advances one reader's cursor by up to scanPagesPerRound pages and
@@ -141,7 +145,7 @@ func scanUser(ctx context.Context, db *sql.DB, userID int64, settings Settings, 
 
 func scanPage(ctx context.Context, db *sql.DB, userID, cursor int64) ([]scanRow, error) {
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.account_id, m.mailbox_id, mb.name, mb.role, m.message_id_header, m.subject,
-			m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.is_encrypted, m.canonical_sha256, m.created_at
+			m.from_addr, m.to_addr, m.cc_addr, m.date_unix, m.is_encrypted, m.canonical_sha256, m.created_at, m.has_attachments
 		FROM messages m
 		JOIN mailboxes mb ON mb.id = m.mailbox_id AND mb.user_id = m.user_id
 		WHERE m.user_id = ? AND m.id > ?
@@ -153,12 +157,13 @@ func scanPage(ctx context.Context, db *sql.DB, userID, cursor int64) ([]scanRow,
 	var out []scanRow
 	for rows.Next() {
 		var row scanRow
-		var encrypted int
+		var encrypted, attachments int
 		if err := rows.Scan(&row.ID, &row.AccountID, &row.MailboxID, &row.MailboxName, &row.MailboxRole, &row.MessageIDHeader, &row.Subject,
-			&row.From, &row.To, &row.CC, &row.DateUnix, &encrypted, &row.ContentSHA, &row.CreatedAt); err != nil {
+			&row.From, &row.To, &row.CC, &row.DateUnix, &encrypted, &row.ContentSHA, &row.CreatedAt, &attachments); err != nil {
 			return nil, err
 		}
 		row.Encrypted = encrypted != 0
+		row.HasAttachments = attachments != 0
 		out = append(out, row)
 	}
 	return out, rows.Err()
@@ -195,11 +200,18 @@ func recordCandidates(ctx context.Context, db *sql.DB, userID int64, candidates 
 	recorded := 0
 	for _, row := range candidates {
 		body := bodies[row.ID]
+		text := body[0]
+		if strings.TrimSpace(text) == "" {
+			text = recipe.TextFromMarkup(body[1])
+		}
 		links := recipe.ExtractLinks(body[0], body[1])
-		if len(links) == 0 {
+		noteBody := recipe.NoteBody(text, noteBodyLimit)
+		// A note without a link is kept when the reader wrote something: a
+		// body, or a subject on a mail that is not just a file sent across.
+		if len(links) == 0 && noteBody == "" && (strings.TrimSpace(row.Subject) == "" || row.HasAttachments) {
 			continue
 		}
-		if err := recordMail(ctx, db, userID, row, links, recipe.NoteText(body[0], noteLimit)); err != nil {
+		if err := recordMail(ctx, db, userID, row, links, recipe.NoteText(text, noteLimit), noteBody); err != nil {
 			return recorded, err
 		}
 		recorded++
@@ -225,7 +237,7 @@ func messageKey(accountID, messageID int64, header, contentSHA string) string {
 	return fmt.Sprintf("row:%d:%d", accountID, messageID)
 }
 
-func recordMail(ctx context.Context, db *sql.DB, userID int64, row scanRow, links []string, note string) error {
+func recordMail(ctx context.Context, db *sql.DB, userID int64, row scanRow, links []string, note, body string) error {
 	now := time.Now().UTC().Unix()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -235,13 +247,14 @@ func recordMail(ctx context.Context, db *sql.DB, userID int64, row scanRow, link
 	var mailID int64
 	// The row the mail is stored as now is always the newest one the scan
 	// reached, so the link back to the mail follows it into its new folder.
-	err = tx.QueryRowContext(ctx, `INSERT INTO plugin_recipe_box_mails (user_id, message_key, message_id, message_id_header, content_sha, account_id, subject, date_unix, note, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (user_id, message_key) DO UPDATE SET message_id = excluded.message_id, account_id = excluded.account_id, updated_at = excluded.updated_at
+	err = tx.QueryRowContext(ctx, `INSERT INTO plugin_recipe_box_mails (user_id, message_key, message_id, message_id_header, content_sha, account_id, subject, date_unix, note, body, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, message_key) DO UPDATE SET message_id = excluded.message_id, account_id = excluded.account_id,
+			note = excluded.note, body = excluded.body, updated_at = excluded.updated_at
 		RETURNING id`,
 		userID, messageKey(row.AccountID, row.ID, row.MessageIDHeader, row.ContentSHA), row.ID, strings.TrimSpace(row.MessageIDHeader),
 		strings.TrimSpace(row.ContentSHA), row.AccountID,
-		mailparse.SanitizeText(row.Subject), row.DateUnix, mailparse.SanitizeText(note), now, now).Scan(&mailID)
+		mailparse.SanitizeText(row.Subject), row.DateUnix, mailparse.SanitizeText(note), mailparse.SanitizeText(body), now, now).Scan(&mailID)
 	if err != nil {
 		return err
 	}

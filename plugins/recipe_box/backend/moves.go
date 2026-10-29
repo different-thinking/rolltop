@@ -1,5 +1,5 @@
 // File overview: Filing the mail behind a recipe into the account's recipe
-// folder.
+// folder, and -- when the reader switched it on -- notes into a notes folder.
 //
 // A mail is filed once. Its state ends at "moved" the first time it reaches
 // the folder, and nothing moves it again after that: a reader who drags it back
@@ -42,18 +42,40 @@ type pendingMail struct {
 	Attempts   int
 }
 
+// carriesRecipe is the SQL test for a mail that named a recipe the reader has
+// not taken out of the cookbook; it assumes the mails table aliased m. It is
+// the one line between the two shelves: a mail it holds for is a recipe mail,
+// every other one is a note.
+const carriesRecipe = `EXISTS (
+	SELECT 1 FROM plugin_recipe_box_mail_links ml
+	JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
+	JOIN plugin_recipe_box_recipes r ON r.id = l.recipe_id AND r.user_id = l.user_id
+	WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'recipe' AND r.dismissed = 0)`
+
+// awaitsPage is the SQL test for a mail with a link whose page has not
+// answered yet: it may still turn out to be a recipe, so it is not a note to
+// file until it has.
+const awaitsPage = `EXISTS (
+	SELECT 1 FROM plugin_recipe_box_mail_links ml
+	JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
+	WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'pending')`
+
 // mailsToFile lists the mails that carried a recipe the reader has not
 // dismissed and that are not filed yet.
 func mailsToFile(ctx context.Context, db *sql.DB, userID int64, limit int) ([]pendingMail, error) {
+	return pendingMails(ctx, db, userID, `AND `+carriesRecipe, limit)
+}
+
+// notesToFile lists the notes that are not filed yet: mails that carried no
+// recipe, whose links have all answered, and that the reader kept.
+func notesToFile(ctx context.Context, db *sql.DB, userID int64, limit int) ([]pendingMail, error) {
+	return pendingMails(ctx, db, userID, `AND m.note_dismissed = 0 AND NOT `+carriesRecipe+` AND NOT `+awaitsPage, limit)
+}
+
+func pendingMails(ctx context.Context, db *sql.DB, userID int64, where string, limit int) ([]pendingMail, error) {
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts
 		FROM plugin_recipe_box_mails m
-		WHERE m.user_id = ? AND m.move_state = '' AND m.move_next_at <= ?
-		AND EXISTS (
-			SELECT 1 FROM plugin_recipe_box_mail_links ml
-			JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
-			JOIN plugin_recipe_box_recipes r ON r.id = l.recipe_id AND r.user_id = l.user_id
-			WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'recipe' AND r.dismissed = 0
-		)
+		WHERE m.user_id = ? AND m.move_state = '' AND m.move_next_at <= ? `+where+`
 		ORDER BY m.id LIMIT ?`, userID, time.Now().UTC().Unix(), limit)
 	if err != nil {
 		return nil, err
@@ -116,17 +138,45 @@ func storedCopies(ctx context.Context, db *sql.DB, userID int64, mail pendingMai
 	return out, rows.Err()
 }
 
-// fileMails moves up to movesPerRound mails and reports whether more wait.
+// fileMails files recipe mails and -- when the reader asked for it -- notes,
+// up to movesPerRound of each, and reports whether more wait. Recipes go first:
+// a mail is filed once, and the shelf it goes to is the recipe one whenever it
+// carried a recipe.
 func fileMails(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID int64, settings Settings) (int, bool, error) {
 	mover, canMove := host.(plugins.StoredMessageHost)
 	folders, canCreate := host.(plugins.MailFolderHost)
-	if !settings.MoveEnabled || !canMove || !canCreate {
+	if !canMove || !canCreate {
 		return 0, false, nil
 	}
-	mails, err := mailsToFile(ctx, db, userID, movesPerRound+1)
-	if err != nil {
-		return 0, false, err
+	moved, more := 0, false
+	if settings.MoveEnabled {
+		mails, err := mailsToFile(ctx, db, userID, movesPerRound+1)
+		if err != nil {
+			return 0, false, err
+		}
+		n, batchMore, err := fileBatch(ctx, mover, folders, db, userID, settings.FolderName, mails)
+		moved, more = moved+n, more || batchMore
+		if err != nil {
+			return moved, more, err
+		}
 	}
+	if settings.NotesMoveEnabled {
+		mails, err := notesToFile(ctx, db, userID, movesPerRound+1)
+		if err != nil {
+			return moved, more, err
+		}
+		n, batchMore, err := fileBatch(ctx, mover, folders, db, userID, settings.NotesFolderName, mails)
+		moved, more = moved+n, more || batchMore
+		if err != nil {
+			return moved, more, err
+		}
+	}
+	return moved, more, nil
+}
+
+// fileBatch moves up to movesPerRound of the mails given into the folder named
+// folderName of each one's own account.
+func fileBatch(ctx context.Context, mover plugins.StoredMessageHost, folders plugins.MailFolderHost, db *sql.DB, userID int64, folderName string, mails []pendingMail) (int, bool, error) {
 	more := len(mails) > movesPerRound
 	if more {
 		mails = mails[:movesPerRound]
@@ -137,7 +187,7 @@ func fileMails(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID
 		if ctx.Err() != nil {
 			return moved, true, ctx.Err()
 		}
-		state, moveErr := fileMail(ctx, mover, folders, db, userID, settings, mail, folderByAccount)
+		state, moveErr := fileMail(ctx, mover, folders, db, userID, folderName, mail, folderByAccount)
 		now := time.Now().UTC().Unix()
 		if moveErr != nil {
 			if errors.Is(moveErr, context.Canceled) {
@@ -169,7 +219,7 @@ func fileMails(ctx context.Context, host plugins.BackendHost, db *sql.DB, userID
 	return moved, more, nil
 }
 
-func fileMail(ctx context.Context, mover plugins.StoredMessageHost, folders plugins.MailFolderHost, db *sql.DB, userID int64, settings Settings, mail pendingMail, folderByAccount map[int64]int64) (string, error) {
+func fileMail(ctx context.Context, mover plugins.StoredMessageHost, folders plugins.MailFolderHost, db *sql.DB, userID int64, folderName string, mail pendingMail, folderByAccount map[int64]int64) (string, error) {
 	copies, err := storedCopies(ctx, db, userID, mail)
 	if err != nil {
 		return "", err
@@ -182,7 +232,7 @@ func fileMail(ctx context.Context, mover plugins.StoredMessageHost, folders plug
 	}
 	filed, eligible := 0, 0
 	for _, c := range copies {
-		if strings.EqualFold(c.MailboxName, settings.FolderName) {
+		if strings.EqualFold(c.MailboxName, folderName) {
 			filed++
 			continue
 		}
@@ -194,7 +244,7 @@ func fileMail(ctx context.Context, mover plugins.StoredMessageHost, folders plug
 		eligible++
 		folderID, ok := folderByAccount[c.AccountID]
 		if !ok {
-			folderID, err = recipeFolder(ctx, folders, db, userID, c.AccountID, settings.FolderName)
+			folderID, err = recipeFolder(ctx, folders, db, userID, c.AccountID, folderName)
 			if err != nil {
 				return "", err
 			}

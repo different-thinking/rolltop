@@ -393,6 +393,15 @@ site and in review.
   reader who drags it back has answered for it. Nothing runs for a reader
   without a settings row: switching the plugin on for an installation moves
   nobody's mail.
+- **Everything else the reader mailed themselves is a note, and a note's shelf
+  is what its page says it is** (`recipe.Classify`): schema.org types, then
+  `og:type`, then the platform the link lives on, otherwise a plain link -- the
+  same rule as the recipe test, never a guess from words. Filing notes is its
+  own switch and **off by default** (`notes_move_enabled`): a reader who agreed
+  to have recipe mails moved did not agree to have the rest of their notes
+  moved. A note waits for every page it links to (`awaitsPage`) before it is
+  filed, so a mail is never put in the notes folder and then turns out to have
+  carried a recipe.
 - **A plugin's stylesheet is asked for until it arrives.** Its module and its
   stylesheet are two requests, and a page can get the module without the
   stylesheet - a dropped connection, a server busy for a moment. The module

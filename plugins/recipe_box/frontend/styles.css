@@ -182,6 +182,7 @@
 }
 
 .recipe-card-image {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -454,54 +455,261 @@
   font-size: 16px;
 }
 
-.recipe-links-intro {
+/* Cooked recipes stay on their own tab; on a card the badge says it. */
+.recipe-tab-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.recipe-tabs button.active .recipe-tab-count {
+  background: var(--surface);
+  color: var(--accent-strong);
+}
+
+.recipe-tab-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.recipe-cooked-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.recipe-cooked-badge .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.recipe-card.is-cooked .recipe-card-image img {
+  opacity: 0.85;
+}
+
+.recipe-cooked-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
-  max-width: 70ch;
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
-.recipe-link-list {
+/* Notes: shelves as sections in the overview, one list once a shelf is open. */
+.notes-shelves button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notes-shelves button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.notes-shelf-count {
+  color: inherit;
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.notes-shelf {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
-.recipe-link {
+.notes-shelf h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 15px;
+}
+
+.notes-shelf h2 .icon {
+  color: var(--muted);
+}
+
+.notes-show-all {
+  justify-self: start;
+}
+
+.notes-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.notes-list:empty {
+  display: none;
+}
+
+.notes-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 12px;
   align-items: start;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
 }
 
-.recipe-link-icon {
+.notes-row:first-child {
+  border-top: 0;
+}
+
+.notes-row.is-done .notes-row-title strong {
+  color: var(--text-soft);
+}
+
+.notes-row-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   background: var(--surface-subtle);
   color: var(--muted);
 }
 
-.recipe-link-body {
+.notes-row-icon.kind-text {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.notes-row-body {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.recipe-link-body a {
+.notes-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.notes-row-title a {
+  color: var(--text);
+  text-decoration: none;
   overflow-wrap: anywhere;
 }
 
-.recipe-link-body p {
-  margin: 2px 0;
+.notes-row-title a:hover {
+  text-decoration: underline;
+}
+
+.notes-row-title strong {
+  overflow-wrap: anywhere;
+}
+
+.notes-detail {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
   color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.notes-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notes-row-meta a {
+  color: inherit;
+}
+
+.notes-row-text {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.notes-row-text.is-own {
+  color: var(--text);
+}
+
+.notes-row-text.is-expanded {
+  display: block;
+}
+
+.notes-more {
+  justify-self: start;
+  padding: 0;
+  font-size: 12px;
+}
+
+.notes-more-links {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
   font-size: 13px;
 }
 
-.recipe-link-actions {
+.notes-more-links li {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+.notes-more-links .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.notes-more-links a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.notes-row-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .recipe-box-settings .recipe-settings-form {
@@ -614,16 +822,25 @@
     max-width: none;
   }
 
-  .recipe-link {
-    grid-template-columns: minmax(0, 1fr);
+  .notes-shelves {
+    flex-wrap: nowrap;
+    margin: 0 -16px;
+    padding: 0 16px 2px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
-  .recipe-link-icon {
-    display: none;
+  .notes-shelves button {
+    flex: none;
   }
 
-  .recipe-link-actions {
-    flex-direction: row;
-    flex-wrap: wrap;
+  .notes-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 10px 12px;
+  }
+
+  .notes-row-actions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 }

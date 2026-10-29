@@ -1,5 +1,5 @@
 // File overview: The recipe box's settings: which mail it may read, where it
-// files what it found, and how far the backfill has come.
+// files the recipes and the notes it found, and how far the backfill has come.
 
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
@@ -7,7 +7,7 @@ import { Icon } from "../../../frontend/src/components/Icon";
 import { SettingsError, SettingsLoading, SettingsPage } from "../../../frontend/src/features/settings/SettingsUI";
 import type { AccountSettingsRouteContext } from "../../../frontend/src/plugins/runtime";
 import { messageFromError, recipeAPI, type Settings, type SettingsResponse } from "./api";
-import { recipesPath } from "./RecipesView";
+import { notesPath, recipesPath } from "./RecipesView";
 
 export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRouteContext) {
   const [data, setData] = useState<SettingsResponse | null>(null);
@@ -90,7 +90,12 @@ export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRout
       backPath="/settings/account/plugins"
       navigate={navigate}
       className="recipe-box-settings"
-      actions={<button className="secondary" type="button" onClick={() => navigate(recipesPath)}><Icon name="cooking_pot" />Open recipes</button>}
+      actions={
+        <>
+          <button className="secondary" type="button" onClick={() => navigate(notesPath)}><Icon name="draft" />Open notes</button>
+          <button className="secondary" type="button" onClick={() => navigate(recipesPath)}><Icon name="cooking_pot" />Open recipes</button>
+        </>
+      }
     >
       {!data && !loadError ? <SettingsLoading label="Loading the recipe box..." /> : null}
       {loadError ? <SettingsError message={loadError} onRetry={() => void load()} /> : null}
@@ -130,6 +135,22 @@ export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRout
                 <input type="text" value={draft.folder_name} onChange={(event) => setDraft({ ...draft, folder_name: event.target.value })} placeholder="Recipes" maxLength={120} />
               </label>
             ) : null}
+            <label className="recipe-settings-check">
+              <input type="checkbox" checked={draft.notes_move_enabled} onChange={(event) => setDraft({ ...draft, notes_move_enabled: event.target.checked })} />
+              <span>
+                <strong>File notes out of the Inbox</strong>
+                <small>
+                  A note is every other mail you sent yourself - a link that is not a recipe, or a few lines of text. It is
+                  filed the same way, into its own folder, once the pages it links to have been read.
+                </small>
+              </span>
+            </label>
+            {draft.notes_move_enabled ? (
+              <label>
+                <span className="settings-field-label">Notes folder</span>
+                <input type="text" value={draft.notes_folder_name} onChange={(event) => setDraft({ ...draft, notes_folder_name: event.target.value })} placeholder="Notes" maxLength={120} />
+              </label>
+            ) : null}
             <div className="recipe-settings-actions">
               <button type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</button>
             </div>
@@ -157,31 +178,31 @@ export function RecipeSettings({ csrf, navigate, addToast }: AccountSettingsRout
               </div>
             ) : null}
             <dl className="recipe-facts">
-              <div><dt>Notes to self with links</dt><dd>{status.notes_found.toLocaleString()}</dd></div>
+              <div><dt>Mails to self</dt><dd>{status.notes_found.toLocaleString()}</dd></div>
               <div><dt>Recipes</dt><dd>{status.recipes.toLocaleString()}</dd></div>
+              <div><dt>Open notes</dt><dd>{status.notes.toLocaleString()}</dd></div>
               <div><dt>Pages still to read</dt><dd>{((status.links.pending || 0) + (status.links.retrying || 0)).toLocaleString()}</dd></div>
-              <div><dt>Not a recipe</dt><dd>{(status.links.page || 0).toLocaleString()}</dd></div>
-              <div><dt>Could not be read</dt><dd>{(status.links.failed || 0).toLocaleString()}</dd></div>
+              <div><dt>Pages that could not be read</dt><dd>{(status.links.failed || 0).toLocaleString()}</dd></div>
               <div><dt>Mails filed</dt><dd>{(status.mails.moved || 0).toLocaleString()}</dd></div>
               {status.mails.failed ? <div><dt>Could not be filed</dt><dd>{status.mails.failed.toLocaleString()}</dd></div> : null}
             </dl>
-            {(status.links.page || 0) + (status.links.failed || 0) > 0 ? (
-              <button className="ghost" type="button" onClick={() => navigate(`${recipesPath}/links`)}>Review links that were not recognised</button>
+            {status.notes > 0 ? (
+              <button className="ghost" type="button" onClick={() => navigate(notesPath)}>Look through the notes</button>
             ) : null}
           </section>
 
-          {settings.move_enabled && status.folders.length > 0 ? (
+          {status.folders.length > 0 ? (
             <section className="panel recipe-settings-folders">
-              <h2>Recipe folders</h2>
+              <h2>Folders</h2>
               <ul>
                 {status.folders.map((folder) => (
-                  <li key={folder.account_id}>
+                  <li key={`${folder.shelf}-${folder.account_id}`}>
                     <span>
                       <strong>{folder.account}</strong>
                       <small className="muted">
                         {folder.mailbox_id
                           ? folder.show_in_all_mail ? `${folder.name} - still listed in All Mail` : `${folder.name} - kept out of All Mail`
-                          : "Created when the first recipe mail is filed"}
+                          : `${folder.wanted} - created when the first ${folder.shelf === "notes" ? "note" : "recipe mail"} is filed`}
                       </small>
                     </span>
                     {folder.mailbox_id && folder.show_in_all_mail ? (

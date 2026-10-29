@@ -1,9 +1,9 @@
 // File overview: The cookbook -- every recipe the reader mailed themselves, as
 // a recipe rather than as a mail with a link in it.
 //
-// Three pages share one route subtree: the cards (/apps/recipes), one recipe
-// opened (/apps/recipes/<id>), and the links that did not turn out to be a
-// recipe (/apps/recipes/links), where the reader can still say that one is.
+// Two pages share one route subtree: the cards (/apps/recipes) and one recipe
+// opened (/apps/recipes/<id>). The links that did not turn out to be a recipe
+// are notes now, with an overview of their own (/apps/notes).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent, ReactNode } from "react";
@@ -17,27 +17,37 @@ import {
   messageFromError,
   minutesLabel,
   recipeAPI,
-  type LinkSummary,
+  type RecipeCounts,
   type RecipeDetail,
   type RecipeSummary,
+  type RecipeView,
   type SettingsResponse
 } from "./api";
 
 export const recipesPath = "/apps/recipes";
 export const settingsPath = "/settings/account/plugins/recipes";
+export const notesPath = "/apps/notes";
 
 /** A dish counts as quick at this many minutes or fewer. */
 const quickMinutes = 30;
 
 export function RecipesView(context: RuntimeAppViewContext) {
   const rest = context.location.path.slice(recipesPath.length).replace(/^\/+|\/+$/g, "");
-  if (rest === "links") return <LinksPage {...context} />;
+  if (rest === "links") return <MovedToNotes navigate={context.navigate} />;
   const id = Number(rest);
   if (rest && Number.isInteger(id) && id > 0) return <RecipePage key={id} id={id} {...context} />;
   return <CookbookPage {...context} />;
 }
 
-function useLink(navigate: (url: string) => void) {
+/** MovedToNotes answers the old not-recognised list, whose links are notes now. */
+function MovedToNotes({ navigate }: { navigate: (url: string) => void }) {
+  useEffect(() => {
+    navigate(notesPath);
+  }, [navigate]);
+  return null;
+}
+
+export function useLink(navigate: (url: string) => void) {
   return (url: string) => (event: MouseEvent) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -45,7 +55,7 @@ function useLink(navigate: (url: string) => void) {
   };
 }
 
-function dateLabel(unix: number, prefs: DatePrefs): string {
+export function dateLabel(unix: number, prefs: DatePrefs): string {
   if (!unix) return "";
   return displayDateTime(new Date(unix * 1000).toISOString(), prefs);
 }
@@ -56,7 +66,7 @@ function dateLabel(unix: number, prefs: DatePrefs): string {
  * here that cannot wait for a mail change: links resolve without any mail
  * arriving.
  */
-function useStatus(mailGeneration: number) {
+export function useStatus(mailGeneration: number) {
   const [status, setStatus] = useState<SettingsResponse | null>(null);
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -82,8 +92,9 @@ function useStatus(mailGeneration: number) {
 function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppViewContext) {
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
-  const [view, setView] = useState<"" | "dismissed">("");
+  const [view, setView] = useState<RecipeView>("");
   const [recipes, setRecipes] = useState<RecipeSummary[] | null>(null);
+  const [counts, setCounts] = useState<RecipeCounts | null>(null);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState("");
   const [adding, setAdding] = useState(false);
@@ -108,6 +119,7 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
     recipeAPI.recipes(appliedQuery, view).then((next) => {
       if (cancelled) return;
       setRecipes(next.recipes);
+      setCounts(next.counts || null);
       setError("");
     }).catch((err) => {
       if (!cancelled) setError(messageFromError(err));
@@ -120,7 +132,7 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
   const filters = useMemo(() => recipeFilters(recipes || []), [recipes]);
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
   const enabled = status?.settings.enabled;
-  const unrecognised = (status?.status.links.page || 0) + (status?.status.links.failed || 0);
+  const notes = status?.status.notes || 0;
 
   async function add(event: FormEvent) {
     event.preventDefault();
@@ -144,7 +156,7 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
       <div className="content-head recipe-box-head">
         <div>
           <h1>Recipes</h1>
-          {recipes ? <span className="label-pill">{recipes.length.toLocaleString()}{view === "dismissed" ? " removed" : ""}</span> : null}
+          {recipes ? <span className="label-pill">{recipes.length.toLocaleString()}{viewSuffix[view]}</span> : null}
         </div>
         <div className="recipe-box-head-actions">
           <button className="secondary" type="button" onClick={() => setAdding((value) => !value)}>
@@ -201,15 +213,21 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
           />
         </label>
         <div className="recipe-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected={view === ""} className={view === "" ? "active" : ""} onClick={() => setView("")}>Cookbook</button>
-          <button type="button" role="tab" aria-selected={view === "dismissed"} className={view === "dismissed" ? "active" : ""} onClick={() => setView("dismissed")}>Removed</button>
-          <a className={`recipe-tab-link${unrecognised ? "" : " empty"}`} href={`${recipesPath}/links`} onClick={link(`${recipesPath}/links`)}>
-            Not recognised{unrecognised ? ` (${unrecognised.toLocaleString()})` : ""}
+          {recipeViews.map((entry) => {
+            const count = counts ? counts[entry.count] : 0;
+            return (
+              <button key={entry.view} type="button" role="tab" aria-selected={view === entry.view} className={view === entry.view ? "active" : ""} onClick={() => { setView(entry.view); setFilter(""); }}>
+                {entry.label}{count ? <span className="recipe-tab-count">{count.toLocaleString()}</span> : null}
+              </button>
+            );
+          })}
+          <a className={`recipe-tab-link${notes ? "" : " empty"}`} href={notesPath} onClick={link(notesPath)}>
+            <Icon name="draft" />Notes{notes ? <span className="recipe-tab-count">{notes.toLocaleString()}</span> : null}
           </a>
         </div>
       </div>
 
-      {filters.length > 0 && view === "" ? (
+      {filters.length > 0 && view !== "dismissed" ? (
         <div className="recipe-filters" aria-label="Filter recipes">
           <button type="button" className={filter === "" ? "active" : ""} onClick={() => setFilter("")}>All</button>
           {filters.map((item) => (
@@ -228,7 +246,11 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
             ? "No recipe matches."
             : view === "dismissed"
               ? "Nothing removed."
-              : "No recipes yet. Send yourself a link to a recipe, and it appears here."}
+              : view === "cooked"
+                ? "Nothing cooked yet. Open a recipe you made and mark it cooked."
+                : (counts?.cooked || 0) > 0
+                  ? "Everything here has been cooked. Send yourself the next recipe."
+                  : "No recipes yet. Send yourself a link to a recipe, and it appears here."}
         </p>
       ) : null}
 
@@ -240,6 +262,15 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
     </div>
   );
 }
+
+/** The cookbook's three shelves: what is still to try, what was made, and what was taken out. */
+const recipeViews: { view: RecipeView; label: string; count: keyof RecipeCounts }[] = [
+  { view: "", label: "To cook", count: "to_cook" },
+  { view: "cooked", label: "Cooked", count: "cooked" },
+  { view: "dismissed", label: "Removed", count: "dismissed" }
+];
+
+const viewSuffix: Record<RecipeView, string> = { "": " to cook", cooked: " cooked", dismissed: " removed" };
 
 function percent(done: number, total: number): string {
   if (!total) return "";
@@ -289,9 +320,10 @@ function RecipeCard({ recipe, href, onOpen }: { recipe: RecipeSummary; href: str
   const time = minutesLabel(recipe.total_minutes);
   const summary = recipe.note || recipe.description;
   return (
-    <a className="recipe-card" href={href} onClick={onOpen}>
+    <a className={`recipe-card${recipe.cooked_at ? " is-cooked" : ""}`} href={href} onClick={onOpen}>
       <div className="recipe-card-image">
         {recipe.image_url ? <img src={recipe.image_url} alt="" loading="lazy" /> : <Icon name="cooking_pot" />}
+        {recipe.cooked_at ? <span className="recipe-cooked-badge"><Icon name="check" />Cooked</span> : null}
       </div>
       <div className="recipe-card-body">
         <strong className="recipe-card-title">{recipe.title || hostOf(recipe.url)}</strong>
@@ -348,6 +380,20 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
     }
   }
 
+  async function setCooked(cooked: boolean) {
+    if (!recipe) return;
+    setBusy(true);
+    try {
+      const next = await recipeAPI.setCooked(csrf, recipe.id, cooked);
+      setRecipe(next.recipe);
+      addToast(cooked ? "Marked as cooked." : "Back on the list to cook.");
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function toggleIngredient(index: number) {
     setChecked((current) => {
       const next = new Set(current);
@@ -396,8 +442,14 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
             {notes.map((note) => (
               <blockquote className="recipe-detail-note" key={note}><Icon name="draft" />{note}</blockquote>
             ))}
+            {recipe.cooked_at ? (
+              <p className="recipe-cooked-line"><Icon name="check" />Cooked {dateLabel(recipe.cooked_at, datePrefs)}</p>
+            ) : null}
             <div className="recipe-detail-actions">
-              <a className="button" href={recipe.url} target="_blank" rel="noopener noreferrer"><Icon name="open_in_new" />Open original</a>
+              {recipe.cooked_at
+                ? <button className="secondary" type="button" disabled={busy} onClick={() => void setCooked(false)}>Not cooked yet</button>
+                : <button type="button" disabled={busy || recipe.dismissed} onClick={() => void setCooked(true)}><Icon name="check" />Mark as cooked</button>}
+              <a className="button secondary" href={recipe.url} target="_blank" rel="noopener noreferrer"><Icon name="open_in_new" />Open original</a>
               {recipe.dismissed
                 ? <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(false)}>Put back in the cookbook</button>
                 : <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(true)}><Icon name="delete" />Not a recipe</button>}
@@ -467,98 +519,6 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
           </ul>
         </section>
       ) : null}
-    </div>
-  );
-}
-
-function LinksPage({ csrf, navigate, addToast, datePrefs, mailGeneration }: RuntimeAppViewContext) {
-  const [status, setStatus] = useState<"page" | "failed" | "pending">("page");
-  const [links, setLinks] = useState<LinkSummary[] | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState<Set<number>>(() => new Set());
-  const link = useLink(navigate);
-
-  // Same rule as the cookbook: switching tabs quickly must not let the
-  // previous tab's slower answer replace the one the reader is looking at.
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.links(status).then((next) => {
-      if (cancelled) return;
-      setLinks(next.links);
-      setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [status, mailGeneration]);
-
-  async function act(item: LinkSummary, action: "promote" | "retry") {
-    setBusy((current) => new Set(current).add(item.id));
-    try {
-      if (action === "promote") await recipeAPI.promoteLink(csrf, item.id);
-      else await recipeAPI.retryLink(csrf, item.id);
-      setLinks((current) => (current || []).filter((entry) => entry.id !== item.id));
-      addToast(action === "promote" ? "Filed as a recipe." : "It will be read again shortly.");
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    } finally {
-      setBusy((current) => {
-        const next = new Set(current);
-        next.delete(item.id);
-        return next;
-      });
-    }
-  }
-
-  return (
-    <div className="recipe-box">
-      <a className="recipe-back" href={recipesPath} onClick={link(recipesPath)}><Icon name="arrow_back" />Recipes</a>
-      <div className="content-head">
-        <div><h1>Shared links</h1></div>
-      </div>
-      <p className="muted recipe-links-intro">
-        Links you sent yourself whose page publishes no recipe. A video or a social post is the usual case;
-        if one of them is a recipe after all, file it, and its mail is filed with it.
-      </p>
-      <div className="recipe-tabs" role="tablist">
-        {(["page", "failed", "pending"] as const).map((value) => (
-          <button key={value} type="button" role="tab" aria-selected={status === value} className={status === value ? "active" : ""} onClick={() => setStatus(value)}>
-            {value === "page" ? "Not a recipe" : value === "failed" ? "Could not be read" : "Waiting"}
-          </button>
-        ))}
-      </div>
-      {error ? <div className="error">{error}</div> : null}
-      {links !== null && links.length === 0 ? <p className="muted recipe-empty">Nothing here.</p> : null}
-      <div className="recipe-link-list">
-        {(links || []).map((item) => (
-          <div className="panel recipe-link" key={item.id}>
-            {/* The preview picture stays on its own site: loading it from here
-                would tell that site the reader looked, for a page that is not
-                even a recipe. */}
-            <span className="recipe-link-icon"><Icon name="link" /></span>
-            <div className="recipe-link-body">
-              <a href={item.final_url || item.url} target="_blank" rel="noopener noreferrer"><strong>{item.title || hostOf(item.url)}</strong></a>
-              <span className="recipe-card-site">{item.site_name || hostOf(item.final_url || item.url)}</span>
-              {item.description ? <p>{item.description}</p> : null}
-              {item.error ? <p className="error-text">{item.error}</p> : null}
-              <small className="muted">
-                {item.message_id
-                  ? <a href={messageURL(item.message_id)} onClick={link(messageURL(item.message_id))}>{item.subject || "(no subject)"}</a>
-                  : item.subject}
-                {item.date_unix ? ` · ${dateLabel(item.date_unix, datePrefs)}` : ""}
-              </small>
-            </div>
-            <div className="recipe-link-actions">
-              <button type="button" disabled={busy.has(item.id)} onClick={() => void act(item, "promote")}><Icon name="cooking_pot" />It is a recipe</button>
-              {item.status !== "pending" ? (
-                <button className="secondary" type="button" disabled={busy.has(item.id)} onClick={() => void act(item, "retry")}><Icon name="sync" />Read again</button>
-              ) : null}
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
