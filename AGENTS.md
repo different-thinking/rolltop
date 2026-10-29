@@ -394,9 +394,11 @@ site and in review.
   without a settings row: switching the plugin on for an installation moves
   nobody's mail.
 - **Everything else the reader mailed themselves is a note, and a note's shelf
-  is what its page says it is** (`recipe.Classify`): schema.org types, then
-  `og:type`, then the platform the link lives on, otherwise a plain link -- the
-  same rule as the recipe test, never a guess from words. Filing notes is its
+  is what its page says it is** (`recipe.Classify`): a platform that holds one
+  kind of content answers first (YouTube is video, whatever else a page of it
+  declares), then the schema.org types the page publishes, then its `og:type`,
+  then a shop's or news site's platform, otherwise a plain link -- the same
+  rule as the recipe test, never a guess from words. Filing notes is its
   own switch and **off by default** (`notes_move_enabled`): a reader who agreed
   to have recipe mails moved did not agree to have the rest of their notes
   moved. A note waits for every page it links to (`awaitsPage`) before it is

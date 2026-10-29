@@ -148,6 +148,14 @@ func TestNotesAreFiledOnlyWhenAskedAndOnlyOnceTheirPagesAnswered(t *testing.T) {
 	if _, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, MoveEnabled: true, NotesMoveEnabled: true, FolderName: "Ablage", NotesFolderName: "ablage"}); err == nil {
 		t.Fatal("one folder was accepted for both shelves")
 	}
+	// While notes are not filed the notes folder is not asked about: a recipe
+	// folder that carries the default notes name must not block every save.
+	if _, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, MoveEnabled: true, FolderName: "Notes"}); err != nil {
+		t.Fatalf("a recipe folder named like the unused notes folder was refused: %v", err)
+	}
+	if _, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true, MoveEnabled: true, NotesMoveEnabled: true, NotesFolderName: "Notizen"}); err != nil {
+		t.Fatal(err)
+	}
 	p := testBackend()
 	host := &fakeHost{t: t, store: st, userID: f.user.ID}
 	drain(t, p, host, f.user.ID)

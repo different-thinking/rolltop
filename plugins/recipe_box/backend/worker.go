@@ -135,9 +135,6 @@ func (p *recipeBoxBackend) runUser(ctx context.Context, host plugins.BackendHost
 	if err := p.fillMissingImages(ctx, db, userID); err != nil {
 		return scanMore || fetchMore, err
 	}
-	if err := fillMissingKinds(ctx, db, userID); err != nil {
-		return scanMore || fetchMore, err
-	}
 	_, fileMore, err := fileMails(ctx, host, db, userID, settings)
 	if resolved > 0 {
 		// The cookbook and the folder list both read what this round changed.

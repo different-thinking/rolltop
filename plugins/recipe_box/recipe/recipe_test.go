@@ -304,6 +304,8 @@ func TestClassifyReadsWhatThePageSaysAboutItself(t *testing.T) {
 		{"og article", `<head><meta property="og:type" content="article"></head>`, "https://blog.example.test/a", KindArticle, ""},
 		{"youtube is a video whatever it says", `<script type="application/ld+json">{"@type":"Person"}</script>`, "https://www.youtube.com/watch?v=x", KindVideo, ""},
 		{"youtube music is music", ``, "https://music.youtube.com/watch?v=x", KindMusic, ""},
+		{"a ticket platform keeps the event's date", `<script type="application/ld+json">{"@type":"Event","name":"Lesung","startDate":"2026-12-01"}</script>`,
+			"https://www.eventbrite.de/e/lesung-1", KindEvent, "2026-12-01"},
 		{"microdata place", `<div itemscope itemtype="https://schema.org/Restaurant"></div>`, "https://trattoria.example.test/", KindPlace, ""},
 		{"amazon page without data", ``, "https://www.amazon.de/dp/B0", KindProduct, ""},
 		{"nothing said", `<html><head><title>x</title></head></html>`, "https://example.test/x", KindLink, ""},

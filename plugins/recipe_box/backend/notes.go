@@ -57,12 +57,12 @@ type NoteLink struct {
 // shelf holds while one of them is open.
 func (p *recipeBoxBackend) apiListNotes(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
 	done := r.URL.Query().Get("state") == "done"
-	notes, err := loadNotes(r.Context(), db, userID, done)
+	query := strings.Fields(strings.ToLower(r.URL.Query().Get("q")))
+	notes, err := loadNotes(r.Context(), db, userID, done, query)
 	if err != nil {
 		host.ServerError(w, err)
 		return
 	}
-	query := strings.Fields(strings.ToLower(r.URL.Query().Get("q")))
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	counts := map[string]int{}
 	out := []Note{}
@@ -84,18 +84,38 @@ func (p *recipeBoxBackend) apiListNotes(host plugins.APIHost, db *sql.DB, userID
 	host.WriteJSON(w, map[string]any{"notes": out, "counts": counts, "totals": totals})
 }
 
-// loadNotes reads every note in one state, newest first, with its links.
-func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool) ([]Note, error) {
+// noteSearchTerms bounds how many words of a search narrow the read in SQL;
+// noteMatches still checks every word on what comes back.
+const noteSearchTerms = 6
+
+// loadNotes reads the notes in one state, newest first, with their links. The
+// words of a search narrow the read itself, ahead of noteListLimit, so a note
+// older than the newest noteListLimit is still found by searching for it.
+func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words []string) ([]Note, error) {
 	state := `m.done_at = 0`
 	if done {
 		state = `m.done_at > 0`
 	}
+	args := []any{userID}
+	for i, word := range words {
+		if i >= noteSearchTerms {
+			break
+		}
+		pattern := "%" + likeEscaper.Replace(word) + "%"
+		state += ` AND (LOWER(m.subject || ' ' || m.body || ' ' || m.note) LIKE ? ESCAPE '\'
+			OR EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links sml
+				JOIN plugin_recipe_box_links sl ON sl.id = sml.link_id AND sl.user_id = sml.user_id
+				WHERE sml.mail_id = m.id AND sml.user_id = m.user_id
+				AND LOWER(sl.title || ' ' || sl.description || ' ' || sl.site_name || ' ' || sl.url || ' ' || sl.detail) LIKE ? ESCAPE '\'))`
+		args = append(args, pattern, pattern)
+	}
+	args = append(args, noteListLimit)
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.subject, m.date_unix, CASE WHEN m.body <> '' THEN m.body ELSE m.note END, m.done_at, m.move_state,
 			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND m.message_id_header <> '' AND x.message_id_header = m.message_id_header),
 				(SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.note_dismissed = 0 AND `+state+` AND NOT `+carriesRecipe+`
-		ORDER BY CASE WHEN m.done_at > 0 THEN m.done_at ELSE m.date_unix END DESC, m.id DESC LIMIT ?`, userID, noteListLimit)
+		ORDER BY CASE WHEN m.done_at > 0 THEN m.done_at ELSE m.date_unix END DESC, m.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +172,11 @@ func attachNoteLinks(ctx context.Context, db *sql.DB, userID int64, notes []Note
 				rows.Close()
 				return err
 			}
+			if link.Kind == "" {
+				// A link answered before kinds existed, or one whose page has
+				// not answered yet, is filed by its platform.
+				link.Kind = hostKindOrLink(link.URL)
+			}
 			if i, ok := index[mailID]; ok {
 				notes[i].Links = append(notes[i].Links, link)
 			}
@@ -172,8 +197,10 @@ func noteKind(note Note) string {
 	if len(note.Links) == 0 {
 		return recipe.KindText
 	}
+	// attachNoteLinks has given every link a kind; a recipe the reader took
+	// out of the cookbook is filed by its platform like any other page.
 	first := note.Links[0]
-	if first.Kind != "" && first.Kind != recipe.KindRecipe {
+	if first.Kind != recipe.KindRecipe {
 		return first.Kind
 	}
 	return hostKindOrLink(first.URL)

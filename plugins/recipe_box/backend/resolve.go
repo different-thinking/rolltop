@@ -207,37 +207,6 @@ func hostKindOrLink(link string) string {
 	return recipe.KindLink
 }
 
-// fillMissingKinds files the links answered before kinds existed that are not
-// read again: the ones that failed, which are filed by their platform.
-func fillMissingKinds(ctx context.Context, db *sql.DB, userID int64) error {
-	rows, err := db.QueryContext(ctx, `SELECT id, url FROM plugin_recipe_box_links WHERE user_id = ? AND kind = '' AND status = 'failed' ORDER BY id LIMIT 200`, userID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type pending struct {
-		id   int64
-		link string
-	}
-	var links []pending
-	for rows.Next() {
-		var item pending
-		if err := rows.Scan(&item.id, &item.link); err != nil {
-			return err
-		}
-		links = append(links, item)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, item := range links {
-		if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET kind = ? WHERE user_id = ? AND id = ?`, hostKindOrLink(item.link), userID, item.id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type preview struct {
 	Title, Description, ImageURL, SiteName string
 }

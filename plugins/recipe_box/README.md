@@ -61,12 +61,14 @@ kept (`mails.body`, bounded) so the overview can show it after blob retention
 has pruned the raw message.
 
 Its shelf is the kind of its first link, and the kind is what the page says
-about itself, never a guess from words (`recipe.Classify`): the schema.org
-types it publishes (`Product`, `Event`, `VideoObject`, `Place`, `Book`,
-`MusicRecording`, `SoftwareApplication`, `NewsArticle` …) first, then its
-`og:type`, then the platform it lives on (YouTube is video, Spotify is music,
-GitHub is tech, Google Maps is a place), and otherwise just a link. A product
-keeps its price and an event its start as the note's detail. Google documents,
+about itself, never a guess from words (`recipe.Classify`). A platform that
+holds one kind of content answers first, whatever a single page of it says
+(YouTube is video, Spotify is music, GitHub is tech, Google Maps is a place);
+otherwise the schema.org types the page publishes (`Product`, `Event`,
+`VideoObject`, `Place`, `Book`, `MusicRecording`, `SoftwareApplication`,
+`NewsArticle` …), then its `og:type`, then a shop's or a news site's platform,
+and otherwise just a link. A product keeps its price and an event its start
+as the note's detail. Google documents,
 Drive files and map links are not fetched at all: they answer a server with a
 sign-in page, so their host is all that can be known.
 

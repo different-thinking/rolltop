@@ -346,6 +346,19 @@ function firstLine(text: string): string {
 function detailLabel(link: NoteLink, datePrefs: DatePrefs): string {
   if (!link.detail) return "";
   if (link.kind === "event") {
+    // A bare date names a day, not an instant: read as UTC midnight it would
+    // print the evening before for anyone west of Greenwich.
+    const day = link.detail.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (day) {
+      const local = new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]));
+      const options: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric" };
+      try {
+        return local.toLocaleDateString(datePrefs.date_locale?.trim() || undefined, options);
+      } catch {
+        // A locale the browser does not know: its own default answers.
+        return local.toLocaleDateString(undefined, options);
+      }
+    }
     const when = new Date(link.detail);
     if (!Number.isNaN(when.getTime())) return displayDateTime(when.toISOString(), datePrefs);
   }

@@ -17,10 +17,7 @@ import (
 	"rolltop/plugins/recipe_box/recipe"
 )
 
-const (
-	recipeListLimit = 1000
-	linkListLimit   = 300
-)
+const recipeListLimit = 1000
 
 func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.ResponseWriter, r *http.Request) {
 	cu, ok := host.RequireAPIAuth(w, r)
@@ -89,8 +86,6 @@ func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.R
 			return
 		}
 		p.apiUpdateNote(host, db, userID, id, w, r)
-	case rest == "links" && r.Method == http.MethodGet:
-		p.apiListLinks(host, db, userID, w, r)
 	case len(parts) == 3 && parts[0] == "links" && r.Method == http.MethodPost:
 		id, ok := parseID(host, w, parts[1])
 		if !ok {
@@ -612,65 +607,6 @@ func (p *recipeBoxBackend) apiAddRecipe(host plugins.APIHost, db *sql.DB, userID
 	host.WriteJSON(w, map[string]any{"ok": true, "link_id": id, "status": status, "recipe_id": recipeID})
 }
 
-// LinkSummary is one shared link that did not become a recipe, with the
-// preview its page gave and the mail it came in.
-type LinkSummary struct {
-	ID          int64  `json:"id"`
-	URL         string `json:"url"`
-	FinalURL    string `json:"final_url"`
-	Status      string `json:"status"`
-	Error       string `json:"error"`
-	Attempts    int    `json:"attempts"`
-	NextAttempt int64  `json:"next_attempt_at"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	ImageURL    string `json:"image_url"`
-	SiteName    string `json:"site_name"`
-	Subject     string `json:"subject"`
-	DateUnix    int64  `json:"date_unix"`
-	MessageID   int64  `json:"message_id"`
-}
-
-func (p *recipeBoxBackend) apiListLinks(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
-	if status != linkPage && status != linkFailed && status != linkPending {
-		host.WriteAPIError(w, http.StatusBadRequest, "unknown link status")
-		return
-	}
-	rows, err := db.QueryContext(r.Context(), `SELECT l.id, l.url, l.final_url, l.status, l.error, l.attempts, l.next_attempt_at, l.title, l.description, l.image_url, l.site_name,
-			COALESCE(m.subject, ''), COALESCE(m.date_unix, 0),
-			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = l.user_id AND m.message_id_header <> '' AND x.message_id_header = m.message_id_header),
-				(SELECT x.id FROM messages x WHERE x.user_id = l.user_id AND x.id = m.message_id), 0)
-		FROM plugin_recipe_box_links l
-		LEFT JOIN LATERAL (
-			SELECT pm.subject, pm.date_unix, pm.message_id_header, pm.message_id FROM plugin_recipe_box_mails pm
-			JOIN plugin_recipe_box_mail_links ml ON ml.mail_id = pm.id AND ml.user_id = pm.user_id
-			WHERE ml.link_id = l.id AND ml.user_id = l.user_id ORDER BY pm.date_unix DESC LIMIT 1
-		) m ON TRUE
-		WHERE l.user_id = ? AND l.status = ?
-		ORDER BY COALESCE(m.date_unix, 0) DESC, l.id DESC LIMIT ?`, userID, status, linkListLimit)
-	if err != nil {
-		host.ServerError(w, err)
-		return
-	}
-	defer rows.Close()
-	out := []LinkSummary{}
-	for rows.Next() {
-		var link LinkSummary
-		if err := rows.Scan(&link.ID, &link.URL, &link.FinalURL, &link.Status, &link.Error, &link.Attempts, &link.NextAttempt, &link.Title,
-			&link.Description, &link.ImageURL, &link.SiteName, &link.Subject, &link.DateUnix, &link.MessageID); err != nil {
-			host.ServerError(w, err)
-			return
-		}
-		out = append(out, link)
-	}
-	if err := rows.Err(); err != nil {
-		host.ServerError(w, err)
-		return
-	}
-	host.WriteJSON(w, map[string]any{"links": out})
-}
-
 // apiPromoteLink is the reader saying a page the box did not recognise is a
 // recipe after all. The preview the page already gave is enough to file it at
 // once; a page that never answered is asked again with the reader's word on it.
@@ -724,7 +660,7 @@ func (p *recipeBoxBackend) recordPromoted(ctx context.Context, db *sql.DB, userI
 		return err
 	}
 	now := time.Now().UTC().Unix()
-	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'recipe', recipe_id = ?, updated_at = ? WHERE user_id = ? AND id = ?`, recipeID, now, userID, link.ID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'recipe', kind = 'recipe', recipe_id = ?, updated_at = ? WHERE user_id = ? AND id = ?`, recipeID, now, userID, link.ID); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes SET dismissed = 0 WHERE user_id = ? AND id = ?`, userID, recipeID); err != nil {

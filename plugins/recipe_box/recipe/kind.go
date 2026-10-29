@@ -219,7 +219,7 @@ func Classify(page Page, link string) (string, string) {
 	// A platform with one kind of content wins over what its page says: a
 	// YouTube page that also carries a Person or an Organization is a video.
 	if byHost != "" && byHost != KindArticle && byHost != KindProduct {
-		return byHost, ""
+		return byHost, detailFor(byHost, facts)
 	}
 	for _, entry := range schemaKinds {
 		for _, name := range facts.SchemaTypes {

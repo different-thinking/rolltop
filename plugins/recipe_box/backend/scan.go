@@ -170,8 +170,9 @@ func scanPage(ctx context.Context, db *sql.DB, userID, cursor int64) ([]scanRow,
 }
 
 // recordCandidates reads the bodies of the notes-to-self on one page and
-// records each one with its links. A note without a link is not recorded at
-// all: there is nothing the box could show for it.
+// records each one with its links. A note without a link is recorded only when
+// the reader wrote something in it; a file sent across with no words is not a
+// note.
 func recordCandidates(ctx context.Context, db *sql.DB, userID int64, candidates []scanRow) (int, error) {
 	ids := make([]any, 0, len(candidates)+1)
 	ids = append(ids, userID)

@@ -83,8 +83,10 @@ func saveSettings(ctx context.Context, db *sql.DB, userID int64, in Settings) (S
 	}
 	// The two shelves are two folders. One folder for both would file every
 	// note into the recipe folder, where the cookbook claims to be the reason
-	// the mail is there.
-	if strings.EqualFold(name, notesName) {
+	// the mail is there. It is asked only while notes are filed: the notes
+	// folder is not shown otherwise, and a reader whose recipe folder happens
+	// to carry the default notes name could not save anything else.
+	if in.NotesMoveEnabled && strings.EqualFold(name, notesName) {
 		return Settings{}, errors.New("recipes and notes need two different folders")
 	}
 	now := time.Now().UTC().Unix()
