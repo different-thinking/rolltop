@@ -91,6 +91,8 @@ export type AppShellProps = {
   accountNotice: string;
   databaseUnavailable: boolean;
   enabledPlugins: string[];
+  /** Pages enabled plugins contribute, listed under the sidebar's Organizer heading. */
+  pluginViews: { path: string; label: string; icon: string }[];
   /** Sidebar category entries with the counts their lists hold. */
   mailCategories: import("./types").MailCategorySummary[];
   /** Messages still waiting to be read for their category headers. */

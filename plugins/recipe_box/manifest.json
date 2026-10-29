@@ -1,0 +1,15 @@
+{
+  "id": "recipe_box",
+  "name": "Recipe box",
+  "description": "Collects the recipes you send yourself as links into a cookbook with pictures, ingredients and steps, and files those mails out of the Inbox.",
+  "version": "1.0.0",
+  "auto_start": true,
+  "backend": {
+    "kind": "go-plugin",
+    "binary": "backend/recipe_box.so"
+  },
+  "frontend": {
+    "module": "frontend_dist/index.js",
+    "css": "frontend_dist/styles.css"
+  }
+}

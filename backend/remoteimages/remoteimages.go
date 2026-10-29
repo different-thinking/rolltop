@@ -250,6 +250,17 @@ func fetch(ctx context.Context, rawURL string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
+// SafeDialContext is the dialer behind every fetch this package makes, for a
+// caller outside it that fetches a URL taken from mail. It resolves the host
+// itself and dials only addresses privateIP lets through, so a name that
+// resolves to loopback, a private range or a special-purpose block cannot turn
+// the fetch into a request against the network Rolltop runs in. It is used as
+// an http.Transport's DialContext with the proxy switched off: a proxy would
+// do the resolving instead and nothing here would see the address.
+func SafeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return safeDialContext(ctx, network, address)
+}
+
 func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {

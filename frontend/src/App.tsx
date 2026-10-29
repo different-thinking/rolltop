@@ -1,7 +1,7 @@
 // File overview: Root React coordinator for bootstrap, session routing, global chrome state,
 // toast lifecycle, server-sent events, browser-history navigation, and the compose overlay.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { notifyChromeEvent } from "./chromeEvents";
 import type { Bootstrap, ChromeEvent, FrontendPluginDefinition, SyncRun, ThemeDefinition } from "./types";
@@ -22,7 +22,7 @@ import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, u
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
 import { applyDocumentTheme, syncBrowserChromeColor, systemThemeID, watchSystemThemePreference } from "./lib/theme";
 import { embeddedBootstrap } from "./lib/startup";
-import { emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
+import { appViews, emptyRuntimePlugins, loadRuntimePlugins, type RuntimePlugins } from "./plugins/runtime";
 import { emptySecurityUnlockState, securityUnlockPlugin } from "./plugins/securityUnlock";
 import { useCalendarOutboxFlush } from "./features/calendar/useCalendarOutboxFlush";
 import { reminderBody } from "./lib/calendarReminders";
@@ -977,6 +977,10 @@ export default function App() {
   useCalendarOutboxFlush(bootstrap?.user?.id || 0, bootstrap?.csrf || "", addToast);
 
   const unlockPlugin = securityUnlockPlugin(runtimePlugins.all);
+  const pluginViews = useMemo(
+    () => appViews(runtimePlugins).map(({ path, label, icon }) => ({ path, label, icon })),
+    [runtimePlugins]
+  );
 
   if (!bootstrap) {
     return (
@@ -1019,6 +1023,7 @@ export default function App() {
         accountNotice={bootstrap.account_notice || ""}
         databaseUnavailable={Boolean(bootstrap.database_unavailable)}
         enabledPlugins={bootstrap.enabled_plugins || []}
+        pluginViews={pluginViews}
         mailCategories={bootstrap.mail_categories || []}
         mailCategoriesPending={bootstrap.mail_categories_pending || 0}
         mailGeneration={bootstrap.mail_generation || 0}

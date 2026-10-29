@@ -40,6 +40,7 @@ const cssScripts = {
   experimental_spam_filter: "build:experimental-spam-filter-css",
   mail_filters: "build:mail-filters-css",
   matrix_theme: "build:themes",
+  recipe_box: "build:recipe-box-css",
   remote_imap_sync: "build:remote-imap-sync-css"
 };
 

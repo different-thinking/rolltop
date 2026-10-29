@@ -13,8 +13,8 @@ import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
-import { mailRouteView, organizerRoute } from "./lib/routes";
-import type { RuntimePlugins } from "./plugins/runtime";
+import { appViewRoute, mailRouteView, organizerRoute } from "./lib/routes";
+import { matchAppView, type RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
 /**
@@ -138,6 +138,21 @@ export function RouteView({
     }
     if (organizerRoute(location.path, "invoices")) {
       return <InvoicesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
+    }
+    if (appViewRoute(location.path)) {
+      const view = matchAppView(runtimePlugins, location.path);
+      if (view) {
+        return <>{view.render({ csrf, user, mailboxes, location, mailGeneration, datePrefs: user, navigate, addToast })}</>;
+      }
+      // Plugins load after the first render, so the subtree is answered with a
+      // wait until they have, and only then with the plugin being absent.
+      return (
+        <section className="panel">
+          {runtimePlugins.status === "loading"
+            ? <p className="muted">Loading…</p>
+            : <p className="muted">This page belongs to a plugin that is not enabled.</p>}
+        </section>
+      );
     }
     if (location.path === "/settings/account" || location.path.startsWith("/settings/account/")) {
       return <SettingsView key={user.id} csrf={csrf} user={user} mailboxes={mailboxes} mailCategories={mailCategories} swipePreferences={swipePreferences} latestSyncRun={latestSyncRun} activeSyncRuns={activeSyncRuns} syncRunning={syncRunning} availableThemes={availableThemes} location={location} navigate={navigate} replaceRoute={replaceRoute} refreshChrome={refreshChrome} runtimePlugins={runtimePlugins} reloadRuntimePlugins={reloadRuntimePlugins} addToast={addToast} />;

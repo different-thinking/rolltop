@@ -47,6 +47,7 @@ export function AppShell({
   accountNotice,
   databaseUnavailable,
   enabledPlugins,
+  pluginViews,
   mailCategories,
   mailCategoriesPending,
   mailGeneration,
@@ -471,6 +472,7 @@ export function AppShell({
           buildCommit={buildCommit}
           mailCategories={mailCategories}
           mailCategoriesPending={mailCategoriesPending}
+          pluginViews={pluginViews}
           currentPath={location.path}
           navigate={navigate}
           openCompose={openCompose}
@@ -1046,6 +1048,7 @@ function Sidebar({
   buildCommit,
   mailCategories,
   mailCategoriesPending,
+  pluginViews,
   currentPath,
   navigate,
   openCompose,
@@ -1073,6 +1076,7 @@ function Sidebar({
   buildCommit: string;
   mailCategories: MailCategorySummary[];
   mailCategoriesPending: number;
+  pluginViews: AppShellProps["pluginViews"];
   currentPath: string;
   navigate: (url: string) => void;
   openCompose: (query?: string) => void;
@@ -1409,6 +1413,22 @@ function Sidebar({
               <span className="folder-name">
                 <Icon name={entry.icon} weight={active ? "bold" : undefined} />
                 {entry.label}
+              </span>
+            </a>
+          );
+        })}
+        {pluginViews.map((view, index) => {
+          const active = currentPath === view.path || currentPath.startsWith(`${view.path}/`);
+          return (
+            <a
+              key={view.path}
+              href={view.path}
+              className={`folder ${index === 0 ? "folder-group-break" : ""} ${active ? "active" : ""}`}
+              onClick={(event) => open(event, view.path)}
+            >
+              <span className="folder-name">
+                <Icon name={view.icon} weight={active ? "bold" : undefined} />
+                {view.label}
               </span>
             </a>
           );
