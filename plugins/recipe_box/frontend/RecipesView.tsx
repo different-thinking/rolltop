@@ -97,19 +97,25 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  const load = useCallback(async () => {
-    try {
-      const next = await recipeAPI.recipes(appliedQuery, view);
-      setRecipes(next.recipes);
-      setError("");
-    } catch (err) {
-      setError(messageFromError(err));
-    }
-  }, [appliedQuery, view]);
+  // Each load answers only for the query and view it was asked with: typing
+  // fires one per pause, and a slow earlier answer landing after a later one
+  // would otherwise draw the results of a search the reader already changed.
+  const [reloadKey, setReloadKey] = useState(0);
+  const load = useCallback(() => setReloadKey((value) => value + 1), []);
 
   useEffect(() => {
-    void load();
-  }, [load, mailGeneration, tick]);
+    let cancelled = false;
+    recipeAPI.recipes(appliedQuery, view).then((next) => {
+      if (cancelled) return;
+      setRecipes(next.recipes);
+      setError("");
+    }).catch((err) => {
+      if (!cancelled) setError(messageFromError(err));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [appliedQuery, view, mailGeneration, tick, reloadKey]);
 
   const filters = useMemo(() => recipeFilters(recipes || []), [recipes]);
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
@@ -472,19 +478,21 @@ function LinksPage({ csrf, navigate, addToast, datePrefs, mailGeneration }: Runt
   const [busy, setBusy] = useState<Set<number>>(() => new Set());
   const link = useLink(navigate);
 
-  const load = useCallback(async () => {
-    try {
-      const next = await recipeAPI.links(status);
+  // Same rule as the cookbook: switching tabs quickly must not let the
+  // previous tab's slower answer replace the one the reader is looking at.
+  useEffect(() => {
+    let cancelled = false;
+    recipeAPI.links(status).then((next) => {
+      if (cancelled) return;
       setLinks(next.links);
       setError("");
-    } catch (err) {
-      setError(messageFromError(err));
-    }
-  }, [status]);
-
-  useEffect(() => {
-    void load();
-  }, [load, mailGeneration]);
+    }).catch((err) => {
+      if (!cancelled) setError(messageFromError(err));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, mailGeneration]);
 
   async function act(item: LinkSummary, action: "promote" | "retry") {
     setBusy((current) => new Set(current).add(item.id));

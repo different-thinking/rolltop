@@ -20,6 +20,24 @@ var (
 	itemPropTagRE    = regexp.MustCompile(`(?is)<([a-z][a-z0-9]*)\b[^>]*\bitemprop\s*=[^>]*>`)
 )
 
+const (
+	// maxMicrodataProps bounds how many itemprop elements one page is read
+	// for. A recipe uses a few dozen; a page with thousands is listing
+	// something else, or is built to be expensive to read.
+	maxMicrodataProps = 2000
+	// maxMicrodataTextBytes bounds the text collected from them in all.
+	maxMicrodataTextBytes = 2 * 1024 * 1024
+)
+
+// microdataProps are the properties a recipe is read for, each with how many
+// values of it can be used: one for a scalar (a few, since the first may be
+// empty), a list's length for a list.
+var microdataProps = map[string]int{
+	"name": 3, "description": 3, "recipeYield": 3, "totalTime": 3, "prepTime": 3, "cookTime": 3,
+	"recipeCategory": 3, "recipeCuisine": 3, "keywords": 3, "image": 3,
+	"recipeIngredient": maxListItems, "ingredients": maxListItems, "recipeInstructions": maxListItems,
+}
+
 func recipeFromMicrodata(markup, pageURL string) *Recipe {
 	loc := recipeItemTypeRE.FindStringIndex(markup)
 	if loc == nil {
@@ -27,10 +45,24 @@ func recipeFromMicrodata(markup, pageURL string) *Recipe {
 	}
 	region := markup[loc[0]:]
 	values := map[string][]string{}
-	for _, match := range itemPropTagRE.FindAllStringSubmatchIndex(region, -1) {
+	budget := maxMicrodataTextBytes
+	for _, match := range itemPropTagRE.FindAllStringSubmatchIndex(region, maxMicrodataProps) {
 		tag := region[match[0]:match[1]]
 		name := strings.ToLower(region[match[2]:match[3]])
 		attrs := attributes(tag)
+		// Only the properties a card is built from are read, each only as
+		// often as it can be used. Reading the text of every other itemprop -- a
+		// review's, a breadcrumb's -- is work a hostile page could multiply by
+		// the thousand, in the one loop every reader's recipes wait on.
+		var wanted []string
+		for _, prop := range strings.Fields(attrs["itemprop"]) {
+			if limit, ok := microdataProps[prop]; ok && len(values[prop]) < limit {
+				wanted = append(wanted, prop)
+			}
+		}
+		if len(wanted) == 0 {
+			continue
+		}
 		var value string
 		switch name {
 		case "meta":
@@ -46,8 +78,11 @@ func recipeFromMicrodata(markup, pageURL string) *Recipe {
 		default:
 			value = firstNonEmpty(attrs["content"], elementText(region, match[1], name))
 		}
-		for _, prop := range strings.Fields(attrs["itemprop"]) {
+		for _, prop := range wanted {
 			values[prop] = append(values[prop], value)
+		}
+		if budget -= len(value); budget <= 0 {
+			break
 		}
 	}
 	first := func(prop string) string {
@@ -80,12 +115,18 @@ func recipeFromMicrodata(markup, pageURL string) *Recipe {
 		ingredients = values["ingredients"]
 	}
 	for _, item := range ingredients {
-		if text := cleanText(item, maxShortRunes); text != "" && len(r.Ingredients) < maxListItems {
+		if len(r.Ingredients) >= maxListItems {
+			break
+		}
+		if text := cleanText(item, maxShortRunes); text != "" {
 			r.Ingredients = append(r.Ingredients, text)
 		}
 	}
 	section := StepSection{}
 	for _, item := range values["recipeInstructions"] {
+		if len(section.Steps) >= maxListItems {
+			break
+		}
 		for _, line := range cleanLines(item) {
 			if len(section.Steps) < maxListItems {
 				section.Steps = append(section.Steps, line)

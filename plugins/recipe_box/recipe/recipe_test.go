@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A page shaped like Chefkoch's: one standalone Recipe, ingredients as a list,
@@ -262,5 +263,25 @@ func TestParsePageSurvivesUndeclaredLatin1(t *testing.T) {
 	_ = ParsePage(micro, "https://example.test/")
 	if got := elementText(`<a>x<abbr>y</abbr>z</a>`, 3, "a"); got != "x<abbr>y</abbr>z" {
 		t.Fatalf("elementText = %q", got)
+	}
+}
+
+func TestMicrodataReadIsBoundedOnHostilePages(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`<div itemscope itemtype="https://schema.org/Recipe"><h1 itemprop="name">Teig</h1>`)
+	// Unclosed list items, each of which would otherwise be read up to the
+	// element-text bound, and reviews nothing on a card uses.
+	for b.Len() < MaxPageBytes-64 {
+		b.WriteString(`<li itemprop="recipeIngredient">Mehl <span itemprop="reviewBody">x`)
+	}
+	start := time.Now()
+	page := ParsePage(b.String(), "https://example.test/")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("hostile page took %v to read", elapsed)
+	}
+	// The text budget ends the read before the list cap would: each unclosed
+	// item is read to the element bound, so fewer of them fit.
+	if page.Recipe == nil || len(page.Recipe.Ingredients) == 0 || len(page.Recipe.Ingredients) > maxListItems {
+		t.Fatalf("recipe = %v ingredients", page.Recipe != nil)
 	}
 }
