@@ -92,9 +92,11 @@ const noteSearchTerms = 6
 // words of a search narrow the read itself, ahead of noteListLimit, so a note
 // older than the newest noteListLimit is still found by searching for it.
 func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words []string) ([]Note, error) {
-	state := `m.done_at = 0`
+	// One state sorts by one column, named outright rather than through a
+	// CASE, so the notes index can serve the order.
+	state, order := `m.done_at = 0`, `m.date_unix`
 	if done {
-		state = `m.done_at > 0`
+		state, order = `m.done_at > 0`, `m.done_at`
 	}
 	args := []any{userID}
 	for i, word := range words {
@@ -115,7 +117,7 @@ func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words [
 				(SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.note_dismissed = 0 AND `+state+` AND NOT `+carriesRecipe+`
-		ORDER BY CASE WHEN m.done_at > 0 THEN m.done_at ELSE m.date_unix END DESC, m.id DESC LIMIT ?`, args...)
+		ORDER BY `+order+` DESC, m.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
