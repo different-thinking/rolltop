@@ -21,7 +21,13 @@ export type RecipeSummary = {
   origin: "structured" | "manual" | string;
   dismissed: boolean;
   first_seen_at: number;
+  /** When the reader marked the dish cooked; zero while it is still one to try. */
+  cooked_at: number;
 };
+
+export type RecipeView = "" | "cooked" | "dismissed";
+
+export type RecipeCounts = { to_cook: number; cooked: number; dismissed: number };
 
 export type RecipeMail = {
   message_id: number;
@@ -42,21 +48,41 @@ export type RecipeDetail = RecipeSummary & {
   mails: RecipeMail[];
 };
 
-export type LinkSummary = {
+/** The shelves the notes overview sorts by, in the order it draws them. */
+export type NoteKind =
+  | "text" | "article" | "video" | "product" | "place" | "event"
+  | "music" | "media" | "tech" | "social" | "docs" | "link";
+
+export type NoteLink = {
   id: number;
   url: string;
   final_url: string;
-  status: "pending" | "page" | "failed" | string;
-  error: string;
-  attempts: number;
-  next_attempt_at: number;
+  status: "pending" | "page" | "failed" | "recipe" | string;
+  kind: string;
+  /** The one detail a card shows for its kind: a price, an event's date. */
+  detail: string;
   title: string;
   description: string;
-  image_url: string;
   site_name: string;
+  error: string;
+};
+
+export type Note = {
+  id: number;
+  message_id: number;
   subject: string;
   date_unix: number;
-  message_id: number;
+  body: string;
+  kind: NoteKind | string;
+  done_at: number;
+  filed: boolean;
+  links: NoteLink[];
+};
+
+export type NotesResponse = {
+  notes: Note[];
+  counts: Record<string, number>;
+  totals: { open: number; done: number };
 };
 
 export type Settings = {
@@ -64,11 +90,15 @@ export type Settings = {
   own_recipients_only: boolean;
   move_enabled: boolean;
   folder_name: string;
+  notes_move_enabled: boolean;
+  notes_folder_name: string;
   scan_started_at: number;
   scan_finished_at: number;
 };
 
 export type FolderStatus = {
+  shelf: "recipes" | "notes" | string;
+  wanted: string;
   account_id: number;
   account: string;
   mailbox_id: number;
@@ -82,6 +112,7 @@ export type Status = {
   notes_found: number;
   links: Record<string, number>;
   recipes: number;
+  notes: number;
   mails: Record<string, number>;
   folders: FolderStatus[];
 };
@@ -95,17 +126,24 @@ export const recipeAPI = {
   saveSettings: (csrf: string, settings: Partial<Settings>) => postJSON<SettingsResponse>(`${base}/settings`, csrf, settings),
   restartScan: (csrf: string) => postJSON<SettingsResponse>(`${base}/scan/restart`, csrf, {}),
   hideFolder: (csrf: string, mailboxID: number) => postJSON<SettingsResponse>(`${base}/folders/hide`, csrf, { mailbox_id: mailboxID }),
-  recipes: (query: string, view: "" | "dismissed") => {
+  recipes: (query: string, view: RecipeView) => {
     const params = new URLSearchParams();
     if (query.trim()) params.set("q", query.trim());
     if (view) params.set("view", view);
     const suffix = params.toString();
-    return getJSON<{ recipes: RecipeSummary[] }>(`${base}/recipes${suffix ? `?${suffix}` : ""}`);
+    return getJSON<{ recipes: RecipeSummary[]; counts: RecipeCounts }>(`${base}/recipes${suffix ? `?${suffix}` : ""}`);
   },
   recipe: (id: number) => getJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`),
   setDismissed: (csrf: string, id: number, dismissed: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { dismissed }),
+  setCooked: (csrf: string, id: number, cooked: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { cooked }),
   addRecipe: (csrf: string, url: string) => postJSON<{ ok: boolean; status: string; recipe_id: number }>(`${base}/recipes`, csrf, { url }),
-  links: (status: "page" | "failed" | "pending") => getJSON<{ links: LinkSummary[] }>(`${base}/links?status=${status}`),
+  notes: (state: "open" | "done", query: string) => {
+    const params = new URLSearchParams({ state });
+    if (query.trim()) params.set("q", query.trim());
+    return getJSON<NotesResponse>(`${base}/notes?${params.toString()}`);
+  },
+  setNoteDone: (csrf: string, id: number, done: boolean) => postJSON<{ ok: boolean }>(`${base}/notes/${id}`, csrf, { done }),
+  dismissNote: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/notes/${id}`, csrf, { dismissed: true }),
   promoteLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/recipe`, csrf, {}),
   retryLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/retry`, csrf, {})
 };

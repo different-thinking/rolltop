@@ -87,6 +87,15 @@ func (p *recipeBoxBackend) resolveLinks(ctx context.Context, db *sql.DB, userID 
 		if ctx.Err() != nil {
 			return done, true, ctx.Err()
 		}
+		if recipe.NoFetch(link.URL) && !link.Forced {
+			// A document or a map answers a fetch with a sign-in page or a
+			// script; its platform is all that can be said about it.
+			if err := recordUnfetched(ctx, db, userID, link); err != nil {
+				return done, more, err
+			}
+			done++
+			continue
+		}
 		p.waitForHost(ctx, link.URL)
 		page, finalURL, fetchErr := p.fetcher.FetchPage(ctx, link.URL)
 		if fetchErr != nil && ctx.Err() != nil {
@@ -135,8 +144,8 @@ func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID 
 		permanent := errors.Is(fetchErr, recipe.ErrNotHTML) || (errors.As(fetchErr, &status) && status.Permanent())
 		attempts := link.Tries + 1
 		if permanent || attempts >= maxFetchAttempts {
-			_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'failed', attempts = ?, error = ?, fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
-				attempts, fetchErrorText(fetchErr), now.Unix(), now.Unix(), userID, link.ID)
+			_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'failed', kind = ?, attempts = ?, error = ?, fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+				hostKindOrLink(link.URL), attempts, fetchErrorText(fetchErr), now.Unix(), now.Unix(), userID, link.ID)
 			return err
 		}
 		next := now.Add(retryDelays[min(attempts-1, len(retryDelays)-1)])
@@ -163,7 +172,9 @@ func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID 
 		}
 		origin = "manual"
 	default:
-		_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', updated_at = ? WHERE user_id = ? AND id = ?`, now.Unix(), userID, link.ID)
+		kind, detail := recipe.Classify(page, firstText(finalURL, link.URL))
+		_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', kind = ?, detail = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+			kind, clean(detail), now.Unix(), userID, link.ID)
 		return err
 	}
 	canonical := canonicalURL(link.URL, finalURL, page)
@@ -171,13 +182,29 @@ func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID 
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'recipe', recipe_id = ?, updated_at = ? WHERE user_id = ? AND id = ?`, recipeID, now.Unix(), userID, link.ID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'recipe', kind = 'recipe', recipe_id = ?, updated_at = ? WHERE user_id = ? AND id = ?`, recipeID, now.Unix(), userID, link.ID); err != nil {
 		return err
 	}
 	if err := refreshFirstSeen(ctx, db, userID, recipeID); err != nil {
 		return err
 	}
 	return p.ensureImage(ctx, db, userID, recipeID)
+}
+
+// recordUnfetched files a link that is not fetched by its platform.
+func recordUnfetched(ctx context.Context, db *sql.DB, userID int64, link dueLink) error {
+	now := time.Now().UTC().Unix()
+	_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', kind = ?, detail = '', site_name = CASE WHEN site_name = '' THEN ? ELSE site_name END,
+			error = '', fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		hostKindOrLink(link.URL), hostLabel(link.URL), now, now, userID, link.ID)
+	return err
+}
+
+func hostKindOrLink(link string) string {
+	if kind := recipe.HostKind(link); kind != "" {
+		return kind
+	}
+	return recipe.KindLink
 }
 
 type preview struct {

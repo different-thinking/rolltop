@@ -39,14 +39,13 @@ var trackingParams = map[string]bool{
 	"cmp": true, "cmpid": true, "wt_mc": true, "ito": true, "ncid": true,
 }
 
-// skippedHosts are hosts whose pages are never a recipe a reader could be
-// reading: documents behind a login, meetings, code. Fetching them would only
-// put a login page into the list of links that were not recognised.
+// skippedHosts are links that are plumbing rather than something kept: a call
+// to join, a chat to open, a sign-in. Documents, repositories and maps are not
+// among them -- a reader who mails one of those to themselves kept it, and the
+// notes overview files it by its platform without fetching it (NoFetch).
 var skippedHosts = []string{
-	"docs.google.com", "drive.google.com", "meet.google.com", "calendar.google.com", "mail.google.com",
-	"accounts.google.com", "dropbox.com", "onedrive.live.com", "sharepoint.com", "teams.microsoft.com",
-	"zoom.us", "github.com", "gitlab.com", "maps.google.com", "goo.gl", "maps.app.goo.gl", "wa.me",
-	"whatsapp.com", "t.me", "localhost",
+	"meet.google.com", "calendar.google.com", "mail.google.com", "accounts.google.com",
+	"teams.microsoft.com", "teams.live.com", "zoom.us", "wa.me", "whatsapp.com", "t.me", "localhost",
 }
 
 // redirectParams name, per redirecting host, the query parameter holding the
@@ -234,23 +233,47 @@ func encodeSortedQuery(query url.Values) string {
 // often carries one line of the reader's own ("for Sunday", "less sugar"),
 // which is worth more on the card than the site's description.
 func NoteText(text string, limit int) string {
-	text = textURLRE.ReplaceAllString(text, " ")
+	return truncateRunes(strings.Join(noteLines(text, false), " "), limit)
+}
+
+// NoteBody is the same text for reading rather than for a card: line breaks
+// are kept, and a run of blank lines becomes one. A note without a link is
+// all body, and a shopping list read as one run-on line is not a list.
+func NoteBody(text string, limit int) string {
+	return truncateRunes(strings.TrimSpace(strings.Join(noteLines(text, true), "\n")), limit)
+}
+
+// noteLines is the reader's own writing in a message: URLs, a quoted reply,
+// the client's "sent from" footer and everything after a signature marker
+// removed.
+func noteLines(text string, keepBlank bool) []string {
+	text = textURLRE.ReplaceAllString(strings.ReplaceAll(text, "\r\n", "\n"), " ")
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimRight(line, " ") == "--" {
+			break
+		}
 		line = strings.Join(strings.Fields(line), " ")
 		lower := strings.ToLower(line)
-		// A quoted reply and the client's own footer are not the reader's note.
-		if line == "" || strings.HasPrefix(line, ">") || strings.HasPrefix(lower, "sent from") ||
-			strings.HasPrefix(lower, "gesendet von") || strings.HasPrefix(lower, "von meinem") || line == "--" {
-			if line == "--" {
-				break
+		if strings.HasPrefix(line, ">") || strings.HasPrefix(lower, "sent from") ||
+			strings.HasPrefix(lower, "gesendet von") || strings.HasPrefix(lower, "von meinem") {
+			continue
+		}
+		if line == "" {
+			if keepBlank && len(lines) > 0 && lines[len(lines)-1] != "" {
+				lines = append(lines, "")
 			}
 			continue
 		}
 		lines = append(lines, line)
 	}
-	note := strings.Join(lines, " ")
-	return truncateRunes(note, limit)
+	return lines
+}
+
+// TextFromMarkup is a message's HTML part as plain text, for the notes that
+// were written in a client that sends no text part.
+func TextFromMarkup(markup string) string {
+	return html.UnescapeString(stripTags(markup))
 }
 
 func truncateRunes(value string, limit int) string {

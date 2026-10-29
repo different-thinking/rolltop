@@ -28,6 +28,9 @@ type Page struct {
 	ImageURL     string
 	SiteName     string
 	CanonicalURL string
+	// Facts is what the page says about its own kind, read for the notes
+	// overview when the page is not a recipe.
+	Facts PageFacts
 }
 
 // Recipe is a schema.org Recipe as the plugin stores it: plain text, minutes
@@ -102,6 +105,7 @@ func ParsePage(markup string, pageURL string) Page {
 	page.SiteName = cleanText(meta["og:site_name"], maxShortRunes)
 	page.CanonicalURL = resolveURL(pageURL, firstNonEmpty(canonicalLink(head), meta["og:url"]))
 	page.Title = cleanText(page.Title, maxShortRunes)
+	page.Facts = pageFacts(markup, meta)
 
 	recipe := recipeFromJSONLD(markup, pageURL)
 	if recipe == nil {

@@ -379,8 +379,13 @@ site and in review.
   what the page says about itself** (`plugins/recipe_box`). A mail is read for
   links only when one of the reader's own addresses sent it and -- unless they
   relaxed it -- only their own addresses received it (`isNoteToSelf`); mail from
-  anybody else is never read, whatever it links to, and Sent, Drafts, Trash,
-  Junk and Gmail's system folders are never read at all. A link is a recipe only
+  any other address is never read, whatever it links to, and Sent, Drafts,
+  Trash, Junk and Gmail's system folders are never read at all. The test reads
+  the `From` header and nothing proves it: a forged one the provider did not
+  send to Junk is accepted. That is a decided limit, not an oversight --
+  requiring a Sent copy would miss every note from a client that keeps none --
+  and what a spoof can reach is bounded to one guarded fetch per link, a card
+  of text and a sniffed raster image, and the move of that mail. A link is a recipe only
   when its page publishes a schema.org `Recipe` (JSON-LD or microdata); a page
   that does not is a preview the reader can file by hand, never a guess. Every
   fetch goes through `remoteimages.SafeDialContext` with no proxy, cookie or
@@ -393,6 +398,17 @@ site and in review.
   reader who drags it back has answered for it. Nothing runs for a reader
   without a settings row: switching the plugin on for an installation moves
   nobody's mail.
+- **Everything else the reader mailed themselves is a note, and a note's shelf
+  is what its page says it is** (`recipe.Classify`): a platform that holds one
+  kind of content answers first (YouTube is video, whatever else a page of it
+  declares), then the schema.org types the page publishes, then its `og:type`,
+  then a shop's or news site's platform, otherwise a plain link -- the same
+  rule as the recipe test, never a guess from words. Filing notes is its
+  own switch and **off by default** (`notes_move_enabled`): a reader who agreed
+  to have recipe mails moved did not agree to have the rest of their notes
+  moved. A note waits for every page it links to (`awaitsPage`) before it is
+  filed, so a mail is never put in the notes folder and then turns out to have
+  carried a recipe.
 - **A plugin's stylesheet is asked for until it arrives.** Its module and its
   stylesheet are two requests, and a page can get the module without the
   stylesheet - a dropped connection, a server busy for a moment. The module
