@@ -291,43 +291,64 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		host.ServerError(w, err)
 		return
 	}
-	copies, err := storedCopies(ctx, db, userID, mail)
-	if err != nil {
-		host.ServerError(w, err)
-		return
-	}
-	// Every account's Trash is resolved before anything moves, so an account
-	// without one refuses the delete instead of leaving it half done.
+	// The copies are read again after every pass. A copy reported gone may be
+	// gone because something else moved it -- the box filing this very note
+	// into its notes folder is the usual case -- and the row it left behind is
+	// then a new one in that folder, not mail in Trash. Only a pass that finds
+	// nothing left outside Trash ends the delete. A row asked about once is not
+	// asked again: a move the server answered with "no longer in that folder"
+	// succeeds and leaves its row for reconciliation to remove.
 	trashByAccount := map[int64]int64{}
-	var targets []storedCopy
-	for _, c := range copies {
-		if !mailboxReadable(c.MailboxName, c.MailboxRole) {
-			continue
+	attempted := map[int64]bool{}
+	moved := 0
+	for round := 0; ; round++ {
+		copies, err := storedCopies(ctx, db, userID, mail)
+		if err != nil {
+			host.ServerError(w, err)
+			return
 		}
-		if _, ok := trashByAccount[c.AccountID]; !ok {
-			trashID, err := trashMailboxID(ctx, db, userID, c.AccountID)
-			if err != nil {
-				host.ServerError(w, err)
-				return
-			}
-			if trashID == 0 {
-				host.WriteAPIError(w, http.StatusConflict, "this account has no Trash folder")
-				return
-			}
-			trashByAccount[c.AccountID] = trashID
-		}
-		targets = append(targets, c)
-	}
-	for _, c := range targets {
-		if err := mover.MoveMessage(ctx, userID, c.ID, trashByAccount[c.AccountID]); err != nil {
-			// A copy that is already gone is deleted as far as this note is
-			// concerned. Anything else stops here with the note still listed,
-			// and pressing Delete again moves only what is still out of Trash.
-			if store.IsNotFound(err) {
+		// Every account's Trash is resolved before anything moves, so an
+		// account without one refuses the delete instead of leaving it half
+		// done.
+		var targets []storedCopy
+		for _, c := range copies {
+			if attempted[c.ID] || !mailboxReadable(c.MailboxName, c.MailboxRole) {
 				continue
 			}
-			host.WriteAPIError(w, http.StatusBadGateway, moveErrorText(err))
+			if _, ok := trashByAccount[c.AccountID]; !ok {
+				trashID, err := trashMailboxID(ctx, db, userID, c.AccountID)
+				if err != nil {
+					host.ServerError(w, err)
+					return
+				}
+				if trashID == 0 {
+					host.WriteAPIError(w, http.StatusConflict, "this account has no Trash folder")
+					return
+				}
+				trashByAccount[c.AccountID] = trashID
+			}
+			targets = append(targets, c)
+		}
+		if len(targets) == 0 {
+			break
+		}
+		if round >= deleteNoteRounds {
+			host.WriteAPIError(w, http.StatusConflict, "the mail moved while it was being deleted; try again")
 			return
+		}
+		for _, c := range targets {
+			attempted[c.ID] = true
+			if err := mover.MoveMessage(ctx, userID, c.ID, trashByAccount[c.AccountID]); err != nil {
+				// A copy that is already gone is settled by the next pass.
+				// Anything else stops here with the note still listed, and
+				// pressing Delete again moves only what is still out of Trash.
+				if store.IsNotFound(err) {
+					continue
+				}
+				host.WriteAPIError(w, http.StatusBadGateway, moveErrorText(err))
+				return
+			}
+			moved++
 		}
 	}
 	now := time.Now().UTC().Unix()
@@ -335,11 +356,16 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		host.ServerError(w, err)
 		return
 	}
-	if notifier, ok := host.(plugins.UserChangeHost); ok && len(targets) > 0 {
+	if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
 		notifier.NotifyUserChanged(userID)
 	}
-	host.WriteJSON(w, map[string]any{"ok": true, "moved": len(targets)})
+	host.WriteJSON(w, map[string]any{"ok": true, "moved": moved})
 }
+
+// deleteNoteRounds bounds how many times a delete reads the note's copies
+// again after moving them: a copy that keeps turning up somewhere new is mail
+// something else is moving at the same time, and the reader is told so.
+const deleteNoteRounds = 3
 
 // trashMailboxID answers one account's Trash folder, zero when it has none.
 func trashMailboxID(ctx context.Context, db *sql.DB, userID, accountID int64) (int64, error) {

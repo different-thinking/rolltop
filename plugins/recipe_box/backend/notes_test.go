@@ -332,3 +332,37 @@ func TestDeletingANoteRefusesAnAccountWithoutTrash(t *testing.T) {
 		t.Fatalf("a refused delete still moved %v", host.moved)
 	}
 }
+
+func TestDeletingANoteKeepsItListedWhenAMoveFails(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "failing@example.test")
+	if _, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Trash", "trash"); err != nil {
+		t.Fatal(err)
+	}
+	me := "failing@example.test"
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<fail@x>", me, me, "Notiz", "Text", time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC))
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	target := fmt.Sprintf("%s/notes/%d/delete", apiPath, answer.Notes[0].ID)
+	host.moveErr = fmt.Errorf("server busy")
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete with a failing move = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := listNotes(t, p, host, ""); len(got.Notes) != 1 {
+		t.Fatalf("a failed delete took the note away: %#v", got.Notes)
+	}
+	host.moveErr = nil
+	rec := callAPI(t, p, host, http.MethodPost, target, `{}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"moved":1`) {
+		t.Fatalf("delete after the server recovered = %d %s", rec.Code, rec.Body.String())
+	}
+}
