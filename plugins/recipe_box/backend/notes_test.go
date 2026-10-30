@@ -366,3 +366,55 @@ func TestDeletingANoteKeepsItListedWhenAMoveFails(t *testing.T) {
 		t.Fatalf("delete after the server recovered = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestDeletingANoteTakesCopiesTheScanNeverReads(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "gmail@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allMail, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/All Mail", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	junk, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/Spam", "junk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := "gmail@example.test"
+	date := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	inboxCopy := createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<arch@x>", me, me, "Notiz", "Text", date)
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	// Archived in Gmail: the Inbox copy is gone and All Mail holds the
+	// message; another copy was filed as spam.
+	if _, err := st.DB().ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, f.user.ID, inboxCopy.ID); err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, allMail.ID, "<arch@x>", me, me, "Notiz", "Text", date)
+	createMessage(t, st, f.user.ID, f.account.ID, junk.ID, "<arch@x>", me, me, "Notiz", "Text", date)
+	sentCopy := createMessage(t, st, f.user.ID, f.account.ID, f.sent.ID, "<arch@x>", me, me, "Notiz", "Text", date)
+
+	rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/notes/%d/delete", apiPath, answer.Notes[0].ID), `{}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"moved":2`) {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+	}
+	var inTrash, outside, inSent int
+	if err := st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE mailbox_id = ?), COUNT(*) FILTER (WHERE mailbox_id IN (?, ?)), COUNT(*) FILTER (WHERE id = ?)
+		FROM messages WHERE user_id = ?`, trash.ID, allMail.ID, junk.ID, sentCopy.ID, f.user.ID).Scan(&inTrash, &outside, &inSent); err != nil {
+		t.Fatal(err)
+	}
+	if inTrash != 2 || outside != 0 || inSent != 1 {
+		t.Fatalf("in Trash = %d, left in All Mail or Junk = %d, Sent copy kept = %d", inTrash, outside, inSent)
+	}
+}

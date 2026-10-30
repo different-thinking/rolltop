@@ -266,11 +266,15 @@ func (p *recipeBoxBackend) apiUpdateNote(host plugins.APIHost, db *sql.DB, userI
 	host.WriteJSON(w, map[string]any{"ok": true})
 }
 
-// apiDeleteNote deletes the mail behind a note: every delivered copy goes to
-// its own account's Trash, the same move the mail view's Delete makes, and the
-// note leaves the overview. Nothing leaves the server until that Trash is
-// emptied. The reader's Sent copy stays where it is, as it does when a note is
-// filed: it is the record of what they sent, not the note they are done with.
+// apiDeleteNote deletes the mail behind a note: every copy goes to its own
+// account's Trash, the same move the mail view's Delete makes, and the note
+// leaves the overview. Nothing leaves the server until that Trash is emptied.
+// Unlike filing, Delete also takes the copies the scan never reads -- a Gmail
+// label view such as All Mail, Junk -- because a reader who archived the note
+// in Gmail has nothing left but the All Mail copy, and a delete that left it
+// there would have deleted nothing. The Sent and Drafts copies stay where they
+// are; on Gmail they are labels of the one message, so trashing the Inbox copy
+// trashes them with it.
 func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
 	mover, ok := host.(plugins.StoredMessageHost)
 	if !ok {
@@ -312,7 +316,7 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		// done.
 		var targets []storedCopy
 		for _, c := range copies {
-			if attempted[c.ID] || !mailboxReadable(c.MailboxName, c.MailboxRole) {
+			if attempted[c.ID] || deleteKeeps(c.MailboxRole) {
 				continue
 			}
 			if _, ok := trashByAccount[c.AccountID]; !ok {
@@ -360,6 +364,16 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		notifier.NotifyUserChanged(userID)
 	}
 	host.WriteJSON(w, map[string]any{"ok": true, "moved": moved})
+}
+
+// deleteKeeps reports whether Delete leaves a copy where it is: what is in
+// Trash already, and the reader's own Sent and Drafts copies.
+func deleteKeeps(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "trash", "sent", "drafts":
+		return true
+	}
+	return false
 }
 
 // deleteNoteRounds bounds how many times a delete reads the note's copies
