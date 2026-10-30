@@ -49,11 +49,16 @@ func mailboxReadable(name, role string) bool {
 	if excludedRoles[strings.ToLower(strings.TrimSpace(role))] {
 		return false
 	}
-	lower := strings.ToLower(strings.TrimSpace(name))
 	// Gmail's system folders are labels and views over the real ones: All
 	// Mail, Important and Starred hold copies, and its Sent, Drafts, Spam and
 	// Trash are covered by their roles above already.
-	return !strings.HasPrefix(lower, "[gmail]/") && !strings.HasPrefix(lower, "[google mail]/")
+	return !gmailSystemFolder(name)
+}
+
+// gmailSystemFolder reports whether a folder is one of Gmail's system labels.
+func gmailSystemFolder(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(lower, "[gmail]/") || strings.HasPrefix(lower, "[google mail]/")
 }
 
 type scanRow struct {

@@ -273,8 +273,10 @@ func (p *recipeBoxBackend) apiUpdateNote(host plugins.APIHost, db *sql.DB, userI
 // label view such as All Mail, Junk -- because a reader who archived the note
 // in Gmail has nothing left but the All Mail copy, and a delete that left it
 // there would have deleted nothing. The Sent and Drafts copies stay where they
-// are; on Gmail they are labels of the one message, so trashing the Inbox copy
-// trashes them with it.
+// are, except a Gmail Sent copy in the account the note was delivered to: there
+// it is a label of the one message, so trashing the Inbox copy trashes it with
+// it -- and once the note is archived it is the only copy a default sync
+// mirrors, since All Mail is not synced unless the reader asks for it.
 func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
 	mover, ok := host.(plugins.StoredMessageHost)
 	if !ok {
@@ -316,7 +318,7 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		// done.
 		var targets []storedCopy
 		for _, c := range copies {
-			if attempted[c.ID] || deleteKeeps(c.MailboxRole) {
+			if attempted[c.ID] || deleteKeeps(c, mail.AccountID) {
 				continue
 			}
 			if _, ok := trashByAccount[c.AccountID]; !ok {
@@ -367,11 +369,16 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 }
 
 // deleteKeeps reports whether Delete leaves a copy where it is: what is in
-// Trash already, and the reader's own Sent and Drafts copies.
-func deleteKeeps(role string) bool {
-	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "trash", "sent", "drafts":
+// Trash already, and the reader's own Sent and Drafts copies. Gmail's Sent
+// folder is a label, so in the account the note was delivered to its copy is
+// the note itself and goes with it; in any other account it is the reader's
+// record of what they sent somewhere else and stays.
+func deleteKeeps(c storedCopy, noteAccountID int64) bool {
+	switch strings.ToLower(strings.TrimSpace(c.MailboxRole)) {
+	case "trash", "drafts":
 		return true
+	case "sent":
+		return !(c.AccountID == noteAccountID && gmailSystemFolder(c.MailboxName))
 	}
 	return false
 }

@@ -418,3 +418,48 @@ func TestDeletingANoteTakesCopiesTheScanNeverReads(t *testing.T) {
 		t.Fatalf("in Trash = %d, left in All Mail or Junk = %d, Sent copy kept = %d", inTrash, outside, inSent)
 	}
 }
+
+func TestDeletingAnArchivedGmailNoteTrashesItsSentLabel(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "archived@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gmailSent, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/Sent Mail", "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := "archived@example.test"
+	date := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	inboxCopy := createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<gs@x>", me, me, "Notiz", "Text", date)
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	// Archived in Gmail with All Mail not mirrored -- the default: the Sent
+	// label is the only copy left, and it is the note itself.
+	if _, err := st.DB().ExecContext(ctx, `DELETE FROM messages WHERE user_id = ? AND id = ?`, f.user.ID, inboxCopy.ID); err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, gmailSent.ID, "<gs@x>", me, me, "Notiz", "Text", date)
+
+	rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/notes/%d/delete", apiPath, answer.Notes[0].ID), `{}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"moved":1`) {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+	}
+	var inTrash int
+	if err := st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE user_id = ? AND mailbox_id = ?`, f.user.ID, trash.ID).Scan(&inTrash); err != nil {
+		t.Fatal(err)
+	}
+	if inTrash != 1 {
+		t.Fatalf("in Trash = %d, want the Gmail Sent label's copy", inTrash)
+	}
+}

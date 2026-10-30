@@ -42,6 +42,8 @@ function kindInfo(kind: string) {
 /** How many notes a shelf shows in the overview before "Show all". */
 const overviewPerShelf = 4;
 
+type NoteAction = "done" | "reopen" | "remove" | "delete" | "recipe" | "retry";
+
 export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration }: RuntimeAppViewContext) {
   const [state, setState] = useState<"open" | "done">("open");
   const [query, setQuery] = useState("");
@@ -102,7 +104,7 @@ export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration 
     });
   }
 
-  async function act(note: Note, action: "done" | "reopen" | "remove" | "delete" | "recipe" | "retry", target?: NoteLink) {
+  async function act(note: Note, action: NoteAction, target?: NoteLink) {
     setBusy(note.id, true);
     try {
       if (action === "done" || action === "reopen") {
@@ -245,7 +247,7 @@ function NoteRow({
   navigate: (url: string) => void;
   link: (url: string) => (event: MouseEvent) => void;
   busyIDs: Set<number>;
-  onAction: (note: Note, action: "done" | "reopen" | "remove" | "delete" | "recipe" | "retry", target?: NoteLink) => void;
+  onAction: (note: Note, action: NoteAction, target?: NoteLink) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const info = kindInfo(note.kind);
