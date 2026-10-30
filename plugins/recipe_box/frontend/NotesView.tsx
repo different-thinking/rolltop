@@ -102,7 +102,7 @@ export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration 
     });
   }
 
-  async function act(note: Note, action: "done" | "reopen" | "remove" | "recipe" | "retry", target?: NoteLink) {
+  async function act(note: Note, action: "done" | "reopen" | "remove" | "delete" | "recipe" | "retry", target?: NoteLink) {
     setBusy(note.id, true);
     try {
       if (action === "done" || action === "reopen") {
@@ -113,6 +113,11 @@ export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration 
         await recipeAPI.dismissNote(csrf, note.id);
         drop(note.id);
         addToast("Removed from the notes.");
+      } else if (action === "delete") {
+        const result = await recipeAPI.deleteNote(csrf, note.id);
+        drop(note.id);
+        // A note whose mail is already gone has nothing left to move.
+        addToast(result.moved ? "Moved to Trash." : "Removed from the notes.");
       } else if (action === "recipe" && target) {
         await recipeAPI.promoteLink(csrf, target.id);
         drop(note.id);
@@ -240,7 +245,7 @@ function NoteRow({
   navigate: (url: string) => void;
   link: (url: string) => (event: MouseEvent) => void;
   busyIDs: Set<number>;
-  onAction: (note: Note, action: "done" | "reopen" | "remove" | "recipe" | "retry", target?: NoteLink) => void;
+  onAction: (note: Note, action: "done" | "reopen" | "remove" | "delete" | "recipe" | "retry", target?: NoteLink) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const info = kindInfo(note.kind);
@@ -305,6 +310,7 @@ function NoteRow({
         {first && first.status === "failed" ? (
           <button className="ghost" type="button" disabled={busy} onClick={() => onAction(note, "retry", first)}><Icon name="sync" />Read again</button>
         ) : null}
+        <button className="ghost icon-only" type="button" disabled={busy} title="Delete the mail (moves it to Trash)" aria-label="Delete" onClick={() => onAction(note, "delete")}><Icon name="delete" /></button>
         <button className="ghost icon-only" type="button" disabled={busy} title="Remove from the notes" aria-label="Remove from the notes" onClick={() => onAction(note, "remove")}><Icon name="close" /></button>
       </div>
     </article>

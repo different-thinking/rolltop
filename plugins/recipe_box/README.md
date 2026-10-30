@@ -81,6 +81,11 @@ sign-in page, so their host is all that can be known.
 
 A note is open until the reader marks it done; done notes keep their own tab.
 Removing a note hides it from the overview and keeps it from being filed.
+Deleting a note moves its mail to the Trash of each account holding a copy --
+the same move the mail view's Delete makes, so nothing leaves the server until
+that Trash is emptied -- and takes the note out of the overview. The reader's
+Sent copy stays, as it does when a note is filed, and an account without a
+Trash folder refuses the delete before anything moves.
 
 Filing notes out of the Inbox is a **separate switch, off by default**, into a
 folder of its own (`Notes`): the box was switched on by readers who agreed to

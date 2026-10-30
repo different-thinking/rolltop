@@ -247,3 +247,88 @@ func TestRecipesCanBeMarkedCooked(t *testing.T) {
 		t.Fatalf("to cook after uncooking = %d", n)
 	}
 }
+
+func TestDeletingANoteMovesItsMailToTrash(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "delete@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := "delete@example.test"
+	date := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<del@x>", me, me, "Einkauf", "Milch", date)
+	sentCopy := createMessage(t, st, f.user.ID, f.account.ID, f.sent.ID, "<del@x>", me, me, "Einkauf", "Milch", date)
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	noteID := answer.Notes[0].ID
+	target := fmt.Sprintf("%s/notes/%d/delete", apiPath, noteID)
+
+	// Somebody else cannot delete the reader's note, nor move their mail.
+	stranger := newFixture(t, st, "other@example.test")
+	if rec := callAPI(t, p, &fakeHost{t: t, store: st, userID: stranger.user.ID}, http.MethodPost, target, `{}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("a stranger deleted the note: %d", rec.Code)
+	}
+	if len(host.moved) != 0 {
+		t.Fatalf("moved before the delete = %v", host.moved)
+	}
+
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(host.moved) != 1 {
+		t.Fatalf("moved = %v, want the Inbox copy only", host.moved)
+	}
+	var inTrash, inSent int
+	if err := st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE mailbox_id = ?), COUNT(*) FILTER (WHERE id = ?) FROM messages WHERE user_id = ?`,
+		trash.ID, sentCopy.ID, f.user.ID).Scan(&inTrash, &inSent); err != nil {
+		t.Fatal(err)
+	}
+	if inTrash != 1 || inSent != 1 {
+		t.Fatalf("in Trash = %d, Sent copy kept = %d", inTrash, inSent)
+	}
+	if got := listNotes(t, p, host, ""); len(got.Notes) != 0 || got.Totals["open"] != 0 {
+		t.Fatalf("notes after delete = %#v", got)
+	}
+	// The mail in Trash is not read back into a note.
+	drain(t, p, host, f.user.ID)
+	if got := listNotes(t, p, host, ""); len(got.Notes) != 0 {
+		t.Fatalf("notes after the next round = %#v", got.Notes)
+	}
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete = %d", rec.Code)
+	}
+}
+
+func TestDeletingANoteRefusesAnAccountWithoutTrash(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "notrash@example.test")
+	me := "notrash@example.test"
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<nt@x>", me, me, "Notiz", "Text", time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC))
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/notes/%d/delete", apiPath, answer.Notes[0].ID), `{}`); rec.Code != http.StatusConflict {
+		t.Fatalf("delete without Trash = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(host.moved) != 0 || len(listNotes(t, p, host, "").Notes) != 1 {
+		t.Fatalf("a refused delete still moved %v", host.moved)
+	}
+}

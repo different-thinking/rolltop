@@ -13,11 +13,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"rolltop/backend/plugins"
+	"rolltop/backend/store"
 	"rolltop/plugins/recipe_box/recipe"
 )
 
@@ -262,4 +264,89 @@ func (p *recipeBoxBackend) apiUpdateNote(host plugins.APIHost, db *sql.DB, userI
 		return
 	}
 	host.WriteJSON(w, map[string]any{"ok": true})
+}
+
+// apiDeleteNote deletes the mail behind a note: every delivered copy goes to
+// its own account's Trash, the same move the mail view's Delete makes, and the
+// note leaves the overview. Nothing leaves the server until that Trash is
+// emptied. The reader's Sent copy stays where it is, as it does when a note is
+// filed: it is the record of what they sent, not the note they are done with.
+func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
+	mover, ok := host.(plugins.StoredMessageHost)
+	if !ok {
+		host.WriteAPIError(w, http.StatusNotImplemented, "deleting mail is not available")
+		return
+	}
+	ctx := r.Context()
+	var mail pendingMail
+	err := db.QueryRowContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts
+		FROM plugin_recipe_box_mails m
+		WHERE m.user_id = ? AND m.id = ? AND m.note_dismissed = 0 AND NOT `+carriesRecipe, userID, id).
+		Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID, &mail.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		host.WriteAPIError(w, http.StatusNotFound, "note not found")
+		return
+	}
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	copies, err := storedCopies(ctx, db, userID, mail)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	// Every account's Trash is resolved before anything moves, so an account
+	// without one refuses the delete instead of leaving it half done.
+	trashByAccount := map[int64]int64{}
+	var targets []storedCopy
+	for _, c := range copies {
+		if !mailboxReadable(c.MailboxName, c.MailboxRole) {
+			continue
+		}
+		if _, ok := trashByAccount[c.AccountID]; !ok {
+			trashID, err := trashMailboxID(ctx, db, userID, c.AccountID)
+			if err != nil {
+				host.ServerError(w, err)
+				return
+			}
+			if trashID == 0 {
+				host.WriteAPIError(w, http.StatusConflict, "this account has no Trash folder")
+				return
+			}
+			trashByAccount[c.AccountID] = trashID
+		}
+		targets = append(targets, c)
+	}
+	for _, c := range targets {
+		if err := mover.MoveMessage(ctx, userID, c.ID, trashByAccount[c.AccountID]); err != nil {
+			// A copy that is already gone is deleted as far as this note is
+			// concerned. Anything else stops here with the note still listed,
+			// and pressing Delete again moves only what is still out of Trash.
+			if store.IsNotFound(err) {
+				continue
+			}
+			host.WriteAPIError(w, http.StatusBadGateway, moveErrorText(err))
+			return
+		}
+	}
+	now := time.Now().UTC().Unix()
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_mails SET note_dismissed = 1, updated_at = ? WHERE user_id = ? AND id = ?`, now, userID, id); err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	if notifier, ok := host.(plugins.UserChangeHost); ok && len(targets) > 0 {
+		notifier.NotifyUserChanged(userID)
+	}
+	host.WriteJSON(w, map[string]any{"ok": true, "moved": len(targets)})
+}
+
+// trashMailboxID answers one account's Trash folder, zero when it has none.
+func trashMailboxID(ctx context.Context, db *sql.DB, userID, accountID int64) (int64, error) {
+	var id int64
+	err := db.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE user_id = ? AND account_id = ? AND role = 'trash' ORDER BY id LIMIT 1`, userID, accountID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
 }
