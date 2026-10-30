@@ -86,6 +86,12 @@ func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.R
 			return
 		}
 		p.apiUpdateNote(host, db, userID, id, w, r)
+	case len(parts) == 3 && parts[0] == "notes" && parts[2] == "delete" && r.Method == http.MethodPost:
+		id, ok := parseID(host, w, parts[1])
+		if !ok {
+			return
+		}
+		p.apiDeleteNote(host, db, userID, id, w, r)
 	case len(parts) == 3 && parts[0] == "links" && r.Method == http.MethodPost:
 		id, ok := parseID(host, w, parts[1])
 		if !ok {

@@ -144,6 +144,8 @@ export const recipeAPI = {
   },
   setNoteDone: (csrf: string, id: number, done: boolean) => postJSON<{ ok: boolean }>(`${base}/notes/${id}`, csrf, { done }),
   dismissNote: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/notes/${id}`, csrf, { dismissed: true }),
+  /** Moves the mail behind a note to its account's Trash and takes the note out of the overview. */
+  deleteNote: (csrf: string, id: number) => postJSON<{ ok: boolean; moved: number }>(`${base}/notes/${id}/delete`, csrf, {}),
   promoteLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/recipe`, csrf, {}),
   retryLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/retry`, csrf, {})
 };
