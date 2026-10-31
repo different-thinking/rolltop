@@ -331,8 +331,8 @@ function NoteRow({
  */
 function withoutTrashedNotes(data: NotesResponse | null, trashed: (note: Note) => boolean): NotesResponse | null {
   if (!data) return data;
-  const gone = data.notes.filter(trashed);
-  if (gone.length === 0) return data;
+  const gone = new Set(data.notes.filter(trashed));
+  if (gone.size === 0) return data;
   const counts = { ...data.counts };
   const totals = { ...data.totals };
   gone.forEach((note) => {
@@ -340,7 +340,7 @@ function withoutTrashedNotes(data: NotesResponse | null, trashed: (note: Note) =
     const state = note.done_at ? "done" : "open";
     totals[state] = Math.max(0, (totals[state] || 1) - 1);
   });
-  return { ...data, notes: data.notes.filter((note) => !trashed(note)), counts, totals };
+  return { ...data, notes: data.notes.filter((note) => !gone.has(note)), counts, totals };
 }
 
 /** The kinds of page a recipe can hide in without saying so. */

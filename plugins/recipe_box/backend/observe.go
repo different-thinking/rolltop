@@ -12,9 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
-	"time"
 
 	"rolltop/backend/plugins"
 )
@@ -52,25 +50,24 @@ func isTrashRole(role string) bool {
 // moved row, so that row is left out of the count by id; the row the move
 // creates in Trash is not there yet, and would not count if it were.
 func dismissNotesOfTrashedMail(ctx context.Context, db *sql.DB, userID, accountID, messageID int64, header string) (int, error) {
-	var contentSHA string
-	err := db.QueryRowContext(ctx, `SELECT canonical_sha256 FROM messages WHERE user_id = ? AND id = ?`, userID, messageID).Scan(&contentSHA)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
-	}
-	// The keys a note can know this message by (messageKey), and the row
-	// itself for a note recorded before its key could follow it.
-	keys := []any{fmt.Sprintf("row:%d:%d", accountID, messageID)}
+	// The key a note knows this message by is the one messageKey gives it: the
+	// Message-ID when it has one, its content otherwise, its row last. That is
+	// one lookup on the unique (user_id, message_key) index -- this runs for
+	// every message a move takes to Trash, a whole-filter delete included.
+	key := ""
 	if header = strings.TrimSpace(header); header != "" {
-		keys = append(keys, "mid:"+header)
+		key = messageKey(accountID, messageID, header, "")
+	} else {
+		var contentSHA string
+		err := db.QueryRowContext(ctx, `SELECT canonical_sha256 FROM messages WHERE user_id = ? AND id = ?`, userID, messageID).Scan(&contentSHA)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		key = messageKey(accountID, messageID, "", contentSHA)
 	}
-	if contentSHA = strings.TrimSpace(contentSHA); contentSHA != "" {
-		keys = append(keys, fmt.Sprintf("sha:%d:%s", accountID, contentSHA))
-	}
-	args := append([]any{userID, messageID}, keys...)
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id
 		FROM plugin_recipe_box_mails m
-		WHERE m.user_id = ? AND m.note_dismissed = 0 AND NOT `+carriesRecipe+`
-		AND (m.message_id = ? OR m.message_key IN (?`+strings.Repeat(", ?", len(keys)-1)+`))`, args...)
+		WHERE m.user_id = ? AND m.message_key = ? AND m.note_dismissed = 0 AND NOT `+carriesRecipe, userID, key)
 	if err != nil {
 		return 0, err
 	}
@@ -103,12 +100,13 @@ func dismissNotesOfTrashedMail(ctx context.Context, db *sql.DB, userID, accountI
 		if held {
 			continue
 		}
-		now := time.Now().UTC().Unix()
-		if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_mails SET note_dismissed = 1, updated_at = ? WHERE user_id = ? AND id = ? AND note_dismissed = 0`,
-			now, userID, mail.ID); err != nil {
+		changed, err := dismissNote(ctx, db, userID, mail.ID)
+		if err != nil {
 			return dismissed, err
 		}
-		dismissed++
+		if changed {
+			dismissed++
+		}
 	}
 	return dismissed, nil
 }

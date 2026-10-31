@@ -135,3 +135,31 @@ func TestCopyHoldsNote(t *testing.T) {
 		}
 	}
 }
+
+func TestANoteOpensARealFolderBeforeAGmailLabelView(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	f := newFixture(t, st, "label@example.test")
+	allMail, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "[Gmail]/All Mail", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := "label@example.test"
+	date := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	inboxCopy := createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<label@x>", me, me, "Notiz", "Text", date)
+	// The label view mirrored later holds the newer row.
+	createMessage(t, st, f.user.ID, f.account.ID, allMail.ID, "<label@x>", me, me, "Notiz", "Text", date)
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	answer := listNotes(t, p, host, "")
+	if len(answer.Notes) != 1 {
+		t.Fatalf("notes = %#v", answer.Notes)
+	}
+	if got := answer.Notes[0].MessageID; got != inboxCopy.ID {
+		t.Fatalf("note opens message %d, want the Inbox copy %d rather than the All Mail row", got, inboxCopy.ID)
+	}
+}
