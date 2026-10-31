@@ -69,15 +69,10 @@ export function dateLabel(unix: number, prefs: DatePrefs): string {
 export function useStatus(mailGeneration: number) {
   const [status, setStatus] = useState<SettingsResponse | null>(null);
   const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.settings().then((next) => {
-      if (!cancelled) setStatus(next);
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [mailGeneration, tick]);
+  // The status is refreshed on the same terms as the lists: a tick or a mail
+  // change waits for the request in flight instead of discarding it, or a
+  // status slower than the tick would never arrive and `busy` never clear.
+  useCurrentLoad("status", `${mailGeneration}:${tick}`, () => recipeAPI.settings(), setStatus, () => undefined);
   const busy = Boolean(status && status.settings.enabled && (
     !status.settings.scan_finished_at || (status.status.links.pending || 0) > 0
   ));
@@ -104,13 +99,19 @@ export function useCurrentLoad<T>(key: string, refresh: string, load: () => Prom
   handlers.current = { load, apply, fail };
   const latest = useRef(0);
   const inFlight = useRef(false);
+  const startedAt = useRef(0);
   const again = useRef(false);
+  const lastRefresh = useRef(refresh);
   const [round, setRound] = useState(0);
 
   useEffect(() => {
     const id = ++latest.current;
     inFlight.current = true;
+    startedAt.current = Date.now();
     again.current = false;
+    // This request answers the refresh in force now, so a refresh that
+    // changed in the same render as the key needs no second request.
+    lastRefresh.current = refresh;
     handlers.current.load().then((value) => {
       if (latest.current === id) handlers.current.apply(value);
     }, (err) => {
@@ -125,11 +126,13 @@ export function useCurrentLoad<T>(key: string, refresh: string, load: () => Prom
     });
   }, [key, round]);
 
-  const lastRefresh = useRef(refresh);
   useEffect(() => {
     if (lastRefresh.current === refresh) return;
     lastRefresh.current = refresh;
-    if (inFlight.current) again.current = true;
+    // A request that has not answered in a long while is presumed lost (a
+    // fetch has no timeout of its own, and a phone changing networks can
+    // leave one hanging), so it is superseded rather than waited for.
+    if (inFlight.current && Date.now() - startedAt.current < staleLoadMS) again.current = true;
     else setRound((value) => value + 1);
   }, [refresh]);
 
@@ -138,6 +141,9 @@ export function useCurrentLoad<T>(key: string, refresh: string, load: () => Prom
     latest.current++;
   }, []);
 }
+
+/** How long useCurrentLoad waits on one request before a refresh replaces it. */
+const staleLoadMS = 60_000;
 
 function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppViewContext) {
   const [query, setQuery] = useState("");
@@ -394,19 +400,16 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
   const link = useLink(navigate);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.recipe(id).then((next) => {
-      if (cancelled) return;
+  useCurrentLoad(
+    String(id),
+    String(mailGeneration),
+    () => recipeAPI.recipe(id),
+    (next) => {
       setRecipe(next.recipe);
       setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [id, mailGeneration]);
+    },
+    (err) => setError(messageFromError(err)),
+  );
 
   useEffect(() => {
     if (recipe) headingRef.current?.focus();
