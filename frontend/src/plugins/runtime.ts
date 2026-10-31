@@ -53,6 +53,15 @@ export type RuntimeAppViewContext = {
   datePrefs: DatePrefs;
   navigate: Navigate;
   addToast: AddToast;
+  /**
+   * messageFiledTo names the folder the reader has just filed a message into
+   * (`filedMessageDestination`), 0 when they have not. A page drawing
+   * something built from a message can leave it out the moment the reader
+   * deletes the mail elsewhere, rather than for the undo window and the move
+   * behind it. The function is replaced whenever a filing changes, so a page
+   * memoizing on it recomputes then.
+   */
+  messageFiledTo: (messageID: number) => number;
 };
 
 /**

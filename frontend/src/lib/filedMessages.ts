@@ -242,6 +242,19 @@ export function filedMessageIDs(): number[] {
 }
 
 /**
+ * filedMessageDestination names the folder a live filing is sending a message
+ * to: 0 when nothing is recorded for it, when the record has aged out, and for
+ * a message the server no longer has. It is for a view that draws something
+ * other than the message's row - a plugin's note about the message - and has
+ * to know where the reader sent it before the move behind the filing lands.
+ */
+export function filedMessageDestination(messageID: number): number {
+  const record = records.get(messageID);
+  if (!record || record.at <= Date.now() - filedMessageTTLMS) return 0;
+  return record.to;
+}
+
+/**
  * messageIsFiled reports whether a row should stay off screen. A record with no
  * destination is a message the server no longer has, and hides it everywhere;
  * otherwise the row is hidden only while it still claims the folder it was

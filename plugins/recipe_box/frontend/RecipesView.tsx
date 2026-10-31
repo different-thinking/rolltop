@@ -402,6 +402,8 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState<Set<number>>(() => new Set());
   const link = useLink(navigate);
+  // A mail opened from here comes back to this recipe, not to All Mail.
+  const mailURL = (messageID: number) => messageURL(messageID, "", [], `${recipesPath}/${id}`);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   useCurrentLoad(
@@ -561,7 +563,7 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
             {recipe.mails.map((mail, index) => (
               <li key={`${mail.message_id}-${index}`}>
                 {mail.message_id ? (
-                  <a href={messageURL(mail.message_id)} onClick={link(messageURL(mail.message_id))}>{mail.subject || "(no subject)"}</a>
+                  <a href={mailURL(mail.message_id)} onClick={link(mailURL(mail.message_id))}>{mail.subject || "(no subject)"}</a>
                 ) : <span>{mail.subject || "(no subject)"}</span>}
                 <small className="muted">
                   {dateLabel(mail.date_unix, datePrefs)}

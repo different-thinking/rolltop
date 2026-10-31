@@ -118,8 +118,16 @@ func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words [
 	// side, not on the note's: the index that serves it is partial on exactly
 	// that predicate, and a planner that cannot see it there scans every
 	// message the reader has once per note -- seconds per hundred notes.
+	//
+	// The copy a note opens is the one that holds it (copyHoldsNote), newest
+	// first, and a Sent or Trash copy only when nothing else is left: the mail
+	// view's Delete acts on the folder of the copy it opened, so opening the
+	// Sent copy made Delete leave the note itself where it was, and opening the
+	// Trash copy greyed Delete out altogether.
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.subject, m.date_unix, CASE WHEN m.body <> '' THEN m.body ELSE m.note END, m.done_at, m.move_state,
-			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header),
+			COALESCE((SELECT x.id FROM messages x JOIN mailboxes xb ON xb.id = x.mailbox_id AND xb.user_id = x.user_id
+				WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header
+				ORDER BY CASE WHEN LOWER(xb.role) IN ('trash', 'junk', 'drafts', 'sent') THEN 1 ELSE 0 END, x.id DESC LIMIT 1),
 				(SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.note_dismissed = 0 AND `+state+` AND NOT `+carriesRecipe+`

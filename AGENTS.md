@@ -409,6 +409,17 @@ site and in review.
   moved. A note waits for every page it links to (`awaitsPage`) before it is
   filed, so a mail is never put in the notes folder and then turns out to have
   carried a recipe.
+- **A note is its mail, so deleting the mail anywhere deletes the note**
+  (`ObserveMessageMove` in `plugins/recipe_box/backend/observe.go`). A move into
+  Trash dismisses the note once no copy is left outside Trash, Junk, Sent and
+  Drafts (`copyHoldsNote`); a copy still in a folder the reader reads keeps it.
+  It only ever dismisses -- restoring the mail does not bring the note back, as
+  after the note's own Delete. The mail a note opens is a copy that holds it,
+  never the Sent or Trash copy while another exists, because the mail view's
+  Delete acts on the folder of the copy it opened. It opens with the notes as
+  its way back (`messageURL`'s `back`), and the notes page leaves the note out
+  the moment the reader files its mail into Trash (`messageFiledTo` in
+  `RuntimeAppViewContext`), not when the move behind the undo window lands.
 - **A plugin's stylesheet is asked for until it arrives.** Its module and its
   stylesheet are two requests, and a page can get the module without the
   stylesheet - a dropped connection, a server busy for a moment. The module

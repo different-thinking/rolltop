@@ -1,6 +1,7 @@
 // File overview: Small route switch for the single-page app. It translates the parsed location
 // into feature views while passing only the shared state each view needs.
 
+import { useCallback, useEffect, useState } from "react";
 import type { AddToast, LocationState, SecurityUnlockState } from "./appTypes";
 import type { AccountMailboxChoice, Bootstrap, MailCategorySummary, Mailbox, SwipePreferences, SyncRun, ThemeDefinition, User } from "./types";
 import { MailView, SearchView, SnoozedView } from "./features/mail/MailViews";
@@ -14,7 +15,8 @@ import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/S
 import { ActivityView } from "./features/activity/ActivityView";
 import { AdminDatabaseView } from "./features/settings/admin/DatabasePanel";
 import { appViewRoute, mailRouteView, organizerRoute } from "./lib/routes";
-import { matchAppView, type RuntimePlugins } from "./plugins/runtime";
+import { filedMessageDestination, subscribeFiledMessages } from "./lib/filedMessages";
+import { matchAppView, type RuntimeAppView, type RuntimeAppViewContext, type RuntimePlugins } from "./plugins/runtime";
 import { securityUnlockPlugin } from "./plugins/securityUnlock";
 
 /**
@@ -142,7 +144,7 @@ export function RouteView({
     if (appViewRoute(location.path)) {
       const view = matchAppView(runtimePlugins, location.path);
       if (view) {
-        return <>{view.render({ csrf, user, mailboxes, location, mailGeneration, datePrefs: user, navigate, addToast })}</>;
+        return <PluginAppView view={view} context={{ csrf, user, mailboxes, location, mailGeneration, datePrefs: user, navigate, addToast }} />;
       }
       // Plugins load after the first render, so the subtree is answered with a
       // wait until they have, and only then with the plugin being absent.
@@ -191,4 +193,18 @@ export function RouteView({
       messageSecurityPlugins={runtimePlugins.all}
     />
   );
+}
+
+/**
+ * PluginAppView renders a plugin's page with the reader's filings in its
+ * context. It follows them itself so that a filing re-renders only the plugin
+ * page on screen, and hands over a new `messageFiledTo` each time one changes.
+ */
+function PluginAppView({ view, context }: { view: RuntimeAppView; context: Omit<RuntimeAppViewContext, "messageFiledTo"> }) {
+  const [filedGeneration, setFiledGeneration] = useState(0);
+  useEffect(() => subscribeFiledMessages(() => setFiledGeneration((current) => current + 1)), []);
+  // The generation is the dependency on purpose: the records live outside
+  // React, and a new function is what tells the page they changed.
+  const messageFiledTo = useCallback((messageID: number) => filedMessageDestination(messageID), [filedGeneration]);
+  return <>{view.render({ ...context, messageFiledTo })}</>;
 }

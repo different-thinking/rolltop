@@ -15,7 +15,7 @@ import { displayDateTime } from "../../../frontend/src/lib/format";
 import { messageURL } from "../../../frontend/src/lib/routes";
 import type { RuntimeAppViewContext } from "../../../frontend/src/plugins/runtime";
 import { hostOf, messageFromError, recipeAPI, type Note, type NoteLink, type NotesResponse } from "./api";
-import { dateLabel, recipesPath, settingsPath, useCurrentLoad, useLink, useStatus } from "./RecipesView";
+import { dateLabel, notesPath, recipesPath, settingsPath, useCurrentLoad, useLink, useStatus } from "./RecipesView";
 
 /** The shelves, in the order the overview draws them, with what they are called. */
 export const noteKinds: { kind: string; label: string; icon: string }[] = [
@@ -44,12 +44,12 @@ const overviewPerShelf = 4;
 
 type NoteAction = "done" | "reopen" | "remove" | "delete" | "recipe" | "retry";
 
-export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration }: RuntimeAppViewContext) {
+export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration, mailboxes, messageFiledTo }: RuntimeAppViewContext) {
   const [state, setState] = useState<"open" | "done">("open");
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
   const [kind, setKind] = useState("");
-  const [data, setData] = useState<NotesResponse | null>(null);
+  const [loaded, setData] = useState<NotesResponse | null>(null);
   const [error, setError] = useState("");
   const [busyIDs, setBusyIDs] = useState<Set<number>>(() => new Set());
   const [reloadKey, setReloadKey] = useState(0);
@@ -75,6 +75,12 @@ export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration 
   );
 
   const reload = useCallback(() => setReloadKey((value) => value + 1), []);
+  // A note is its mail, so mail the reader has just deleted from the mail view
+  // takes its note along at once. The server drops the note when the move lands
+  // (ObserveMessageMove), which is the undo window and the move later; until
+  // then the filing says where the mail went, and an undo gives it back.
+  const trashIDs = useMemo(() => new Set(mailboxes.filter((mailbox) => mailbox.role === "trash").map((mailbox) => mailbox.id)), [mailboxes]);
+  const data = useMemo(() => withoutTrashedNotes(loaded, (note) => note.message_id > 0 && trashIDs.has(messageFiledTo(note.message_id))), [loaded, trashIDs, messageFiledTo]);
   const notes = data?.notes || [];
   const shown = useMemo(() => (kind ? notes.filter((note) => note.kind === kind) : notes), [notes, kind]);
   const shelves = useMemo(() => noteKinds.filter((entry) => (data?.counts[entry.kind] || 0) > 0), [data]);
@@ -255,6 +261,9 @@ function NoteRow({
   const site = siteName !== title ? siteName : "";
   const detail = first ? detailLabel(first, datePrefs) : "";
   const busy = busyIDs.has(note.id);
+  // The mail opens with the notes as its way back: Back, and the return a
+  // Delete makes there, would otherwise land in All Mail.
+  const mailURL = note.message_id ? messageURL(note.message_id, "", [], notesPath) : "";
   // A note that is all text shows its text; a link note shows what the reader
   // wrote beside the link, and the page's description only when they wrote
   // nothing.
@@ -277,7 +286,7 @@ function NoteRow({
         <span className="notes-row-meta">
           {site ? <span>{site}</span> : null}
           {note.date_unix ? <span>{dateLabel(note.date_unix, datePrefs)}</span> : null}
-          {note.message_id ? <a href={messageURL(note.message_id)} onClick={link(messageURL(note.message_id))}>{note.subject && first ? note.subject : "Open mail"}</a> : null}
+          {mailURL ? <a href={mailURL} onClick={link(mailURL)}>{note.subject && first ? note.subject : "Open mail"}</a> : null}
           {note.filed ? <span>filed</span> : null}
           {first && first.status === "pending" ? <span>reading the page…</span> : null}
         </span>
@@ -314,6 +323,24 @@ function NoteRow({
       </div>
     </article>
   );
+}
+
+/**
+ * withoutTrashedNotes leaves out the notes the reader has just sent to Trash,
+ * with the counts the shelves and tabs print taken down to match.
+ */
+function withoutTrashedNotes(data: NotesResponse | null, trashed: (note: Note) => boolean): NotesResponse | null {
+  if (!data) return data;
+  const gone = data.notes.filter(trashed);
+  if (gone.length === 0) return data;
+  const counts = { ...data.counts };
+  const totals = { ...data.totals };
+  gone.forEach((note) => {
+    counts[note.kind] = Math.max(0, (counts[note.kind] || 1) - 1);
+    const state = note.done_at ? "done" : "open";
+    totals[state] = Math.max(0, (totals[state] || 1) - 1);
+  });
+  return { ...data, notes: data.notes.filter((note) => !trashed(note)), counts, totals };
 }
 
 /** The kinds of page a recipe can hide in without saying so. */
