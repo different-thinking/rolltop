@@ -65,23 +65,8 @@ func dismissNotesOfTrashedMail(ctx context.Context, db *sql.DB, userID, accountI
 		}
 		key = messageKey(accountID, messageID, "", contentSHA)
 	}
-	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id
-		FROM plugin_recipe_box_mails m
-		WHERE m.user_id = ? AND m.message_key = ? AND m.note_dismissed = 0 AND NOT `+carriesRecipe, userID, key)
+	notes, err := listedNotesByKey(ctx, db, userID, key)
 	if err != nil {
-		return 0, err
-	}
-	var notes []pendingMail
-	for rows.Next() {
-		var mail pendingMail
-		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		notes = append(notes, mail)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return 0, err
 	}
 	dismissed := 0
@@ -109,6 +94,28 @@ func dismissNotesOfTrashedMail(ctx context.Context, db *sql.DB, userID, accountI
 		}
 	}
 	return dismissed, nil
+}
+
+// listedNotesByKey reads the listed notes a mail key names. The rows are read
+// to the end and closed here, before the caller asks anything else of the
+// database for each note.
+func listedNotesByKey(ctx context.Context, db *sql.DB, userID int64, key string) ([]pendingMail, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id
+		FROM plugin_recipe_box_mails m
+		WHERE m.user_id = ? AND m.message_key = ? AND m.note_dismissed = 0 AND NOT `+carriesRecipe, userID, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var notes []pendingMail
+	for rows.Next() {
+		var mail pendingMail
+		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID); err != nil {
+			return nil, err
+		}
+		notes = append(notes, mail)
+	}
+	return notes, rows.Err()
 }
 
 // copyHoldsNote reports whether a copy left behind still keeps the note: the
