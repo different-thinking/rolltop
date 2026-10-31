@@ -95,8 +95,12 @@ export function useStatus(mailGeneration: number) {
  * "Loading…" for as long as the box was busy.
  */
 export function useCurrentLoad<T>(key: string, refresh: string, load: () => Promise<T>, apply: (value: T) => void, fail: (err: unknown) => void) {
+  // The handlers are taken from the render that committed, never from one
+  // React discarded; declared first, this runs ahead of the load below.
   const handlers = useRef({ load, apply, fail });
-  handlers.current = { load, apply, fail };
+  useEffect(() => {
+    handlers.current = { load, apply, fail };
+  });
   const latest = useRef(0);
   const inFlight = useRef(false);
   const startedAt = useRef(0);
