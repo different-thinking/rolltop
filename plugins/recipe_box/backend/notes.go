@@ -114,8 +114,12 @@ func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words [
 		args = append(args, pattern, pattern)
 	}
 	args = append(args, noteListLimit)
+	// The Message-ID lookup names x.message_id_header <> '' on the messages
+	// side, not on the note's: the index that serves it is partial on exactly
+	// that predicate, and a planner that cannot see it there scans every
+	// message the reader has once per note -- seconds per hundred notes.
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.subject, m.date_unix, CASE WHEN m.body <> '' THEN m.body ELSE m.note END, m.done_at, m.move_state,
-			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND m.message_id_header <> '' AND x.message_id_header = m.message_id_header),
+			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header),
 				(SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.note_dismissed = 0 AND `+state+` AND NOT `+carriesRecipe+`

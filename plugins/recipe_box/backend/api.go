@@ -465,10 +465,11 @@ func loadRecipe(ctx context.Context, db *sql.DB, userID, id int64) (RecipeDetail
 // recipeMails lists the mails that shared a recipe, each resolved to the row
 // it is stored as now. A mail is followed by its Message-ID, because the row
 // it was found as is gone the moment it is filed and the folder's sync stores
-// it again under a new one.
+// it again under a new one. The lookup tests the messages side for an empty
+// header, for the partial index that serves it, as loadNotes does.
 func recipeMails(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]RecipeMail, error) {
 	rows, err := db.QueryContext(ctx, `SELECT DISTINCT m.id, m.message_id, m.message_id_header, m.subject, m.date_unix, m.note, m.move_state, m.move_error,
-			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND m.message_id_header <> '' AND x.message_id_header = m.message_id_header), 0),
+			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header), 0),
 			COALESCE((SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		JOIN plugin_recipe_box_mail_links ml ON ml.mail_id = m.id AND ml.user_id = m.user_id

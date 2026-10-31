@@ -69,15 +69,10 @@ export function dateLabel(unix: number, prefs: DatePrefs): string {
 export function useStatus(mailGeneration: number) {
   const [status, setStatus] = useState<SettingsResponse | null>(null);
   const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.settings().then((next) => {
-      if (!cancelled) setStatus(next);
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [mailGeneration, tick]);
+  // The status is refreshed on the same terms as the lists: a tick or a mail
+  // change waits for the request in flight instead of discarding it, or a
+  // status slower than the tick would never arrive and `busy` never clear.
+  useCurrentLoad("status", `${mailGeneration}:${tick}`, () => recipeAPI.settings(), setStatus, () => undefined);
   const busy = Boolean(status && status.settings.enabled && (
     !status.settings.scan_finished_at || (status.status.links.pending || 0) > 0
   ));
@@ -88,6 +83,71 @@ export function useStatus(mailGeneration: number) {
   }, [busy, tick]);
   return { status, busy, tick };
 }
+
+/**
+ * useCurrentLoad keeps one view's list current. A change of what is asked for
+ * (`key`: the search, the shelf, a reload after an action) supersedes the
+ * request in flight, so a slow earlier answer never draws over a later
+ * question. A background refresh (`refresh`: the status tick, a mail change)
+ * does not: it waits for the request in flight and is asked once after it.
+ * Superseding on every refresh meant a list slower to arrive than the status
+ * tick never arrived at all -- a phone on a mobile connection showed
+ * "Loading…" for as long as the box was busy.
+ */
+export function useCurrentLoad<T>(key: string, refresh: string, load: () => Promise<T>, apply: (value: T) => void, fail: (err: unknown) => void) {
+  // The handlers are taken from the render that committed, never from one
+  // React discarded; declared first, this runs ahead of the load below.
+  const handlers = useRef({ load, apply, fail });
+  useEffect(() => {
+    handlers.current = { load, apply, fail };
+  });
+  const latest = useRef(0);
+  const inFlight = useRef(false);
+  const startedAt = useRef(0);
+  const again = useRef(false);
+  const lastRefresh = useRef(refresh);
+  const [round, setRound] = useState(0);
+
+  useEffect(() => {
+    const id = ++latest.current;
+    inFlight.current = true;
+    startedAt.current = Date.now();
+    again.current = false;
+    // This request answers the refresh in force now, so a refresh that
+    // changed in the same render as the key needs no second request.
+    lastRefresh.current = refresh;
+    handlers.current.load().then((value) => {
+      if (latest.current === id) handlers.current.apply(value);
+    }, (err) => {
+      if (latest.current === id) handlers.current.fail(err);
+    }).finally(() => {
+      if (latest.current !== id) return;
+      inFlight.current = false;
+      if (again.current) {
+        again.current = false;
+        setRound((value) => value + 1);
+      }
+    });
+  }, [key, round]);
+
+  useEffect(() => {
+    if (lastRefresh.current === refresh) return;
+    lastRefresh.current = refresh;
+    // A request that has not answered in a long while is presumed lost (a
+    // fetch has no timeout of its own, and a phone changing networks can
+    // leave one hanging), so it is superseded rather than waited for.
+    if (inFlight.current && Date.now() - startedAt.current < staleLoadMS) again.current = true;
+    else setRound((value) => value + 1);
+  }, [refresh]);
+
+  // An answer landing after the view is gone is dropped.
+  useEffect(() => () => {
+    latest.current++;
+  }, []);
+}
+
+/** How long useCurrentLoad waits on one request before a refresh replaces it. */
+const staleLoadMS = 60_000;
 
 function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppViewContext) {
   const [query, setQuery] = useState("");
@@ -114,20 +174,17 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
   const [reloadKey, setReloadKey] = useState(0);
   const load = useCallback(() => setReloadKey((value) => value + 1), []);
 
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.recipes(appliedQuery, view).then((next) => {
-      if (cancelled) return;
+  useCurrentLoad(
+    JSON.stringify([appliedQuery, view, reloadKey]),
+    `${mailGeneration}:${tick}`,
+    () => recipeAPI.recipes(appliedQuery, view),
+    (next) => {
       setRecipes(next.recipes);
       setCounts(next.counts || null);
       setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [appliedQuery, view, mailGeneration, tick, reloadKey]);
+    },
+    (err) => setError(messageFromError(err)),
+  );
 
   const filters = useMemo(() => recipeFilters(recipes || []), [recipes]);
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
@@ -347,19 +404,16 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
   const link = useLink(navigate);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.recipe(id).then((next) => {
-      if (cancelled) return;
+  useCurrentLoad(
+    String(id),
+    String(mailGeneration),
+    () => recipeAPI.recipe(id),
+    (next) => {
       setRecipe(next.recipe);
       setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [id, mailGeneration]);
+    },
+    (err) => setError(messageFromError(err)),
+  );
 
   useEffect(() => {
     if (recipe) headingRef.current?.focus();

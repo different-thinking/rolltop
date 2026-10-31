@@ -110,7 +110,8 @@ func storedCopies(ctx context.Context, db *sql.DB, userID int64, mail pendingMai
 	args := []any{userID}
 	switch {
 	case strings.HasPrefix(mail.Key, "mid:") && mail.Header != "":
-		query += `m.message_id_header = ?`
+		// The empty-header test is for the partial index on the column.
+		query += `m.message_id_header <> '' AND m.message_id_header = ?`
 		args = append(args, mail.Header)
 	case strings.HasPrefix(mail.Key, "sha:") && mail.ContentSHA != "":
 		// A mail without a Message-ID is followed by its content inside its

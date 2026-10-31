@@ -15,7 +15,7 @@ import { displayDateTime } from "../../../frontend/src/lib/format";
 import { messageURL } from "../../../frontend/src/lib/routes";
 import type { RuntimeAppViewContext } from "../../../frontend/src/plugins/runtime";
 import { hostOf, messageFromError, recipeAPI, type Note, type NoteLink, type NotesResponse } from "./api";
-import { dateLabel, recipesPath, settingsPath, useLink, useStatus } from "./RecipesView";
+import { dateLabel, recipesPath, settingsPath, useCurrentLoad, useLink, useStatus } from "./RecipesView";
 
 /** The shelves, in the order the overview draws them, with what they are called. */
 export const noteKinds: { kind: string; label: string; icon: string }[] = [
@@ -63,19 +63,16 @@ export function NotesView({ csrf, navigate, addToast, datePrefs, mailGeneration 
 
   // Each answer is for the state and search it was asked with; a slower
   // earlier one must not replace what the reader is now looking at.
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.notes(state, appliedQuery).then((next) => {
-      if (cancelled) return;
+  useCurrentLoad(
+    JSON.stringify([state, appliedQuery, reloadKey]),
+    `${mailGeneration}:${tick}`,
+    () => recipeAPI.notes(state, appliedQuery),
+    (next) => {
       setData(next);
       setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [state, appliedQuery, mailGeneration, tick, reloadKey]);
+    },
+    (err) => setError(messageFromError(err)),
+  );
 
   const reload = useCallback(() => setReloadKey((value) => value + 1), []);
   const notes = data?.notes || [];
