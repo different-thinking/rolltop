@@ -118,8 +118,20 @@ func loadNotes(ctx context.Context, db *sql.DB, userID int64, done bool, words [
 	// side, not on the note's: the index that serves it is partial on exactly
 	// that predicate, and a planner that cannot see it there scans every
 	// message the reader has once per note -- seconds per hundred notes.
+	//
+	// The copy a note opens is the one that holds it (copyHoldsNote), newest
+	// first, and a Sent or Trash copy only when nothing else is left: the mail
+	// view's Delete acts on the folder of the copy it opened, so opening the
+	// Sent copy made Delete leave the note itself where it was, and opening the
+	// Trash copy greyed Delete out altogether. A mirrored Gmail label view
+	// (All Mail, Important) comes after a real folder for the same reason: the
+	// thread view draws the real folder's row in its place, and the id the
+	// note opened is then not the message Delete acts on.
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.subject, m.date_unix, CASE WHEN m.body <> '' THEN m.body ELSE m.note END, m.done_at, m.move_state,
-			COALESCE((SELECT MAX(x.id) FROM messages x WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header),
+			COALESCE((SELECT x.id FROM messages x JOIN mailboxes xb ON xb.id = x.mailbox_id AND xb.user_id = x.user_id
+				WHERE x.user_id = m.user_id AND x.message_id_header <> '' AND x.message_id_header = m.message_id_header
+				ORDER BY CASE WHEN LOWER(xb.role) IN ('trash', 'junk', 'drafts', 'sent') THEN 2
+					WHEN LOWER(xb.name) LIKE '[gmail]/%' OR LOWER(xb.name) LIKE '[google mail]/%' THEN 1 ELSE 0 END, x.id DESC LIMIT 1),
 				(SELECT x.id FROM messages x WHERE x.user_id = m.user_id AND x.id = m.message_id), 0)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND m.note_dismissed = 0 AND `+state+` AND NOT `+carriesRecipe+`
@@ -361,8 +373,7 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 			moved++
 		}
 	}
-	now := time.Now().UTC().Unix()
-	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_mails SET note_dismissed = 1, updated_at = ? WHERE user_id = ? AND id = ?`, now, userID, id); err != nil {
+	if _, err := dismissNote(ctx, db, userID, id); err != nil {
 		host.ServerError(w, err)
 		return
 	}
@@ -370,6 +381,18 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 		notifier.NotifyUserChanged(userID)
 	}
 	host.WriteJSON(w, map[string]any{"ok": true, "moved": moved})
+}
+
+// dismissNote takes a note off the shelf for good, whichever way its mail was
+// deleted, and reports whether it was still listed.
+func dismissNote(ctx context.Context, db *sql.DB, userID, id int64) (bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_mails SET note_dismissed = 1, updated_at = ? WHERE user_id = ? AND id = ? AND note_dismissed = 0`,
+		time.Now().UTC().Unix(), userID, id)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed > 0, err
 }
 
 // deleteKeeps reports whether Delete leaves a copy where it is: what is in
