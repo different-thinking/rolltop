@@ -89,6 +89,56 @@ export function useStatus(mailGeneration: number) {
   return { status, busy, tick };
 }
 
+/**
+ * useCurrentLoad keeps one view's list current. A change of what is asked for
+ * (`key`: the search, the shelf, a reload after an action) supersedes the
+ * request in flight, so a slow earlier answer never draws over a later
+ * question. A background refresh (`refresh`: the status tick, a mail change)
+ * does not: it waits for the request in flight and is asked once after it.
+ * Superseding on every refresh meant a list slower to arrive than the status
+ * tick never arrived at all -- a phone on a mobile connection showed
+ * "Loading…" for as long as the box was busy.
+ */
+export function useCurrentLoad<T>(key: string, refresh: string, load: () => Promise<T>, apply: (value: T) => void, fail: (err: unknown) => void) {
+  const handlers = useRef({ load, apply, fail });
+  handlers.current = { load, apply, fail };
+  const latest = useRef(0);
+  const inFlight = useRef(false);
+  const again = useRef(false);
+  const [round, setRound] = useState(0);
+
+  useEffect(() => {
+    const id = ++latest.current;
+    inFlight.current = true;
+    again.current = false;
+    handlers.current.load().then((value) => {
+      if (latest.current === id) handlers.current.apply(value);
+    }, (err) => {
+      if (latest.current === id) handlers.current.fail(err);
+    }).finally(() => {
+      if (latest.current !== id) return;
+      inFlight.current = false;
+      if (again.current) {
+        again.current = false;
+        setRound((value) => value + 1);
+      }
+    });
+  }, [key, round]);
+
+  const lastRefresh = useRef(refresh);
+  useEffect(() => {
+    if (lastRefresh.current === refresh) return;
+    lastRefresh.current = refresh;
+    if (inFlight.current) again.current = true;
+    else setRound((value) => value + 1);
+  }, [refresh]);
+
+  // An answer landing after the view is gone is dropped.
+  useEffect(() => () => {
+    latest.current++;
+  }, []);
+}
+
 function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppViewContext) {
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
@@ -114,20 +164,17 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
   const [reloadKey, setReloadKey] = useState(0);
   const load = useCallback(() => setReloadKey((value) => value + 1), []);
 
-  useEffect(() => {
-    let cancelled = false;
-    recipeAPI.recipes(appliedQuery, view).then((next) => {
-      if (cancelled) return;
+  useCurrentLoad(
+    JSON.stringify([appliedQuery, view, reloadKey]),
+    `${mailGeneration}:${tick}`,
+    () => recipeAPI.recipes(appliedQuery, view),
+    (next) => {
       setRecipes(next.recipes);
       setCounts(next.counts || null);
       setError("");
-    }).catch((err) => {
-      if (!cancelled) setError(messageFromError(err));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [appliedQuery, view, mailGeneration, tick, reloadKey]);
+    },
+    (err) => setError(messageFromError(err)),
+  );
 
   const filters = useMemo(() => recipeFilters(recipes || []), [recipes]);
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
