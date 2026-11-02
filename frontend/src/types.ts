@@ -132,6 +132,8 @@ export type Message = {
   /** shipment is absent for the mail that is not about a parcel, which is
    * nearly all of it. */
   shipment?: MessageShipmentSummary;
+  /** trip is the ticket this message carries, with every leg. */
+  trip?: MessageTripSummary;
 };
 
 /** MessageAnnotation is compact, non-sensitive metadata supplied by an enabled backend plugin. */
@@ -1066,6 +1068,57 @@ export type SMTPTestResult = {
   error?: string;
   session?: SMTPLogSession;
 };
+
+/** TripKind is what a ticket is for. */
+export type TripKind = "flight" | "train" | "bus" | "event";
+
+/** TripSegment is one leg of a trip: one flight, train, coach, or event. start
+ * and end are the times the ticket printed, "YYYY-MM-DDTHH:MM", or a plain day
+ * for an event without a time (all_day); start_at and end_at are the same
+ * moments as instants, empty when the mail did not say which zone it meant --
+ * the wall clock is then read in the reader's own zone. */
+export type TripSegment = {
+  id: number;
+  kind: TripKind;
+  number: string;
+  title: string;
+  provider: string;
+  from: string;
+  from_code: string;
+  to: string;
+  to_code: string;
+  venue: string;
+  address: string;
+  start: string;
+  start_at: string;
+  end: string;
+  end_at: string;
+  all_day: boolean;
+  seat: string;
+  /** seat_only marks a seat reservation without a ticket. */
+  seat_only: boolean;
+  cancelled: boolean;
+  /** from_calendar_object marks a leg read from the message's own .ics. */
+  from_calendar_object: boolean;
+  /** calendar_event_id is the event the reader created from this leg. */
+  calendar_event_id: number;
+  calendar_start: string;
+  calendar_all_day: boolean;
+};
+
+/** Trip is one booking the mail carried, with every message that named it. */
+export type Trip = {
+  id: number;
+  kind: TripKind;
+  reference: string;
+  provider: string;
+  segments: TripSegment[];
+  messages: ShipmentMessage[];
+};
+
+/** MessageTripSummary is the trip one message carries; count says how many it
+ * named. */
+export type MessageTripSummary = Trip & { count: number };
 
 /** MessageShipmentSummary is the parcel one message is about, as the message
  * payload carries it. count says how many the message named; the other fields

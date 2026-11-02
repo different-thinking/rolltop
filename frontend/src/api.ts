@@ -10,6 +10,7 @@ import type {
   CalendarEventInput,
   CalendarSummary,
   Shipment,
+  Trip,
   Invoice,
   Contact,
   ContactAutocomplete,
@@ -1168,6 +1169,16 @@ export const api = {
     postJSON<{ shipment: Shipment }>(`/api/deliveries/${id}`, csrf, { manual_status: manualStatus }),
   expectedDeliveries: (day: string) =>
     getJSON<{ count: number; carrier_label: string }>(`/api/deliveries/expected?${new URLSearchParams({ day })}`),
+  // Tickets the mail carried. The day travels for the parcel list's reason.
+  trips: (day: string) => getJSON<{ trips: Trip[] }>(`/api/trips?${new URLSearchParams({ day })}`),
+  tripsToAdd: (day: string) =>
+    getJSON<{ count: number; title: string }>(`/api/trips/pending?${new URLSearchParams({ day })}`),
+  setTripManualStatus: (csrf: string, id: number, manualStatus: "" | "dismissed") =>
+    postJSON<{ ok: boolean }>(`/api/trips/${id}`, csrf, { manual_status: manualStatus }),
+  // Records the event the reader created from some legs through the event
+  // dialog, so the trip shows as in the calendar.
+  linkTripToCalendar: (csrf: string, id: number, segmentIDs: number[], eventID: number) =>
+    postJSON<{ trip: Trip }>(`/api/trips/${id}/calendar`, csrf, { segment_ids: segmentIDs, event_id: eventID }),
   // The day travels for the same reason it does above. An invoice list differs
   // from a parcel list in what it does with the day, not in who knows it: a
   // parcel stops being today's news tomorrow, an unpaid bill becomes overdue.

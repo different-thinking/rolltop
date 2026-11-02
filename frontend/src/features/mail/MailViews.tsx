@@ -33,6 +33,7 @@ import { defaultSwipePreferences, rowSwipeAvailable, swipeActionPresentation, sw
 import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip } from "../deliveries/ShipmentChip";
 import { InvoiceChip } from "../invoices/InvoiceChip";
+import { TripChip } from "../trips/TripCard";
 import { SnoozeControl } from "./SnoozeControl";
 import { ArchiveBeforeControl, DeleteBeforeControl, EmptyTrashControl } from "./MailListActions";
 
@@ -3371,6 +3372,7 @@ function MessageList({
                 {annotationNodes}
                 {msg.shipment ? <ShipmentChip shipment={msg.shipment} /> : null}
                 {msg.invoice ? <InvoiceChip invoice={msg.invoice} /> : null}
+                {msg.trip ? <TripChip trip={msg.trip} /> : null}
                 {attachmentNames.length > 0 ? (
                   <span className={`attachment-preview ${attachmentMatches.length > 0 || conversation.attachment_content_matched ? "matched" : ""}`}>
                     <Icon name="attach_file" />

@@ -178,6 +178,9 @@ type Server struct {
 	calendarPushScheduleMu    sync.Mutex
 	calendarPushRunning       map[int64]bool
 	calendarPushDirty         map[int64]bool
+	tripPushScheduleMu        sync.Mutex
+	tripPushRunning           map[int64]bool
+	tripPushDirty             map[int64]bool
 	calendarReminderWake      chan struct{}
 	// calendarReminderDirty names the users whose calendars changed since the
 	// reminder loop last looked, so a wake re-reads them alone rather than
@@ -476,6 +479,8 @@ func New(opts Options) (*Server, error) {
 		snoozeSchedulerWake:       make(chan struct{}, 1),
 		calendarPushRunning:       map[int64]bool{},
 		calendarPushDirty:         map[int64]bool{},
+		tripPushRunning:           map[int64]bool{},
+		tripPushDirty:             map[int64]bool{},
 		calendarReminderWake:      make(chan struct{}, 1),
 		calendarReminderDirty:     map[int64]bool{},
 		retentionSchedulerWake:    make(chan struct{}, 1),
@@ -531,6 +536,7 @@ func New(opts Options) (*Server, error) {
 		srv.resumeNewMailWebPushAsync()
 		srv.resumeSnoozeReminderWebPushAsync()
 		srv.resumeCalendarReminderWebPushAsync()
+		srv.resumeTripWebPushAsync()
 		srv.startSnoozeScheduler()
 		srv.startCalendarReminderScheduler()
 		srv.startRetentionScheduler()

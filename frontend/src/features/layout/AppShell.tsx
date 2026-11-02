@@ -23,6 +23,7 @@ import { createPluginSet } from "../../plugins/registry";
 import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete";
 import { useExpectedDeliveries, type ExpectedDeliveries } from "../deliveries/useExpectedDeliveries";
 import { useDueInvoices, type DueInvoices } from "../invoices/useDueInvoices";
+import { useTripsToAdd, type TripsToAdd } from "../trips/useTripsToAdd";
 
 /**
  * AppShell renders everything that survives route changes after login: topbar,
@@ -775,6 +776,7 @@ function Topbar({
   // only there when something is coming is the notice it is meant to be.
   const expectedDeliveries = useExpectedDeliveries(mailGeneration);
   const dueInvoices = useDueInvoices(mailGeneration);
+  const tripsToAdd = useTripsToAdd(mailGeneration);
   // Named after the manifest the offer was made for, not the route: the route
   // changes a render before the manifest link follows it and drops the offer.
   useInstallMenu();
@@ -910,6 +912,17 @@ function Topbar({
             <span className="invoice-chip-button-label">{invoiceChipLabel(dueInvoices)}</span>
           </button>
         ) : null}
+        {tripsToAdd.count > 0 ? (
+          <button
+            className="trip-chip-button"
+            type="button"
+            title={tripChipTitle(tripsToAdd)}
+            onClick={() => navigate("/trips")}
+          >
+            <Icon name="ticket" weight="fill" />
+            <span className="trip-chip-button-label">{tripChipLabel(tripsToAdd)}</span>
+          </button>
+        ) : null}
         {securityUnlockAvailable ? (
           <button
             className={securityUnlocked ? "ghost security-lock-toggle active" : "ghost security-lock-toggle"}
@@ -1007,6 +1020,19 @@ function deliveryChipTitle(expected: ExpectedDeliveries): string {
     ? `A parcel${expected.carrierLabel ? ` from ${expected.carrierLabel}` : ""} is expected today`
     : `${expected.count.toLocaleString()} parcels are expected today`;
   return `${what} - see every shipment`;
+}
+
+// tripChipLabel names one ticket by its first leg and several by their count.
+function tripChipLabel(pending: TripsToAdd): string {
+  if (pending.count === 1) return `Add to calendar: ${pending.title || "1 ticket"}`;
+  return `${pending.count.toLocaleString()} tickets to add`;
+}
+
+function tripChipTitle(pending: TripsToAdd): string {
+  const what = pending.count === 1
+    ? `A ticket${pending.title ? ` for ${pending.title}` : ""} is not in your calendar yet`
+    : `${pending.count.toLocaleString()} tickets are not in your calendar yet`;
+  return `${what} - see every trip`;
 }
 
 // invoiceChipLabel says the one thing that changes a reader's afternoon first.
@@ -1473,7 +1499,8 @@ const organizerLinks: { route: OrganizerRoute; label: string; icon: string; gap?
   { route: "calendar", label: "Calendar", icon: "calendar" },
   { route: "contacts", label: "Contacts", icon: "group" },
   { route: "deliveries", label: "Parcels", icon: "package", gap: true },
-  { route: "invoices", label: "Invoices", icon: "receipt" }
+  { route: "invoices", label: "Invoices", icon: "receipt" },
+  { route: "trips", label: "Trips & tickets", icon: "ticket" }
 ];
 
 /**

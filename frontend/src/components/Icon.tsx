@@ -16,6 +16,8 @@ import {
   MapPin,
   MusicNotes,
   Ticket,
+  Train,
+  Bus,
   ChefHat,
   CookingPot,
   ForkKnife,
@@ -188,6 +190,8 @@ const iconMap: Record<string, PhosphorIcon> = {
   open_in_new: ArrowSquareOut,
   ticket: Ticket,
   timer: Timer,
+  train: Train,
+  bus: Bus,
   travel: AirplaneTilt,
   video: VideoCamera
 };
