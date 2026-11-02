@@ -9,6 +9,7 @@ import { ThreadView } from "./features/mail/ThreadView";
 import { ComposePage } from "./features/compose/ComposeViews";
 import { ContactsView } from "./features/contacts/ContactsView";
 import { DeliveriesView } from "./features/deliveries/DeliveriesView";
+import { TripsView } from "./features/trips/TripsView";
 import { InvoicesView } from "./features/invoices/InvoicesView";
 import { CalendarView } from "./features/calendar/CalendarView";
 import { SettingsView, AdminUsersView, SyncRunView } from "./features/settings/SettingsViews";
@@ -137,6 +138,9 @@ export function RouteView({
     }
     if (organizerRoute(location.path, "deliveries")) {
       return <DeliveriesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
+    }
+    if (organizerRoute(location.path, "trips")) {
+      return <TripsView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;
     }
     if (organizerRoute(location.path, "invoices")) {
       return <InvoicesView csrf={csrf} datePrefs={user} mailGeneration={mailGeneration} navigate={navigate} addToast={addToast} />;

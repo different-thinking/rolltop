@@ -50,6 +50,7 @@ func (s *Server) notifyUserChanged(userID int64) {
 	s.noteMailListChanged(userID)
 	s.warmAllMailFirstPageAsync(userID)
 	s.notifyNewMailWebPushAsync(userID)
+	s.notifyTripWebPushAsync(userID)
 	if s.events != nil {
 		s.events.Notify(userID)
 	}

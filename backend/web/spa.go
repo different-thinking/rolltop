@@ -407,6 +407,8 @@ var spaRoutes = []spaRoute{
 	// single parcel is a row in it rather than a page of its own.
 	{path: "/deliveries", exact: true},
 	{path: "/invoices", exact: true},
+	// The tickets the mail carried. Exact for the parcel list's reason.
+	{path: "/trips", exact: true},
 	// Views a frontend plugin contributes (RuntimeAppView). The subtree is
 	// claimed as a whole because the plugin, not this table, decides what lives
 	// below it, and an unclaimed path would be answered with a 404 on reload.

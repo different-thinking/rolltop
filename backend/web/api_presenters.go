@@ -452,9 +452,11 @@ func (s *Server) apiThreadMessagesTimed(ctx context.Context, userID int64, views
 	// than one per message.
 	shipments := s.messageShipments(ctx, userID, messageIDs)
 	invoices := s.messageInvoices(ctx, userID, messageIDs)
+	trips := s.messageTrips(ctx, userID, messageIDs)
 	for i := range out {
 		out[i].Message.Shipment = shipments[out[i].Message.ID]
 		out[i].Message.Invoice = invoices[out[i].Message.ID]
+		out[i].Message.Trip = trips[out[i].Message.ID]
 	}
 	return out
 }

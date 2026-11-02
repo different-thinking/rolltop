@@ -80,10 +80,12 @@ func (s *Server) apiConversationsWithAnnotations(ctx context.Context, userID int
 	annotations := s.pluginMessageAnnotations(ctx, userID, ids, nil)
 	shipments := s.messageShipments(ctx, userID, ids)
 	invoices := s.messageInvoices(ctx, userID, ids)
+	trips := s.messageTrips(ctx, userID, ids)
 	for i := range out {
 		out[i].Message.Annotations = annotations[out[i].Message.ID]
 		out[i].Message.Shipment = shipments[out[i].Message.ID]
 		out[i].Message.Invoice = invoices[out[i].Message.ID]
+		out[i].Message.Trip = trips[out[i].Message.ID]
 	}
 	return out
 }

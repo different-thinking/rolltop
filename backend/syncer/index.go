@@ -141,6 +141,7 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 		// read would leave them stamped and never read, because the backfill
 		// selects on the stored category.
 		InvoiceScanned: !parseFailed && parsed.Category == mailparse.CategoryInvoices,
+		TravelScanned:  !parseFailed,
 	})
 	if err != nil {
 		_, cleanupErr := s.deleteUnreferencedBlob(ctx, userID, blobRec.ID, blobPath)
@@ -182,6 +183,16 @@ func (s *Service) storeFetchedMessage(ctx context.Context, userID int64, account
 	if parsed.Invoice != nil {
 		generationRecoveryPhase(ctx, "sqlite-message-invoices", "")
 		if err := s.Store.ReplaceMessageInvoice(ctx, userID, msg.ID, date.Unix(), parsed.Invoice); err != nil {
+			return store.MessageRecord{}, parsed, nil, err
+		}
+	}
+	// Tickets are recorded from the same parse for the invoice's reason: a pass
+	// or a ticket PDF is an attachment body, and the bodies exist only while the
+	// message is being parsed. This is the fetch path, so a trip it creates for
+	// a journey still to come may be announced to the reader.
+	if len(parsed.Travel) > 0 {
+		generationRecoveryPhase(ctx, "sqlite-message-trips", "")
+		if err := s.Store.ReplaceMessageTrips(ctx, userID, msg.ID, date.Unix(), parsed.Travel, true); err != nil {
 			return store.MessageRecord{}, parsed, nil, err
 		}
 	}

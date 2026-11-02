@@ -169,6 +169,11 @@ type ParsedMessage struct {
 	// more that is its own: it is the only reading that opens attachment
 	// *bodies*, and the bodies exist only while the message is being parsed.
 	Invoice *InvoiceNotice
+	// Travel are the tickets the message carries -- flights, trains, coaches,
+	// event admissions. Read here for the parcel's reason, and for the
+	// invoice's: a pass or a ticket PDF is an attachment body, and the bodies
+	// exist only while the message is being parsed.
+	Travel []TravelBooking
 }
 
 // Parse is the indexing/parser entrypoint. It decodes headers, walks MIME parts,
@@ -239,6 +244,13 @@ func (p *ParsedMessage) classify(sent time.Time) {
 	if p.Category == CategoryInvoices {
 		p.Invoice = ExtractInvoiceNotice(content, p.InvoiceDocuments(), p.From, sent)
 	}
+	p.Travel = ExtractTravelBookings(TravelInput{
+		Subject: p.Subject,
+		From:    p.From,
+		HTML:    p.HTML,
+		Files:   p.TravelFiles(),
+		Sent:    sent,
+	})
 }
 
 // InvoiceDocuments reduces the attachments to the ones a bill is actually

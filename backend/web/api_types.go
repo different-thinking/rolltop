@@ -149,6 +149,9 @@ type apiMessage struct {
 	Shipment *apiMessageShipment `json:"shipment,omitempty"`
 	// Invoice is the bill this message is about, on the same terms.
 	Invoice *apiMessageInvoice `json:"invoice,omitempty"`
+	// Trip is the ticket this message carries, with every leg, so an open
+	// message can offer them for the calendar without a second request.
+	Trip *apiMessageTrip `json:"trip,omitempty"`
 }
 
 type apiMessageAnnotation struct {

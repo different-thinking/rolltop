@@ -33,6 +33,8 @@ describe("organizerRoute", () => {
     expect(organizerRoute("/deliveries", "deliveries")).toBe(true);
     expect(organizerRoute("/invoices", "invoices")).toBe(true);
     expect(organizerURL("invoices")).toBe("/invoices");
+    expect(organizerRoute("/trips", "trips")).toBe(true);
+    expect(organizerURL("trips")).toBe("/trips");
   });
 
   it("does not answer for a neighbour's path", () => {

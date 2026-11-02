@@ -36,6 +36,7 @@ import { threadSecurityPlugin, type ThreadSecurityDecryptedAttachment, type Thre
 import { MessageCategoryPill } from "./MessageCategoryPill";
 import { ShipmentChip, ShipmentDetails } from "../deliveries/ShipmentChip";
 import { InvoiceChip, InvoiceDetails } from "../invoices/InvoiceChip";
+import { TripChip, TripDetails } from "../trips/TripCard";
 import { SnoozeControl } from "./SnoozeControl";
 import { MessageCalendarCard } from "./MessageCalendarCard";
 
@@ -2247,6 +2248,7 @@ export function ThreadView({
                         <MessageCategoryPill category={item.message.category} categories={mailCategories} />
                         {item.message.shipment ? <ShipmentChip shipment={item.message.shipment} /> : null}
                         {item.message.invoice ? <InvoiceChip invoice={item.message.invoice} /> : null}
+                        {item.message.trip ? <TripChip trip={item.message.trip} /> : null}
                         {annotationNodes}
                         <OneClickUnsubscribeInlineAction
                           item={item}
@@ -2405,6 +2407,18 @@ export function ThreadView({
                       for. */}
                   {item.message.shipment ? <ShipmentDetails shipment={item.message.shipment} navigate={navigate} /> : null}
                   {item.message.invoice ? <InvoiceDetails invoice={item.message.invoice} navigate={navigate} /> : null}
+                  {/* A ticket's journeys, with the way into the calendar. Drawn
+                      for expanded messages only, like the invitation card: it
+                      carries an event dialog and its shortcuts. */}
+                  {item.message.trip && isExpanded ? (
+                    <TripDetails
+                      trip={item.message.trip}
+                      csrf={csrf}
+                      navigate={navigate}
+                      addToast={addToast}
+                      onDialogOpenChange={setCalendarDialogOpen}
+                    />
+                  ) : null}
                   {/* An invitation is read for its time and place, which its
                       body spells out in whatever layout the sender's client
                       chose, if at all; the card says it the same way every

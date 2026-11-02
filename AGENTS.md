@@ -554,6 +554,37 @@ site and in review.
   the generation bump for changed rules, on the `CategoryVersion` model; the
   backfill only ever reaches what blob retention still holds, which is why
   extraction has to happen at fetch time.
+- **A ticket is not a category either, and it needs evidence too.** Ticket
+  extraction (`mailparse.ExtractTravelBookings`) produces trips in `trips`, with
+  their legs in `trip_segments` and the messages behind them in
+  `trip_messages`, on the parcel shape and for the parcel reason: the booking,
+  the ticket and the seat reservation are three messages about one journey. Four
+  sources count and nothing else does: schema.org reservations in the HTML
+  (`travel_schema.go` -- reservations only, never a bare `Event`, which is an
+  advertisement), an Apple Wallet pass (`travel_pkpass.go`), Deutsche Bahn's
+  itinerary table in its ticket PDF (`travel_db.go`, read from layout text and
+  only from a document that is DB's), and a published calendar object in a mail
+  that calls itself a ticket (`travel_ics.go` -- never an invitation, which the
+  calendar card answers). Do not add a reader that guesses a journey from words.
+  A time without a stated offset is a floating time unless the source names its
+  zone: a flight's airport (`airportZones`, where a miss stays floating) or DB's
+  own timetable clock; never assume the reader's or the server's zone.
+- **A later ticket mail updates a leg, a silent one never removes it.**
+  `ReplaceMessageTrips` upserts legs by `segment_key` and only overwrites a field
+  from a message at least as recent (`reported_at`); a check-in mail naming the
+  outbound flight says nothing about the return, and that silence is not a
+  cancellation. A seat reservation with no ticket (`seat_only`) is folded into
+  the ticketed leg of the same train on the same day **at read time**
+  (`foldSeatReservations`), because the two arrive in either order and from
+  different bookings. Adding a journey to the calendar is the event dialog's
+  Save, seeded by `journeyPrefill` with the way there and back as travel time,
+  never a write of its own; the created event is recorded on the legs
+  (`calendar_event_id`, a pointer joined at read time, so a deleted event reads
+  as not added). Only a trip the **fetch path** created, from a message sent in
+  the last few days, for a journey still to come is pushed (`trips.notify_at`,
+  `webpush_trips.go`): the backfill and an initial sync go through the same
+  store call with `notify` false or with old mail, and must never announce the
+  tickets a mailbox already held. `store.TravelVersion` is the re-read bump.
 - **Changing what a category means is a `store.CategoryVersion` bump, not a
   column reset.** The backfill re-reads mail an older generation filed, a batch
   at a time, while the rows keep the category they already have; emptying

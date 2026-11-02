@@ -114,6 +114,7 @@ type Runner struct {
 	classifyCategoriesForUser func(context.Context, int64, int) (int, error)
 	scanDeliveriesForUser     func(context.Context, int64, int) (int, error)
 	scanInvoicesForUser       func(context.Context, int64, int) (int, error)
+	scanTravelForUser         func(context.Context, int64, int) (int, error)
 }
 
 // NewRunner builds a process-lifetime scheduler using a background context. The
@@ -904,6 +905,13 @@ func (r *Runner) scanPendingInvoicesForUser(ctx context.Context, userID int64, l
 		return r.scanInvoicesForUser(ctx, userID, limit)
 	}
 	return r.Service.ScanPendingInvoicesForUser(ctx, userID, limit)
+}
+
+func (r *Runner) scanPendingTravelForUser(ctx context.Context, userID int64, limit int) (int, error) {
+	if r.scanTravelForUser != nil {
+		return r.scanTravelForUser(ctx, userID, limit)
+	}
+	return r.Service.ScanPendingTravelForUser(ctx, userID, limit)
 }
 
 func (r *Runner) runMailboxes(userID int64, mailboxes []string) bool {
@@ -1767,6 +1775,25 @@ func (r *Runner) StartAttachmentIndex(userID int64) bool {
 			categorizedAny = true
 		}
 		drainMore = drainMore || billed == store.InvoiceBackfillLimit
+		// The ticket backfill rides the same turn, last, for the invoice pass's
+		// reason: it opens attachment bodies.
+		if ctx.Err() != nil {
+			return
+		}
+		travelled, err := r.scanPendingTravelForUser(ctx, userID, store.TravelBackfillLimit)
+		if err != nil {
+			indexFailed = true
+			if ctx.Err() == nil {
+				log.Printf("travel backfill user_id=%d: %v", userID, err)
+			}
+			return
+		}
+		if travelled > 0 {
+			log.Printf("travel backfill user_id=%d scanned=%d", userID, travelled)
+			// The header chip and the trip list are chrome.
+			categorizedAny = true
+		}
+		drainMore = drainMore || travelled == store.TravelBackfillLimit
 	}()
 	return true
 }

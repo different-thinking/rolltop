@@ -121,7 +121,8 @@ const organizerRoutes = {
   calendar: { url: "/calendar", nested: true },
   contacts: { url: "/contacts", nested: false },
   deliveries: { url: "/deliveries", nested: false },
-  invoices: { url: "/invoices", nested: false }
+  invoices: { url: "/invoices", nested: false },
+  trips: { url: "/trips", nested: false }
 } as const;
 
 /** OrganizerRoute names one of those destinations. */

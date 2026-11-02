@@ -483,9 +483,12 @@ type WebPushSubscription struct {
 	// calendar_reminder_events, independent of the other two like they are
 	// of each other.
 	LastCalendarReminderEventID int64
-	CreatedAt                   time.Time
-	UpdatedAt                   time.Time
-	LastSeenAt                  time.Time
+	// LastTripNoticeID is the endpoint's cursor over the trips marked for a
+	// push (trips.notify_at), by trip id.
+	LastTripNoticeID int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	LastSeenAt       time.Time
 }
 
 // MessageSnooze is local-only reminder state for one user-owned conversation.
