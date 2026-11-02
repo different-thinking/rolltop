@@ -219,6 +219,10 @@ func dbSeat(rest string) string {
 			break
 		}
 		fields := strings.Fields(token)
+		if len(fields) > 0 {
+			// "[Reservierung: 1 Sitzplatz, Wg. 12, Pl. 51]" closes on the seat.
+			fields[0] = strings.TrimRight(fields[0], "]);.")
+		}
 		if len(fields) == 0 || !allDigits(fields[0]) {
 			break
 		}

@@ -3,6 +3,9 @@ package mailparse
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -430,5 +433,97 @@ func TestTravelDBSubjectDecidesSeatOnly(t *testing.T) {
 	}))
 	if booking.Segments[0].SeatOnly {
 		t.Fatalf("a booking confirmation is a ticket: %+v", booking.Segments[0])
+	}
+}
+
+func readTestICS(t *testing.T, name string) TravelFile {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TravelFile{Filename: name, ContentType: "text/calendar", Data: data}
+}
+
+// The calendar export DB attaches to a booking (one journey there with a change,
+// one back with a change and a seat), exactly as DB writes it -- the check-in
+// token redacted. Each train is a leg; the first journey's times carry no zone
+// and are Berlin's.
+func TestTravelDBRealBookingICS(t *testing.T) {
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Buchungsbestätigung", From: "DB Fernverkehr AG <buchungsbestaetigung@bahn.de>",
+		Files: []TravelFile{readTestICS(t, "db_hinrueckfahrt.ics")},
+	}))
+	type want struct{ number, from, to, start, end, seat string }
+	wants := []want{
+		{"IC 1914", "Dresden-Neustadt", "Leipzig Hbf", "2026-09-25T09:29", "2026-09-25T10:31", "1st class"},
+		{"RE 15 (74824)", "Leipzig Hbf", "Jena Paradies", "2026-09-25T11:02", "2026-09-25T12:12", "1st class"},
+		{"RE 3 (3964)", "Jena West", "Erfurt Hbf", "2026-09-26T19:08", "2026-09-26T19:40", "1st class"},
+		{"ICE 1655", "Erfurt Hbf", "Dresden-Neustadt", "2026-09-26T19:49", "2026-09-26T21:38", "Coach 12, seat 51 (1st class)"},
+	}
+	if len(booking.Segments) != len(wants) {
+		t.Fatalf("legs = %+v", booking.Segments)
+	}
+	for i, w := range wants {
+		got := booking.Segments[i]
+		if got.Number != w.number || got.From != w.from || got.To != w.to || got.Start != w.start || got.End != w.end || got.Seat != w.seat {
+			t.Errorf("leg %d = %+v, want %+v", i, got, w)
+		}
+		if got.SeatOnly {
+			t.Errorf("leg %d of a booking is not seat-only", i)
+		}
+	}
+	if want := time.Date(2026, 9, 25, 7, 29, 0, 0, time.UTC); !booking.Segments[0].StartAt.Equal(want) {
+		t.Errorf("a zoneless DB time is Berlin's: %v, want %v", booking.Segments[0].StartAt, want)
+	}
+	if booking.Segments[0].ICalUID != "736b025d-df6a-4772-917d-d0d81cd9704d@bahn.de" || booking.Segments[2].ICalUID != "2469c843-bece-4e7a-b135-58ce359a9fdf@bahn.de" {
+		t.Errorf("each journey's first train carries its event's UID: %q / %q", booking.Segments[0].ICalUID, booking.Segments[2].ICalUID)
+	}
+}
+
+// The calendar export DB attaches to a seat reservation: one train, its seat,
+// and a subject that says it is a reservation.
+func TestTravelDBRealReservationICS(t *testing.T) {
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Reservierung", From: "noreply@bahn.de",
+		Files: []TravelFile{readTestICS(t, "db_hinfahrt_reservierung.ics")},
+	}))
+	if len(booking.Segments) != 1 {
+		t.Fatalf("legs = %+v", booking.Segments)
+	}
+	leg := booking.Segments[0]
+	if leg.Number != "ICE 1652" || leg.From != "Dresden-Neustadt" || leg.To != "Leipzig Hbf" ||
+		leg.Start != "2026-11-02T08:17" || leg.End != "2026-11-02T09:20" || leg.Seat != "Coach 12, seat 62 (1st class)" || !leg.SeatOnly {
+		t.Fatalf("leg = %+v", leg)
+	}
+	if want := time.Date(2026, 11, 2, 7, 17, 0, 0, time.UTC); !leg.StartAt.Equal(want) {
+		t.Errorf("start = %v, want %v", leg.StartAt, want)
+	}
+}
+
+// The whole fetch path: a DB mail with the calendar export attached, parsed the
+// way the sync parses it, and read back by the backfill's scan alike.
+func TestTravelDBRealICSThroughParse(t *testing.T) {
+	file := readTestICS(t, "db_hinrueckfahrt.ics")
+	encoded := base64.StdEncoding.EncodeToString(file.Data)
+	raw := "From: DB Fernverkehr AG <buchungsbestaetigung@bahn.de>\r\nSubject: Ihre Buchungsbestätigung\r\n" +
+		"Date: Thu, 24 Sep 2026 18:22:00 +0200\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nGute Reise\r\n" +
+		"--b\r\nContent-Type: text/calendar; charset=utf-8; name=\"BAHN_Hinrueckfahrt.ics\"\r\n" +
+		"Content-Disposition: attachment; filename=\"BAHN_Hinrueckfahrt.ics\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		encoded + "\r\n--b--\r\n"
+	parsed, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Travel) != 1 || len(parsed.Travel[0].Segments) != 4 {
+		t.Fatalf("parsed travel = %+v", parsed.Travel)
+	}
+	scanned, err := TravelBookingsReaderScan(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scanned) != 1 || scanned[0].Key() != parsed.Travel[0].Key() || len(scanned[0].Segments) != 4 {
+		t.Fatalf("backfill and fetch path disagree: %+v vs %+v", scanned, parsed.Travel)
 	}
 }

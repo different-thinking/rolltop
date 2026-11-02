@@ -20,6 +20,7 @@ package mailparse
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ const maxICSTravelEvents = 6
 var (
 	// icsRouteRE splits a summary like "Berlin Hbf -> München Hbf" or
 	// "Berlin Hbf – München Hbf" into its two stations.
-	icsRouteRE = regexp.MustCompile(`^\s*(.+?)\s*(?:->|→|=>|–|—| - | nach )\s*(.+?)\s*$`)
+	icsRouteRE = regexp.MustCompile(`^\s*(.+?)\s*(?:->|→|➞|➔|=>|–|—| - | nach )\s*(.+?)\s*$`)
 	// icsSeatRE reads a reservation written out in words, the way a calendar
 	// description spells what the PDF abbreviates: "Wagen 25, Platz 45".
 	icsSeatRE = regexp.MustCompile(`(?i)\bWagen\s*(\d{1,3})\s*,?\s*(?:Platz|Plätze|Sitzplatz)\s*([0-9][0-9 ,]*)`)
@@ -84,10 +85,20 @@ func travelFromICS(data []byte, subject string, trainOperator, ticketWords bool)
 	return out
 }
 
-// travelFromTrainICS reads a rail operator's calendar object as one booking
-// with a leg per event: the way there and the way back of a booking, or the one
-// train of a seat reservation. An event that names no train is still a leg --
-// its start is what joins it to the PDF's leg for the same departure.
+// travelFromTrainICS reads a rail operator's calendar object as one booking.
+// DB writes one event per journey -- the way there, the way back -- and spells
+// out every train of it in the description:
+//
+//	Dresden-Neustadt ➞ Leipzig Hbf
+//	[Reservierung: 1 Sitzplatz, Wg. 12, Pl. 51]
+//	IC 1914
+//	● ab 09:29 Dresden-Neustadt ▷ Gleis 5
+//	○ an 10:31 Leipzig Hbf ▷ Gleis 15
+//
+// so each train becomes a leg (dbICSLegs), and the change in Leipzig stays
+// inside one journey. An event whose description cannot be read that way is
+// still one leg, from its summary and its bounds: its start is what joins it to
+// the PDF's leg for the same departure.
 func travelFromTrainICS(cal icalendar.Calendar, subject string) (TravelBooking, bool) {
 	booking := TravelBooking{Kind: TravelTrain, Provider: "Deutsche Bahn"}
 	seatOnly := dbSeatOnlySubject(subject)
@@ -95,44 +106,163 @@ func travelFromTrainICS(cal icalendar.Calendar, subject string) (TravelBooking, 
 		if event.Recurring || event.Occurrence || event.Start.IsZero() || event.AllDay {
 			continue
 		}
-		text := event.Summary + "\n" + event.Description
-		seg := TravelSegment{
-			Kind:      TravelTrain,
-			Provider:  "Deutsche Bahn",
-			Cancelled: event.Status == "CANCELLED",
-			Source:    TravelSourceICS,
-			ICalUID:   event.UID,
-			SeatOnly:  seatOnly,
-		}
-		if product := dbProductRE.FindStringSubmatch(text); product != nil {
-			seg.Number = product[1] + " " + product[2]
-		}
-		route := strings.TrimSpace(dbProductRE.ReplaceAllString(event.Summary, ""))
-		route = strings.Trim(route, " ,:;()")
-		if match := icsRouteRE.FindStringSubmatch(route); match != nil {
-			seg.From, seg.To = strings.Trim(match[1], " ,:;()"), strings.Trim(match[2], " ,:;()")
-		}
-		if seg.From == "" {
-			seg.From = event.Location
-		}
-		seg.Seat = dbSeat(event.Description)
-		if seg.Seat == "" {
-			if match := icsSeatRE.FindStringSubmatch(event.Description); match != nil {
-				seg.Seat = dbSeat("Wg. " + match[1] + ", Pl. " + match[2])
-			}
-		}
 		if booking.Reference == "" {
 			if match := dbReferenceRE.FindStringSubmatch(event.Description); match != nil {
 				booking.Reference = match[1]
 			}
 		}
-		if seg.Number == "" && seg.From == "" && seg.To == "" {
-			seg.Title = event.Summary
+		legs := dbICSLegs(event)
+		if len(legs) == 0 {
+			legs = []TravelSegment{dbICSWholeJourney(event)}
 		}
-		icsBounds(event, &seg)
-		booking.Segments = append(booking.Segments, seg)
+		for i := range legs {
+			legs[i].SeatOnly = seatOnly
+			legs[i].Cancelled = event.Status == "CANCELLED"
+			// One UID covers the journey; the first train carries it, which is
+			// what the calendar's own copy of the event starts with.
+			if i == 0 {
+				legs[i].ICalUID = event.UID
+			}
+		}
+		booking.Segments = append(booking.Segments, legs...)
 	}
 	return booking, len(booking.Segments) > 0
+}
+
+var (
+	// dbICSProductRE is a train line as DB's calendar export writes it:
+	// "ICE 1655", "IC 1914", "RE15 (74824)" -- a regional line with its train
+	// number in brackets.
+	dbICSProductRE = regexp.MustCompile(`^\s*(ICE|IC|EC|ECE|EN|NJ|RJX|RJ|TGV|THA|EST|FLX|IRE|RE|RB|MEX|ALX|ERB|BRB|VIA|HLB|NWB|S|U|STR|Bus)\s?(\d{1,5})(?:\s*\((\d{1,6})\))?\s*$`)
+	// dbICSStopRE is a departure or arrival: "● ab 09:29 Dresden-Neustadt ▷ Gleis 5".
+	dbICSStopRE  = regexp.MustCompile(`^\s*[●○•◦]?\s*(ab|an)\s+(\d{1,2}):(\d{2})\s+(.+?)\s*(?:▷\s*Gleis\s*(\S+))?\s*$`)
+	dbICSDateRE  = regexp.MustCompile(`(?i)\bDatum:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})`)
+	dbICSClassRE = regexp.MustCompile(`(?i)\bKlasse:\s*([12])\.\s*Klasse`)
+)
+
+// dbICSLegs reads the trains out of one DB journey event's description.
+func dbICSLegs(event icalendar.Event) []TravelSegment {
+	if !strings.Contains(event.Description, " ab ") && !strings.Contains(event.Description, "\nab ") {
+		return nil
+	}
+	zone := berlin
+	if event.TimeZone != "" {
+		if loc, err := time.LoadLocation(event.TimeZone); err == nil {
+			zone = loc
+		}
+	}
+	if zone == nil {
+		zone = time.UTC
+	}
+	// The day the journey starts on: the description's own "Datum:", else the
+	// event's start read in the timetable's zone.
+	start := event.Start
+	if !event.Floating {
+		start = start.In(zone)
+	}
+	day := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, zone)
+	if match := dbICSDateRE.FindStringSubmatch(event.Description); match != nil {
+		d, _ := strconv.Atoi(match[1])
+		m, _ := strconv.Atoi(match[2])
+		y, _ := strconv.Atoi(match[3])
+		day = time.Date(y, time.Month(m), d, 0, 0, 0, 0, zone)
+	}
+	class := ""
+	if match := dbICSClassRE.FindStringSubmatch(event.Description); match != nil {
+		class = map[string]string{"1": "1st class", "2": "2nd class"}[match[1]]
+	}
+
+	var legs []TravelSegment
+	var leg *TravelSegment
+	seat := ""
+	last := time.Time{}
+	// at turns a clock time into a moment on the journey, rolling over
+	// midnight when a time comes out earlier than the one before it.
+	at := func(hour, minute int) time.Time {
+		t := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, zone)
+		for !last.IsZero() && t.Before(last) {
+			t = t.AddDate(0, 0, 1)
+		}
+		last = t
+		return t
+	}
+	for _, line := range strings.Split(event.Description, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+			leg, seat = nil, ""
+		case strings.HasPrefix(line, "[") && strings.Contains(line, "Wg."):
+			seat = dbSeat(line)
+		case dbICSProductRE.MatchString(line):
+			match := dbICSProductRE.FindStringSubmatch(line)
+			number := match[1] + " " + match[2]
+			if match[3] != "" {
+				number += " (" + match[3] + ")"
+			}
+			legs = append(legs, TravelSegment{
+				Kind: TravelTrain, Number: number, Provider: "Deutsche Bahn",
+				Seat: joinSeatClass(seat, class), Source: TravelSourceICS,
+			})
+			leg = &legs[len(legs)-1]
+		case leg != nil && dbICSStopRE.MatchString(line):
+			match := dbICSStopRE.FindStringSubmatch(line)
+			hour, _ := strconv.Atoi(match[2])
+			minute, _ := strconv.Atoi(match[3])
+			moment := at(hour, minute)
+			station := strings.TrimSpace(match[4])
+			if match[1] == "ab" && leg.Start == "" {
+				leg.From, leg.Start, leg.StartAt = station, moment.Format(travelLocalLayout), moment
+			} else if match[1] == "an" && leg.Start != "" {
+				leg.To, leg.End, leg.EndAt = station, moment.Format(travelLocalLayout), moment
+			}
+		}
+	}
+	kept := legs[:0]
+	for _, l := range legs {
+		if l.Start != "" {
+			kept = append(kept, l)
+		}
+	}
+	return kept
+}
+
+// dbICSWholeJourney is the journey as one leg, for an event whose description
+// does not list its trains.
+func dbICSWholeJourney(event icalendar.Event) TravelSegment {
+	text := event.Summary + "\n" + event.Description
+	seg := TravelSegment{Kind: TravelTrain, Provider: "Deutsche Bahn", Source: TravelSourceICS}
+	if product := dbProductRE.FindStringSubmatch(text); product != nil {
+		seg.Number = product[1] + " " + product[2]
+	}
+	route := strings.Trim(strings.TrimSpace(dbProductRE.ReplaceAllString(event.Summary, "")), " ,:;()")
+	if match := icsRouteRE.FindStringSubmatch(route); match != nil {
+		seg.From, seg.To = strings.Trim(match[1], " ,:;()"), strings.Trim(match[2], " ,:;()")
+	}
+	if seg.From == "" {
+		seg.From = event.Location
+	}
+	seg.Seat = dbSeat(event.Description)
+	if seg.Seat == "" {
+		if match := icsSeatRE.FindStringSubmatch(event.Description); match != nil {
+			seg.Seat = dbSeat("Wg. " + match[1] + ", Pl. " + match[2])
+		}
+	}
+	if seg.Number == "" && seg.From == "" && seg.To == "" {
+		seg.Title = event.Summary
+	}
+	icsBounds(event, &seg)
+	return seg
+}
+
+func joinSeatClass(seat, class string) string {
+	switch {
+	case seat == "":
+		return class
+	case class == "":
+		return seat
+	default:
+		return seat + " (" + class + ")"
+	}
 }
 
 // dbSeatOnlySubject reads whether a DB mail is a seat reservation without a
@@ -159,6 +289,16 @@ func icsBounds(event icalendar.Event, seg *TravelSegment) {
 		seg.Start = event.Start.UTC().Format(travelLocalLayout)
 		if event.End.After(event.Start) {
 			seg.End = event.End.UTC().Format(travelLocalLayout)
+		}
+		if seg.Kind == TravelTrain && berlin != nil {
+			// DB exports some journeys without a zone; the wall clock is still
+			// its timetable's, which is Berlin's.
+			wall := event.Start.UTC()
+			seg.StartAt = time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), 0, 0, berlin)
+			if event.End.After(event.Start) {
+				end := event.End.UTC()
+				seg.EndAt = time.Date(end.Year(), end.Month(), end.Day(), end.Hour(), end.Minute(), 0, 0, berlin)
+			}
 		}
 	default:
 		loc := time.UTC

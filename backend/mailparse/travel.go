@@ -420,14 +420,17 @@ func joinTravelBookings(a, b TravelBooking) TravelBooking {
 	return a
 }
 
-// sameTravelLeg reports two readings of one leg: the same key, or -- when one
-// source named no train -- the same kind of travel leaving at the same minute.
-// A calendar object titled only with its route is the PDF's train all the same.
+// sameTravelLeg reports two readings of one leg: the same key, or the same
+// kind of travel leaving at the same minute. One traveller is on one train at
+// a time, and the sources do not spell a train alike -- the PDF's "RE 74824" is
+// the calendar export's "RE 15 (74824)", and a calendar object may name only
+// the route -- so the departure is what identifies it. Events are exempt: two
+// admissions at 20:00 are two tickets.
 func sameTravelLeg(a, b TravelSegment) bool {
 	if a.Key() == b.Key() {
 		return true
 	}
-	if a.Kind != b.Kind || a.Kind == TravelEvent || (a.Number != "" && b.Number != "") {
+	if a.Kind != b.Kind || a.Kind == TravelEvent {
 		return false
 	}
 	return a.Start != "" && a.Start == b.Start

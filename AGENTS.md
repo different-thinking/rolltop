@@ -565,8 +565,11 @@ site and in review.
   itinerary table in its ticket PDF (`travel_db.go`, read from layout text and
   only from a document that is DB's), and a calendar object (`travel_ics.go`): from
   DB's own domains it is the journey and is read as train legs whatever its
-  iTIP method, so it joins the PDF's legs (the same train, or the same minute
-  when the object names no train) instead of standing beside them; from anyone
+  iTIP method -- one event per journey, each train read from the description
+  (`dbICSLegs`, against real exports in `mailparse/testdata`), zoneless times
+  as Berlin's -- so it joins the PDF's legs instead of standing beside them.
+  The same departure minute is the same train (`sameTravelLeg`): the sources
+  do not spell a regional train alike ("RE 74824", "RE15 (74824)"); from anyone
   else only a published object in a mail that calls itself a ticket, never an
   invitation, which the calendar card answers. A message with a trip shows the
   trip card **instead of** the calendar card, or one train is offered twice. A

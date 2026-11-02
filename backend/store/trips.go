@@ -31,7 +31,11 @@ import (
 // Mail read under 1 carries an "event" trip beside the train for the same
 // journey; re-reading it detaches that trip, which then has no mail left and
 // drops out of every list.
-const TravelVersion = 2
+//
+// 3: DB's calendar export is read train by train from its description (one
+// event per journey, every change listed), zoneless times are Berlin's, and
+// the same departure minute joins the readings of one train.
+const TravelVersion = 3
 
 // TravelBackfillLimit bounds one backfill pass. It is a quarter of the parcel
 // pass's because a ticket read opens attachment bodies -- a pass, a PDF run
