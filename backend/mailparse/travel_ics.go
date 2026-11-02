@@ -43,13 +43,13 @@ var (
 
 // travelFromICS reads an attached calendar object. trainOperator says the
 // message is a rail operator's own, ticketWords that it calls itself a ticket.
-func travelFromICS(data []byte, subject string, trainOperator, ticketWords bool) []TravelBooking {
+func travelFromICS(data []byte, trainOperator, ticketWords bool) []TravelBooking {
 	cal, err := icalendar.Parse(data)
 	if err != nil || len(cal.Events) > maxICSTravelEvents {
 		return nil
 	}
 	if trainOperator {
-		if booking, ok := travelFromTrainICS(cal, subject); ok {
+		if booking, ok := travelFromTrainICS(cal); ok {
 			return []TravelBooking{booking}
 		}
 	}
@@ -99,9 +99,8 @@ func travelFromICS(data []byte, subject string, trainOperator, ticketWords bool)
 // inside one journey. An event whose description cannot be read that way is
 // still one leg, from its summary and its bounds: its start is what joins it to
 // the PDF's leg for the same departure.
-func travelFromTrainICS(cal icalendar.Calendar, subject string) (TravelBooking, bool) {
+func travelFromTrainICS(cal icalendar.Calendar) (TravelBooking, bool) {
 	booking := TravelBooking{Kind: TravelTrain, Provider: "Deutsche Bahn"}
-	seatOnly := dbSeatOnlySubject(subject)
 	for _, event := range cal.Events {
 		if event.Recurring || event.Occurrence || event.Start.IsZero() || event.AllDay {
 			continue
@@ -115,8 +114,8 @@ func travelFromTrainICS(cal icalendar.Calendar, subject string) (TravelBooking, 
 		if len(legs) == 0 {
 			legs = []TravelSegment{dbICSWholeJourney(event)}
 		}
+		// Seat reservation or ticket is the subject's to say (applyDBSubject).
 		for i := range legs {
-			legs[i].SeatOnly = seatOnly
 			legs[i].Cancelled = event.Status == "CANCELLED"
 			// One UID covers the journey; the first train carries it, which is
 			// what the calendar's own copy of the event starts with.
@@ -263,14 +262,6 @@ func joinSeatClass(seat, class string) string {
 	default:
 		return seat + " (" + class + ")"
 	}
-}
-
-// dbSeatOnlySubject reads whether a DB mail is a seat reservation without a
-// ticket from its subject, which says so ("Ihre Reservierung") where the
-// booking says "Buchungsbestätigung".
-func dbSeatOnlySubject(subject string) bool {
-	lower := strings.ToLower(subject)
-	return strings.Contains(lower, "reservierung") && !containsAnyWord(lower, "buchung", "ticket", "fahrkarte")
 }
 
 // icsBounds copies an event's bounds onto a leg in the shape legs carry them:

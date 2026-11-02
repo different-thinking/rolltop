@@ -293,7 +293,7 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 	operator := dbSender(in.From)
 	for _, file := range in.Files {
 		if IsCalendarPart(file.ContentType, file.Filename) && !isPassFile(file.Filename, file.ContentType) {
-			found = append(found, travelFromICS(file.Data, in.Subject, operator, ticketWords)...)
+			found = append(found, travelFromICS(file.Data, operator, ticketWords)...)
 		}
 	}
 	bookings := mergeTravelBookings(found)
@@ -303,19 +303,36 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 	return bookings
 }
 
-// applyDBSubject lets a DB mail's subject settle whether its train legs are a
-// seat reservation without a ticket. The subject says it plainly -- "Ihre
-// Reservierung" against "Ihre Buchungsbestätigung" -- where the PDF's text has
-// to be read for fare words that a reservation may also mention.
+// applyDBSubject reads what a DB mail's subject settles. DB names the kind of
+// mail and the order in it -- "Buchungsbestätigung Deutsche Bahn (Auftrag:
+// 916319593981)", "Reservierungsbestätigung Deutsche Bahn (Auftrag:
+// 194938114535)" -- which says plainly whether the train legs are a ticket or
+// a seat reservation without one, where the PDF's text would have to be read
+// for fare words a reservation may mention too. The order number is the
+// booking's reference when no document named one, so a later mail about the
+// same order lands on the same trip.
 func applyDBSubject(bookings []TravelBooking, subject string) {
 	lower := strings.ToLower(subject)
 	booked := containsAnyWord(lower, "buchung", "ticket", "fahrkarte")
 	reserved := strings.Contains(lower, "reservierung") && !booked
-	if !booked && !reserved {
-		return
+	reference := ""
+	if match := dbReferenceRE.FindStringSubmatch(subject); match != nil {
+		reference = match[1]
+	}
+	trains := 0
+	for _, booking := range bookings {
+		if booking.Kind == TravelTrain {
+			trains++
+		}
 	}
 	for i := range bookings {
 		if bookings[i].Kind != TravelTrain {
+			continue
+		}
+		if bookings[i].Reference == "" && trains == 1 {
+			bookings[i].Reference = reference
+		}
+		if !booked && !reserved {
 			continue
 		}
 		for j := range bookings[i].Segments {

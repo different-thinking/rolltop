@@ -35,7 +35,10 @@ import (
 // 3: DB's calendar export is read train by train from its description (one
 // event per journey, every change listed), zoneless times are Berlin's, and
 // the same departure minute joins the readings of one train.
-const TravelVersion = 3
+//
+// 4: a DB mail's order number ("Auftrag: 916319593981" in the subject) is the
+// booking's reference, which changes the trip's identity.
+const TravelVersion = 4
 
 // TravelBackfillLimit bounds one backfill pass. It is a quarter of the parcel
 // pass's because a ticket read opens attachment bodies -- a pass, a PDF run

@@ -451,9 +451,12 @@ func readTestICS(t *testing.T, name string) TravelFile {
 // and are Berlin's.
 func TestTravelDBRealBookingICS(t *testing.T) {
 	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
-		Subject: "Ihre Buchungsbestätigung", From: "DB Fernverkehr AG <buchungsbestaetigung@bahn.de>",
+		Subject: "Buchungsbestätigung Deutsche Bahn (Auftrag: 916319593981)", From: "DB Fernverkehr AG <buchungsbestaetigung@bahn.de>",
 		Files: []TravelFile{readTestICS(t, "db_hinrueckfahrt.ics")},
 	}))
+	if booking.Reference != "916319593981" {
+		t.Errorf("the order number in the subject is the booking's reference: %q", booking.Reference)
+	}
 	type want struct{ number, from, to, start, end, seat string }
 	wants := []want{
 		{"IC 1914", "Dresden-Neustadt", "Leipzig Hbf", "2026-09-25T09:29", "2026-09-25T10:31", "1st class"},
@@ -485,9 +488,12 @@ func TestTravelDBRealBookingICS(t *testing.T) {
 // and a subject that says it is a reservation.
 func TestTravelDBRealReservationICS(t *testing.T) {
 	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
-		Subject: "Ihre Reservierung", From: "noreply@bahn.de",
+		Subject: "Reservierungsbestätigung Deutsche Bahn (Auftrag: 194938114535)", From: "noreply@bahn.de",
 		Files: []TravelFile{readTestICS(t, "db_hinfahrt_reservierung.ics")},
 	}))
+	if booking.Reference != "194938114535" {
+		t.Errorf("reference = %q", booking.Reference)
+	}
 	if len(booking.Segments) != 1 {
 		t.Fatalf("legs = %+v", booking.Segments)
 	}
