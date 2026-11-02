@@ -39,6 +39,11 @@ var (
 	// shopTitleSuffixRE is the sales label a shop appends to the event's name
 	// in its calendar link: "… - TICKETS IN DRESDEN".
 	shopTitleSuffixRE = regexp.MustCompile(`(?i)\s+-\s+tickets\s+in\s+.+$`)
+	// seatHeaderRE is the heading a shop writes the seats under in the event's
+	// notes. It is matched on the notes themselves, never on a lowercased copy:
+	// lowercasing can change a character's byte length, and an index into the
+	// copy then slices the original in the wrong place.
+	seatHeaderRE = regexp.MustCompile(`(?i)(?:platzinformationen|seat information)\s*:`)
 )
 
 const (
@@ -142,7 +147,7 @@ func segmentFromCalendarLink(link *url.URL) (TravelSegment, bool) {
 	seg := TravelSegment{Kind: TravelEvent, Source: TravelSourceLink}
 	var location, notes string
 	switch {
-	case host == "calendar.google.com" || host == "www.google.com" && strings.HasPrefix(link.Path, "/calendar"):
+	case host == "calendar.google.com" || (host == "www.google.com" && strings.HasPrefix(link.Path, "/calendar")):
 		// /calendar/render?action=TEMPLATE, /calendar/event?action=TEMPLATE
 		// and /calendar/r/eventedit all take the same parameters.
 		seg.Title = q.Get("text")
@@ -176,8 +181,10 @@ func segmentFromCalendarLink(link *url.URL) (TravelSegment, bool) {
 	if len(seg.Start) == len(travelDateLayout) && len(seg.End) == len(travelDateLayout) {
 		exclusive, err := time.Parse(travelDateLayout, seg.End)
 		seg.End = ""
-		if last := exclusive.AddDate(0, 0, -1).Format(travelDateLayout); err == nil && last > seg.Start {
-			seg.End = last
+		if err == nil {
+			if last := exclusive.AddDate(0, 0, -1).Format(travelDateLayout); last > seg.Start {
+				seg.End = last
+			}
 		}
 	}
 	// "Filmtheater Schauburg, Königsbrücker Straße 55, 01099 DRESDEN": the
@@ -280,15 +287,11 @@ func writtenEndWallClock(seg TravelSegment) string {
 // notes under "Platzinformationen:" (or "Seat information:"), one per ticket,
 // and says them once with their count.
 func seatFromCalendarNotes(notes string) string {
-	lower := strings.ToLower(notes)
-	at := strings.Index(lower, "platzinformationen:")
-	if at < 0 {
-		at = strings.Index(lower, "seat information:")
-	}
-	if at < 0 {
+	loc := seatHeaderRE.FindStringIndex(notes)
+	if loc == nil {
 		return ""
 	}
-	rest := notes[strings.Index(notes[at:], ":")+at+1:]
+	rest := notes[loc[1]:]
 	counts := map[string]int{}
 	var order []string
 	blank := 0

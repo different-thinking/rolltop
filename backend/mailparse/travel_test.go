@@ -651,3 +651,12 @@ func TestTravelCalendarLinkAllDayEndIsExclusive(t *testing.T) {
 		t.Errorf("two days = %+v", two)
 	}
 }
+
+// Lowercasing "İ" changes its byte length; the seat heading must be found in
+// the notes themselves, or a stranger's notes slice wrong or panic.
+func TestTravelSeatNotesWithUnicodeBeforeTheHeading(t *testing.T) {
+	notes := strings.Repeat("İ", 40) + "\nPlatzinformationen:\nReihe 3, Platz 7\n\n\nViel Spaß"
+	if got := seatFromCalendarNotes(notes); got != "Reihe 3, Platz 7" {
+		t.Fatalf("seat = %q", got)
+	}
+}
