@@ -42,7 +42,9 @@ import (
 // 5: a vehicle leg is keyed by its departure minute alone, and every train of
 // a DB journey carries the calendar object's UID. The re-read is clean because
 // a leg only this message named is dropped when it no longer names it.
-const TravelVersion = 5
+//
+// 6: a ticket shop's add-to-calendar links are read (EVENTIM).
+const TravelVersion = 6
 
 // TravelBackfillLimit bounds one backfill pass. It is a quarter of the parcel
 // pass's because a ticket read opens attachment bodies -- a pass, a PDF run

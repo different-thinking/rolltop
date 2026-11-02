@@ -533,3 +533,77 @@ func TestTravelDBRealICSThroughParse(t *testing.T) {
 		t.Fatalf("backfill and fetch path disagree: %+v vs %+v", scanned, parsed.Travel)
 	}
 }
+
+// eventimConfirmation rebuilds the parts of a real EVENTIM order confirmation
+// the reader looks at -- the order number, the "Datum" block and the "Im
+// Kalender speichern" links exactly as EVENTIM writes them -- without the
+// buyer's address and without the ticket download links, which grant access
+// to the tickets themselves.
+func eventimConfirmation(orderNumber string) string {
+	google := "https://calendar.google.com/calendar/r/eventedit?text=Maria+Clara+Groppler+-+Ehefrau+-+TICKETS+IN+DRESDEN" +
+		"&amp;dates=20261103T190000Z/20261103T190000Z&amp;location=Filmtheater+Schauburg%2C+K%C3%B6nigsbr%C3%BCcker+Stra%C3%9Fe+55%2C+01099+DRESDEN" +
+		"&amp;details=Platzinformationen%3A%0AEingang+Platzwahl+frei%2C+Block+Sitzplatz%0A%0AEingang+Platzwahl+frei%2C+Block+Sitzplatz%0A%0A%0AEVENTIM+w%C3%BCnscht+viel+Spa%C3%9F"
+	outlook := "https://outlook.live.com/owa/?path=/calendar/action/compose&amp;rru=addevent&amp;subject=Maria+Clara+Groppler+-+Ehefrau+-+TICKETS+IN+DRESDEN" +
+		"&amp;startdt=20261103T190000&amp;enddt=20261103T190000&amp;location=Filmtheater+Schauburg%2C+K%C3%B6nigsbr%C3%BCcker+Stra%C3%9Fe+55%2C+01099+DRESDEN"
+	order := ""
+	if orderNumber != "" {
+		order = `<p>Deine Bestellung mit der Ordernummer ` + orderNumber + ` haben wir erhalten.</p>`
+	}
+	return `<html><body><h1>Bestellbestätigung</h1>` + order +
+		`<h2>Deine Tickets herunterladen</h2><p>Deine Tickets stehen nun zur Verfügung.</p>` +
+		`<table><tr><td>Maria Clara Groppler - Ehefrau</td></tr><tr><td>Datum:</td><td>Di., 03.11.2026, 20:00</td></tr>` +
+		`<tr><td>Ort:</td><td>Filmtheater Schauburg, Königsbrücker Straße 55, 01099 DRESDEN</td></tr></table>` +
+		`<h2>Im Kalender speichern</h2><a href="` + google + `">Google Kalender</a> <a href="` + google + `">Google</a>` +
+		`<a href="https://www.eventim.de/imageservlet?fun=calendar&amp;affiliate=EGG&amp;t=1">Outlook</a>` +
+		`<a href="` + outlook + `">Outlook.com</a></body></html>`
+}
+
+// EVENTIM publishes no markup and attaches no .ics; the event is in its
+// add-to-calendar links. The Google link's instant and the local time the mail
+// writes give 20:00, the Outlook.com link's zoneless copy of the UTC digits is
+// not read as a second event, and the .ics behind "Outlook" is never fetched.
+func TestTravelCalendarLinksEventimOrder(t *testing.T) {
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Deine EVENTIM-Bestellung: Maria Clara Groppler - Ehefrau - Bestellnummer 810156291",
+		From:    "EVENTIM Kundenservice <bestellstatus@eventim.de>",
+		HTML:    eventimConfirmation("810156291"),
+	}))
+	if booking.Kind != TravelEvent || booking.Reference != "810156291" || booking.Provider != "eventim.de" || len(booking.Segments) != 1 {
+		t.Fatalf("booking = %+v", booking)
+	}
+	seg := booking.Segments[0]
+	if seg.Title != "Maria Clara Groppler - Ehefrau" || seg.Venue != "Filmtheater Schauburg" || seg.Address != "Königsbrücker Straße 55, 01099 DRESDEN" {
+		t.Errorf("segment = %+v", seg)
+	}
+	if seg.Start != "2026-11-03T20:00" || !seg.StartAt.Equal(time.Date(2026, 11, 3, 19, 0, 0, 0, time.UTC)) {
+		t.Errorf("start = %q / %v", seg.Start, seg.StartAt)
+	}
+	if seg.Seat != "2× Eingang Platzwahl frei, Block Sitzplatz" {
+		t.Errorf("seat = %q", seg.Seat)
+	}
+}
+
+// A calendar link under an event a newsletter advertises is not a ticket: it
+// names no order.
+func TestTravelCalendarLinksNeedAnOrder(t *testing.T) {
+	got := ExtractTravelBookings(TravelInput{
+		Subject: "Tickets jetzt sichern!",
+		From:    "news@eventim.de",
+		HTML:    eventimConfirmation(""),
+	})
+	if len(got) != 0 {
+		t.Fatalf("an advertised event is not a booking: %+v", got)
+	}
+}
+
+// A zoneless link that names its zone is that zone's wall clock.
+func TestTravelCalendarLinkWithZone(t *testing.T) {
+	link := `<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Theater&amp;dates=20261201T193000/20261201T220000&amp;ctz=Europe/Vienna&amp;location=Burgtheater">x</a>`
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Tickets – Buchungsnummer AB12345", HTML: `<p>Ihre Tickets</p>` + link,
+	}))
+	seg := booking.Segments[0]
+	if seg.Start != "2026-12-01T19:30" || seg.End != "2026-12-01T22:00" || !seg.StartAt.Equal(time.Date(2026, 12, 1, 18, 30, 0, 0, time.UTC)) {
+		t.Fatalf("segment = %+v", seg)
+	}
+}

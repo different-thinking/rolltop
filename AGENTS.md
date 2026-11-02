@@ -558,10 +558,17 @@ site and in review.
   extraction (`mailparse.ExtractTravelBookings`) produces trips in `trips`, with
   their legs in `trip_segments` and the messages behind them in
   `trip_messages`, on the parcel shape and for the parcel reason: the booking,
-  the ticket and the seat reservation are three messages about one journey. Four
+  the ticket and the seat reservation are three messages about one journey. Five
   sources count and nothing else does: schema.org reservations in the HTML
   (`travel_schema.go` -- reservations only, never a bare `Event`, which is an
-  advertisement), an Apple Wallet pass (`travel_pkpass.go`), Deutsche Bahn's
+  advertisement), a shop's Google Calendar / Outlook.com add-to-calendar link
+  (`travel_links.go`, EVENTIM's "Im Kalender speichern") -- read only beside
+  ticket words **and** an order or booking number, because a newsletter puts
+  the same link under an event it advertises and never an order number; a link
+  that would have to be fetched (an .ics download) is never followed, a UTC
+  instant takes the local wall clock the same mail writes for it
+  (`writtenWallClock`), and a zoneless copy of an instant another link states
+  is dropped --, an Apple Wallet pass (`travel_pkpass.go`), Deutsche Bahn's
   itinerary table in its ticket PDF (`travel_db.go`, read from layout text and
   only from a document that is DB's), and a calendar object (`travel_ics.go`): from
   DB's own domains it is the journey and is read as train legs whatever its

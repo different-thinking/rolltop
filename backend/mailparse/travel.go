@@ -52,6 +52,7 @@ const (
 	TravelSourcePass   = "pkpass"
 	TravelSourcePDF    = "pdf"
 	TravelSourceICS    = "ics"
+	TravelSourceLink   = "link"
 )
 
 const (
@@ -277,6 +278,7 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 	var found []TravelBooking
 	if in.HTML != "" {
 		found = append(found, travelFromSchema(in.HTML)...)
+		found = append(found, travelFromCalendarLinks(in.HTML, in.Subject, in.From)...)
 	}
 	// The documents go before the calendar objects: a leg takes each field
 	// from the first source that names it, and an operator's .ics may hold a
