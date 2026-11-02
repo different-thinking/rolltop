@@ -533,3 +533,130 @@ func TestTravelDBRealICSThroughParse(t *testing.T) {
 		t.Fatalf("backfill and fetch path disagree: %+v vs %+v", scanned, parsed.Travel)
 	}
 }
+
+// eventimConfirmation rebuilds the parts of a real EVENTIM order confirmation
+// the reader looks at -- the order number, the "Datum" block and the "Im
+// Kalender speichern" links exactly as EVENTIM writes them -- without the
+// buyer's address and without the ticket download links, which grant access
+// to the tickets themselves.
+func eventimConfirmation(orderNumber string) string {
+	google := "https://calendar.google.com/calendar/r/eventedit?text=Maria+Clara+Groppler+-+Ehefrau+-+TICKETS+IN+DRESDEN" +
+		"&amp;dates=20261103T190000Z/20261103T190000Z&amp;location=Filmtheater+Schauburg%2C+K%C3%B6nigsbr%C3%BCcker+Stra%C3%9Fe+55%2C+01099+DRESDEN" +
+		"&amp;details=Platzinformationen%3A%0AEingang+Platzwahl+frei%2C+Block+Sitzplatz%0A%0AEingang+Platzwahl+frei%2C+Block+Sitzplatz%0A%0A%0AEVENTIM+w%C3%BCnscht+viel+Spa%C3%9F"
+	outlook := "https://outlook.live.com/owa/?path=/calendar/action/compose&amp;rru=addevent&amp;subject=Maria+Clara+Groppler+-+Ehefrau+-+TICKETS+IN+DRESDEN" +
+		"&amp;startdt=20261103T190000&amp;enddt=20261103T190000&amp;location=Filmtheater+Schauburg%2C+K%C3%B6nigsbr%C3%BCcker+Stra%C3%9Fe+55%2C+01099+DRESDEN"
+	order := ""
+	if orderNumber != "" {
+		order = `<p>Deine Bestellung mit der Ordernummer ` + orderNumber + ` haben wir erhalten.</p>`
+	}
+	return `<html><body><h1>Bestellbestätigung</h1>` + order +
+		`<h2>Deine Tickets herunterladen</h2><p>Deine Tickets stehen nun zur Verfügung.</p>` +
+		`<table><tr><td>Maria Clara Groppler - Ehefrau</td></tr><tr><td>Datum:</td><td>Di., 03.11.2026, 20:00</td></tr>` +
+		`<tr><td>Ort:</td><td>Filmtheater Schauburg, Königsbrücker Straße 55, 01099 DRESDEN</td></tr></table>` +
+		`<h2>Im Kalender speichern</h2><a href="` + google + `">Google Kalender</a> <a href="` + google + `">Google</a>` +
+		`<a href="https://www.eventim.de/imageservlet?fun=calendar&amp;affiliate=EGG&amp;t=1">Outlook</a>` +
+		`<a href="` + outlook + `">Outlook.com</a></body></html>`
+}
+
+// EVENTIM publishes no markup and attaches no .ics; the event is in its
+// add-to-calendar links. The Google link's instant and the local time the mail
+// writes give 20:00, the Outlook.com link's zoneless copy of the UTC digits is
+// not read as a second event, and the .ics behind "Outlook" is never fetched.
+func TestTravelCalendarLinksEventimOrder(t *testing.T) {
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Deine EVENTIM-Bestellung: Maria Clara Groppler - Ehefrau - Bestellnummer 810156291",
+		From:    "EVENTIM Kundenservice <bestellstatus@eventim.de>",
+		HTML:    eventimConfirmation("810156291"),
+	}))
+	if booking.Kind != TravelEvent || booking.Reference != "810156291" || booking.Provider != "eventim.de" || len(booking.Segments) != 1 {
+		t.Fatalf("booking = %+v", booking)
+	}
+	seg := booking.Segments[0]
+	if seg.Title != "Maria Clara Groppler - Ehefrau" || seg.Venue != "Filmtheater Schauburg" || seg.Address != "Königsbrücker Straße 55, 01099 DRESDEN" {
+		t.Errorf("segment = %+v", seg)
+	}
+	if seg.Start != "2026-11-03T20:00" || !seg.StartAt.Equal(time.Date(2026, 11, 3, 19, 0, 0, 0, time.UTC)) {
+		t.Errorf("start = %q / %v", seg.Start, seg.StartAt)
+	}
+	if seg.Seat != "2× Eingang Platzwahl frei, Block Sitzplatz" {
+		t.Errorf("seat = %q", seg.Seat)
+	}
+}
+
+// A calendar link under an event a newsletter advertises is not a ticket: it
+// names no order.
+func TestTravelCalendarLinksNeedAnOrder(t *testing.T) {
+	got := ExtractTravelBookings(TravelInput{
+		Subject: "Tickets jetzt sichern!",
+		From:    "news@eventim.de",
+		HTML:    eventimConfirmation(""),
+	})
+	if len(got) != 0 {
+		t.Fatalf("an advertised event is not a booking: %+v", got)
+	}
+}
+
+// A zoneless link that names its zone is that zone's wall clock.
+func TestTravelCalendarLinkWithZone(t *testing.T) {
+	link := `<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Theater&amp;dates=20261201T193000/20261201T220000&amp;ctz=Europe/Vienna&amp;location=Burgtheater">x</a>`
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Tickets – Buchungsnummer AB12345", HTML: `<p>Ihre Tickets</p>` + link,
+	}))
+	seg := booking.Segments[0]
+	if seg.Start != "2026-12-01T19:30" || seg.End != "2026-12-01T22:00" || !seg.StartAt.Equal(time.Date(2026, 12, 1, 18, 30, 0, 0, time.UTC)) {
+		t.Fatalf("segment = %+v", seg)
+	}
+}
+
+// "Deine Bestellnummer findest du im Kundenkonto" names no order: a
+// reference has to carry a digit, or the advertisement gate is a formality.
+func TestTravelCalendarLinksOrderNeedsADigit(t *testing.T) {
+	html := strings.Replace(eventimConfirmation(""), "<h2>Deine Tickets",
+		"<p>Deine Bestellnummer findest du im Kundenkonto.</p><h2>Deine Tickets", 1)
+	if got := ExtractTravelBookings(TravelInput{Subject: "Neue Tickets", HTML: html}); len(got) != 0 {
+		t.Fatalf("a word is not an order number: %+v", got)
+	}
+}
+
+// Two shows in one order: each link takes the written time nearest its own
+// instant, not the first one in the mail.
+func TestTravelCalendarLinksTwoShowsTwoTimes(t *testing.T) {
+	link := func(text, dates string) string {
+		return `<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=` + text + `&amp;dates=` + dates + `">x</a>`
+	}
+	html := `<p>Deine Tickets, Bestellnummer 4711123</p><p>Früh: 03.11.2026, 18:00</p><p>Spät: 03.11.2026, 21:00</p>` +
+		link("Fruehe+Show", "20261103T170000Z/20261103T190000Z") + link("Spaete+Show", "20261103T200000Z/20261103T220000Z")
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{Subject: "Bestellung", HTML: html}))
+	if len(booking.Segments) != 2 || booking.Segments[0].Start != "2026-11-03T18:00" || booking.Segments[1].Start != "2026-11-03T21:00" {
+		t.Fatalf("segments = %+v", booking.Segments)
+	}
+	if booking.Segments[1].End != "2026-11-03T23:00" {
+		t.Errorf("the end follows the start's offset: %q", booking.Segments[1].End)
+	}
+}
+
+// A whole-day link's end is exclusive; a one-day festival is one day.
+func TestTravelCalendarLinkAllDayEndIsExclusive(t *testing.T) {
+	html := `<p>Deine Tickets, Buchungsnummer FEST2026</p>` +
+		`<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Festival&amp;dates=20261205/20261206">x</a>` +
+		`<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Wochenende&amp;dates=20261212/20261214">y</a>`
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{Subject: "Tickets", HTML: html}))
+	if len(booking.Segments) != 2 {
+		t.Fatalf("segments = %+v", booking.Segments)
+	}
+	if one := booking.Segments[0]; one.Start != "2026-12-05" || one.End != "" {
+		t.Errorf("one day = %+v", one)
+	}
+	if two := booking.Segments[1]; two.Start != "2026-12-12" || two.End != "2026-12-13" {
+		t.Errorf("two days = %+v", two)
+	}
+}
+
+// Lowercasing "İ" changes its byte length; the seat heading must be found in
+// the notes themselves, or a stranger's notes slice wrong or panic.
+func TestTravelSeatNotesWithUnicodeBeforeTheHeading(t *testing.T) {
+	notes := strings.Repeat("İ", 40) + "\nPlatzinformationen:\nReihe 3, Platz 7\n\n\nViel Spaß"
+	if got := seatFromCalendarNotes(notes); got != "Reihe 3, Platz 7" {
+		t.Fatalf("seat = %q", got)
+	}
+}
