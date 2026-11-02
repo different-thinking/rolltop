@@ -316,3 +316,26 @@ func TestTravelScanReadsStoredMessage(t *testing.T) {
 		t.Fatalf("fetch path and backfill disagree: %+v vs %+v", parsed.Travel, bookings)
 	}
 }
+
+// The booking date can fall in the year before the journey; the table's days
+// take the year the ticket writes beside the same day, not the first year on
+// the page.
+func TestTravelDBYearComesFromTheJourneyDay(t *testing.T) {
+	text := `
+  Buchungsdatum: 28.12.2025
+  Hinfahrt am 03.01.2026
+  Halt              Datum   Zeit       Gleis  Produkte   Reservierung
+  Berlin Hbf        03.01.  ab 08:29   7      ICE 597
+  München Hbf       03.01.  an 12:32   21
+  Online-Ticket DB Fernverkehr AG`
+	booking, ok := travelFromDBText(text, "noreply@bahn.de", time.Date(2025, 12, 28, 10, 0, 0, 0, time.UTC))
+	if !ok || booking.Segments[0].Start != "2026-01-03T08:29" {
+		t.Fatalf("booking = %+v ok=%v", booking, ok)
+	}
+	// With no full date at all, the journey is the next such day after the mail.
+	bare := strings.ReplaceAll(strings.ReplaceAll(text, "Buchungsdatum: 28.12.2025", ""), "Hinfahrt am 03.01.2026", "")
+	booking, ok = travelFromDBText(bare, "noreply@bahn.de", time.Date(2025, 12, 28, 10, 0, 0, 0, time.UTC))
+	if !ok || booking.Segments[0].Start != "2026-01-03T08:29" {
+		t.Fatalf("fallback booking = %+v ok=%v", booking, ok)
+	}
+}

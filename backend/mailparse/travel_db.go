@@ -71,7 +71,8 @@ func travelFromDBText(text, from string, sent time.Time) (TravelBooking, bool) {
 	if header < 0 {
 		return TravelBooking{}, false
 	}
-	year := dbTicketYear(text, sent)
+	stated := dbStatedYears(text)
+	year := 0
 	seatOnly := strings.Contains(lower, "reservierung") && !containsAnyWord(lower,
 		"fahrkarte", "online-ticket", "flexpreis", "sparpreis", "supersparpreis", "bahncard 100", "deutschland-ticket")
 
@@ -89,18 +90,25 @@ func travelFromDBText(text, from string, sent time.Time) (TravelBooking, bool) {
 		hour, _ := strconv.Atoi(match[6])
 		minute, _ := strconv.Atoi(match[7])
 		lineYear := year
-		if match[4] != "" {
+		if y, ok := stated[[2]int{day, month}]; ok && match[4] == "" {
+			// The ticket names this very day with its year elsewhere
+			// ("Hinfahrt am 14.11.2026"); that is the year, whatever other
+			// dates -- the booking's, the invoice's -- the page also carries.
+			lineYear = y
+		} else if match[4] != "" {
 			if y, err := strconv.Atoi(match[4]); err == nil {
 				if y < 100 {
 					y += 2000
 				}
 				lineYear = y
 			}
-		} else if lastMonth == 12 && month == 1 {
+		} else if year != 0 && lastMonth == 12 && month == 1 {
 			// A journey over New Year prints no year either side of midnight.
-			year++
-			lineYear = year
+			lineYear = year + 1
+		} else if year == 0 {
+			lineYear = dbFallbackYear(day, month, sent)
 		}
+		year = lineYear
 		lastMonth = month
 		if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 {
 			continue
@@ -156,20 +164,41 @@ func travelFromDBText(text, from string, sent time.Time) (TravelBooking, bool) {
 	return TravelBooking{Kind: TravelTrain, Reference: reference, Provider: "Deutsche Bahn", Segments: kept}, true
 }
 
-// dbTicketYear is the year the table's dates belong to. The table prints day
-// and month only; the ticket states its date with the year elsewhere ("Hinfahrt
-// am 14.11.2026", "Gültigkeit: ab 14.11.2026"). Failing that, the year that puts
-// the journey nearest after the mail was sent.
-func dbTicketYear(text string, sent time.Time) int {
-	if match := dbYearRE.FindStringSubmatch(text); match != nil {
-		if y, err := strconv.Atoi(match[3]); err == nil {
-			return y
+// dbStatedYears collects the days the ticket writes out with their year, keyed
+// by day and month. The table prints day and month only; the ticket states the
+// journey's dates in full elsewhere ("Hinfahrt am 14.11.2026", "Gültigkeit: ab
+// 14.11.2026"). Matching by day is what keeps the booking date or an invoice
+// date -- which may fall in the previous year -- from deciding the journey's.
+func dbStatedYears(text string) map[[2]int]int {
+	out := map[[2]int]int{}
+	for _, match := range dbYearRE.FindAllStringSubmatch(text, 64) {
+		day, _ := strconv.Atoi(match[1])
+		month, _ := strconv.Atoi(match[2])
+		year, err := strconv.Atoi(match[3])
+		if err != nil {
+			continue
+		}
+		key := [2]int{day, month}
+		if _, ok := out[key]; !ok {
+			out[key] = year
 		}
 	}
+	return out
+}
+
+// dbFallbackYear is the year for a day the ticket never writes out in full:
+// the one that puts the journey nearest after the mail was sent. A ticket is
+// sent before the journey, so a day well before the mail's own belongs to the
+// following year.
+func dbFallbackYear(day, month int, sent time.Time) int {
 	if sent.IsZero() {
-		return time.Now().Year()
+		sent = time.Now()
 	}
-	return sent.Year()
+	year := sent.Year()
+	if time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC).Before(sent.AddDate(0, 0, -60)) {
+		year++
+	}
+	return year
 }
 
 // dbSeat spells a DB reservation the way a reader says it. "Wg. 25, Pl. 45, 1

@@ -13,7 +13,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -44,8 +43,8 @@ const (
 	// pushed. An initial sync goes through the fetch path too, and an old
 	// booking for a journey still months away must not announce itself as new.
 	tripNoticeWindow = 3 * 24 * time.Hour
-	// maxTripNoticesPerPass bounds the push feed one read returns.
-	maxTripNoticesPerPass = 20
+	// MaxTripNoticesPerPass bounds the push feed one read returns.
+	MaxTripNoticesPerPass = 20
 )
 
 // Manual statuses a reader can put on a trip.
@@ -259,7 +258,7 @@ func (s *Store) ListTrips(ctx context.Context, userID int64, today string) ([]Tr
 	if err != nil {
 		return nil, err
 	}
-	trips, _, err := s.listTrips(ctx, userID, day.AddDate(0, 0, -tripHistoryDays).Format(plainDateLayout), 0)
+	trips, _, err := s.listTrips(ctx, userID, day.AddDate(0, 0, -tripHistoryDays).Format(plainDateLayout), nil)
 	return trips, err
 }
 
@@ -267,7 +266,7 @@ func (s *Store) ListTrips(ctx context.Context, userID int64, today string) ([]Tr
 // list folds it. A seat reservation folded into a ticket answers with the
 // ticket's trip, which is where the list draws it.
 func (s *Store) GetTrip(ctx context.Context, userID, tripID int64) (Trip, error) {
-	trips, absorbed, err := s.listTrips(ctx, userID, "", tripID)
+	trips, absorbed, err := s.listTrips(ctx, userID, "", []int64{tripID})
 	if err != nil {
 		return Trip{}, err
 	}
@@ -282,7 +281,7 @@ func (s *Store) GetTrip(ctx context.Context, userID, tripID int64) (Trip, error)
 	return Trip{}, ErrNotFound
 }
 
-func (s *Store) listTrips(ctx context.Context, userID int64, since string, onlyTrip int64) ([]Trip, map[int64]int64, error) {
+func (s *Store) listTrips(ctx context.Context, userID int64, since string, onlyTrips []int64) ([]Trip, map[int64]int64, error) {
 	db, err := s.dataDB(ctx, userID)
 	if err != nil {
 		return nil, nil, err
@@ -296,17 +295,24 @@ func (s *Store) listTrips(ctx context.Context, userID int64, since string, onlyT
 			SELECT 1 FROM trip_segments ts WHERE ts.user_id = t.user_id AND ts.trip_id = t.id
 				AND (ts.start_local >= ? OR ts.end_local >= ?))`
 	args := []any{userID, since, since}
-	if onlyTrip > 0 {
-		// One trip is read with every trip that could fold into it or it into
-		// them: the trains on the same days.
+	if len(onlyTrips) > 0 {
+		// Named trips are read with every trip that could fold into them or
+		// they into it: the trains on the same days.
+		marks := make([]string, len(onlyTrips))
+		ids := make([]any, len(onlyTrips))
+		for i, id := range onlyTrips {
+			marks[i] = "?"
+			ids[i] = id
+		}
+		list := strings.Join(marks, ", ")
 		query = `SELECT t.id, t.kind, t.reference, t.provider, t.manual_status, t.reported_at
 			FROM trips t
-			WHERE t.user_id = ? AND (t.id = ? OR EXISTS (
+			WHERE t.user_id = ? AND (t.id IN (` + list + `) OR EXISTS (
 				SELECT 1 FROM trip_segments mine
 				JOIN trip_segments other ON other.user_id = mine.user_id AND other.kind = mine.kind
 					AND other.number = mine.number AND LEFT(other.start_local, 10) = LEFT(mine.start_local, 10)
-				WHERE mine.user_id = t.user_id AND mine.trip_id = ? AND mine.number <> '' AND other.trip_id = t.id))`
-		args = []any{userID, onlyTrip, onlyTrip}
+				WHERE mine.user_id = t.user_id AND mine.trip_id IN (` + list + `) AND mine.number <> '' AND other.trip_id = t.id))`
+		args = append(append([]any{userID}, ids...), ids...)
 	}
 	rows, err := db.QueryContext(ctx, query+` ORDER BY t.id DESC LIMIT ?`, append(args, tripListLimit*2)...)
 	if err != nil {
@@ -441,6 +447,11 @@ func foldSeatReservations(trips []Trip) ([]Trip, map[int64]int64) {
 	type ticketed struct{ trip, seg int }
 	byTrain := map[string]ticketed{}
 	for ti, trip := range trips {
+		// A ticket the reader dismissed hosts nothing: a reservation folded
+		// into it would disappear with it.
+		if trip.ManualStatus == TripManualDismissed {
+			continue
+		}
 		for si, seg := range trip.Segments {
 			if seg.SeatOnly || seg.Number == "" || seg.Kind != mailparse.TravelTrain {
 				continue
@@ -534,7 +545,7 @@ func (s *Store) TripsToAdd(ctx context.Context, userID int64, today string) (Pen
 	if err != nil {
 		return PendingTrips{}, err
 	}
-	trips, _, err := s.listTrips(ctx, userID, day.Format(plainDateLayout), 0)
+	trips, _, err := s.listTrips(ctx, userID, day.Format(plainDateLayout), nil)
 	if err != nil {
 		return PendingTrips{}, err
 	}
@@ -625,23 +636,33 @@ func (s *Store) TripsForMessages(ctx context.Context, userID int64, messageIDs [
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	cache := map[int64]*Trip{}
+	// Every trip the batch names is read in one pass, folded the way the list
+	// folds it; a reservation folded into a ticket answers with the ticket.
+	wanted := make([]int64, 0, len(byMessage))
+	seenTrip := map[int64]bool{}
+	for _, messageID := range order {
+		for _, tripID := range byMessage[messageID] {
+			if !seenTrip[tripID] {
+				seenTrip[tripID] = true
+				wanted = append(wanted, tripID)
+			}
+		}
+	}
+	loaded, absorbed, err := s.listTrips(ctx, userID, "", wanted)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]*Trip, len(loaded))
+	for i := range loaded {
+		byID[loaded[i].ID] = &loaded[i]
+	}
 	for _, messageID := range order {
 		var best *Trip
 		for _, tripID := range byMessage[messageID] {
-			trip, ok := cache[tripID]
-			if !ok {
-				loaded, err := s.GetTrip(ctx, userID, tripID)
-				switch {
-				case err == nil:
-					trip = &loaded
-				case errors.Is(err, ErrNotFound):
-					trip = nil
-				default:
-					return nil, err
-				}
-				cache[tripID] = trip
+			if host, ok := absorbed[tripID]; ok {
+				tripID = host
 			}
+			trip := byID[tripID]
 			if trip == nil {
 				continue
 			}
@@ -714,6 +735,7 @@ func (s *Store) LinkTripSegmentsToCalendar(ctx context.Context, userID, tripID i
 		result, err := tx.ExecContext(ctx, `UPDATE trip_segments SET calendar_event_id = ?, calendar_added_at = ?, updated_at = ?
 			WHERE user_id = ? AND id = ? AND (trip_id = ? OR EXISTS (
 				SELECT 1 FROM trip_segments host WHERE host.user_id = trip_segments.user_id AND host.trip_id = ?
+					AND trip_segments.seat_only <> 0 AND trip_segments.number <> ''
 					AND host.kind = trip_segments.kind AND host.number = trip_segments.number
 					AND LEFT(host.start_local, 10) = LEFT(trip_segments.start_local, 10)))`,
 			eventID, now, now, userID, segmentID, tripID, tripID)
@@ -757,7 +779,7 @@ func (s *Store) TripNoticesAfter(ctx context.Context, userID, after int64) ([]Tr
 			WHERE user_id = t.user_id AND trip_id = t.id ORDER BY start_local, id LIMIT 1) ts ON true
 		WHERE t.user_id = ? AND t.notify_at > 0 AND t.id > ? AND t.manual_status = ''
 		ORDER BY t.id
-		LIMIT ?`, userID, after, maxTripNoticesPerPass)
+		LIMIT ?`, userID, after, MaxTripNoticesPerPass)
 	if err != nil {
 		return nil, after, err
 	}

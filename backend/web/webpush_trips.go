@@ -139,6 +139,10 @@ func (s *Server) notifyTripWebPush(ctx context.Context, userID int64) bool {
 			retryNeeded = true
 			continue
 		}
+		if len(notices) >= store.MaxTripNoticesPerPass {
+			// The rest is sent on the next round rather than on the next sync.
+			retryNeeded = true
+		}
 		for _, notice := range notices {
 			payload, err := json.Marshal(tripWebPushNotification(notice))
 			if err != nil {

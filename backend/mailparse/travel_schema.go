@@ -37,8 +37,7 @@ const (
 
 // travelFromSchema returns the bookings the message's markup declares.
 func travelFromSchema(markup string) []TravelBooking {
-	lower := strings.ToLower(markup)
-	if !strings.Contains(lower, "ld+json") || !strings.Contains(lower, "reservation") {
+	if !containsFold(markup, "ld+json") || !containsFold(markup, "reservation") {
 		return nil
 	}
 	var out []TravelBooking
@@ -376,4 +375,24 @@ func schemaTime(value any, zone *time.Location) (string, time.Time) {
 		return "", time.Time{}
 	}
 	return local, at
+}
+
+// containsFold reports whether s contains substr ignoring ASCII case, without
+// the copy strings.ToLower would make of a whole message's markup -- this gate
+// runs on every fetched message and almost always answers no.
+func containsFold(s, substr string) bool {
+	n := len(substr)
+	if n == 0 {
+		return true
+	}
+	first := substr[0] | 0x20
+	for i := 0; i+n <= len(s); i++ {
+		if s[i]|0x20 != first {
+			continue
+		}
+		if strings.EqualFold(s[i:i+n], substr) {
+			return true
+		}
+	}
+	return false
 }

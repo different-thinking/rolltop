@@ -182,13 +182,14 @@ export function TripJourneys({
 }) {
   const today = localDay();
   const journeys = groupJourneys(trip);
-  const addable = journeys.filter((journey) => !journeyCalendarStart(journey) && !journeyCancelled(journey) && legDay(journey.segments[0]) >= today);
+  const journeyPast = (journey: Journey) => legDay(journey.segments[journey.segments.length - 1]) < today;
+  const addable = journeys.filter((journey) => !journeyCalendarStart(journey) && !journeyCancelled(journey) && !journeyPast(journey));
   return (
     <div className="trip-journeys">
       {journeys.map((journey) => {
         const added = journeyCalendarStart(journey);
         const cancelled = journeyCancelled(journey);
-        const past = legDay(journey.segments[journey.segments.length - 1]) < today;
+        const past = journeyPast(journey);
         return (
           <div className={`trip-journey ${cancelled ? "cancelled" : ""}`} key={journey.key}>
             <div className="trip-journey-head">

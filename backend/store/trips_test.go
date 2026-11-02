@@ -257,3 +257,32 @@ func TestTripNoticesOnlyForNewUpcomingTrips(t *testing.T) {
 		t.Fatalf("the cursor did not advance: %+v %v", again, err)
 	}
 }
+
+// A reservation for the train of a ticket the reader dismissed stays visible on
+// its own rather than folding into a trip nothing shows.
+func TestListTripsDoesNotFoldIntoADismissedTicket(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "trip-seat-dismissed@example.test")
+	at := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	ticket := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Ticket", at)
+	if err := db.ReplaceMessageTrips(ctx, user.ID, ticket.ID, at.Unix(), []mailparse.TravelBooking{roundTrip()}, false); err != nil {
+		t.Fatal(err)
+	}
+	trips, _ := db.ListTrips(ctx, user.ID, "2026-11-02")
+	if err := db.SetTripManualStatus(ctx, user.ID, trips[0].ID, TripManualDismissed); err != nil {
+		t.Fatal(err)
+	}
+	reservation := shipmentTestMessage(t, ctx, db, user, account, mailbox, 2, "Reservierung", at)
+	if err := db.ReplaceMessageTrips(ctx, user.ID, reservation.ID, at.Unix(), []mailparse.TravelBooking{{
+		Kind: mailparse.TravelTrain, Reference: "R-2",
+		Segments: []mailparse.TravelSegment{trainLeg("ICE 597", "Berlin Hbf", "München Hbf", "2026-11-14T08:29", "2026-11-14T12:32", "Coach 7, seat 12", true)},
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	trips, err := db.ListTrips(ctx, user.ID, "2026-11-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trips) != 1 || trips[0].Reference != "R-2" {
+		t.Fatalf("trips = %+v", trips)
+	}
+}

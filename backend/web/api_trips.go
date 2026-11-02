@@ -172,7 +172,7 @@ func (s *Server) apiTripByID(w http.ResponseWriter, r *http.Request, rest string
 			s.serverError(w, r, err)
 			return
 		}
-		s.notifyChromeChanged(cu.User.ID)
+		s.notifySyncProgress(cu.User.ID)
 		writeJSON(w, map[string]any{"ok": true})
 	case "calendar":
 		var in struct {
@@ -203,18 +203,10 @@ func (s *Server) apiTripByID(w http.ResponseWriter, r *http.Request, rest string
 			s.serverError(w, r, err)
 			return
 		}
-		s.notifyChromeChanged(cu.User.ID)
+		s.notifySyncProgress(cu.User.ID)
 		writeJSON(w, map[string]any{"trip": apiTripFromStore(trip)})
 	default:
 		http.NotFound(w, r)
-	}
-}
-
-// notifyChromeChanged tells the open tabs to re-read their chrome, which is
-// where the header chip lives.
-func (s *Server) notifyChromeChanged(userID int64) {
-	if s.events != nil {
-		s.events.Notify(userID)
 	}
 }
 
