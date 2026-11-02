@@ -120,6 +120,11 @@ type TravelSegment struct {
 	SeatOnly  bool
 	Cancelled bool
 	Source    string
+	// ICalUID is the UID of the calendar object the leg was read from, when it
+	// was. A provider that imported that object on its own -- Gmail puts a
+	// DB booking's .ics straight into Google Calendar -- holds an event with
+	// the same iCalUID, which is how the trip knows it is already there.
+	ICalUID string
 }
 
 // AllDay reports a leg that names a day and no time.
@@ -267,7 +272,10 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 	if in.HTML != "" {
 		found = append(found, travelFromSchema(in.HTML)...)
 	}
-	ticketWords := ticketEvidence(in.Subject, in.Files)
+	// The documents go before the calendar objects: a leg takes each field
+	// from the first source that names it, and an operator's .ics may hold a
+	// whole journey with a change as one event, whose end is the journey's
+	// rather than the first train's.
 	for _, file := range in.Files {
 		switch {
 		case isPassFile(file.Filename, file.ContentType):
@@ -275,16 +283,45 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 				found = append(found, booking)
 			}
 		case IsCalendarPart(file.ContentType, file.Filename):
-			if ticketWords {
-				found = append(found, travelFromICS(file.Data)...)
-			}
 		case isPDFFile(file.Filename, file.ContentType):
 			if booking, ok := travelFromDBPDF(file.Data, in.From, in.Sent); ok {
 				found = append(found, booking)
 			}
 		}
 	}
-	return mergeTravelBookings(found)
+	ticketWords := ticketEvidence(in.Subject, in.Files)
+	operator := dbSender(in.From)
+	for _, file := range in.Files {
+		if IsCalendarPart(file.ContentType, file.Filename) && !isPassFile(file.Filename, file.ContentType) {
+			found = append(found, travelFromICS(file.Data, in.Subject, operator, ticketWords)...)
+		}
+	}
+	bookings := mergeTravelBookings(found)
+	if operator {
+		applyDBSubject(bookings, in.Subject)
+	}
+	return bookings
+}
+
+// applyDBSubject lets a DB mail's subject settle whether its train legs are a
+// seat reservation without a ticket. The subject says it plainly -- "Ihre
+// Reservierung" against "Ihre Buchungsbestätigung" -- where the PDF's text has
+// to be read for fare words that a reservation may also mention.
+func applyDBSubject(bookings []TravelBooking, subject string) {
+	lower := strings.ToLower(subject)
+	booked := containsAnyWord(lower, "buchung", "ticket", "fahrkarte")
+	reserved := strings.Contains(lower, "reservierung") && !booked
+	if !booked && !reserved {
+		return
+	}
+	for i := range bookings {
+		if bookings[i].Kind != TravelTrain {
+			continue
+		}
+		for j := range bookings[i].Segments {
+			bookings[i].Segments[j].SeatOnly = reserved
+		}
+	}
 }
 
 // ticketEvidence is the one place words count, and only to decide whether a
@@ -349,7 +386,7 @@ func sameTravelBooking(a, b TravelBooking) bool {
 	}
 	for _, left := range a.Segments {
 		for _, right := range b.Segments {
-			if left.Key() == right.Key() {
+			if sameTravelLeg(left, right) {
 				return true
 			}
 		}
@@ -370,7 +407,7 @@ func joinTravelBookings(a, b TravelBooking) TravelBooking {
 	for _, seg := range b.Segments {
 		joined := false
 		for i := range a.Segments {
-			if a.Segments[i].Key() == seg.Key() {
+			if sameTravelLeg(a.Segments[i], seg) {
 				a.Segments[i] = joinTravelSegments(a.Segments[i], seg)
 				joined = true
 				break
@@ -381,6 +418,19 @@ func joinTravelBookings(a, b TravelBooking) TravelBooking {
 		}
 	}
 	return a
+}
+
+// sameTravelLeg reports two readings of one leg: the same key, or -- when one
+// source named no train -- the same kind of travel leaving at the same minute.
+// A calendar object titled only with its route is the PDF's train all the same.
+func sameTravelLeg(a, b TravelSegment) bool {
+	if a.Key() == b.Key() {
+		return true
+	}
+	if a.Kind != b.Kind || a.Kind == TravelEvent || (a.Number != "" && b.Number != "") {
+		return false
+	}
+	return a.Start != "" && a.Start == b.Start
 }
 
 func joinTravelSegments(a, b TravelSegment) TravelSegment {
@@ -400,6 +450,7 @@ func joinTravelSegments(a, b TravelSegment) TravelSegment {
 	fill(&a.Address, b.Address)
 	fill(&a.End, b.End)
 	fill(&a.Seat, b.Seat)
+	fill(&a.ICalUID, b.ICalUID)
 	if a.StartAt.IsZero() {
 		a.StartAt = b.StartAt
 	}

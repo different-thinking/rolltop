@@ -2426,7 +2426,12 @@ export function ThreadView({
                       card still mounts its body (hidden by CSS), so the card
                       is drawn for expanded messages only: reading the
                       calendar may cost an IMAP fetch per message. */}
-                  {item.has_calendar && isExpanded ? (
+                  {/* A ticket's own calendar object (DB attaches the journey as
+                      an .ics) is the trip card's to offer: it adds the journey
+                      with travel time and knows when the provider already
+                      imported it. Two "Add to calendar" cards for one train
+                      would enter it twice. */}
+                  {item.has_calendar && isExpanded && !item.message.trip ? (
                     <MessageCalendarCard
                       messageID={item.message.id}
                       csrf={csrf}

@@ -814,6 +814,20 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE web_push_subscriptions ADD COLUMN last_trip_notice_id bigint NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// A leg read from a calendar object keeps that object's UID. Gmail
+		// imports the .ics a DB booking carries into Google Calendar on its
+		// own, so the reader's calendar may already hold the journey under
+		// that iCalUID; a trip reads it as added through this column, as the
+		// invitation card already does for the message's own calendar part.
+		// The index serves that lookup and the card's, which until now
+		// scanned the tenant's events.
+		Version: "0021-trip-segment-ical-uid",
+		Statements: []string{
+			`ALTER TABLE trip_segments ADD COLUMN ical_uid text COLLATE "C" NOT NULL DEFAULT ''`,
+			`CREATE INDEX idx_calendar_events_ical_uid ON calendar_events (user_id, ical_uid) WHERE ical_uid <> ''`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

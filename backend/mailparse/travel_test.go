@@ -339,3 +339,96 @@ func TestTravelDBYearComesFromTheJourneyDay(t *testing.T) {
 		t.Fatalf("fallback booking = %+v ok=%v", booking, ok)
 	}
 }
+
+func dbBookingICS(method string) string {
+	return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + method +
+		"BEGIN:VEVENT\r\nUID:out-482910375512@bahn.de\r\nDTSTART;TZID=Europe/Berlin:20261114T082900\r\n" +
+		"DTEND;TZID=Europe/Berlin:20261114T123200\r\nSUMMARY:Berlin Hbf -> München Hbf\r\nLOCATION:Berlin Hbf\r\n" +
+		"DESCRIPTION:Auftragsnummer: 482910375512\\nICE 597 Wagen 25\\, Platz 45\r\n" +
+		"ORGANIZER:mailto:noreply@bahn.de\r\nATTENDEE:mailto:reader@example.com\r\nEND:VEVENT\r\n" +
+		"BEGIN:VEVENT\r\nUID:back-482910375512@bahn.de\r\nDTSTART;TZID=Europe/Berlin:20261116T172800\r\n" +
+		"DTEND;TZID=Europe/Berlin:20261116T213100\r\nSUMMARY:München Hbf -> Berlin Hbf\r\nLOCATION:München Hbf\r\n" +
+		"DESCRIPTION:ICE 1006\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+}
+
+// DB attaches the booking's journeys as a calendar object: both are train legs
+// of the booking, read whatever the object's method, and the outbound one is
+// the same leg as the PDF's first train.
+func TestTravelDBBookingICSIsTrainLegs(t *testing.T) {
+	file := TravelFile{Filename: "Buchung.ics", ContentType: "text/calendar", Data: []byte(dbBookingICS("METHOD:REQUEST\r\n"))}
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Buchungsbestätigung", From: "DB Reisezentrum <noreply@bahn.de>", Files: []TravelFile{file},
+	}))
+	if booking.Kind != TravelTrain || booking.Reference != "482910375512" || len(booking.Segments) != 2 {
+		t.Fatalf("booking = %+v", booking)
+	}
+	out, back := booking.Segments[0], booking.Segments[1]
+	if out.Number != "ICE 597" || out.From != "Berlin Hbf" || out.To != "München Hbf" || out.Seat != "Coach 25, seat 45" {
+		t.Errorf("outbound = %+v", out)
+	}
+	if out.ICalUID != "out-482910375512@bahn.de" || out.Start != "2026-11-14T08:29" || out.SeatOnly {
+		t.Errorf("outbound = %+v", out)
+	}
+	if back.Number != "ICE 1006" || back.From != "München Hbf" {
+		t.Errorf("return = %+v", back)
+	}
+
+	original := pdfTextExtractor
+	defer func() { pdfTextExtractor = original }()
+	pdfTextExtractor = func([]byte) (string, error) { return dbTicketText, nil }
+	pdf := TravelFile{Filename: "Ticket.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}
+	booking = onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Buchungsbestätigung", From: "noreply@bahn.de", Files: []TravelFile{file, pdf}, Sent: travelSent(t),
+	}))
+	if len(booking.Segments) != 3 {
+		t.Fatalf("the .ics and the PDF should be one journey of three legs, got %+v", booking.Segments)
+	}
+	if booking.Segments[0].End != "2026-11-14T10:12" || booking.Segments[0].ICalUID == "" {
+		t.Errorf("the PDF decides the first train's end, the .ics adds its UID: %+v", booking.Segments[0])
+	}
+}
+
+// A seat reservation's calendar object names the train by its route only; the
+// subject says it is a reservation, and the minute joins it to the PDF's leg.
+func TestTravelDBReservationICS(t *testing.T) {
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:res-1@bahn.de\r\n" +
+		"DTSTART:20261120T050100Z\r\nDTEND:20261120T090500Z\r\nSUMMARY:Hamburg Hbf – Köln Hbf\r\n" +
+		"DESCRIPTION:Wagen 3\\, Platz 111\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	file := TravelFile{Filename: "Reservierung.ics", ContentType: "text/calendar", Data: []byte(ics)}
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Reservierung", From: "noreply@bahn.de", Files: []TravelFile{file},
+	}))
+	seg := booking.Segments[0]
+	if !seg.SeatOnly || seg.Seat != "Coach 3, seat 111" || seg.Start != "2026-11-20T06:01" || seg.From != "Hamburg Hbf" {
+		t.Fatalf("segment = %+v", seg)
+	}
+
+	original := pdfTextExtractor
+	defer func() { pdfTextExtractor = original }()
+	pdfTextExtractor = func([]byte) (string, error) {
+		return "Reservierung\nHalt  Datum  Zeit  Gleis  Produkte  Reservierung\nHamburg Hbf  20.11.  ab 06:01  13  ICE 1673  Wg. 3, Pl. 111\nKöln Hbf  20.11.  an 10:05  4\nwww.bahn.de", nil
+	}
+	pdf := TravelFile{Filename: "Reservierung.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}
+	booking = onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Reservierung", From: "noreply@bahn.de", Files: []TravelFile{file, pdf}, Sent: travelSent(t),
+	}))
+	if len(booking.Segments) != 1 || booking.Segments[0].Number != "ICE 1673" || booking.Segments[0].ICalUID != "res-1@bahn.de" {
+		t.Fatalf("the .ics and the PDF should be one leg: %+v", booking.Segments)
+	}
+}
+
+// The subject of a DB booking overrides the PDF's fare-word reading.
+func TestTravelDBSubjectDecidesSeatOnly(t *testing.T) {
+	original := pdfTextExtractor
+	defer func() { pdfTextExtractor = original }()
+	pdfTextExtractor = func([]byte) (string, error) {
+		return "Ihre Reiseverbindung und Reservierung\nHalt  Datum  Zeit  Gleis  Produkte  Reservierung\nBerlin Hbf  14.11.2026  ab 08:29  7  ICE 597  Wg. 25, Pl. 45\nMünchen Hbf  14.11.2026  an 12:32  21\nDB Fernverkehr AG", nil
+	}
+	pdf := TravelFile{Filename: "Ticket.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		Subject: "Ihre Buchungsbestätigung (Auftrag 482910375512)", From: "noreply@bahn.de", Files: []TravelFile{pdf}, Sent: travelSent(t),
+	}))
+	if booking.Segments[0].SeatOnly {
+		t.Fatalf("a booking confirmation is a ticket: %+v", booking.Segments[0])
+	}
+}

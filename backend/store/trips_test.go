@@ -286,3 +286,32 @@ func TestListTripsDoesNotFoldIntoADismissedTicket(t *testing.T) {
 		t.Fatalf("trips = %+v", trips)
 	}
 }
+
+// Gmail imports a DB booking's .ics into Google Calendar by itself; the leg read
+// from that object reads as added through the event's iCalUID.
+func TestTripLegReadsAsAddedThroughImportedICalUID(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "trip-ical@example.test")
+	at := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	message := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Buchung", at)
+	booking := roundTrip()
+	booking.Segments[0].ICalUID = "out-1@bahn.de"
+	if err := db.ReplaceMessageTrips(ctx, user.ID, message.ID, at.Unix(), []mailparse.TravelBooking{booking}, false); err != nil {
+		t.Fatal(err)
+	}
+	other := createPendingMoveTestUser(t, ctx, db, "trip-ical-other@example.test")
+	otherCalendar := mustCalendar(t, db, ctx, other.ID, 1, "primary")
+	start := time.Date(2026, 11, 14, 7, 29, 0, 0, time.UTC)
+	mustEvent(t, db, ctx, other.ID, CalendarEvent{CalendarID: otherCalendar.ID, ExternalID: "x", ICalUID: "out-1@bahn.de",
+		Summary: "theirs", StartAt: start, EndAt: start.Add(time.Hour)})
+	trips, _ := db.ListTrips(ctx, user.ID, "2026-11-02")
+	if trips[0].Segments[0].CalendarEventID != 0 {
+		t.Fatalf("another tenant's event counts as this reader's: %+v", trips[0].Segments[0])
+	}
+	calendar := mustCalendar(t, db, ctx, user.ID, 1, "primary")
+	event := mustEvent(t, db, ctx, user.ID, CalendarEvent{CalendarID: calendar.ID, ExternalID: "y", ICalUID: "out-1@bahn.de",
+		Summary: "Berlin Hbf -> München Hbf", StartAt: start, EndAt: start.Add(time.Hour)})
+	trips, _ = db.ListTrips(ctx, user.ID, "2026-11-02")
+	if trips[0].Segments[0].CalendarEventID != event.ID || trips[0].Segments[1].CalendarEventID != 0 {
+		t.Fatalf("legs = %+v", trips[0].Segments)
+	}
+}

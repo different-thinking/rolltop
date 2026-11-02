@@ -212,8 +212,8 @@ func upsertTripSegment(ctx context.Context, tx *sql.Tx, userID, tripID, reported
 	_, err := tx.ExecContext(ctx, `INSERT INTO trip_segments
 			(trip_id, user_id, segment_key, kind, number, title, provider, from_name, from_code, to_name, to_code,
 			 venue, address, start_local, start_at, end_local, end_at, seat, seat_only, cancelled, source,
-			 reported_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ical_uid, reported_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (trip_id, segment_key) DO UPDATE SET
 			number = CASE WHEN EXCLUDED.reported_at >= trip_segments.reported_at AND EXCLUDED.number <> '' THEN EXCLUDED.number ELSE trip_segments.number END,
 			title = CASE WHEN EXCLUDED.reported_at >= trip_segments.reported_at AND EXCLUDED.title <> '' THEN EXCLUDED.title ELSE trip_segments.title END,
@@ -230,11 +230,12 @@ func upsertTripSegment(ctx context.Context, tx *sql.Tx, userID, tripID, reported
 			seat = CASE WHEN EXCLUDED.seat <> '' AND (EXCLUDED.reported_at >= trip_segments.reported_at OR trip_segments.seat = '') THEN EXCLUDED.seat ELSE trip_segments.seat END,
 			seat_only = CASE WHEN EXCLUDED.seat_only = 0 THEN 0 ELSE trip_segments.seat_only END,
 			cancelled = CASE WHEN EXCLUDED.reported_at >= trip_segments.reported_at THEN EXCLUDED.cancelled ELSE trip_segments.cancelled END,
+			ical_uid = CASE WHEN trip_segments.ical_uid = '' THEN EXCLUDED.ical_uid ELSE trip_segments.ical_uid END,
 			reported_at = GREATEST(EXCLUDED.reported_at, trip_segments.reported_at),
 			updated_at = EXCLUDED.updated_at`,
 		tripID, userID, seg.Key(), seg.Kind, seg.Number, seg.Title, seg.Provider, seg.From, seg.FromCode, seg.To, seg.ToCode,
 		seg.Venue, seg.Address, seg.Start, unixOrZero(seg.StartAt), seg.End, unixOrZero(seg.EndAt), seg.Seat,
-		boolInt(seg.SeatOnly), boolInt(seg.Cancelled), seg.Source, reportedAt, now, now)
+		boolInt(seg.SeatOnly), boolInt(seg.Cancelled), seg.Source, seg.ICalUID, reportedAt, now, now)
 	return err
 }
 
@@ -381,9 +382,15 @@ func (s *Store) attachTripSegments(ctx context.Context, userID int64, trips []Tr
 	rows, err := db.QueryContext(ctx, `SELECT ts.id, ts.trip_id, ts.kind, ts.number, ts.title, ts.provider,
 			ts.from_name, ts.from_code, ts.to_name, ts.to_code, ts.venue, ts.address,
 			ts.start_local, ts.start_at, ts.end_local, ts.end_at, ts.seat, ts.seat_only, ts.cancelled,
-			COALESCE(ce.id, 0), COALESCE(ce.start_at, 0), COALESCE(ce.all_day, 0)
+			COALESCE(ce.id, imported.id, 0), COALESCE(ce.start_at, imported.start_at, 0), COALESCE(ce.all_day, imported.all_day, 0)
 		FROM trip_segments ts
 		LEFT JOIN calendar_events ce ON ce.id = ts.calendar_event_id AND ce.user_id = ts.user_id
+		-- The event the reader made from the leg wins; failing that, one the
+		-- provider imported from the very calendar object the leg was read
+		-- from (Gmail does this with a DB booking's .ics).
+		LEFT JOIN LATERAL (SELECT id, start_at, all_day FROM calendar_events
+			WHERE user_id = ts.user_id AND ts.ical_uid <> '' AND ical_uid = ts.ical_uid
+			ORDER BY id LIMIT 1) imported ON true
 		WHERE ts.user_id = ? AND ts.trip_id IN (`+list+`)
 		ORDER BY ts.start_local, ts.id`, args...)
 	if err != nil {

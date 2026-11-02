@@ -563,9 +563,16 @@ site and in review.
   (`travel_schema.go` -- reservations only, never a bare `Event`, which is an
   advertisement), an Apple Wallet pass (`travel_pkpass.go`), Deutsche Bahn's
   itinerary table in its ticket PDF (`travel_db.go`, read from layout text and
-  only from a document that is DB's), and a published calendar object in a mail
-  that calls itself a ticket (`travel_ics.go` -- never an invitation, which the
-  calendar card answers). Do not add a reader that guesses a journey from words.
+  only from a document that is DB's), and a calendar object (`travel_ics.go`): from
+  DB's own domains it is the journey and is read as train legs whatever its
+  iTIP method, so it joins the PDF's legs (the same train, or the same minute
+  when the object names no train) instead of standing beside them; from anyone
+  else only a published object in a mail that calls itself a ticket, never an
+  invitation, which the calendar card answers. A message with a trip shows the
+  trip card **instead of** the calendar card, or one train is offered twice. A
+  leg keeps its calendar object's UID (`trip_segments.ical_uid`) and reads as
+  added when the reader's calendar holds an event with that iCalUID -- Gmail
+  imports a DB booking's .ics into Google Calendar by itself. Do not add a reader that guesses a journey from words.
   A time without a stated offset is a floating time unless the source names its
   zone: a flight's airport (`airportZones`, where a miss stays floating) or DB's
   own timetable clock; never assume the reader's or the server's zone.
