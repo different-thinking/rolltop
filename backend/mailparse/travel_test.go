@@ -607,3 +607,47 @@ func TestTravelCalendarLinkWithZone(t *testing.T) {
 		t.Fatalf("segment = %+v", seg)
 	}
 }
+
+// "Deine Bestellnummer findest du im Kundenkonto" names no order: a
+// reference has to carry a digit, or the advertisement gate is a formality.
+func TestTravelCalendarLinksOrderNeedsADigit(t *testing.T) {
+	html := strings.Replace(eventimConfirmation(""), "<h2>Deine Tickets",
+		"<p>Deine Bestellnummer findest du im Kundenkonto.</p><h2>Deine Tickets", 1)
+	if got := ExtractTravelBookings(TravelInput{Subject: "Neue Tickets", HTML: html}); len(got) != 0 {
+		t.Fatalf("a word is not an order number: %+v", got)
+	}
+}
+
+// Two shows in one order: each link takes the written time nearest its own
+// instant, not the first one in the mail.
+func TestTravelCalendarLinksTwoShowsTwoTimes(t *testing.T) {
+	link := func(text, dates string) string {
+		return `<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=` + text + `&amp;dates=` + dates + `">x</a>`
+	}
+	html := `<p>Deine Tickets, Bestellnummer 4711123</p><p>Früh: 03.11.2026, 18:00</p><p>Spät: 03.11.2026, 21:00</p>` +
+		link("Fruehe+Show", "20261103T170000Z/20261103T190000Z") + link("Spaete+Show", "20261103T200000Z/20261103T220000Z")
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{Subject: "Bestellung", HTML: html}))
+	if len(booking.Segments) != 2 || booking.Segments[0].Start != "2026-11-03T18:00" || booking.Segments[1].Start != "2026-11-03T21:00" {
+		t.Fatalf("segments = %+v", booking.Segments)
+	}
+	if booking.Segments[1].End != "2026-11-03T23:00" {
+		t.Errorf("the end follows the start's offset: %q", booking.Segments[1].End)
+	}
+}
+
+// A whole-day link's end is exclusive; a one-day festival is one day.
+func TestTravelCalendarLinkAllDayEndIsExclusive(t *testing.T) {
+	html := `<p>Deine Tickets, Buchungsnummer FEST2026</p>` +
+		`<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Festival&amp;dates=20261205/20261206">x</a>` +
+		`<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Wochenende&amp;dates=20261212/20261214">y</a>`
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{Subject: "Tickets", HTML: html}))
+	if len(booking.Segments) != 2 {
+		t.Fatalf("segments = %+v", booking.Segments)
+	}
+	if one := booking.Segments[0]; one.Start != "2026-12-05" || one.End != "" {
+		t.Errorf("one day = %+v", one)
+	}
+	if two := booking.Segments[1]; two.Start != "2026-12-12" || two.End != "2026-12-13" {
+		t.Errorf("two days = %+v", two)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -56,16 +57,18 @@ func travelFromCalendarLinks(markup, subject, from string) []TravelBooking {
 	}
 	text := stripHTML(markup)
 	if len(text) > maxTravelLinkText {
-		text = limitCategoryText(text)
+		cut := maxTravelLinkText
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
 	}
 	if !ticketEvidence(subject, nil) && !ticketEvidence(text, nil) {
 		return nil
 	}
-	reference := ""
-	if match := orderReferenceRE.FindStringSubmatch(subject); match != nil {
-		reference = match[1]
-	} else if match := orderReferenceRE.FindStringSubmatch(text); match != nil {
-		reference = match[1]
+	reference := orderReference(subject)
+	if reference == "" {
+		reference = orderReference(text)
 	}
 	if reference == "" {
 		return nil
@@ -118,6 +121,20 @@ func withoutFloatingDuplicates(bookings []TravelBooking) []TravelBooking {
 	return kept
 }
 
+// orderReference is the first order or booking number the text states. The
+// labels are matched in any case, so the value must carry a digit: "Deine
+// Bestellnummer findest du im Kundenkonto" names no number, and taking
+// "findest" for one would let the advertisement through the very gate this
+// exists to be.
+func orderReference(text string) string {
+	for _, match := range orderReferenceRE.FindAllStringSubmatch(text, 8) {
+		if strings.ContainsAny(match[1], "0123456789") {
+			return match[1]
+		}
+	}
+	return ""
+}
+
 // segmentFromCalendarLink reads one Google Calendar or Outlook.com link.
 func segmentFromCalendarLink(link *url.URL) (TravelSegment, bool) {
 	host := strings.ToLower(link.Hostname())
@@ -153,6 +170,15 @@ func segmentFromCalendarLink(link *url.URL) (TravelSegment, bool) {
 	seg.Title = strings.TrimSpace(shopTitleSuffixRE.ReplaceAllString(seg.Title, ""))
 	if seg.Title == "" || seg.Start == "" {
 		return TravelSegment{}, false
+	}
+	// A calendar link's whole-day end is exclusive, as in iCalendar; a leg
+	// names its last day.
+	if len(seg.Start) == len(travelDateLayout) && len(seg.End) == len(travelDateLayout) {
+		exclusive, err := time.Parse(travelDateLayout, seg.End)
+		seg.End = ""
+		if last := exclusive.AddDate(0, 0, -1).Format(travelDateLayout); err == nil && last > seg.Start {
+			seg.End = last
+		}
 	}
 	// "Filmtheater Schauburg, Königsbrücker Straße 55, 01099 DRESDEN": the
 	// venue is the first part and the address the rest.
@@ -205,6 +231,8 @@ func writtenWallClock(text, start string, at time.Time) string {
 		return start
 	}
 	utc := at.UTC()
+	base := time.Date(utc.Year(), utc.Month(), utc.Day(), utc.Hour(), utc.Minute(), 0, 0, time.UTC)
+	best, bestOffset := "", time.Duration(-1)
 	for _, match := range writtenLocalTimeRE.FindAllStringSubmatch(text, 32) {
 		day, _ := strconv.Atoi(match[1])
 		month, _ := strconv.Atoi(match[2])
@@ -215,13 +243,24 @@ func writtenWallClock(text, start string, at time.Time) string {
 			continue
 		}
 		written := time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC)
-		offset := written.Sub(time.Date(utc.Year(), utc.Month(), utc.Day(), utc.Hour(), utc.Minute(), 0, 0, time.UTC))
+		offset := written.Sub(base)
 		if offset%(15*time.Minute) != 0 || offset > 14*time.Hour || offset < -14*time.Hour {
 			continue
 		}
-		return written.Format(travelLocalLayout)
+		// With several events in one order, every written time is within
+		// fourteen hours of every instant; the nearest one is this event's,
+		// since the others sit a show's distance further away.
+		if offset < 0 {
+			offset = -offset
+		}
+		if bestOffset < 0 || offset < bestOffset {
+			best, bestOffset = written.Format(travelLocalLayout), offset
+		}
 	}
-	return start
+	if best == "" {
+		return start
+	}
+	return best
 }
 
 // writtenEndWallClock moves the end by the offset the start was found at, so a
