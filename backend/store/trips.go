@@ -269,9 +269,9 @@ func dropUnnamedSegments(ctx context.Context, tx *sql.Tx, userID int64, segmentI
 		args = append(args, id)
 	}
 	marks := strings.TrimSuffix(strings.Repeat("?, ", len(segmentIDs)), ", ")
-	unnamed := `SELECT o.id FROM trip_segments o
-		WHERE o.user_id = ? AND o.id IN (` + marks + `)
-			AND NOT EXISTS (SELECT 1 FROM trip_segment_messages l WHERE l.segment_id = o.id)`
+	unnamed := `SELECT gone.id FROM trip_segments gone
+		WHERE gone.user_id = ? AND gone.id IN (` + marks + `)
+			AND NOT EXISTS (SELECT 1 FROM trip_segment_messages l WHERE l.segment_id = gone.id)`
 	if _, err := tx.ExecContext(ctx, `UPDATE trip_segments s
 		SET calendar_event_id = o.calendar_event_id, calendar_added_at = o.calendar_added_at
 		FROM trip_segments o

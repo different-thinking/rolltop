@@ -186,13 +186,15 @@ func dbICSLegs(event icalendar.Event) []TravelSegment {
 	}
 	for _, line := range strings.Split(event.Description, "\n") {
 		line = strings.TrimSpace(line)
-		switch {
-		case line == "":
+		if line == "" {
 			leg, seat = nil, ""
-		case strings.HasPrefix(line, "[") && strings.Contains(line, "Wg."):
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "Wg.") {
 			seat = dbSeat(line)
-		case dbICSProductRE.MatchString(line):
-			match := dbICSProductRE.FindStringSubmatch(line)
+			continue
+		}
+		if match := dbICSProductRE.FindStringSubmatch(line); match != nil {
 			number := match[1] + " " + match[2]
 			if match[3] != "" {
 				number += " (" + match[3] + ")"
@@ -202,17 +204,23 @@ func dbICSLegs(event icalendar.Event) []TravelSegment {
 				Seat: joinSeatClass(seat, class), Source: TravelSourceICS,
 			})
 			leg = &legs[len(legs)-1]
-		case leg != nil && dbICSStopRE.MatchString(line):
-			match := dbICSStopRE.FindStringSubmatch(line)
-			hour, _ := strconv.Atoi(match[2])
-			minute, _ := strconv.Atoi(match[3])
-			moment := at(hour, minute)
-			station := strings.TrimSpace(match[4])
-			if match[1] == "ab" && leg.Start == "" {
-				leg.From, leg.Start, leg.StartAt = station, moment.Format(travelLocalLayout), moment
-			} else if match[1] == "an" && leg.Start != "" {
-				leg.To, leg.End, leg.EndAt = station, moment.Format(travelLocalLayout), moment
-			}
+			continue
+		}
+		if leg == nil {
+			continue
+		}
+		match := dbICSStopRE.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		hour, _ := strconv.Atoi(match[2])
+		minute, _ := strconv.Atoi(match[3])
+		moment := at(hour, minute)
+		station := strings.TrimSpace(match[4])
+		if match[1] == "ab" && leg.Start == "" {
+			leg.From, leg.Start, leg.StartAt = station, moment.Format(travelLocalLayout), moment
+		} else if match[1] == "an" && leg.Start != "" {
+			leg.To, leg.End, leg.EndAt = station, moment.Format(travelLocalLayout), moment
 		}
 	}
 	kept := legs[:0]
