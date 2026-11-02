@@ -117,11 +117,10 @@ func travelFromTrainICS(cal icalendar.Calendar) (TravelBooking, bool) {
 		// Seat reservation or ticket is the subject's to say (applyDBSubject).
 		for i := range legs {
 			legs[i].Cancelled = event.Status == "CANCELLED"
-			// One UID covers the journey; the first train carries it, which is
-			// what the calendar's own copy of the event starts with.
-			if i == 0 {
-				legs[i].ICalUID = event.UID
-			}
+			// One UID covers the whole journey, so every train of it carries
+			// it: a journey reads as in the calendar only when all its legs
+			// do, and the provider's imported copy is one event for all of them.
+			legs[i].ICalUID = event.UID
 		}
 		booking.Segments = append(booking.Segments, legs...)
 	}

@@ -828,6 +828,38 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_calendar_events_ical_uid ON calendar_events (user_id, ical_uid) WHERE ical_uid <> ''`,
 		},
 	},
+	{
+		// Which messages named which leg. A trip already knew its messages, but
+		// a leg did not, so nothing could ever take a leg away: a re-read under
+		// a new TravelVersion that spells a leg differently left the old leg on
+		// the trip beside the new one, and a leg whose only message was deleted
+		// stayed drawn for as long as another message kept the trip alive. A
+		// leg is now drawn only while some message names it, and a re-read
+		// drops what only that message named. Silence from another message
+		// still removes nothing -- its links are its own.
+		//
+		// Every leg that exists is linked to every message of its trip, which
+		// is the most any of them could have been named by; a re-read then
+		// narrows that to what each message really says.
+		Version: "0022-trip-segment-messages",
+		Statements: []string{
+			`CREATE TABLE trip_segment_messages (
+				segment_id bigint NOT NULL,
+				message_id bigint NOT NULL,
+				user_id bigint NOT NULL,
+				PRIMARY KEY (segment_id, message_id)
+			)`,
+			`ALTER TABLE trip_segment_messages ADD FOREIGN KEY (segment_id) REFERENCES trip_segments(id) ON DELETE CASCADE`,
+			`ALTER TABLE trip_segment_messages ADD FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE`,
+			`ALTER TABLE trip_segment_messages ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE`,
+			`CREATE INDEX idx_trip_segment_messages_message ON trip_segment_messages (user_id, message_id)`,
+			`INSERT INTO trip_segment_messages (segment_id, message_id, user_id)
+				SELECT ts.id, tm.message_id, ts.user_id
+				FROM trip_segments ts
+				JOIN trip_messages tm ON tm.trip_id = ts.trip_id AND tm.user_id = ts.user_id
+				ON CONFLICT DO NOTHING`,
+		},
+	},
 }
 
 func postgresMigrationChecksum(m postgresMigration) string {

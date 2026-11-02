@@ -64,7 +64,7 @@ const ticket: Trip = {
       from: "Berlin Hbf", from_code: "", to: "München Hbf", to_code: "", venue: "", address: "",
       start: "2099-11-14T08:29", start_at: "2099-11-14T07:29:00Z", end: "2099-11-14T12:32", end_at: "2099-11-14T11:32:00Z",
       all_day: false, seat: "Coach 25, seat 45", seat_only: false, cancelled: false,
-      calendar_event_id: 0, calendar_start: "", calendar_all_day: false
+      from_calendar_object: false, calendar_event_id: 0, calendar_start: "", calendar_all_day: false
     }
   ]
 };

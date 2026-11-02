@@ -315,3 +315,62 @@ func TestTripLegReadsAsAddedThroughImportedICalUID(t *testing.T) {
 		t.Fatalf("legs = %+v", trips[0].Segments)
 	}
 }
+
+// A re-read that spells a leg differently replaces it rather than adding a
+// second one beside it, and the calendar event the reader made from the old
+// leg follows to the new one. A leg whose only mail is gone is not drawn.
+func TestReplaceMessageTripsDropsLegsOnlyThatMessageNamed(t *testing.T) {
+	db, ctx, user, account, mailbox := shipmentTestSetup(t, "trip-reread@example.test")
+	at := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	booking := shipmentTestMessage(t, ctx, db, user, account, mailbox, 1, "Buchung", at)
+	whole := mailparse.TravelBooking{Kind: mailparse.TravelTrain, Reference: "A1", Segments: []mailparse.TravelSegment{
+		trainLeg("IC 1914", "Dresden-Neustadt", "Jena Paradies", "2026-11-14T09:29", "2026-11-14T12:12", "", false),
+	}}
+	if err := db.ReplaceMessageTrips(ctx, user.ID, booking.ID, at.Unix(), []mailparse.TravelBooking{whole}, false); err != nil {
+		t.Fatal(err)
+	}
+	calendar := mustCalendar(t, db, ctx, user.ID, 1, "primary")
+	start := time.Date(2026, 11, 14, 8, 29, 0, 0, time.UTC)
+	event := mustEvent(t, db, ctx, user.ID, CalendarEvent{CalendarID: calendar.ID, ExternalID: "e", Summary: "Zug", StartAt: start, EndAt: start.Add(3 * time.Hour)})
+	trips, _ := db.ListTrips(ctx, user.ID, "2026-11-02")
+	if err := db.LinkTripSegmentsToCalendar(ctx, user.ID, trips[0].ID, []int64{trips[0].Segments[0].ID}, event.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same message read again names two trains instead of one journey,
+	// the first leaving at the same minute.
+	split := whole
+	split.Segments = []mailparse.TravelSegment{
+		trainLeg("IC 1914", "Dresden-Neustadt", "Leipzig Hbf", "2026-11-14T09:29", "2026-11-14T10:31", "", false),
+		trainLeg("RE 15 (74824)", "Leipzig Hbf", "Jena Paradies", "2026-11-14T11:02", "2026-11-14T12:12", "", false),
+	}
+	split.Segments[0].Start = "2026-11-14T09:29"
+	if err := db.ReplaceMessageTrips(ctx, user.ID, booking.ID, at.Unix(), []mailparse.TravelBooking{split}, false); err != nil {
+		t.Fatal(err)
+	}
+	trips, _ = db.ListTrips(ctx, user.ID, "2026-11-02")
+	if len(trips) != 1 || len(trips[0].Segments) != 2 {
+		t.Fatalf("legs = %+v", trips)
+	}
+	if trips[0].Segments[0].To != "Leipzig Hbf" || trips[0].Segments[0].CalendarEventID != event.ID {
+		t.Errorf("first leg = %+v", trips[0].Segments[0])
+	}
+
+	// A later mail names a third train; deleting it takes that train away
+	// while the booking keeps the trip and its two legs.
+	change := shipmentTestMessage(t, ctx, db, user, account, mailbox, 2, "Änderung", at.Add(time.Hour))
+	extra := whole
+	extra.Segments = []mailparse.TravelSegment{trainLeg("RE 3", "Jena West", "Erfurt Hbf", "2026-11-15T19:08", "2026-11-15T19:40", "", false)}
+	if err := db.ReplaceMessageTrips(ctx, user.ID, change.ID, at.Add(time.Hour).Unix(), []mailparse.TravelBooking{extra}, false); err != nil {
+		t.Fatal(err)
+	}
+	if trips, _ = db.ListTrips(ctx, user.ID, "2026-11-02"); len(trips[0].Segments) != 3 {
+		t.Fatalf("legs = %+v", trips[0].Segments)
+	}
+	if err := db.ClearMessageTrips(ctx, user.ID, []int64{change.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if trips, _ = db.ListTrips(ctx, user.ID, "2026-11-02"); len(trips[0].Segments) != 2 {
+		t.Fatalf("a leg only a detached mail named is still drawn: %+v", trips[0].Segments)
+	}
+}

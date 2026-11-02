@@ -52,9 +52,12 @@ type apiTripSegment struct {
 	Cancelled bool   `json:"cancelled"`
 	// CalendarEventID is the event the reader created from this leg, 0 while
 	// there is none; CalendarStart is its start, for the way to it.
-	CalendarEventID int64  `json:"calendar_event_id"`
-	CalendarStart   string `json:"calendar_start"`
-	CalendarAllDay  bool   `json:"calendar_all_day"`
+	// FromCalendarObject marks a leg read from the message's own calendar
+	// object; the thread shows the trip card in place of that object's card.
+	FromCalendarObject bool   `json:"from_calendar_object"`
+	CalendarEventID    int64  `json:"calendar_event_id"`
+	CalendarStart      string `json:"calendar_start"`
+	CalendarAllDay     bool   `json:"calendar_all_day"`
 }
 
 type apiTripMessage struct {
@@ -227,6 +230,7 @@ func apiTripFromStore(trip store.Trip) apiTrip {
 			Start: seg.Start, End: seg.End, AllDay: len(seg.Start) == len("2006-01-02"),
 			Seat: seg.Seat, SeatOnly: seg.SeatOnly, Cancelled: seg.Cancelled,
 			CalendarEventID: seg.CalendarEventID, CalendarAllDay: seg.CalendarAllDay,
+			FromCalendarObject: seg.FromCalendarObject,
 		}
 		if seg.StartAt > 0 {
 			item.StartAt = timeString(time.Unix(seg.StartAt, 0).UTC())

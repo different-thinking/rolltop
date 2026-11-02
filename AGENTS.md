@@ -568,8 +568,9 @@ site and in review.
   iTIP method -- one event per journey, each train read from the description
   (`dbICSLegs`, against real exports in `mailparse/testdata`), zoneless times
   as Berlin's -- so it joins the PDF's legs instead of standing beside them.
-  The same departure minute is the same train (`sameTravelLeg`): the sources
-  do not spell a regional train alike ("RE 74824", "RE15 (74824)"); from anyone
+  A vehicle leg's identity is its departure minute (`TravelSegment.Key`, which
+  `sameTravelLeg` and the stored `segment_key` share): the sources do not spell
+  a regional train alike ("RE 74824", "RE15 (74824)"); from anyone
   else only a published object in a mail that calls itself a ticket, never an
   invitation, which the calendar card answers. A message with a trip shows the
   trip card **instead of** the calendar card, or one train is offered twice. A
@@ -583,7 +584,12 @@ site and in review.
   `ReplaceMessageTrips` upserts legs by `segment_key` and only overwrites a field
   from a message at least as recent (`reported_at`); a check-in mail naming the
   outbound flight says nothing about the return, and that silence is not a
-  cancellation. A seat reservation with no ticket (`seat_only`) is folded into
+  cancellation. Every leg records the messages that named it
+  (`trip_segment_messages`): a leg is drawn only while one does, and re-reading
+  a message drops the legs that message alone named and no longer names
+  (`dropUnnamedSegments`, carrying a calendar link to the leg at the same
+  departure) -- without that, every `TravelVersion` bump that respells a leg
+  leaves the old one standing beside the new. A seat reservation with no ticket (`seat_only`) is folded into
   the ticketed leg of the same train on the same day **at read time**
   (`foldSeatReservations`), because the two arrive in either order and from
   different bookings. Adding a journey to the calendar is the event dialog's

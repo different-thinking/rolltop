@@ -2431,7 +2431,7 @@ export function ThreadView({
                       with travel time and knows when the provider already
                       imported it. Two "Add to calendar" cards for one train
                       would enter it twice. */}
-                  {item.has_calendar && isExpanded && !item.message.trip ? (
+                  {item.has_calendar && isExpanded && !item.message.trip?.segments.some((leg) => leg.from_calendar_object) ? (
                     <MessageCalendarCard
                       messageID={item.message.id}
                       csrf={csrf}

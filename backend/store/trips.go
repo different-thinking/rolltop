@@ -38,7 +38,11 @@ import (
 //
 // 4: a DB mail's order number ("Auftrag: 916319593981" in the subject) is the
 // booking's reference, which changes the trip's identity.
-const TravelVersion = 4
+//
+// 5: a vehicle leg is keyed by its departure minute alone, and every train of
+// a DB journey carries the calendar object's UID. The re-read is clean because
+// a leg only this message named is dropped when it no longer names it.
+const TravelVersion = 5
 
 // TravelBackfillLimit bounds one backfill pass. It is a quarter of the parcel
 // pass's because a ticket read opens attachment bodies -- a pass, a PDF run
@@ -112,6 +116,9 @@ type TripSegment struct {
 	// CalendarStart is that event's start, for the way to it.
 	CalendarStart  int64
 	CalendarAllDay bool
+	// FromCalendarObject marks a leg read from a calendar object the message
+	// carries, which the trip card offers in place of the invitation card.
+	FromCalendarObject bool
 }
 
 // TripMessage is one mail that named a trip.
@@ -160,6 +167,12 @@ func (s *Store) ReplaceMessageTrips(ctx context.Context, userID, messageID, mess
 	if _, err := tx.ExecContext(ctx, `DELETE FROM trip_messages WHERE user_id = ? AND message_id = ?`, userID, messageID); err != nil {
 		return err
 	}
+	// The legs this message named before are re-linked below as it names them
+	// now; whatever it alone named and no longer does goes at the end.
+	prior, err := unlinkMessageSegments(ctx, tx, userID, []any{messageID})
+	if err != nil {
+		return err
+	}
 	recent := messageDate > 0 && time.Since(time.Unix(messageDate, 0)) <= tripNoticeWindow
 	for _, booking := range bookings {
 		key := booking.Key()
@@ -183,7 +196,12 @@ func (s *Store) ReplaceMessageTrips(ctx context.Context, userID, messageID, mess
 		}
 		upcoming := false
 		for _, seg := range booking.Segments {
-			if err := upsertTripSegment(ctx, tx, userID, tripID, messageDate, now, seg); err != nil {
+			segmentID, err := upsertTripSegment(ctx, tx, userID, tripID, messageDate, now, seg)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO trip_segment_messages (segment_id, message_id, user_id)
+				VALUES (?, ?, ?) ON CONFLICT (segment_id, message_id) DO NOTHING`, segmentID, messageID, userID); err != nil {
 				return err
 			}
 			if segmentStillToCome(seg) && !seg.Cancelled {
@@ -201,11 +219,69 @@ func (s *Store) ReplaceMessageTrips(ctx context.Context, userID, messageID, mess
 			}
 		}
 	}
+	if err := dropUnnamedSegments(ctx, tx, userID, prior); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE messages SET travel_version = ? WHERE user_id = ? AND id = ?`,
 		TravelVersion, userID, messageID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// unlinkMessageSegments removes the messages' links to the legs they named and
+// returns those legs, for dropUnnamedSegments to look at once the messages
+// have said what they name now.
+func unlinkMessageSegments(ctx context.Context, tx *sql.Tx, userID int64, messageIDs []any) ([]int64, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(messageIDs)), ", ")
+	rows, err := tx.QueryContext(ctx, `DELETE FROM trip_segment_messages
+		WHERE user_id = ? AND message_id IN (`+marks+`)
+		RETURNING segment_id`, append([]any{userID}, messageIDs...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// dropUnnamedSegments deletes those of the given legs no message names any
+// more. A calendar event the reader created from one moves to the leg that
+// now stands for it -- the same departure on the same trip -- so a re-read
+// that only respelled a leg does not put the journey back on the to-add list.
+func dropUnnamedSegments(ctx context.Context, tx *sql.Tx, userID int64, segmentIDs []int64) error {
+	if len(segmentIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(segmentIDs)+1)
+	args = append(args, userID)
+	for _, id := range segmentIDs {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(segmentIDs)), ", ")
+	unnamed := `SELECT o.id FROM trip_segments o
+		WHERE o.user_id = ? AND o.id IN (` + marks + `)
+			AND NOT EXISTS (SELECT 1 FROM trip_segment_messages l WHERE l.segment_id = o.id)`
+	if _, err := tx.ExecContext(ctx, `UPDATE trip_segments s
+		SET calendar_event_id = o.calendar_event_id, calendar_added_at = o.calendar_added_at
+		FROM trip_segments o
+		WHERE o.id IN (`+unnamed+`) AND o.calendar_event_id <> 0
+			AND s.user_id = o.user_id AND s.trip_id = o.trip_id AND s.id <> o.id
+			AND s.start_local = o.start_local AND s.calendar_event_id = 0`, args...); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM trip_segments WHERE id IN (`+unnamed+`)`, args...)
+	return err
 }
 
 // segmentStillToCome reports a leg whose day has not passed. It is read on the
@@ -221,8 +297,9 @@ func segmentStillToCome(seg mailparse.TravelSegment) bool {
 	return day >= time.Now().UTC().AddDate(0, 0, -1).Format(plainDateLayout)
 }
 
-func upsertTripSegment(ctx context.Context, tx *sql.Tx, userID, tripID, reportedAt, now int64, seg mailparse.TravelSegment) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO trip_segments
+func upsertTripSegment(ctx context.Context, tx *sql.Tx, userID, tripID, reportedAt, now int64, seg mailparse.TravelSegment) (int64, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO trip_segments
 			(trip_id, user_id, segment_key, kind, number, title, provider, from_name, from_code, to_name, to_code,
 			 venue, address, start_local, start_at, end_local, end_at, seat, seat_only, cancelled, source,
 			 ical_uid, reported_at, created_at, updated_at)
@@ -245,11 +322,12 @@ func upsertTripSegment(ctx context.Context, tx *sql.Tx, userID, tripID, reported
 			cancelled = CASE WHEN EXCLUDED.reported_at >= trip_segments.reported_at THEN EXCLUDED.cancelled ELSE trip_segments.cancelled END,
 			ical_uid = CASE WHEN trip_segments.ical_uid = '' THEN EXCLUDED.ical_uid ELSE trip_segments.ical_uid END,
 			reported_at = GREATEST(EXCLUDED.reported_at, trip_segments.reported_at),
-			updated_at = EXCLUDED.updated_at`,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id`,
 		tripID, userID, seg.Key(), seg.Kind, seg.Number, seg.Title, seg.Provider, seg.From, seg.FromCode, seg.To, seg.ToCode,
 		seg.Venue, seg.Address, seg.Start, unixOrZero(seg.StartAt), seg.End, unixOrZero(seg.EndAt), seg.Seat,
-		boolInt(seg.SeatOnly), boolInt(seg.Cancelled), seg.Source, seg.ICalUID, reportedAt, now, now)
-	return err
+		boolInt(seg.SeatOnly), boolInt(seg.Cancelled), seg.Source, seg.ICalUID, reportedAt, now, now).Scan(&id)
+	return id, err
 }
 
 func unixOrZero(t time.Time) int64 {
@@ -395,7 +473,8 @@ func (s *Store) attachTripSegments(ctx context.Context, userID int64, trips []Tr
 	rows, err := db.QueryContext(ctx, `SELECT ts.id, ts.trip_id, ts.kind, ts.number, ts.title, ts.provider,
 			ts.from_name, ts.from_code, ts.to_name, ts.to_code, ts.venue, ts.address,
 			ts.start_local, ts.start_at, ts.end_local, ts.end_at, ts.seat, ts.seat_only, ts.cancelled,
-			COALESCE(ce.id, imported.id, 0), COALESCE(ce.start_at, imported.start_at, 0), COALESCE(ce.all_day, imported.all_day, 0)
+			COALESCE(ce.id, imported.id, 0), COALESCE(ce.start_at, imported.start_at, 0), COALESCE(ce.all_day, imported.all_day, 0),
+			ts.ical_uid <> ''
 		FROM trip_segments ts
 		LEFT JOIN calendar_events ce ON ce.id = ts.calendar_event_id AND ce.user_id = ts.user_id
 		-- The event the reader made from the leg wins; failing that, one the
@@ -404,7 +483,10 @@ func (s *Store) attachTripSegments(ctx context.Context, userID int64, trips []Tr
 		LEFT JOIN LATERAL (SELECT id, start_at, all_day FROM calendar_events
 			WHERE user_id = ts.user_id AND ts.ical_uid <> '' AND ical_uid = ts.ical_uid
 			ORDER BY id LIMIT 1) imported ON true
+		-- A leg no message names any more -- its only mail deleted -- is not
+		-- drawn: it has no evidence left.
 		WHERE ts.user_id = ? AND ts.trip_id IN (`+list+`)
+			AND EXISTS (SELECT 1 FROM trip_segment_messages tsm WHERE tsm.segment_id = ts.id)
 		ORDER BY ts.start_local, ts.id`, args...)
 	if err != nil {
 		return err
@@ -416,7 +498,7 @@ func (s *Store) attachTripSegments(ctx context.Context, userID int64, trips []Tr
 		if err := rows.Scan(&seg.ID, &seg.TripID, &seg.Kind, &seg.Number, &seg.Title, &seg.Provider,
 			&seg.From, &seg.FromCode, &seg.To, &seg.ToCode, &seg.Venue, &seg.Address,
 			&seg.Start, &seg.StartAt, &seg.End, &seg.EndAt, &seg.Seat, &seatOnly, &cancelled,
-			&seg.CalendarEventID, &seg.CalendarStart, &allDay); err != nil {
+			&seg.CalendarEventID, &seg.CalendarStart, &allDay, &seg.FromCalendarObject); err != nil {
 			return err
 		}
 		seg.SeatOnly = seatOnly != 0
@@ -884,6 +966,13 @@ func (s *Store) stampMessagesTravelScanned(ctx context.Context, userID int64, id
 	if detach {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM trip_messages WHERE user_id = ? AND message_id IN (`+list+`)`,
 			append([]any{userID}, idArgs...)...); err != nil {
+			return err
+		}
+		prior, err := unlinkMessageSegments(ctx, tx, userID, idArgs)
+		if err != nil {
+			return err
+		}
+		if err := dropUnnamedSegments(ctx, tx, userID, prior); err != nil {
 			return err
 		}
 	}

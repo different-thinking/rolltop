@@ -1098,6 +1098,8 @@ export type TripSegment = {
   /** seat_only marks a seat reservation without a ticket. */
   seat_only: boolean;
   cancelled: boolean;
+  /** from_calendar_object marks a leg read from the message's own .ics. */
+  from_calendar_object: boolean;
   /** calendar_event_id is the event the reader created from this leg. */
   calendar_event_id: number;
   calendar_start: string;

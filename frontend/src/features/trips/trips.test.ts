@@ -24,6 +24,7 @@ function leg(partial: Partial<TripSegment>): TripSegment {
     seat: "",
     seat_only: false,
     cancelled: false,
+    from_calendar_object: false,
     calendar_event_id: 0,
     calendar_start: "",
     calendar_all_day: false,

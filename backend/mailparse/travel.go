@@ -133,16 +133,22 @@ func (s TravelSegment) AllDay() bool {
 }
 
 // Key is what makes the same leg named by two messages -- or by the PDF and the
-// markup of one message -- one leg. The station names are deliberately not part
-// of it: "Berlin Hbf" and "Berlin Hbf (tief)" are one departure.
+// markup of one message -- one leg. For a flight, a train or a coach it is the
+// departure minute and nothing else: one traveller is on one vehicle at a
+// time, and the sources do not spell it alike ("RE 74824", "RE15 (74824)";
+// "Berlin Hbf (tief)"). An event keeps its title in the key, because two
+// admissions at 20:00 are two tickets.
 func (s TravelSegment) Key() string {
-	name := compactTravelKey(s.Number)
-	if name == "" {
-		name = compactTravelKey(s.Title)
-	}
 	start := s.Start
 	if len(start) > len(travelLocalLayout) {
 		start = start[:len(travelLocalLayout)]
+	}
+	if s.Kind != TravelEvent {
+		return s.Kind + "|" + start
+	}
+	name := compactTravelKey(s.Title)
+	if name == "" {
+		name = compactTravelKey(s.Number)
 	}
 	return s.Kind + "|" + name + "|" + start
 }
@@ -437,20 +443,10 @@ func joinTravelBookings(a, b TravelBooking) TravelBooking {
 	return a
 }
 
-// sameTravelLeg reports two readings of one leg: the same key, or the same
-// kind of travel leaving at the same minute. One traveller is on one train at
-// a time, and the sources do not spell a train alike -- the PDF's "RE 74824" is
-// the calendar export's "RE 15 (74824)", and a calendar object may name only
-// the route -- so the departure is what identifies it. Events are exempt: two
-// admissions at 20:00 are two tickets.
+// sameTravelLeg reports two readings of one leg, which is the stored key's
+// question asked before anything is stored.
 func sameTravelLeg(a, b TravelSegment) bool {
-	if a.Key() == b.Key() {
-		return true
-	}
-	if a.Kind != b.Kind || a.Kind == TravelEvent {
-		return false
-	}
-	return a.Start != "" && a.Start == b.Start
+	return a.Start != "" && a.Key() == b.Key()
 }
 
 func joinTravelSegments(a, b TravelSegment) TravelSegment {
