@@ -38,12 +38,22 @@ export type RecipeMail = {
   move_error: string;
 };
 
+/** One ingredient and its index into the recipe's stored list. */
+export type IngredientLine = { index: number; text: string };
+
+/**
+ * One part of a recipe's ingredients ("For the dough"). A list without
+ * headings is one section without a name.
+ */
+export type IngredientSection = { name: string; items: IngredientLine[] };
+
 export type RecipeDetail = RecipeSummary & {
   author: string;
   prep_minutes: number;
   cook_minutes: number;
   calories: string;
   ingredients: string[];
+  ingredient_sections: IngredientSection[];
   instructions: StepSection[];
   mails: RecipeMail[];
 };
@@ -79,6 +89,21 @@ export type Note = {
   links: NoteLink[];
 };
 
+/** One line of the shopping list. */
+export type ShoppingItem = {
+  id: number;
+  /** The recipe the item came from, zero for one the reader typed in. */
+  recipe_id: number;
+  recipe_title: string;
+  section: string;
+  text: string;
+  /** When the reader ticked it off, zero while it is still to buy. */
+  checked_at: number;
+  created_at: number;
+};
+
+export type ShoppingResponse = { items: ShoppingItem[] };
+
 export type NotesResponse = {
   notes: Note[];
   counts: Record<string, number>;
@@ -113,6 +138,8 @@ export type Status = {
   links: Record<string, number>;
   recipes: number;
   notes: number;
+  /** Items on the shopping list still to buy. */
+  shopping: number;
   mails: Record<string, number>;
   folders: FolderStatus[];
 };
@@ -146,6 +173,15 @@ export const recipeAPI = {
   dismissNote: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/notes/${id}`, csrf, { dismissed: true }),
   /** Moves the mail behind a note to its account's Trash and takes the note out of the overview. */
   deleteNote: (csrf: string, id: number) => postJSON<{ ok: boolean; moved: number }>(`${base}/notes/${id}/delete`, csrf, {}),
+  shopping: () => getJSON<ShoppingResponse>(`${base}/shopping`),
+  /** Puts ingredients of a recipe on the list, named by their index into its ingredient list. */
+  addIngredients: (csrf: string, recipeID: number, indexes: number[]) => postJSON<ShoppingResponse>(`${base}/shopping`, csrf, { recipe_id: recipeID, indexes }),
+  /** Puts an item of the reader's own on the list. */
+  addShoppingItem: (csrf: string, text: string) => postJSON<ShoppingResponse>(`${base}/shopping`, csrf, { text }),
+  setShoppingChecked: (csrf: string, id: number, checked: boolean) => postJSON<ShoppingResponse>(`${base}/shopping/${id}`, csrf, { checked }),
+  deleteShoppingItem: (csrf: string, id: number) => postJSON<ShoppingResponse>(`${base}/shopping/${id}/delete`, csrf, {}),
+  /** Takes the ticked-off items off the list, or with `all` every item. */
+  clearShopping: (csrf: string, all: boolean) => postJSON<ShoppingResponse>(`${base}/shopping/clear`, csrf, { all }),
   promoteLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/recipe`, csrf, {}),
   retryLink: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/links/${id}/retry`, csrf, {})
 };
