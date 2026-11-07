@@ -799,6 +799,247 @@
   min-width: 0;
 }
 
+/* The ingredients panel: cooking ticks, and choosing what to buy. */
+.recipe-ingredients-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.recipe-detail-columns .recipe-ingredients-head h2 {
+  margin: 0;
+}
+
+.recipe-ingredients-head button,
+.recipe-pick-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.recipe-ingredients.is-picking {
+  padding: 10px;
+  margin: -10px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+
+.recipe-pick-hint {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.recipe-ingredient-section + .recipe-ingredient-section {
+  margin-top: 12px;
+}
+
+.recipe-ingredient-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recipe-ingredient-section-head h3 {
+  margin: 6px 0 2px;
+  font-size: 14px;
+}
+
+.recipe-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.recipe-link-button:hover {
+  text-decoration: underline;
+}
+
+.recipe-on-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.recipe-pick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.recipe-pick-footer {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.recipe-pick-footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: inherit;
+}
+
+/* The shopping list page. */
+.shopping-list .recipe-box-head-actions .button,
+.shopping-list .recipe-box-head-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+}
+
+.shopping-add {
+  display: flex;
+  gap: 8px;
+}
+
+.shopping-add input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shopping-add button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shopping-group {
+  display: grid;
+  gap: 6px;
+}
+
+.shopping-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+}
+
+.shopping-group h2 a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.shopping-group h2 a:hover {
+  text-decoration: underline;
+}
+
+.shopping-group h3 {
+  margin: 8px 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.shopping-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+
+.shopping-items li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--separator, var(--border));
+}
+
+.shopping-items li:last-child {
+  border-bottom: 0;
+}
+
+.shopping-items label {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 10px 4px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.shopping-items input {
+  margin-top: 3px;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.shopping-items li.is-checked label span {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.shopping-items small {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shopping-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.shopping-remove:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.shopping-list .recipe-box-head-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.shopping-list .recipe-box-head-actions .button,
+.shopping-list .recipe-box-head-actions button {
+  white-space: nowrap;
+}
+
+.shopping-cart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shopping-cart {
+  opacity: 0.85;
+}
+
 @media (max-width: 760px) {
   .recipe-grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

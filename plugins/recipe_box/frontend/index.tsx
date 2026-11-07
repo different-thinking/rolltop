@@ -1,11 +1,12 @@
-// File overview: Runtime frontend for the recipe box plugin: the cookbook and
-// the notes overview under the sidebar's Organizer heading, and the settings
-// page they share.
+// File overview: Runtime frontend for the recipe box plugin: the cookbook, the
+// notes overview and the shopping list under the sidebar's Organizer heading,
+// and the settings page they share.
 
 import type { AccountSettingsRouteContext, RuntimeAppViewContext } from "../../../frontend/src/plugins/runtime";
 import { NotesView } from "./NotesView";
 import { RecipeSettings } from "./RecipeSettings";
-import { notesPath, RecipesView, recipesPath, settingsPath } from "./RecipesView";
+import { notesPath, RecipesView, recipesPath, settingsPath, shoppingPath } from "./RecipesView";
+import { ShoppingView } from "./ShoppingView";
 import "./styles.css";
 
 export default {
@@ -21,6 +22,12 @@ export default {
       label: "Notes",
       icon: "draft",
       render: (context: RuntimeAppViewContext) => <NotesView {...context} />
+    },
+    {
+      path: shoppingPath,
+      label: "Shopping list",
+      icon: "shopping_bag",
+      render: (context: RuntimeAppViewContext) => <ShoppingView {...context} />
     }
   ],
   accountSettingsRoutes: [

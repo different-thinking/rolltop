@@ -3,7 +3,9 @@
 //
 // Two pages share one route subtree: the cards (/apps/recipes) and one recipe
 // opened (/apps/recipes/<id>). The links that did not turn out to be a recipe
-// are notes now, with an overview of their own (/apps/notes).
+// are notes now, with an overview of their own (/apps/notes), and the
+// ingredients the reader picks out of recipes go on the shopping list
+// (/apps/shopping).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent, ReactNode } from "react";
@@ -21,12 +23,15 @@ import {
   type RecipeDetail,
   type RecipeSummary,
   type RecipeView,
-  type SettingsResponse
+  type SettingsResponse,
+  type ShoppingItem
 } from "./api";
+import { Ingredients } from "./Ingredients";
 
 export const recipesPath = "/apps/recipes";
 export const settingsPath = "/settings/account/plugins/recipes";
 export const notesPath = "/apps/notes";
+export const shoppingPath = "/apps/shopping";
 
 /** A dish counts as quick at this many minutes or fewer. */
 const quickMinutes = 30;
@@ -190,6 +195,7 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
   const enabled = status?.settings.enabled;
   const notes = status?.status.notes || 0;
+  const shopping = status?.status.shopping || 0;
 
   async function add(event: FormEvent) {
     event.preventDefault();
@@ -280,6 +286,9 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
           })}
           <a className={`recipe-tab-link${notes ? "" : " empty"}`} href={notesPath} onClick={link(notesPath)}>
             <Icon name="draft" />Notes{notes ? <span className="recipe-tab-count">{notes.toLocaleString()}</span> : null}
+          </a>
+          <a className={`recipe-tab-link${shopping ? "" : " empty"}`} href={shoppingPath} onClick={link(shoppingPath)}>
+            <Icon name="shopping_bag" />Shopping list{shopping ? <span className="recipe-tab-count">{shopping.toLocaleString()}</span> : null}
           </a>
         </div>
       </div>
@@ -400,7 +409,7 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
   const [recipe, setRecipe] = useState<RecipeDetail | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [checked, setChecked] = useState<Set<number>>(() => new Set());
+  const [shopping, setShopping] = useState<ShoppingItem[] | null>(null);
   const link = useLink(navigate);
   // A mail opened from here comes back to this recipe, not to All Mail.
   const mailURL = (messageID: number) => messageURL(messageID, "", [], `${recipesPath}/${id}`);
@@ -416,6 +425,10 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
     },
     (err) => setError(messageFromError(err)),
   );
+
+  // The list only marks what is on it already; a list that cannot be read
+  // leaves the marks out rather than the recipe.
+  useCurrentLoad("shopping", String(mailGeneration), () => recipeAPI.shopping(), (next) => setShopping(next.items), () => undefined);
 
   useEffect(() => {
     if (recipe) headingRef.current?.focus();
@@ -448,15 +461,6 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
     } finally {
       setBusy(false);
     }
-  }
-
-  function toggleIngredient(index: number) {
-    setChecked((current) => {
-      const next = new Set(current);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
   }
 
   const back = (
@@ -524,21 +528,15 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
         {tags.length > 0 ? <div className="recipe-tags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
 
         <div className="recipe-detail-columns">
-          {recipe.ingredients.length > 0 ? (
-            <section className="recipe-ingredients">
-              <h2>Ingredients</h2>
-              <ul>
-                {recipe.ingredients.map((item, index) => (
-                  <li key={`${index}-${item}`}>
-                    <label className={checked.has(index) ? "done" : ""}>
-                      <input type="checkbox" checked={checked.has(index)} onChange={() => toggleIngredient(index)} />
-                      <span>{item}</span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+          <Ingredients
+            recipe={recipe}
+            csrf={csrf}
+            addToast={addToast}
+            shopping={shopping}
+            onShoppingChange={setShopping}
+            shoppingHref={shoppingPath}
+            onOpenShopping={link(shoppingPath)}
+          />
           {recipe.instructions.length > 0 ? (
             <section className="recipe-steps">
               <h2>Method</h2>

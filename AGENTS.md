@@ -409,6 +409,14 @@ site and in review.
   moved. A note waits for every page it links to (`awaitsPage`) before it is
   filed, so a mail is never put in the notes folder and then turns out to have
   carried a recipe.
+- **The recipe box's shopping list takes ingredients by index, never by text
+  the browser sends** (`plugins/recipe_box/backend/shopping.go`). The server
+  reads the line out of the reader's own recipe (a recipe of another
+  reader is a 404), refuses an index that is a section heading or out of range,
+  and copies the recipe's name and section onto the item. Sections are the
+  short, digit-free lines ending in a colon that sites write into
+  `recipeIngredient` (`recipe.IngredientSections`); the stored list is never
+  rewritten for them.
 - **A note is its mail, so deleting the mail anywhere deletes the note**
   (`ObserveMessageMove` in `plugins/recipe_box/backend/observe.go`). A move into
   Trash dismisses the note once no copy is left outside Trash, Junk, Sent and

@@ -92,6 +92,8 @@ func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.R
 			return
 		}
 		p.apiDeleteNote(host, db, userID, id, w, r)
+	case parts[0] == "shopping" && len(parts) <= 3:
+		p.apiShopping(host, db, userID, parts, w, r)
 	case len(parts) == 3 && parts[0] == "links" && r.Method == http.MethodPost:
 		id, ok := parseID(host, w, parts[1])
 		if !ok {
@@ -126,11 +128,13 @@ type Status struct {
 	MessagesScanned int64 `json:"messages_scanned"`
 	NotesFound      int64 `json:"notes_found"`
 	// Notes counts the open notes: what the Notes tab still has to show.
-	Notes   int64          `json:"notes"`
-	Links   map[string]int `json:"links"`
-	Recipes int64          `json:"recipes"`
-	Mails   map[string]int `json:"mails"`
-	Folders []FolderStatus `json:"folders"`
+	Notes int64 `json:"notes"`
+	// Shopping counts the items on the shopping list still to buy.
+	Shopping int64          `json:"shopping"`
+	Links    map[string]int `json:"links"`
+	Recipes  int64          `json:"recipes"`
+	Mails    map[string]int `json:"mails"`
+	Folders  []FolderStatus `json:"folders"`
 }
 
 // FolderStatus is one account's recipe folder, and whether All Mail still
@@ -174,6 +178,9 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 		return status, err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails m WHERE m.user_id = ? AND m.note_dismissed = 0 AND m.done_at = 0 AND NOT `+carriesRecipe, userID).Scan(&status.Notes); err != nil {
+		return status, err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_shopping_items WHERE user_id = ? AND checked_at = 0`, userID).Scan(&status.Shopping); err != nil {
 		return status, err
 	}
 	// A pending link whose retry is not due yet is counted apart as
@@ -308,13 +315,16 @@ type RecipeSummary struct {
 // RecipeDetail is a recipe opened.
 type RecipeDetail struct {
 	RecipeSummary
-	Author       string               `json:"author"`
-	PrepMinutes  int                  `json:"prep_minutes"`
-	CookMinutes  int                  `json:"cook_minutes"`
-	Calories     string               `json:"calories"`
-	Ingredients  []string             `json:"ingredients"`
-	Instructions []recipe.StepSection `json:"instructions"`
-	Mails        []RecipeMail         `json:"mails"`
+	Author      string   `json:"author"`
+	PrepMinutes int      `json:"prep_minutes"`
+	CookMinutes int      `json:"cook_minutes"`
+	Calories    string   `json:"calories"`
+	Ingredients []string `json:"ingredients"`
+	// IngredientSections is the same list split at the headings a site wrote
+	// into it, each ingredient with its index into Ingredients.
+	IngredientSections []recipe.IngredientSection `json:"ingredient_sections"`
+	Instructions       []recipe.StepSection       `json:"instructions"`
+	Mails              []RecipeMail               `json:"mails"`
 }
 
 // RecipeMail is one note-to-self that shared the recipe, and where it is now.
@@ -455,6 +465,7 @@ func loadRecipe(ctx context.Context, db *sql.DB, userID, id int64) (RecipeDetail
 	}
 	d.RecipeSummary = summary
 	d.Ingredients = ingredients
+	d.IngredientSections = recipe.IngredientSections(ingredients)
 	if err := json.Unmarshal([]byte(instructions), &d.Instructions); err != nil || d.Instructions == nil {
 		d.Instructions = []recipe.StepSection{}
 	}
