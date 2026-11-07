@@ -413,10 +413,20 @@ site and in review.
   the browser sends** (`plugins/recipe_box/backend/shopping.go`). The server
   reads the line out of the reader's own recipe (a recipe of another
   reader is a 404), refuses an index that is a section heading or out of range,
-  and copies the recipe's name and section onto the item. Sections are the
-  short, digit-free lines ending in a colon that sites write into
+  and records recipe, title, section and line as the item's source. Sections are
+  the short lines without numbers ending in a colon that sites write into
   `recipeIngredient` (`recipe.IngredientSections`); the stored list is never
   rewritten for them.
+- **The shopping list adds up what is the same thing to buy, and nothing
+  else.** Which lines meet is `recipe.ParseIngredient`'s `Key` alone: name
+  compared loosely, unit compared by kind (grams with kilograms, millilitres
+  with litres, every other unit only with itself). A line without a readable
+  amount never adds to one with an amount. A line already behind an item still
+  to buy is not counted twice, and items in the cart are never added to. Every
+  change that merges takes the reader's advisory lock (`beginShopping`). Rows
+  written before migration `004_shopping_merged` carry an empty `merge_key`
+  and are folded on first touch (`foldLegacyShopping`); a build that writes
+  items without a key would have them folded again.
 - **A note is its mail, so deleting the mail anywhere deletes the note**
   (`ObserveMessageMove` in `plugins/recipe_box/backend/observe.go`). A move into
   Trash dismisses the note once no copy is left outside Trash, Junk, Sent and

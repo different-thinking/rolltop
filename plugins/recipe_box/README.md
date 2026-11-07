@@ -101,24 +101,40 @@ and then turns out to have been a recipe.
 
 Beside a recipe's ingredients, **Shopping list** turns the boxes into a choice
 of what to buy: one by one, a whole section, or every ingredient at once. The
-chosen ingredients land on one list (`/apps/shopping`) that collects from
+chosen ingredients land on **one** list (`/apps/shopping`) that collects from
 recipe after recipe, next to items the reader types in themselves. The list
 lives on the server, so the phone in the shop shows what was picked at home.
 
+- **The same thing to buy stands there once, added up.** "400 g Tomaten" from
+  two recipes is one item of 800 g; under it the recipes it came from.
+  `recipe.ParseIngredient` reads an amount at the front ("400", "1,5", "½",
+  "1 1/2", "2-3" takes the upper end), a unit from a fixed table, and the rest
+  as the name. Lines add up when their `Key` is equal: the same name written
+  loosely -- case, umlauts, singular and plural ("Ei"/"Eier",
+  "Apfel"/"Äpfel") and notes after a comma or in brackets aside -- in the
+  same kind of unit. Grams and kilograms are kept in grams, millilitres and
+  litres in millilitres; every other unit ("EL", "Dose", "Prise") only adds
+  up with itself, so "1 EL Zucker" and "100 g Zucker" stay two items. A line
+  without a readable amount ("Salz und Pfeffer") only meets lines that read
+  the same.
 - **Sections are read, not invented.** schema.org has no sections for
   ingredients; sites write a part's name into `recipeIngredient` as a line of
   its own ending in a colon ("Für den Teig:"). `recipe.IngredientSections`
-  reads a short, digit-free line ending in a colon as a heading. The stored
-  list is not changed, every ingredient keeps its index into it, and a list
-  without such lines is one section without a name.
+  reads a short line without numbers ending in a colon as a heading. The
+  stored list is not changed, and every ingredient keeps its index into it.
 - **An ingredient is named by its index, never by text from the browser.** The
-  server reads the line out of the recipe, refuses an index that is a heading
-  or out of range, and copies the recipe's name and the section onto the item,
-  so the list still says where an item came from after the recipe is gone.
-- **Adding what is there already does not write it twice.** The same text from
-  the same source (compared without case) is put back to buy instead.
-- Ticked-off items stay in **In the cart** until the reader clears them, so a
-  mis-tap in the shop is one tap to undo.
+  server reads the line out of the recipe and refuses an index that is a
+  heading or out of range. Each item keeps the lines it was added up from
+  (`plugin_recipe_box_shopping_sources`: recipe, title, section, text), so it
+  still says where it came from after a recipe is gone.
+- **A line is counted once.** Adding a recipe whose line is already behind an
+  item still to buy changes nothing. What is **In the cart** is never added
+  to -- it was bought for the recipes before -- and an item put back from the
+  cart joins the item to buy it adds up with.
+- **Lists written before items were added up** (migration
+  `004_shopping_merged`) are folded the first time the reader's list is
+  touched (`foldLegacyShopping`): each old row becomes a source, and the rows
+  that add up are merged, open with open and bought with bought.
 
 ## The three steps
 

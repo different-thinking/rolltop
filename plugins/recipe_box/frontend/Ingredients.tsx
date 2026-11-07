@@ -40,6 +40,18 @@ export function shoppingKey(section: string, text: string): string {
   return `${norm(section)}\n${norm(text)}`;
 }
 
+/** listedLines is the set of a recipe's lines behind items still to buy, as shoppingKey values. */
+function listedLines(items: ShoppingItem[], recipeID: number): Set<string> {
+  const keys = new Set<string>();
+  for (const item of items) {
+    if (item.checked_at) continue;
+    for (const source of item.sources || []) {
+      if (source.recipe_id === recipeID) keys.add(shoppingKey(source.section, source.text));
+    }
+  }
+  return keys;
+}
+
 export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange, shoppingHref, onOpenShopping }: Props) {
   const sections = useMemo(() => sectionsOf(recipe), [recipe]);
   const allIndexes = useMemo(() => sections.flatMap((section) => section.items.map((item) => item.index)), [sections]);
@@ -48,15 +60,10 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
   const [chosen, setChosen] = useState<Set<number>>(() => new Set());
   const [busy, setBusy] = useState(false);
 
-  // What of this recipe is still to buy. An item ticked off in the shop is
-  // bought, so it no longer counts as on the list.
-  const onList = useMemo(() => {
-    const keys = new Set<string>();
-    for (const item of shopping || []) {
-      if (item.recipe_id === recipe.id && !item.checked_at) keys.add(shoppingKey(item.section, item.text));
-    }
-    return keys;
-  }, [shopping, recipe.id]);
+  // What of this recipe is still to buy: the lines of it behind items not yet
+  // ticked off. An item ticked off in the shop is bought, so its lines no
+  // longer count as on the list.
+  const onList = useMemo(() => listedLines(shopping || [], recipe.id), [shopping, recipe.id]);
 
   if (allIndexes.length === 0) return null;
 
@@ -83,7 +90,7 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
       onShoppingChange(next.items);
       // Counted from the answer: an ingredient on the list already is not
       // added a second time, so the request's size would overstate it.
-      const after = next.items.filter((item) => item.recipe_id === recipe.id && !item.checked_at).length;
+      const after = listedLines(next.items, recipe.id).size;
       const added = Math.max(0, after - before);
       addToast(added === 0
         ? "Those ingredients are on the shopping list already."

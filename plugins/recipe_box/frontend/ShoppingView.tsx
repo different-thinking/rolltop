@@ -1,54 +1,25 @@
-// File overview: The shopping list -- what the reader picked out of their
-// recipes, and what else they wrote down to buy.
+// File overview: The shopping list -- one list of what to buy, picked out of
+// the reader's recipes and typed in by hand.
 //
-// What is still to buy is grouped by where it came from: the reader's own
-// items first, then each recipe in the order it reached the list, with the
-// recipe's sections kept. Ticking an item off moves it into the cart below,
-// where it stays until the reader clears it, so a mis-tap in the shop is one
-// tap to undo. The list lives on the server, so the phone in the shop shows
-// what was picked on the laptop at home; it is read again whenever the page
-// comes back into view.
+// The same thing to buy stands on it once, its amounts added up by the server
+// across every recipe it came from ("800 g Tomaten"); under each item the
+// recipes it was added up from. Ticking an item off moves it into the cart
+// below, where it stays until the reader clears it, so a mis-tap in the shop
+// is one tap to undo. The list lives on the server, so the phone in the shop
+// shows what was picked on the laptop at home; it is read again whenever the
+// page comes back into view.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Icon } from "../../../frontend/src/components/Icon";
 import type { RuntimeAppViewContext } from "../../../frontend/src/plugins/runtime";
-import { messageFromError, recipeAPI, type ShoppingItem } from "./api";
+import { messageFromError, recipeAPI, shoppingAmount, shoppingRecipes, type ShoppingItem } from "./api";
 import { recipesPath, useCurrentLoad, useLink } from "./RecipesView";
 
-type ItemGroup = {
-  key: string;
-  recipeID: number;
-  title: string;
-  sections: { name: string; items: ShoppingItem[] }[];
-};
-
-/**
- * groupShopping sorts the items still to buy by where they came from: the
- * reader's own first, then one group per recipe in the order its first item
- * was added, each with its sections in the order they appeared.
- */
-export function groupShopping(items: ShoppingItem[]): ItemGroup[] {
-  const groups = new Map<string, ItemGroup>();
-  const own: ItemGroup = { key: "own", recipeID: 0, title: "", sections: [] };
-  for (const item of items) {
-    if (item.checked_at) continue;
-    let group = own;
-    if (item.recipe_id > 0) {
-      const key = `recipe-${item.recipe_id}`;
-      group = groups.get(key) || { key, recipeID: item.recipe_id, title: item.recipe_title, sections: [] };
-      groups.set(key, group);
-      // The newest copy of the recipe's name wins: it is written on each add.
-      if (item.recipe_title) group.title = item.recipe_title;
-    }
-    let section = group.sections.find((entry) => entry.name === item.section);
-    if (!section) {
-      section = { name: item.section, items: [] };
-      group.sections.push(section);
-    }
-    section.items.push(item);
-  }
-  return (own.sections.length ? [own] : []).concat(Array.from(groups.values()));
+/** shoppingLabel is an item as one line: "800 g Tomaten", "3 Eier", "Salz". */
+export function shoppingLabel(item: ShoppingItem): string {
+  const amount = shoppingAmount(item);
+  return amount ? `${amount} ${item.name}` : item.name;
 }
 
 export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: RuntimeAppViewContext) {
@@ -87,7 +58,7 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
     (err) => setError(messageFromError(err)),
   );
 
-  const groups = useMemo(() => groupShopping(items || []), [items]);
+  const toBuy = useMemo(() => (items || []).filter((item) => !item.checked_at), [items]);
   const cart = useMemo(() => (items || []).filter((item) => item.checked_at).sort((a, b) => b.checked_at - a.checked_at || b.id - a.id), [items]);
   const open = (items || []).length - cart.length;
 
@@ -151,18 +122,25 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
 
   function row(item: ShoppingItem) {
     const busy = busyIDs.has(item.id);
+    const amount = shoppingAmount(item);
+    const recipes = shoppingRecipes(item);
+    // The lines as the recipes wrote them, for a reader who wants to know
+    // what the total was added up from.
+    const lines = (item.sources || []).map((source) => (source.recipe_title ? `${source.recipe_title}: ${source.text}` : source.text)).join("\n");
     return (
       <li key={item.id} className={item.checked_at ? "is-checked" : ""}>
-        <label>
+        <label title={lines}>
           <input type="checkbox" checked={Boolean(item.checked_at)} disabled={busy} onChange={() => setChecked(item, !item.checked_at)} />
-          <span>{item.text}</span>
+          <span className="shopping-item-text">
+            <span>{amount ? <strong className="shopping-amount">{amount}</strong> : null}{amount ? " " : ""}{item.name}</span>
+            {recipes.length > 0 ? <small className="muted shopping-recipes">{recipes.join(" · ")}</small> : null}
+          </span>
         </label>
-        {item.checked_at && item.recipe_title ? <small className="muted">{item.recipe_title}</small> : null}
         <button
           className="shopping-remove"
           type="button"
           title="Remove from the list"
-          aria-label={`Remove ${item.text} from the list`}
+          aria-label={`Remove ${shoppingLabel(item)} from the list`}
           disabled={busy}
           onClick={() => void run([item.id], () => recipeAPI.deleteShoppingItem(csrf, item.id))}
         >
@@ -209,23 +187,11 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
       ) : null}
       {items !== null && items.length > 0 && open === 0 ? <p className="muted recipe-empty">Everything is in the cart.</p> : null}
 
-      {groups.map((group) => (
-        <section className="panel shopping-group" key={group.key}>
-          <h2>
-            {group.recipeID ? (
-              <a href={`${recipesPath}/${group.recipeID}`} onClick={link(`${recipesPath}/${group.recipeID}`)}>
-                <Icon name="cooking_pot" />{group.title || "Recipe"}
-              </a>
-            ) : <><Icon name="edit" />My items</>}
-          </h2>
-          {group.sections.map((section) => (
-            <div key={section.name || "-"}>
-              {section.name ? <h3>{section.name}</h3> : null}
-              <ul className="shopping-items">{section.items.map(row)}</ul>
-            </div>
-          ))}
+      {toBuy.length > 0 ? (
+        <section className="panel shopping-group">
+          <ul className="shopping-items">{toBuy.map(row)}</ul>
         </section>
-      ))}
+      ) : null}
 
       {cart.length > 0 ? (
         <section className="panel shopping-group shopping-cart">

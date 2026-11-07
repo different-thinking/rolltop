@@ -985,17 +985,25 @@
   height: 18px;
 }
 
-.shopping-items li.is-checked label span {
-  color: var(--muted);
-  text-decoration: line-through;
+.shopping-item-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
 }
 
-.shopping-items small {
-  flex: 0 1 auto;
-  max-width: 40%;
+.shopping-amount {
+  font-variant-numeric: tabular-nums;
+}
+
+.shopping-recipes {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.shopping-items li.is-checked .shopping-item-text > span {
+  color: var(--muted);
+  text-decoration: line-through;
 }
 
 .shopping-remove {
