@@ -306,3 +306,120 @@ func TestShoppingListStaysInsideTheTenant(t *testing.T) {
 		t.Fatalf("alice's list after bob = %v", itemTexts(got))
 	}
 }
+
+func TestRecipesShoppedForArePlannedUntilCooked(t *testing.T) {
+	st, p, host, ids := shoppingFixture(t)
+	cookbook := func(view string) ([]RecipeSummary, map[string]int) {
+		t.Helper()
+		rec := callAPI(t, p, host, http.MethodGet, apiPath+"/recipes"+view, "")
+		var out struct {
+			Recipes []RecipeSummary `json:"recipes"`
+			Counts  map[string]int  `json:"counts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Recipes, out.Counts
+	}
+	titles := func(recipes []RecipeSummary) string {
+		var out []string
+		for _, r := range recipes {
+			mark := ""
+			if r.PlannedAt > 0 {
+				mark = "*"
+			}
+			out = append(out, r.Title+mark)
+		}
+		return strings.Join(out, ",")
+	}
+	update := func(title, body string) int {
+		t.Helper()
+		return callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, ids[title]), body).Code
+	}
+
+	// Shopping for two dishes plans them, and planned dishes lead the shelf.
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[0]}`, ids["Salat"]))
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[2]}`, ids["Tomatensoße"]))
+	recipes, counts := cookbook("")
+	if counts["planned"] != 2 || counts["to_cook"] != 4 || recipes[0].PlannedAt == 0 || recipes[1].PlannedAt == 0 || recipes[2].PlannedAt != 0 {
+		t.Fatalf("after shopping = %s %v", titles(recipes), counts)
+	}
+
+	// Buying and clearing the ingredients does not end the plan.
+	code, items := shoppingCall(t, p, host, http.MethodGet, "/shopping", "")
+	for _, item := range items {
+		shoppingCall(t, p, host, http.MethodPost, fmt.Sprintf("/shopping/%d", item.ID), `{"checked":true}`)
+	}
+	if code, _ = shoppingCall(t, p, host, http.MethodPost, "/shopping/clear", `{}`); code != http.StatusOK {
+		t.Fatalf("clear = %d", code)
+	}
+	if _, counts = cookbook(""); counts["planned"] != 2 {
+		t.Fatalf("planned after shopping = %v", counts)
+	}
+
+	// Cooking ends it: the dish moves to the cooked shelf, unplanned.
+	// A cooked mark taken back plans the dish again while lines of it are
+	// still to buy, and only then.
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[2]}`, ids["Salat"]))
+	update("Salat", `{"cooked":true}`)
+	if update("Salat", `{"cooked":false}`); !plannedIn(cookbook(""))(ids["Salat"]) {
+		t.Fatal("not cooked yet lost the plan")
+	}
+	shoppingCall(t, p, host, http.MethodPost, "/shopping/clear", `{"all":true}`)
+	if code := update("Salat", `{"cooked":true}`); code != http.StatusOK {
+		t.Fatalf("cook = %d", code)
+	}
+	recipes, counts = cookbook("")
+	if counts["planned"] != 1 || counts["cooked"] != 1 || strings.Contains(titles(recipes), "Salat") {
+		t.Fatalf("after cooking = %s %v", titles(recipes), counts)
+	}
+	if cooked, _ := cookbook("?view=cooked"); titles(cooked) != "Salat" {
+		t.Fatalf("cooked shelf = %s", titles(cooked))
+	}
+
+	// Shopping for a cooked dish again brings it back to the front.
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[1]}`, ids["Salat"]))
+	recipes, counts = cookbook("")
+	if counts["cooked"] != 0 || counts["planned"] != 2 || recipes[0].PlannedAt == 0 || recipes[1].PlannedAt == 0 || !strings.Contains(titles(recipes[:2]), "Salat*") {
+		t.Fatalf("shopped for again = %s %v", titles(recipes), counts)
+	}
+
+	// The reader can take a dish out of the plan by hand, but not put it in:
+	// planning is shopping for it.
+	if code := update("Tomatensoße", `{"planned":false}`); code != http.StatusOK {
+		t.Fatalf("unplan = %d", code)
+	}
+	if code := update("Tomatensoße", `{"planned":true,"cooked":true}`); code != http.StatusBadRequest {
+		t.Fatalf("plan by hand = %d", code)
+	}
+	if _, counts := cookbook(""); counts["cooked"] != 0 {
+		t.Fatalf("a refused request cooked the dish: %v", counts)
+	}
+	if recipes, counts = cookbook(""); counts["planned"] != 1 || titles(recipes[:1]) != "Salat*" {
+		t.Fatalf("after unplanning = %s %v", titles(recipes), counts)
+	}
+
+	// Another reader cannot unplan or cook it.
+	other := newFixture(t, st, "other@example.test")
+	otherHost := &fakeHost{t: t, store: st, userID: other.user.ID}
+	for _, body := range []string{`{"planned":false}`, `{"cooked":true}`} {
+		if code := callAPI(t, p, otherHost, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, ids["Salat"]), body).Code; code != http.StatusNotFound {
+			t.Fatalf("other reader %s = %d", body, code)
+		}
+	}
+	if _, counts = cookbook(""); counts["planned"] != 1 {
+		t.Fatalf("after the other reader = %v", counts)
+	}
+}
+
+// plannedIn reports, for a cookbook listing, whether a recipe in it is planned.
+func plannedIn(recipes []RecipeSummary, _ map[string]int) func(int64) bool {
+	return func(id int64) bool {
+		for _, r := range recipes {
+			if r.ID == id {
+				return r.PlannedAt > 0
+			}
+		}
+		return false
+	}
+}

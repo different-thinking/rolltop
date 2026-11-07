@@ -193,6 +193,9 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
 
   const filters = useMemo(() => recipeFilters(recipes || []), [recipes]);
   const shown = useMemo(() => (recipes || []).filter((recipe) => matchesFilter(recipe, filter)), [recipes, filter]);
+  // On the shelf to cook, what is being shopped for leads, in its own section.
+  const planned = useMemo(() => (view === "" ? shown.filter((recipe) => recipe.planned_at > 0) : []), [shown, view]);
+  const unplanned = useMemo(() => (planned.length ? shown.filter((recipe) => !recipe.planned_at) : shown), [shown, planned]);
   const enabled = status?.settings.enabled;
   const notes = status?.status.notes || 0;
   const shopping = status?.status.shopping || 0;
@@ -320,11 +323,24 @@ function CookbookPage({ csrf, navigate, addToast, mailGeneration }: RuntimeAppVi
         </p>
       ) : null}
 
-      <div className="recipe-grid">
-        {shown.map((recipe) => (
-          <RecipeCard key={recipe.id} recipe={recipe} href={`${recipesPath}/${recipe.id}`} onOpen={link(`${recipesPath}/${recipe.id}`)} />
-        ))}
-      </div>
+      {planned.length > 0 ? (
+        <>
+          <h2 className="recipe-shelf-heading"><Icon name="shopping_bag" />Planned<span className="recipe-tab-count">{planned.length.toLocaleString()}</span></h2>
+          <div className="recipe-grid">
+            {planned.map((recipe) => (
+              <RecipeCard key={recipe.id} recipe={recipe} href={`${recipesPath}/${recipe.id}`} onOpen={link(`${recipesPath}/${recipe.id}`)} />
+            ))}
+          </div>
+          {unplanned.length > 0 ? <h2 className="recipe-shelf-heading">Still to try</h2> : null}
+        </>
+      ) : null}
+      {unplanned.length > 0 ? (
+        <div className="recipe-grid">
+          {unplanned.map((recipe) => (
+            <RecipeCard key={recipe.id} recipe={recipe} href={`${recipesPath}/${recipe.id}`} onOpen={link(`${recipesPath}/${recipe.id}`)} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -390,6 +406,7 @@ function RecipeCard({ recipe, href, onOpen }: { recipe: RecipeSummary; href: str
       <div className="recipe-card-image">
         {recipe.image_url ? <img src={recipe.image_url} alt="" loading="lazy" /> : <Icon name="cooking_pot" />}
         {recipe.cooked_at ? <span className="recipe-cooked-badge"><Icon name="check" />Cooked</span> : null}
+        {recipe.planned_at && !recipe.dismissed ? <span className="recipe-cooked-badge is-planned"><Icon name="shopping_bag" />Planned</span> : null}
       </div>
       <div className="recipe-card-body">
         <strong className="recipe-card-title">{recipe.title || hostOf(recipe.url)}</strong>
@@ -442,6 +459,20 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
       setRecipe(next.recipe);
       addToast(dismissed ? "Removed from the cookbook." : "Back in the cookbook.");
       if (dismissed) navigate(recipesPath);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unplan() {
+    if (!recipe) return;
+    setBusy(true);
+    try {
+      const next = await recipeAPI.unplan(csrf, recipe.id);
+      setRecipe(next.recipe);
+      addToast("Taken out of the plan.");
     } catch (err) {
       addToast(messageFromError(err), "error");
     } finally {
@@ -505,10 +536,16 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
             {recipe.cooked_at ? (
               <p className="recipe-cooked-line"><Icon name="check" />Cooked {dateLabel(recipe.cooked_at, datePrefs)}</p>
             ) : null}
+            {recipe.planned_at ? (
+              <p className="recipe-cooked-line">
+                <Icon name="shopping_bag" />Planned since {dateLabel(recipe.planned_at, datePrefs)}, when its ingredients went on the shopping list
+              </p>
+            ) : null}
             <div className="recipe-detail-actions">
               {recipe.cooked_at
                 ? <button className="secondary" type="button" disabled={busy} onClick={() => void setCooked(false)}>Not cooked yet</button>
                 : <button type="button" disabled={busy || recipe.dismissed} onClick={() => void setCooked(true)}><Icon name="check" />Mark as cooked</button>}
+              {recipe.planned_at ? <button className="secondary" type="button" disabled={busy} onClick={() => void unplan()}>Take out of the plan</button> : null}
               <a className="button secondary" href={recipe.url} target="_blank" rel="noopener noreferrer"><Icon name="open_in_new" />Open original</a>
               {recipe.dismissed
                 ? <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(false)}>Put back in the cookbook</button>
@@ -536,6 +573,9 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
             onShoppingChange={setShopping}
             shoppingHref={shoppingPath}
             onOpenShopping={link(shoppingPath)}
+            // The server plans the dish with every add; the page follows
+            // without asking again, and a cooked dish leaves the cooked shelf.
+            onPlanned={() => setRecipe((current) => (current ? { ...current, planned_at: Math.floor(Date.now() / 1000), cooked_at: 0 } : current))}
           />
           {recipe.instructions.length > 0 ? (
             <section className="recipe-steps">

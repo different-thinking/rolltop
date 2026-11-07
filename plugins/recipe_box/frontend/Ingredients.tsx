@@ -23,6 +23,8 @@ type Props = {
   onShoppingChange: (items: ShoppingItem[]) => void;
   shoppingHref: string;
   onOpenShopping: (event: MouseEvent) => void;
+  /** Called once ingredients went on the list: the server has planned the dish. */
+  onPlanned: () => void;
 };
 
 /** sectionsOf reads the recipe's ingredient parts, one unnamed part for a server that sends none. */
@@ -52,7 +54,7 @@ function listedLines(items: ShoppingItem[], recipeID: number): Set<string> {
   return keys;
 }
 
-export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange, shoppingHref, onOpenShopping }: Props) {
+export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange, shoppingHref, onOpenShopping, onPlanned }: Props) {
   const sections = useMemo(() => sectionsOf(recipe), [recipe]);
   const allIndexes = useMemo(() => sections.flatMap((section) => section.items.map((item) => item.index)), [sections]);
   const [cooked, setCooked] = useState<Set<number>>(() => new Set());
@@ -88,6 +90,7 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
       const before = onList.size;
       const next = await recipeAPI.addIngredients(csrf, recipe.id, indexes);
       onShoppingChange(next.items);
+      onPlanned();
       // Counted from the answer: an ingredient on the list already is not
       // added a second time, so the request's size would overstate it.
       const after = listedLines(next.items, recipe.id).size;
