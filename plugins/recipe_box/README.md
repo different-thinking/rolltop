@@ -131,6 +131,14 @@ lives on the server, so the phone in the shop shows what was picked at home.
   item still to buy changes nothing. What is **In the cart** is never added
   to -- it was bought for the recipes before -- and an item put back from the
   cart joins the item to buy it adds up with.
+- **Shopping for a recipe plans it.** A recipe whose ingredients go on the
+  list (`planned_at`) leads the cookbook's "To cook" shelf under **Planned**,
+  the latest plan first. Buying and clearing the ingredients does not end the
+  plan -- only **Mark as cooked** does, or **Take out of the plan** on the
+  recipe. A cooked recipe shopped for again leaves the cooked shelf and is
+  planned again, so a recipe is never planned and cooked at once. Migration
+  `005_planned_recipes` plans the recipes that already had lines on the list,
+  unless they were cooked after their last line was added.
 - **Lists written before items were added up** (migration
   `004_shopping_merged`) are folded the first time the reader's list is
   touched (`foldLegacyShopping`): each old row becomes a source, and the rows

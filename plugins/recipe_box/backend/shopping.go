@@ -343,6 +343,15 @@ func addShoppingEntries(ctx context.Context, db *sql.DB, userID, recipeID int64,
 		}
 		sources++
 	}
+	// Putting a recipe's ingredients on the list plans it: it leads the
+	// cookbook until it is cooked, and a cooked recipe shopped for again
+	// leaves the cooked shelf. This holds even when every line was on the
+	// list already -- the reader still means to cook it.
+	if recipeID > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes SET planned_at = ?, cooked_at = 0 WHERE user_id = ? AND id = ?`, now, userID, recipeID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 

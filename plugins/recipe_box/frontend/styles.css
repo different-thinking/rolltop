@@ -492,6 +492,19 @@
   font-weight: 600;
 }
 
+.recipe-cooked-badge.is-planned {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.recipe-shelf-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 16px;
+}
+
 .recipe-cooked-badge .icon {
   width: 14px;
   height: 14px;

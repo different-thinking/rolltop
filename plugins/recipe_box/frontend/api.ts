@@ -23,11 +23,17 @@ export type RecipeSummary = {
   first_seen_at: number;
   /** When the reader marked the dish cooked; zero while it is still one to try. */
   cooked_at: number;
+  /**
+   * When ingredients of the dish last went on the shopping list; zero once it
+   * is cooked or taken out of the plan. Planned dishes lead the cookbook.
+   */
+  planned_at: number;
 };
 
 export type RecipeView = "" | "cooked" | "dismissed";
 
-export type RecipeCounts = { to_cook: number; cooked: number; dismissed: number };
+/** `planned` counts the dishes among `to_cook` whose ingredients are being shopped for. */
+export type RecipeCounts = { to_cook: number; cooked: number; dismissed: number; planned: number };
 
 export type RecipeMail = {
   message_id: number;
@@ -176,6 +182,8 @@ export const recipeAPI = {
   recipe: (id: number) => getJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`),
   setDismissed: (csrf: string, id: number, dismissed: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { dismissed }),
   setCooked: (csrf: string, id: number, cooked: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { cooked }),
+  /** Takes a dish out of the plan. It is planned by putting its ingredients on the shopping list. */
+  unplan: (csrf: string, id: number) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { planned: false }),
   addRecipe: (csrf: string, url: string) => postJSON<{ ok: boolean; status: string; recipe_id: number }>(`${base}/recipes`, csrf, { url }),
   notes: (state: "open" | "done", query: string) => {
     const params = new URLSearchParams({ state });

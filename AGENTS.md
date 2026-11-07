@@ -427,6 +427,12 @@ site and in review.
   written before migration `004_shopping_merged` carry an empty `merge_key`
   and are folded on first touch (`foldLegacyShopping`); a build that writes
   items without a key would have them folded again.
+- **A recipe is planned by shopping for it and unplanned by cooking it**
+  (`planned_at`, set in `addShoppingEntries` in the same transaction as the
+  lines). Buying ingredients never ends a plan. Planning clears `cooked_at`
+  and cooking clears `planned_at`, so the two are never set together; the API
+  only unplans by hand (`planned: false`), it never plans without a shopping
+  list.
 - **A note is its mail, so deleting the mail anywhere deletes the note**
   (`ObserveMessageMove` in `plugins/recipe_box/backend/observe.go`). A move into
   Trash dismisses the note once no copy is left outside Trash, Junk, Sent and

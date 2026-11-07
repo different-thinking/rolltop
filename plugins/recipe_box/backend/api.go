@@ -315,6 +315,10 @@ type RecipeSummary struct {
 	// CookedAt is when the reader marked the dish as cooked, zero while it is
 	// still one to try.
 	CookedAt int64 `json:"cooked_at"`
+	// PlannedAt is when ingredients of the dish last went on the shopping
+	// list, zero once it is cooked or the reader takes it out of the plan.
+	// A planned dish is never on the cooked shelf at the same time.
+	PlannedAt int64 `json:"planned_at"`
 }
 
 // RecipeDetail is a recipe opened.
@@ -343,7 +347,7 @@ type RecipeMail struct {
 }
 
 const recipeColumns = `r.id, r.title, r.description, r.site_name, r.canonical_url, r.yield, r.total_minutes, r.rating_value, r.rating_count,
-	r.categories_json, r.cuisines_json, r.keywords_json, r.ingredients_json, r.image_status, r.updated_at, r.origin, r.dismissed, r.first_seen_at, r.cooked_at,
+	r.categories_json, r.cuisines_json, r.keywords_json, r.ingredients_json, r.image_status, r.updated_at, r.origin, r.dismissed, r.first_seen_at, r.cooked_at, r.planned_at,
 	COALESCE((SELECT m.note FROM plugin_recipe_box_mails m
 		JOIN plugin_recipe_box_mail_links ml ON ml.mail_id = m.id AND ml.user_id = m.user_id
 		JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
@@ -359,7 +363,7 @@ func scanSummary(row rowScanner, extra ...any) (RecipeSummary, []string, error) 
 	var updatedAt int64
 	var dismissed int
 	dest := []any{&s.ID, &s.Title, &s.Description, &s.SiteName, &s.URL, &s.Yield, &s.TotalMinutes, &s.RatingValue, &s.RatingCount,
-		&categories, &cuisines, &keywords, &ingredients, &imageStatus, &updatedAt, &s.Origin, &dismissed, &s.FirstSeenAt, &s.CookedAt, &s.Note}
+		&categories, &cuisines, &keywords, &ingredients, &imageStatus, &updatedAt, &s.Origin, &dismissed, &s.FirstSeenAt, &s.CookedAt, &s.PlannedAt, &s.Note}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return s, nil, err
 	}
@@ -413,7 +417,9 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 		// What was made most recently is what a reader looks for there.
 		query += ` ORDER BY r.cooked_at DESC, r.id DESC LIMIT ?`
 	} else {
-		query += ` ORDER BY r.first_seen_at DESC, r.id DESC LIMIT ?`
+		// What is planned comes first, the latest plan on top: those are the
+		// dishes the reader is shopping for now.
+		query += ` ORDER BY r.planned_at DESC, r.first_seen_at DESC, r.id DESC LIMIT ?`
 	}
 	args = append(args, recipeListLimit)
 	rows, err := db.QueryContext(r.Context(), query, args...)
@@ -435,12 +441,21 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 		host.ServerError(w, err)
 		return
 	}
-	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0}
+	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0, "planned": 0}
 	if err := countInto(r.Context(), db, counts, `SELECT CASE WHEN dismissed <> 0 THEN 'dismissed' WHEN cooked_at > 0 THEN 'cooked' ELSE 'to_cook' END AS shelf, COUNT(*)
 		FROM plugin_recipe_box_recipes WHERE user_id = ? GROUP BY shelf`, userID); err != nil {
 		host.ServerError(w, err)
 		return
 	}
+	// Planned dishes are part of "to cook"; their own count says how many of
+	// those lead the shelf.
+	var n int
+	if err := db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND planned_at > 0`, userID).
+		Scan(&n); err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	counts["planned"] = n
 	host.WriteJSON(w, map[string]any{"recipes": out, "counts": counts})
 }
 
@@ -513,14 +528,18 @@ func recipeMails(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]Rec
 	return out, rows.Err()
 }
 
-// apiUpdateRecipe marks a recipe cooked or not, and takes it out of the
-// cookbook or puts it back. Taking it out also stops the box filing the mail
+// apiUpdateRecipe marks a recipe cooked or not, takes it out of the plan, and
+// takes it out of the cookbook or puts it back. Cooking ends the plan: the
+// ingredients bought for it were for this time. Taking it out also stops the box filing the mail
 // behind it; mail it already filed stays where it is, because moving mail back
 // is the reader's own act.
 func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Dismissed *bool `json:"dismissed"`
 		Cooked    *bool `json:"cooked"`
+		// Planned only takes a dish out of the plan (false); it is planned by
+		// putting its ingredients on the shopping list.
+		Planned *bool `json:"planned"`
 	}
 	if !host.DecodeJSON(w, r, &in) {
 		return
@@ -532,7 +551,26 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		if *in.Cooked {
 			cookedAt = time.Now().UTC().Unix()
 		}
-		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET cooked_at = ? WHERE user_id = ? AND id = ?`, cookedAt, userID, id)
+		query := `UPDATE plugin_recipe_box_recipes SET cooked_at = ? WHERE user_id = ? AND id = ?`
+		if *in.Cooked {
+			query = `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = 0 WHERE user_id = ? AND id = ?`
+		}
+		res, err := db.ExecContext(r.Context(), query, cookedAt, userID, id)
+		if err != nil {
+			host.ServerError(w, err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
+			return
+		}
+	}
+	if in.Planned != nil {
+		if *in.Planned {
+			host.WriteAPIError(w, http.StatusBadRequest, "A recipe is planned by putting its ingredients on the shopping list.")
+			return
+		}
+		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET planned_at = 0 WHERE user_id = ? AND id = ?`, userID, id)
 		if err != nil {
 			host.ServerError(w, err)
 			return
