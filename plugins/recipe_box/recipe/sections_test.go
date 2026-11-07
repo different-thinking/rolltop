@@ -32,7 +32,7 @@ func TestIngredientSectionsWithoutHeadingsIsOneUnnamedSection(t *testing.T) {
 }
 
 func TestIngredientHeadingRefusesAmountsAndSentences(t *testing.T) {
-	for _, line := range []string{"2 Eier:", "½ Zitrone:", "Salz", ":", "Alles, was man für diesen wunderbaren und sehr langen Kuchen braucht:"} {
+	for _, line := range []string{"2 Eier:", "½ Zitrone:", "⅓ Gurke:", "⅞ Liter Milch:", "Salz", ":", "Alles, was man für diesen wunderbaren und sehr langen Kuchen braucht:"} {
 		if name, ok := IngredientHeading(line); ok {
 			t.Fatalf("%q read as heading %q", line, name)
 		}

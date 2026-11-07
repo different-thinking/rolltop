@@ -131,6 +131,9 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
       inputRef.current?.focus();
     } catch (err) {
       addToast(messageFromError(err), "error");
+      // An earlier change's answer was dropped as superseded by this one, so
+      // with this one failed nothing has drawn the list since: read it again.
+      setVisible((value) => value + 1);
     } finally {
       setAdding(false);
     }

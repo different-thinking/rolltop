@@ -75,8 +75,9 @@ func IngredientHeading(line string) (string, bool) {
 	if name == "" || utf8.RuneCountInString(name) > maxHeadingRunes {
 		return "", false
 	}
+	// IsNumber, not IsDigit: an amount is as often written ½ or ⅓ as 1.
 	for _, r := range name {
-		if unicode.IsDigit(r) || r == '½' || r == '¼' || r == '¾' {
+		if unicode.IsNumber(r) {
 			return "", false
 		}
 	}
