@@ -89,17 +89,30 @@ export type Note = {
   links: NoteLink[];
 };
 
-/** One line of the shopping list. */
-export type ShoppingItem = {
-  id: number;
-  /** The recipe the item came from, zero for one the reader typed in. */
+/** One recipe line, or one line the reader typed in, behind a shopping item. */
+export type ShoppingSource = {
+  /** The recipe the line came from, zero for one the reader typed in. */
   recipe_id: number;
   recipe_title: string;
   section: string;
+  /** The line as the recipe (or the reader) wrote it. */
   text: string;
+};
+
+/**
+ * One line of the shopping list: the same thing to buy stands there once,
+ * its amounts added up across the recipes it came from.
+ */
+export type ShoppingItem = {
+  id: number;
+  name: string;
+  /** The total in `unit`, null when the lines named no amount ("Salz"). Weights are in grams, volumes in millilitres. */
+  amount: number | null;
+  unit: string;
   /** When the reader ticked it off, zero while it is still to buy. */
   checked_at: number;
   created_at: number;
+  sources: ShoppingSource[];
 };
 
 export type ShoppingResponse = { items: ShoppingItem[] };
@@ -216,6 +229,34 @@ async function errorText(res: Response) {
 export function messageFromError(err: unknown) {
   if (err instanceof TypeError) return "The server could not be reached.";
   return err instanceof Error ? err.message : "Request failed";
+}
+
+const fractionGlyphs: [number, string][] = [[1 / 4, "¼"], [1 / 3, "⅓"], [1 / 2, "½"], [2 / 3, "⅔"], [3 / 4, "¾"]];
+
+/**
+ * shoppingAmount prints an item's total the way a shopping list says it:
+ * grams and millilitres from a thousand up as kilograms and litres, decimals
+ * in the reader's own notation, and a spoon or a cup as a fraction ("½ TL").
+ */
+export function shoppingAmount(item: Pick<ShoppingItem, "amount" | "unit">): string {
+  if (item.amount === null || item.amount === undefined) return "";
+  let amount = item.amount;
+  let unit = item.unit;
+  if (unit === "g" && amount >= 1000) { amount /= 1000; unit = "kg"; }
+  else if (unit === "ml" && amount >= 1000) { amount /= 1000; unit = "l"; }
+  let number = "";
+  if (unit !== "g" && unit !== "ml" && unit !== "kg" && unit !== "l") {
+    const whole = Math.floor(amount + 1e-9);
+    const glyph = fractionGlyphs.find(([value]) => Math.abs(amount - whole - value) < 0.01);
+    if (glyph) number = `${whole > 0 ? whole : ""}${glyph[1]}`;
+  }
+  if (!number) number = amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return unit ? `${number} ${unit}` : number;
+}
+
+/** shoppingRecipes names the recipes an item was added up from, each once. */
+export function shoppingRecipes(item: ShoppingItem): string[] {
+  return Array.from(new Set((item.sources || []).filter((source) => source.recipe_id > 0).map((source) => source.recipe_title || "Recipe")));
 }
 
 /** minutesLabel prints a cooking time the way a cookbook does. */

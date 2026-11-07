@@ -180,6 +180,11 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails m WHERE m.user_id = ? AND m.note_dismissed = 0 AND m.done_at = 0 AND NOT `+carriesRecipe, userID).Scan(&status.Notes); err != nil {
 		return status, err
 	}
+	// A list written before items were added up is folded first, or the count
+	// would include the duplicates the page no longer shows.
+	if err := ensureShoppingFolded(ctx, db, userID); err != nil {
+		return status, err
+	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_shopping_items WHERE user_id = ? AND checked_at = 0`, userID).Scan(&status.Shopping); err != nil {
 		return status, err
 	}
