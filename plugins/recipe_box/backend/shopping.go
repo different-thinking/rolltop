@@ -128,6 +128,9 @@ func loadShopping(ctx context.Context, db *sql.DB, userID int64) ([]ShoppingItem
 	if err != nil {
 		return nil, err
 	}
+	// Closed explicitly below before the next query; the deferred Close is
+	// the guard for an early return (Close is safe to call twice).
+	defer rows.Close()
 	out := []ShoppingItem{}
 	index := map[int64]int{}
 	for rows.Next() {
@@ -279,10 +282,10 @@ func beginShopping(ctx context.Context, db *sql.DB, userID int64) (*sql.Tx, erro
 	return tx, nil
 }
 
-// addShoppingEntries adds lines to the list in one transaction. A line already
-// behind an item still to buy -- the same source, section and text, case
-// aside -- is not counted a second time: adding a recipe twice does not double
-// it. Otherwise the line adds to the item still to buy that it adds up with,
+// addShoppingEntries adds lines to the list in one transaction. A recipe's
+// line already behind an item still to buy -- the same recipe, section and
+// text, case aside -- is not counted a second time: adding a recipe twice does
+// not double it. A line the reader types in always counts. Otherwise the line adds to the item still to buy that it adds up with,
 // or becomes an item of its own. Items already bought are never added to:
 // what is in the cart was bought for the recipes before.
 func addShoppingEntries(ctx context.Context, db *sql.DB, userID, recipeID int64, title string, entries []shoppingEntry) error {
@@ -301,15 +304,19 @@ func addShoppingEntries(ctx context.Context, db *sql.DB, userID, recipeID int64,
 		return err
 	}
 	for _, entry := range entries {
-		var listed bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM plugin_recipe_box_shopping_sources s
-			JOIN plugin_recipe_box_shopping_items i ON i.id = s.item_id AND i.user_id = s.user_id
-			WHERE s.user_id = ? AND s.recipe_id = ? AND s.section = ? AND LOWER(s.text) = LOWER(?) AND i.checked_at = 0)`,
-			userID, recipeID, entry.section, entry.text).Scan(&listed); err != nil {
-			return err
-		}
-		if listed {
-			continue
+		// Only a recipe's line counts once: what the reader types in again
+		// is more of it ("500 g Tomaten" twice is a kilo).
+		if recipeID > 0 {
+			var listed bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM plugin_recipe_box_shopping_sources s
+				JOIN plugin_recipe_box_shopping_items i ON i.id = s.item_id AND i.user_id = s.user_id
+				WHERE s.user_id = ? AND s.recipe_id = ? AND s.section = ? AND LOWER(s.text) = LOWER(?) AND i.checked_at = 0)`,
+				userID, recipeID, entry.section, entry.text).Scan(&listed); err != nil {
+				return err
+			}
+			if listed {
+				continue
+			}
 		}
 		if sources >= shoppingSourceLimit {
 			return errShoppingListFull
@@ -435,6 +442,9 @@ func foldLegacyShopping(ctx context.Context, tx *sql.Tx, userID int64) error {
 	if err != nil {
 		return err
 	}
+	// Closed explicitly before the writes below, which need the
+	// transaction's connection; the deferred Close guards early returns.
+	defer rows.Close()
 	var pending []legacy
 	for rows.Next() {
 		var item legacy

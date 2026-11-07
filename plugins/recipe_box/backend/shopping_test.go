@@ -257,6 +257,11 @@ func TestShoppingListWrittenBeforeAddingUpIsFolded(t *testing.T) {
 	if _, more := shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[2]}`, ids["Tomatensoße"])); itemTexts(more)[len(more)-1] != "1200 g Mehl <Tomatensoße>" {
 		t.Fatalf("flour = %v", itemTexts(more))
 	}
+	// What the reader types in twice is more of it, not the same line again.
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"500 g Reis"}`)
+	if _, more := shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"500 g Reis"}`); itemTexts(more)[len(more)-1] != "1000 g Reis" {
+		t.Fatalf("rice = %v", itemTexts(more))
+	}
 	// Singular and plural meet, and above one the plural names the total.
 	shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"2 Ei"}`)
 	if _, more := shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"1 Ei"}`); itemTexts(more)[1] != "5 Eier <Salat>" {
