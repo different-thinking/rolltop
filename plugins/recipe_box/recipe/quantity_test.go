@@ -35,6 +35,9 @@ func TestParseIngredientReadsAmountUnitAndName(t *testing.T) {
 		{"Salz und Pfeffer", 0, false, "", "Salz und Pfeffer"},
 		{"etwas Salz", 0, false, "", "Salz"},
 		{"Cashewkerne", 0, false, "", "Cashewkerne"},
+		{"Salz, Pfeffer", 0, false, "", "Salz, Pfeffer"},
+		{"etwas Salz, Pfeffer (frisch gemahlen)", 0, false, "", "Salz, Pfeffer"},
+		{"2 Zwiebeln, fein gehackt", 2, true, "", "Zwiebeln"},
 	}
 	for _, c := range cases {
 		got := ParseIngredient(c.line)
@@ -69,6 +72,7 @@ func TestParseIngredientKeysMeetOnlyWhenTheyAddUp(t *testing.T) {
 		{"2 Tomaten", "400 g Tomaten"},
 		{"200 g Mehl", "200 g Zucker"},
 		{"1 Dose Tomaten", "1 Dose Mais"},
+		{"Salz", "Salz, Pfeffer"},
 	}
 	for _, pair := range apart {
 		if a, b := ParseIngredient(pair[0]), ParseIngredient(pair[1]); a.Key == b.Key {

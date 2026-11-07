@@ -209,7 +209,7 @@ func TestShoppingListAddsUpWhatRecipesShare(t *testing.T) {
 // line in the old columns, no merge key) is folded into the new shape the
 // first time it is read: open with open, bought with bought.
 func TestShoppingListWrittenBeforeAddingUpIsFolded(t *testing.T) {
-	st, p, host, _ := shoppingFixture(t)
+	st, p, host, ids := shoppingFixture(t)
 	legacy := []struct {
 		recipeID int64
 		title    string
@@ -251,6 +251,11 @@ func TestShoppingListWrittenBeforeAddingUpIsFolded(t *testing.T) {
 	}
 	if _, more := shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"200 g Tomaten"}`); itemTexts(more)[0] != "1000 g Tomaten <Tomatensoße,Salat>" {
 		t.Fatalf("after the fold = %v", itemTexts(more))
+	}
+	// A name typed in lower case takes the spelling of a recipe that adds to it.
+	shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"200 g mehl"}`)
+	if _, more := shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[2]}`, ids["Tomatensoße"])); itemTexts(more)[len(more)-1] != "1200 g Mehl <Tomatensoße>" {
+		t.Fatalf("flour = %v", itemTexts(more))
 	}
 	// Singular and plural meet, and above one the plural names the total.
 	shoppingCall(t, p, host, http.MethodPost, "/shopping", `{"text":"2 Ei"}`)

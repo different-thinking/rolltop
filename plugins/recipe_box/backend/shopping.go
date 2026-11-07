@@ -92,12 +92,12 @@ func (p *recipeBoxBackend) apiShopping(host plugins.APIHost, db *sql.DB, userID 
 			return
 		}
 		// The item's sources go with it (ON DELETE CASCADE).
-		res, err := db.ExecContext(r.Context(), `DELETE FROM plugin_recipe_box_shopping_items WHERE user_id = ? AND id = ?`, userID, id)
+		n, err := deleteShopping(r.Context(), db, userID, `AND id = ?`, id)
 		if err != nil {
 			host.ServerError(w, err)
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if n == 0 {
 			host.WriteAPIError(w, http.StatusNotFound, "item not found")
 			return
 		}
@@ -377,13 +377,23 @@ func addUp(total float64, name string, amount float64, otherName string, hasAmou
 		return total, name
 	}
 	sum := total + amount
-	switch {
-	case sum > 1 && utf8.RuneCountInString(otherName) > utf8.RuneCountInString(name):
+	switch length, other := utf8.RuneCountInString(name), utf8.RuneCountInString(otherName); {
+	case sum > 1 && other > length:
 		name = otherName
 	case sum <= 1 && amount > total:
 		name = otherName
+	case other == length && startsLower(name) && !startsLower(otherName):
+		// The same word, once typed in lower case: the recipe's spelling wins.
+		name = otherName
 	}
 	return sum, name
+}
+
+func startsLower(text string) bool {
+	for _, r := range text {
+		return unicode.IsLower(r)
+	}
+	return false
 }
 
 // ensureShoppingFolded brings a list written before items were added up into
@@ -570,13 +580,30 @@ func (p *recipeBoxBackend) apiClearShopping(host plugins.APIHost, db *sql.DB, us
 	if !host.DecodeJSON(w, r, &in) {
 		return
 	}
-	query := `DELETE FROM plugin_recipe_box_shopping_items WHERE user_id = ?`
+	filter := ``
 	if !in.All {
-		query += ` AND checked_at > 0`
+		filter = `AND checked_at > 0`
 	}
-	if _, err := db.ExecContext(r.Context(), query, userID); err != nil {
+	if _, err := deleteShopping(r.Context(), db, userID, filter); err != nil {
 		host.ServerError(w, err)
 		return
 	}
 	p.writeShopping(host, db, userID, w, r)
+}
+
+// deleteShopping removes items under the reader's shopping lock: an add that
+// is merging into an item must not have it deleted between finding it and
+// recording its line there. The lines go with their items (ON DELETE CASCADE).
+func deleteShopping(ctx context.Context, db *sql.DB, userID int64, filter string, args ...any) (int64, error) {
+	tx, err := beginShopping(ctx, db, userID)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM plugin_recipe_box_shopping_items WHERE user_id = ? `+filter, append([]any{userID}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, tx.Commit()
 }

@@ -154,7 +154,7 @@ func ParseIngredient(line string) Ingredient {
 		}
 		out.Key = "none"
 	}
-	out.Name = cleanName(rest)
+	out.Name = cleanName(rest, out.HasAmount)
 	if out.Name == "" {
 		out.Name = text
 	}
@@ -337,8 +337,10 @@ func thousandsAmount(amountText string, unit unitInfo) (float64, bool) {
 }
 
 // cleanName drops what is a note rather than the thing to buy: anything in
-// brackets and anything after the first comma.
-func cleanName(text string) string {
+// brackets and, on a line with an amount, anything after the first comma
+// ("400 g Tomaten, gewürfelt"). A line without an amount keeps its commas:
+// there they list things ("Salz, Pfeffer"), and cutting would drop one.
+func cleanName(text string, hasAmount bool) string {
 	var b strings.Builder
 	depth := 0
 	for _, r := range text {
@@ -352,7 +354,7 @@ func cleanName(text string) string {
 		}
 	}
 	name := b.String()
-	if i := strings.IndexByte(name, ','); i >= 0 {
+	if i := strings.IndexByte(name, ','); i >= 0 && hasAmount {
 		name = name[:i]
 	}
 	return strings.Join(strings.Fields(name), " ")
