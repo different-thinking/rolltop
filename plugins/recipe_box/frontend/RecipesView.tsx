@@ -406,7 +406,7 @@ function RecipeCard({ recipe, href, onOpen }: { recipe: RecipeSummary; href: str
       <div className="recipe-card-image">
         {recipe.image_url ? <img src={recipe.image_url} alt="" loading="lazy" /> : <Icon name="cooking_pot" />}
         {recipe.cooked_at ? <span className="recipe-cooked-badge"><Icon name="check" />Cooked</span> : null}
-        {recipe.planned_at ? <span className="recipe-cooked-badge is-planned"><Icon name="shopping_bag" />Planned</span> : null}
+        {recipe.planned_at && !recipe.dismissed ? <span className="recipe-cooked-badge is-planned"><Icon name="shopping_bag" />Planned</span> : null}
       </div>
       <div className="recipe-card-body">
         <strong className="recipe-card-title">{recipe.title || hostOf(recipe.url)}</strong>
@@ -538,7 +538,7 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
             ) : null}
             {recipe.planned_at ? (
               <p className="recipe-cooked-line">
-                <Icon name="shopping_bag" />Planned · ingredients on the shopping list since {dateLabel(recipe.planned_at, datePrefs)}
+                <Icon name="shopping_bag" />Planned since {dateLabel(recipe.planned_at, datePrefs)}, when its ingredients went on the shopping list
               </p>
             ) : null}
             <div className="recipe-detail-actions">

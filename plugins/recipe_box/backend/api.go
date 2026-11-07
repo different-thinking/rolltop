@@ -441,21 +441,15 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 		host.ServerError(w, err)
 		return
 	}
-	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0, "planned": 0}
-	if err := countInto(r.Context(), db, counts, `SELECT CASE WHEN dismissed <> 0 THEN 'dismissed' WHEN cooked_at > 0 THEN 'cooked' ELSE 'to_cook' END AS shelf, COUNT(*)
-		FROM plugin_recipe_box_recipes WHERE user_id = ? GROUP BY shelf`, userID); err != nil {
-		host.ServerError(w, err)
-		return
-	}
 	// Planned dishes are part of "to cook"; their own count says how many of
 	// those lead the shelf.
-	var n int
-	if err := db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND planned_at > 0`, userID).
-		Scan(&n); err != nil {
+	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0, "planned": 0}
+	if err := countInto(r.Context(), db, counts, `SELECT CASE WHEN dismissed <> 0 THEN 'dismissed' WHEN cooked_at > 0 THEN 'cooked' ELSE 'to_cook' END AS shelf, COUNT(*)
+		FROM plugin_recipe_box_recipes WHERE user_id = ? GROUP BY shelf
+		UNION ALL SELECT 'planned', COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND planned_at > 0`, userID, userID); err != nil {
 		host.ServerError(w, err)
 		return
 	}
-	counts["planned"] = n
 	host.WriteJSON(w, map[string]any{"recipes": out, "counts": counts})
 }
 
@@ -544,6 +538,11 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 	if !host.DecodeJSON(w, r, &in) {
 		return
 	}
+	// Refused before anything is written: a refused request changes nothing.
+	if in.Planned != nil && *in.Planned {
+		host.WriteAPIError(w, http.StatusBadRequest, "A recipe is planned by putting its ingredients on the shopping list.")
+		return
+	}
 	if in.Cooked != nil {
 		// updated_at is left alone: it versions the picture URL, and marking a
 		// dish cooked does not change its picture.
@@ -551,11 +550,18 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		if *in.Cooked {
 			cookedAt = time.Now().UTC().Unix()
 		}
-		query := `UPDATE plugin_recipe_box_recipes SET cooked_at = ? WHERE user_id = ? AND id = ?`
-		if *in.Cooked {
-			query = `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = 0 WHERE user_id = ? AND id = ?`
+		// Cooking ends the plan. Taking it back ("not cooked yet") plans the
+		// dish again when lines of it are still to buy on the list -- a
+		// cooked mark set by mistake must not cost the plan.
+		query := `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = 0 WHERE user_id = ? AND id = ?`
+		args := []any{cookedAt, userID, id}
+		if !*in.Cooked {
+			query = `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = COALESCE((SELECT MAX(s.created_at)
+				FROM plugin_recipe_box_shopping_sources s JOIN plugin_recipe_box_shopping_items i ON i.id = s.item_id AND i.user_id = s.user_id
+				WHERE s.user_id = ? AND s.recipe_id = ? AND i.checked_at = 0), 0) WHERE user_id = ? AND id = ?`
+			args = []any{cookedAt, userID, id, userID, id}
 		}
-		res, err := db.ExecContext(r.Context(), query, cookedAt, userID, id)
+		res, err := db.ExecContext(r.Context(), query, args...)
 		if err != nil {
 			host.ServerError(w, err)
 			return
@@ -566,10 +572,6 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		}
 	}
 	if in.Planned != nil {
-		if *in.Planned {
-			host.WriteAPIError(w, http.StatusBadRequest, "A recipe is planned by putting its ingredients on the shopping list.")
-			return
-		}
 		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET planned_at = 0 WHERE user_id = ? AND id = ?`, userID, id)
 		if err != nil {
 			host.ServerError(w, err)
