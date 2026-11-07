@@ -31,9 +31,13 @@ export function sectionsOf(recipe: RecipeDetail): IngredientSection[] {
   return [{ name: "", items: recipe.ingredients.map((text, index) => ({ index, text })) }];
 }
 
-/** shoppingKey is how an item and an ingredient are matched: same words, case aside. */
-export function shoppingKey(text: string): string {
-  return text.trim().replace(/\s+/g, " ").toLowerCase();
+/**
+ * shoppingKey is how an item and an ingredient are matched, the way the server
+ * matches them: same section, same words, case aside.
+ */
+export function shoppingKey(section: string, text: string): string {
+  const norm = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
+  return `${norm(section)}\n${norm(text)}`;
 }
 
 export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange, shoppingHref, onOpenShopping }: Props) {
@@ -49,7 +53,7 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
   const onList = useMemo(() => {
     const keys = new Set<string>();
     for (const item of shopping || []) {
-      if (item.recipe_id === recipe.id && !item.checked_at) keys.add(shoppingKey(item.text));
+      if (item.recipe_id === recipe.id && !item.checked_at) keys.add(shoppingKey(item.section, item.text));
     }
     return keys;
   }, [shopping, recipe.id]);
@@ -74,9 +78,16 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
     if (indexes.length === 0) return;
     setBusy(true);
     try {
+      const before = onList.size;
       const next = await recipeAPI.addIngredients(csrf, recipe.id, indexes);
       onShoppingChange(next.items);
-      addToast(indexes.length === 1 ? "Added 1 ingredient to the shopping list." : `Added ${indexes.length} ingredients to the shopping list.`);
+      // Counted from the answer: an ingredient on the list already is not
+      // added a second time, so the request's size would overstate it.
+      const after = next.items.filter((item) => item.recipe_id === recipe.id && !item.checked_at).length;
+      const added = Math.max(0, after - before);
+      addToast(added === 0
+        ? "Those ingredients are on the shopping list already."
+        : added === 1 ? "Added 1 ingredient to the shopping list." : `Added ${added} ingredients to the shopping list.`);
       setPicking(false);
       setChosen(new Set());
     } catch (err) {
@@ -121,7 +132,7 @@ export function Ingredients({ recipe, csrf, addToast, shopping, onShoppingChange
             ) : null}
             <ul>
               {section.items.map((item) => {
-                const listed = onList.has(shoppingKey(item.text));
+                const listed = onList.has(shoppingKey(section.name, item.text));
                 const checked = picking ? chosen.has(item.index) : cooked.has(item.index);
                 return (
                   <li key={`${item.index}-${item.text}`}>

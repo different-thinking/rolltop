@@ -58,7 +58,12 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
   const [adding, setAdding] = useState(false);
   const [busyIDs, setBusyIDs] = useState<Set<number>>(() => new Set());
   const [visible, setVisible] = useState(0);
+  const [clearing, setClearing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The latest change sent. Each answer carries the whole list, so only the
+  // answer to the latest change may draw it: an earlier one arriving later
+  // would undo a tick made in between.
+  const latestChange = useRef(0);
   const link = useLink(navigate);
 
   // Back in view -- the phone unlocked in the shop -- the list is read again,
@@ -86,14 +91,18 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
   const cart = useMemo(() => (items || []).filter((item) => item.checked_at).sort((a, b) => b.checked_at - a.checked_at || b.id - a.id), [items]);
   const open = (items || []).length - cart.length;
 
-  async function run(ids: number[], change: Promise<{ items: ShoppingItem[] }>, done?: string) {
+  async function run(ids: number[], change: () => Promise<{ items: ShoppingItem[] }>, done?: string) {
+    const seq = ++latestChange.current;
     setBusyIDs((current) => new Set([...current, ...ids]));
     try {
-      const next = await change;
-      setItems(next.items);
+      const next = await change();
+      if (seq === latestChange.current) setItems(next.items);
       if (done) addToast(done);
     } catch (err) {
       addToast(messageFromError(err), "error");
+      // A tick drawn ahead of a change that failed must not stay drawn: the
+      // list is read again for what the server really holds.
+      setVisible((value) => value + 1);
     } finally {
       setBusyIDs((current) => {
         const next = new Set(current);
@@ -107,16 +116,17 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
     // Ticked at once: in the shop a box that waits for the network is a box
     // tapped twice. The server's answer replaces the guess.
     setItems((current) => (current || []).map((entry) => (entry.id === item.id ? { ...entry, checked_at: checked ? Math.floor(Date.now() / 1000) : 0 } : entry)));
-    void run([item.id], recipeAPI.setShoppingChecked(csrf, item.id, checked));
+    void run([item.id], () => recipeAPI.setShoppingChecked(csrf, item.id, checked));
   }
 
   async function add(event: FormEvent) {
     event.preventDefault();
     if (!text.trim()) return;
     setAdding(true);
+    const seq = ++latestChange.current;
     try {
       const next = await recipeAPI.addShoppingItem(csrf, text);
-      setItems(next.items);
+      if (seq === latestChange.current) setItems(next.items);
       setText("");
       inputRef.current?.focus();
     } catch (err) {
@@ -126,9 +136,14 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
     }
   }
 
-  function clearAll() {
-    if (!window.confirm("Take every item off the shopping list?")) return;
-    void run([], recipeAPI.clearShopping(csrf, true), "The shopping list is empty.");
+  async function clear(all: boolean) {
+    if (all && !window.confirm("Take every item off the shopping list?")) return;
+    setClearing(true);
+    try {
+      await run([], () => recipeAPI.clearShopping(csrf, all), all ? "The shopping list is empty." : "Cleared what you bought.");
+    } finally {
+      setClearing(false);
+    }
   }
 
   function row(item: ShoppingItem) {
@@ -146,7 +161,7 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
           title="Remove from the list"
           aria-label={`Remove ${item.text} from the list`}
           disabled={busy}
-          onClick={() => void run([item.id], recipeAPI.deleteShoppingItem(csrf, item.id))}
+          onClick={() => void run([item.id], () => recipeAPI.deleteShoppingItem(csrf, item.id))}
         >
           <Icon name="close" />
         </button>
@@ -164,7 +179,7 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
         <div className="recipe-box-head-actions">
           <a className="button secondary" href={recipesPath} onClick={link(recipesPath)}><Icon name="cooking_pot" />Recipes</a>
           {items && items.length > 0 ? (
-            <button className="secondary" type="button" onClick={clearAll} disabled={busyIDs.size > 0}><Icon name="delete" />Clear list</button>
+            <button className="secondary" type="button" onClick={() => void clear(true)} disabled={clearing || busyIDs.size > 0}><Icon name="delete" />Clear list</button>
           ) : null}
         </div>
       </div>
@@ -216,8 +231,8 @@ export function ShoppingView({ csrf, navigate, addToast, mailGeneration }: Runti
             <button
               className="secondary"
               type="button"
-              disabled={busyIDs.size > 0}
-              onClick={() => void run([], recipeAPI.clearShopping(csrf, false), "Cleared what you bought.")}
+              disabled={clearing || busyIDs.size > 0}
+              onClick={() => void clear(false)}
             >
               Clear bought items
             </button>

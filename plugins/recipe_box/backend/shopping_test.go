@@ -12,7 +12,7 @@ import (
 
 // A recipe in two parts, the way sites write parts into recipeIngredient.
 const appleCakeMarkup = `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Apfelkuchen",
-"recipeIngredient":["Für den Teig:","250 g Mehl","125 g Butter","Für den Belag:","500 g Äpfel","1 EL Zucker"],"recipeInstructions":"Backen."}</script></head></html>`
+"recipeIngredient":["Für den Teig:","250 g Mehl","125 g Butter","Für den Belag:","500 g Äpfel","1 EL Zucker","Für die Streusel:","1 EL Zucker"],"recipeInstructions":"Backen."}</script></head></html>`
 
 func shoppingServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -82,7 +82,7 @@ func TestShoppingListGathersIngredientsFromSeveralRecipes(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatal(err)
 	}
-	if got := detail.Recipe.IngredientSections; len(got) != 2 || got[1].Name != "Für den Belag" || got[1].Items[0].Index != 4 {
+	if got := detail.Recipe.IngredientSections; len(got) != 3 || got[1].Name != "Für den Belag" || got[1].Items[0].Index != 4 {
 		t.Fatalf("sections = %+v", got)
 	}
 
@@ -131,12 +131,19 @@ func TestShoppingListGathersIngredientsFromSeveralRecipes(t *testing.T) {
 		t.Fatalf("whole cake = %d %v", code, itemTexts(items))
 	}
 
+	// The same line in another section is needed a second time, so it is an
+	// item of its own rather than the first one put back.
+	code, items = shoppingCall(t, p, host, http.MethodPost, "/shopping", fmt.Sprintf(`{"recipe_id":%d,"indexes":[7]}`, cake))
+	if code != http.StatusOK || len(items) != 7 || items[6].Section != "Für die Streusel" || items[2].Section != "Für den Belag" {
+		t.Fatalf("sugar for the crumble = %d %v", code, itemTexts(items))
+	}
+
 	// Clearing takes only what was ticked off; clearing all takes the rest.
 	shoppingCall(t, p, host, http.MethodPost, fmt.Sprintf("/shopping/%d", items[0].ID), `{"checked":true}`)
-	if code, items = shoppingCall(t, p, host, http.MethodPost, "/shopping/clear", `{}`); code != http.StatusOK || len(items) != 5 {
+	if code, items = shoppingCall(t, p, host, http.MethodPost, "/shopping/clear", `{}`); code != http.StatusOK || len(items) != 6 {
 		t.Fatalf("clear checked = %d %v", code, itemTexts(items))
 	}
-	if code, items = shoppingCall(t, p, host, http.MethodPost, fmt.Sprintf("/shopping/%d/delete", items[0].ID), ``); code != http.StatusOK || len(items) != 4 {
+	if code, items = shoppingCall(t, p, host, http.MethodPost, fmt.Sprintf("/shopping/%d/delete", items[0].ID), ``); code != http.StatusOK || len(items) != 5 {
 		t.Fatalf("delete = %d %v", code, itemTexts(items))
 	}
 	if code, items = shoppingCall(t, p, host, http.MethodPost, "/shopping/clear", `{"all":true}`); code != http.StatusOK || len(items) != 0 {

@@ -202,22 +202,33 @@ func recipeShoppingEntries(lines []string, indexes []int) ([]shoppingEntry, erro
 }
 
 // addShoppingEntries writes items in one transaction. An item counts as on the
-// list already when the same source gave the same text, compared without
-// case; that one is put back to buy instead of written a second time.
+// list already when the same source gave the same text in the same section,
+// compared without case; that one is put back to buy instead of written a
+// second time. The section is part of it because a recipe can need the same
+// line twice ("1 pinch of salt" for the dough and again for the topping).
+//
+// Adds of one reader are serialized on an advisory lock: the check and the
+// insert are two statements, and two devices adding at once would otherwise
+// both miss the other's row and write the item twice, or both pass the limit.
 func addShoppingEntries(ctx context.Context, db *sql.DB, userID, recipeID int64, title string, entries []shoppingEntry) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// The two-key form keeps clear of the one-key locks the store takes; two
+	// readers whose ids share a key only wait on each other.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('plugin_recipe_box_shopping'), (?::bigint % 2147483647)::integer)`, userID); err != nil {
+		return err
+	}
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_shopping_items WHERE user_id = ?`, userID).Scan(&count); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Unix()
 	for _, entry := range entries {
-		res, err := tx.ExecContext(ctx, `UPDATE plugin_recipe_box_shopping_items SET checked_at = 0, recipe_title = ?, section = ?, updated_at = ?
-			WHERE user_id = ? AND recipe_id = ? AND LOWER(text) = LOWER(?)`, title, entry.section, now, userID, recipeID, entry.text)
+		res, err := tx.ExecContext(ctx, `UPDATE plugin_recipe_box_shopping_items SET checked_at = 0, recipe_title = ?, updated_at = ?
+			WHERE user_id = ? AND recipe_id = ? AND section = ? AND LOWER(text) = LOWER(?)`, title, now, userID, recipeID, entry.section, entry.text)
 		if err != nil {
 			return err
 		}
