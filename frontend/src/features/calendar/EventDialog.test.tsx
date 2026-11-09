@@ -42,6 +42,13 @@ describe("withTravelThere", () => {
     expect(withTravelThere(both, { travelBefore: "90" })).toMatchObject({ travelAfter: "90" });
   });
 
+  it("does not count an empty field as zero minutes, whichever side it is on", () => {
+    const zero = { travelBeforeOn: true, travelBefore: "0", travelAfterOn: true, travelAfter: "" };
+    expect(withTravelThere(zero, { travelBefore: "60" })).toMatchObject({ travelAfter: "" });
+    const empty = { travelBeforeOn: true, travelBefore: "", travelAfterOn: true, travelAfter: "0" };
+    expect(withTravelThere(empty, { travelBefore: "60" })).toMatchObject({ travelAfter: "0" });
+  });
+
   it("does not switch the way back on again once the reader switched it off", () => {
     const off = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
     expect(withTravelThere(off, { travelBefore: "60" })).toMatchObject({ travelAfterOn: false, travelAfter: "30" });

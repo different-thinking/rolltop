@@ -77,7 +77,9 @@ function travelDraft(before: number | undefined, after: number | undefined) {
 /** sameTravelMinutes says whether two travel fields name the same minutes,
  * however they were typed: "060" and "60" agree, two empty fields too. */
 function sameTravelMinutes(a: string, b: string): boolean {
-  return a.trim() === b.trim() || (a.trim() !== "" && Number(a.trim()) === Number(b.trim()));
+  const left = a.trim();
+  const right = b.trim();
+  return left === right || (left !== "" && right !== "" && Number(left) === Number(right));
 }
 
 type TravelFields = Pick<DraftState, "travelBeforeOn" | "travelBefore" | "travelAfterOn" | "travelAfter">;
