@@ -24,8 +24,8 @@ type Press<T> = {
 /**
  * useLongPress arms a long press from a touch pointerdown and calls onLongPress
  * with the payload once the finger has rested for longPressDelay. Moving,
- * lifting, a second finger, or the browser taking the gesture over for a scroll
- * (pointercancel) all call it off. Mouse and pen presses are ignored: they have
+ * lifting, a second finger, the browser taking the gesture over for a scroll
+ * (pointercancel), or the window losing focus all call it off. Mouse and pen presses are ignored: they have
  * their own ways to make an event.
  *
  * Once it has fired, the click and the context menu the release would produce
@@ -106,6 +106,9 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
     window.addEventListener("pointercancel", onEnd);
+    // Switching away mid-press loses its release; the press must not fire
+    // into a window the reader has left.
+    window.addEventListener("blur", cancel);
     window.addEventListener("click", swallow, true);
     window.addEventListener("contextmenu", swallow, true);
     return () => {
@@ -115,6 +118,7 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
+      window.removeEventListener("blur", cancel);
       window.removeEventListener("click", swallow, true);
       window.removeEventListener("contextmenu", swallow, true);
     };

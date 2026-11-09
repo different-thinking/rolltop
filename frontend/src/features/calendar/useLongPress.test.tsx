@@ -91,6 +91,17 @@ describe("useLongPress", () => {
     expect(onLongPress).not.toHaveBeenCalled();
   });
 
+  it("is called off when the window loses focus mid-press", () => {
+    const onLongPress = vi.fn();
+    mount(onLongPress);
+    act(() => {
+      target().dispatchEvent(pointer("pointerdown", {}));
+      window.dispatchEvent(new Event("blur"));
+    });
+    act(() => vi.advanceTimersByTime(longPressDelay));
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
   it("tolerates the small wobble of a finger held still", () => {
     const onLongPress = vi.fn();
     mount(onLongPress);
