@@ -2,13 +2,51 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent, CalendarSummary } from "../../types";
-import { copyPrefill, EventDialog, withoutMeetingJoinDetails, withStartMoved } from "./EventDialog";
+import { copyPrefill, EventDialog, withoutMeetingJoinDetails, withStartMoved, withTravelThere } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const timed = { allDay: false, startDate: "2026-10-23", startTime: "09:00", endDate: "2026-10-23", endTime: "10:30" };
 const allDay = { allDay: true, startDate: "2026-10-23", startTime: "09:00", endDate: "2026-10-25", endTime: "10:00" };
+
+describe("withTravelThere", () => {
+  const none = { travelBeforeOn: false, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
+
+  it("ticks the way back with the same minutes when the way there is ticked", () => {
+    const typed = { ...none, travelBefore: "45", travelAfter: "30" };
+    expect(withTravelThere(typed, { travelBeforeOn: true })).toEqual({
+      travelBeforeOn: true,
+      travelBefore: "45",
+      travelAfterOn: true,
+      travelAfter: "45"
+    });
+  });
+
+  it("carries typed minutes over to the way back while the two agree", () => {
+    let draft = withTravelThere(none, { travelBeforeOn: true });
+    draft = withTravelThere(draft, { travelBefore: "6" });
+    draft = withTravelThere(draft, { travelBefore: "60" });
+    expect(draft).toMatchObject({ travelBefore: "60", travelAfterOn: true, travelAfter: "60" });
+  });
+
+  it("leaves a way back alone once it has a time of its own", () => {
+    const own = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: true, travelAfter: "15" };
+    expect(withTravelThere(own, { travelBefore: "60" })).toMatchObject({ travelAfter: "15" });
+    const later = { ...none, travelAfterOn: true, travelAfter: "15" };
+    expect(withTravelThere(later, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "15" });
+  });
+
+  it("does not switch the way back on again once the reader switched it off", () => {
+    const off = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
+    expect(withTravelThere(off, { travelBefore: "60" })).toMatchObject({ travelAfterOn: false, travelAfter: "30" });
+  });
+
+  it("leaves the way back on when the way there is switched off", () => {
+    const both = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: true, travelAfter: "30" };
+    expect(withTravelThere(both, { travelBeforeOn: false })).toMatchObject({ travelBeforeOn: false, travelAfterOn: true });
+  });
+});
 
 describe("withStartMoved", () => {
   it("carries the end along when the start date moves", () => {

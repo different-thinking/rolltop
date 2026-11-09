@@ -74,6 +74,33 @@ function travelDraft(before: number | undefined, after: number | undefined) {
   };
 }
 
+type TravelFields = Pick<DraftState, "travelBeforeOn" | "travelBefore" | "travelAfterOn" | "travelAfter">;
+
+/** withTravelThere applies a change to the journey there, and the journey back
+ * follows it: most appointments are left the way they were reached, so ticking
+ * "Travel there" ticks "Travel back" with the same minutes, and typing minutes
+ * there carries them over for as long as the two still agree. Once the reader
+ * has given the way back a time of its own, or switched it off after the way
+ * there was ticked, it is theirs and is left alone. */
+export function withTravelThere<T extends TravelFields>(
+  current: T,
+  patch: { travelBeforeOn?: boolean; travelBefore?: string }
+): T {
+  const next = { ...current, ...patch };
+  if (patch.travelBeforeOn === true && !current.travelBeforeOn && !current.travelAfterOn) {
+    next.travelAfterOn = true;
+    next.travelAfter = next.travelBefore;
+  }
+  if (
+    patch.travelBefore !== undefined &&
+    current.travelAfterOn &&
+    current.travelAfter.trim() === current.travelBefore.trim()
+  ) {
+    next.travelAfter = patch.travelBefore;
+  }
+  return next;
+}
+
 /** travelValue reads one travel field, or null when it is ticked but holds no
  * usable number of minutes. */
 function travelValue(on: boolean, minutes: string): number | null {
@@ -849,8 +876,8 @@ export function EventDialog({
                 minutes={draft.travelBefore}
                 hint={travelTimes.leave}
                 disabled={saving}
-                onToggle={(on) => update({ travelBeforeOn: on })}
-                onMinutes={(minutes) => update({ travelBefore: minutes })}
+                onToggle={(on) => setDraft((current) => withTravelThere(current, { travelBeforeOn: on }))}
+                onMinutes={(minutes) => setDraft((current) => withTravelThere(current, { travelBefore: minutes }))}
               />
               <TravelField
                 id="calendar-event-travel-after"
