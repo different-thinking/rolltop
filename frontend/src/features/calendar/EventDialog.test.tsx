@@ -42,9 +42,11 @@ describe("withTravelThere", () => {
     expect(withTravelThere(off, { travelBefore: "60" })).toMatchObject({ travelAfterOn: false, travelAfter: "30" });
   });
 
-  it("leaves the way back on when the way there is switched off", () => {
-    const both = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: true, travelAfter: "30" };
-    expect(withTravelThere(both, { travelBeforeOn: false })).toMatchObject({ travelBeforeOn: false, travelAfterOn: true });
+  it("switches the way back off with the way there and keeps both minutes", () => {
+    const both = { travelBeforeOn: true, travelBefore: "60", travelAfterOn: true, travelAfter: "45" };
+    const off = withTravelThere(both, { travelBeforeOn: false });
+    expect(off).toEqual({ travelBeforeOn: false, travelBefore: "60", travelAfterOn: false, travelAfter: "45" });
+    expect(withTravelThere(off, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "60" });
   });
 });
 

@@ -79,9 +79,11 @@ type TravelFields = Pick<DraftState, "travelBeforeOn" | "travelBefore" | "travel
 /** withTravelThere applies a change to the journey there, and the journey back
  * follows it: most appointments are left the way they were reached, so ticking
  * "Travel there" ticks "Travel back" with the same minutes, and typing minutes
- * there carries them over for as long as the two still agree. Once the reader
- * has given the way back a time of its own, or switched it off after the way
- * there was ticked, it is theirs and is left alone. */
+ * there carries them over for as long as the two still agree. Unticking the
+ * way there unticks the way back too; the minutes stay as typed, so ticking it
+ * again brings both back. Once the reader has given the way back a time of its
+ * own, or switched it off after the way there was ticked, typing minutes there
+ * leaves it alone. */
 export function withTravelThere<T extends TravelFields>(
   current: T,
   patch: { travelBeforeOn?: boolean; travelBefore?: string }
@@ -90,6 +92,9 @@ export function withTravelThere<T extends TravelFields>(
   if (patch.travelBeforeOn === true && !current.travelBeforeOn && !current.travelAfterOn) {
     next.travelAfterOn = true;
     next.travelAfter = next.travelBefore;
+  }
+  if (patch.travelBeforeOn === false) {
+    next.travelAfterOn = false;
   }
   if (
     patch.travelBefore !== undefined &&
