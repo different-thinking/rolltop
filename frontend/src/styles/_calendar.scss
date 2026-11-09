@@ -584,6 +584,10 @@ $calendar-day-columns: var(--calendar-day-columns, repeat(7, minmax(0, 1fr)));
 .calendar-day {
   position: relative;
   border-right: 1px solid var(--border);
+  // Holding a finger on free time makes a new event (useLongPress); the
+  // phone's own long-press callout and text selection would get there first.
+  -webkit-touch-callout: none;
+  user-select: none;
 
   &:last-child {
     border-right: 0;

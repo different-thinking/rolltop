@@ -1,6 +1,6 @@
 // File overview: Authenticated application chrome: top bar, search entry, folder sidebar and the
 // control that hides it, mobile drawer, drag-to-folder handling, sync status, and the floating
-// compose affordance every layout without a sidebar falls back on.
+// compose affordance every layout without a sidebar falls back on (a new event in the calendar).
 
 import { Fragment, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { DragEvent, FormEvent, MouseEvent, ReactNode } from "react";
@@ -24,6 +24,7 @@ import { SearchAutocomplete, useSearchAutocomplete } from "./SearchAutocomplete"
 import { useExpectedDeliveries, type ExpectedDeliveries } from "../deliveries/useExpectedDeliveries";
 import { useDueInvoices, type DueInvoices } from "../invoices/useDueInvoices";
 import { useTripsToAdd, type TripsToAdd } from "../trips/useTripsToAdd";
+import { requestNewCalendarEvent } from "../calendar/newEventRequest";
 
 /**
  * AppShell renders everything that survives route changes after login: topbar,
@@ -421,8 +422,15 @@ export function AppShell({
 
   // The floating Compose button stands in for the sidebar's own wherever the
   // sidebar is not on the page - the phone drawer, and a desktop that hid it.
+  // In the calendar the thing to make is an event, not a message, so there the
+  // same button asks the calendar for a new event, as its own button does.
+  const fabMakesEvent = organizerRoute(location.path, "calendar");
   function composeFromFab() {
     closeMobileSidebar();
+    if (fabMakesEvent) {
+      requestNewCalendarEvent();
+      return;
+    }
     openCompose("");
   }
 
@@ -503,9 +511,14 @@ export function AppShell({
           </div>
         ) : null}
       </div>
-      <button className="compose-fab" type="button" onClick={composeFromFab} aria-label="Compose">
-        <Icon name="edit" weight="bold" />
-        <span>Compose</span>
+      <button
+        className="compose-fab"
+        type="button"
+        onClick={composeFromFab}
+        aria-label={fabMakesEvent ? "New event" : "Compose"}
+      >
+        <Icon name={fabMakesEvent ? "add" : "edit"} weight="bold" />
+        <span>{fabMakesEvent ? "New event" : "Compose"}</span>
       </button>
     </>
   );
