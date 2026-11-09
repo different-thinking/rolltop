@@ -37,6 +37,11 @@ describe("withTravelThere", () => {
     expect(withTravelThere(later, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "15" });
   });
 
+  it("still follows when the minutes agree but are spelled differently", () => {
+    const both = { travelBeforeOn: true, travelBefore: "060", travelAfterOn: true, travelAfter: "60" };
+    expect(withTravelThere(both, { travelBefore: "90" })).toMatchObject({ travelAfter: "90" });
+  });
+
   it("does not switch the way back on again once the reader switched it off", () => {
     const off = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
     expect(withTravelThere(off, { travelBefore: "60" })).toMatchObject({ travelAfterOn: false, travelAfter: "30" });
@@ -47,6 +52,61 @@ describe("withTravelThere", () => {
     const off = withTravelThere(both, { travelBeforeOn: false });
     expect(off).toEqual({ travelBeforeOn: false, travelBefore: "60", travelAfterOn: false, travelAfter: "45" });
     expect(withTravelThere(off, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "60" });
+  });
+});
+
+describe("EventDialog travel time", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  const travelBox = (label: string) =>
+    Array.from(container.querySelectorAll("label"))
+      .find((item) => item.textContent?.includes(label))
+      ?.querySelector<HTMLInputElement>("input[type=checkbox]");
+  const minutes = (id: string) => container.querySelector<HTMLInputElement>(`#${id}`);
+  const type = (input: HTMLInputElement, value: string) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  it("ticks, fills and unticks the way back with the way there", () => {
+    act(() =>
+      root.render(
+        <EventDialog
+          event={null}
+          day={new Date(2026, 9, 27)}
+          calendars={[summary(1)]}
+          saving={false}
+          problem=""
+          onSave={() => undefined}
+          onDelete={() => undefined}
+          onRespond={() => undefined}
+          onClose={() => undefined}
+        />
+      )
+    );
+    act(() => travelBox("Travel there")?.click());
+    expect(travelBox("Travel back")?.checked).toBe(true);
+    const there = minutes("calendar-event-travel-before");
+    expect(there).not.toBeNull();
+    type(there as HTMLInputElement, "60");
+    expect(minutes("calendar-event-travel-after")?.value).toBe("60");
+    act(() => travelBox("Travel there")?.click());
+    expect(travelBox("Travel back")?.checked).toBe(false);
   });
 });
 

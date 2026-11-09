@@ -74,16 +74,22 @@ function travelDraft(before: number | undefined, after: number | undefined) {
   };
 }
 
+/** sameTravelMinutes says whether two travel fields name the same minutes,
+ * however they were typed: "060" and "60" agree, two empty fields too. */
+function sameTravelMinutes(a: string, b: string): boolean {
+  return a.trim() === b.trim() || (a.trim() !== "" && Number(a.trim()) === Number(b.trim()));
+}
+
 type TravelFields = Pick<DraftState, "travelBeforeOn" | "travelBefore" | "travelAfterOn" | "travelAfter">;
 
 /** withTravelThere applies a change to the journey there, and the journey back
  * follows it: most appointments are left the way they were reached, so ticking
  * "Travel there" ticks "Travel back" with the same minutes, and typing minutes
  * there carries them over for as long as the two still agree. Unticking the
- * way there unticks the way back too; the minutes stay as typed, so ticking it
- * again brings both back. Once the reader has given the way back a time of its
- * own, or switched it off after the way there was ticked, typing minutes there
- * leaves it alone. */
+ * way there unticks the way back too, and ticking it again brings the way back
+ * with the way there's minutes. Once the reader has given the way back a time
+ * of its own, or switched it off after the way there was ticked, typing
+ * minutes there leaves it alone. */
 export function withTravelThere<T extends TravelFields>(
   current: T,
   patch: { travelBeforeOn?: boolean; travelBefore?: string }
@@ -99,7 +105,7 @@ export function withTravelThere<T extends TravelFields>(
   if (
     patch.travelBefore !== undefined &&
     current.travelAfterOn &&
-    current.travelAfter.trim() === current.travelBefore.trim()
+    sameTravelMinutes(current.travelAfter, current.travelBefore)
   ) {
     next.travelAfter = patch.travelBefore;
   }
