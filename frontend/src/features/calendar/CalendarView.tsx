@@ -1082,6 +1082,9 @@ export function CalendarView({
   // New event, from the header button or the floating button the shell shows
   // on a phone: on the three-day view the new event starts on the wide day.
   const newEventInView = () => {
+    // Until the calendars have loaded there is nothing to judge yet, and "no
+    // calendar you can write to" would be untrue.
+    if (loading) return;
     if (writableCalendars.length === 0) {
       addToast(noWritableCalendar, "error");
       return;
@@ -1446,7 +1449,7 @@ export function CalendarView({
                     // Pressing empty time and pulling draws a new event; the
                     // hour lines and the now line let the press through to here.
                     if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
-                    longPress.begin(pointerEvent, dayAtOffset(day, pointerEvent));
+                    if (pointerEvent.pointerType === "touch") longPress.begin(pointerEvent, dayAtOffset(day, pointerEvent));
                     beginCreate(
                       pointerEvent,
                       index,

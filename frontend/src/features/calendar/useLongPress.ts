@@ -82,6 +82,16 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
         swallowRef.current = false;
       }, 350);
     };
+    // Any pointer coming down anywhere is news: another finger while a press
+    // is pending makes it a pinch, and a fresh touch after one fired means its
+    // release has long gone, even if the window never saw it.
+    const onDown = (pointerEvent: PointerEvent) => {
+      if (pressRef.current && pointerEvent.pointerId !== pressRef.current.pointerID) cancel();
+      if (swallowRef.current && !pressRef.current) {
+        window.clearTimeout(swallowTimerRef.current);
+        swallowRef.current = false;
+      }
+    };
     const swallow = (event: Event) => {
       // Android's WebView opens a context menu (or starts selecting) on a
       // long press of its own, which may beat the timer: the press is ours.
@@ -91,6 +101,8 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
       event.stopPropagation();
       if (event.type === "click") swallowRef.current = false;
     };
+    // Captured, so it has run before the pointerdown that arms a new press.
+    window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
     window.addEventListener("pointercancel", onEnd);
@@ -99,6 +111,7 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
     return () => {
       cancel();
       window.clearTimeout(swallowTimerRef.current);
+      window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
@@ -110,9 +123,10 @@ export function useLongPress<T>(onLongPress: (payload: T) => void) {
   /** begin arms a long press; payload is what onLongPress receives. */
   const begin = (pointerEvent: ReactPointerEvent, payload: T) => {
     if (pointerEvent.pointerType !== "touch") return;
-    if (pressRef.current) {
-      // A second finger came down: neither of them is a long press.
-      window.clearTimeout(pressRef.current.timer);
+    // A finger that comes down while another is on the screen is not the
+    // primary pointer: neither of them is a long press.
+    if (pressRef.current || !pointerEvent.isPrimary) {
+      if (pressRef.current) window.clearTimeout(pressRef.current.timer);
       pressRef.current = null;
       return;
     }

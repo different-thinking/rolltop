@@ -13,10 +13,14 @@ function Target({ onLongPress }: { onLongPress: (payload: string) => void }) {
   return <div data-testid="target" onPointerDown={(event) => longPress.begin(event, "slot")} />;
 }
 
-function pointer(type: string, init: { pointerType?: string; pointerId?: number; clientX?: number; clientY?: number }) {
+function pointer(
+  type: string,
+  init: { pointerType?: string; pointerId?: number; clientX?: number; clientY?: number; isPrimary?: boolean }
+) {
   const event = new PointerEvent(type, {
     bubbles: true,
     cancelable: true,
+    isPrimary: init.isPrimary ?? true,
     pointerType: init.pointerType ?? "touch",
     pointerId: init.pointerId ?? 1,
     clientX: init.clientX ?? 100,
@@ -103,10 +107,53 @@ describe("useLongPress", () => {
     mount(onLongPress);
     act(() => {
       target().dispatchEvent(pointer("pointerdown", { pointerId: 1 }));
-      target().dispatchEvent(pointer("pointerdown", { pointerId: 2 }));
+      target().dispatchEvent(pointer("pointerdown", { pointerId: 2, isPrimary: false }));
     });
     act(() => vi.advanceTimersByTime(longPressDelay));
     expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it("is called off by a second finger that comes down anywhere else", () => {
+    const onLongPress = vi.fn();
+    mount(onLongPress);
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+    act(() => {
+      target().dispatchEvent(pointer("pointerdown", { pointerId: 1 }));
+      elsewhere.dispatchEvent(pointer("pointerdown", { pointerId: 2, isPrimary: false }));
+    });
+    act(() => vi.advanceTimersByTime(longPressDelay));
+    expect(onLongPress).not.toHaveBeenCalled();
+    elsewhere.remove();
+  });
+
+  it("does not arm a press for a finger that is not the primary one", () => {
+    const onLongPress = vi.fn();
+    mount(onLongPress);
+    act(() => {
+      target().dispatchEvent(pointer("pointerdown", { pointerId: 2, isPrimary: false }));
+    });
+    act(() => vi.advanceTimersByTime(longPressDelay));
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it("stops swallowing clicks once a new touch shows the release was lost", () => {
+    const onLongPress = vi.fn();
+    const clicked = vi.fn();
+    mount(onLongPress);
+    document.body.addEventListener("click", clicked);
+    act(() => {
+      target().dispatchEvent(pointer("pointerdown", {}));
+    });
+    act(() => vi.advanceTimersByTime(longPressDelay));
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    // No pointerup ever reaches the window; the next tap must still work.
+    act(() => {
+      document.body.dispatchEvent(pointer("pointerdown", { pointerId: 3 }));
+      document.body.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(clicked).toHaveBeenCalledTimes(1);
+    document.body.removeEventListener("click", clicked);
   });
 
   it("takes over the browser's own long-press menu and swallows the release's click", () => {
