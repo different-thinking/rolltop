@@ -2,13 +2,120 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent, CalendarSummary } from "../../types";
-import { copyPrefill, EventDialog, withoutMeetingJoinDetails, withStartMoved } from "./EventDialog";
+import { copyPrefill, EventDialog, withoutMeetingJoinDetails, withStartMoved, withTravelThere } from "./EventDialog";
 import type { EventPrefill } from "./EventDialog";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const timed = { allDay: false, startDate: "2026-10-23", startTime: "09:00", endDate: "2026-10-23", endTime: "10:30" };
 const allDay = { allDay: true, startDate: "2026-10-23", startTime: "09:00", endDate: "2026-10-25", endTime: "10:00" };
+
+describe("withTravelThere", () => {
+  const none = { travelBeforeOn: false, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
+
+  it("ticks the way back with the same minutes when the way there is ticked", () => {
+    const typed = { ...none, travelBefore: "45", travelAfter: "30" };
+    expect(withTravelThere(typed, { travelBeforeOn: true })).toEqual({
+      travelBeforeOn: true,
+      travelBefore: "45",
+      travelAfterOn: true,
+      travelAfter: "45"
+    });
+  });
+
+  it("carries typed minutes over to the way back while the two agree", () => {
+    let draft = withTravelThere(none, { travelBeforeOn: true });
+    draft = withTravelThere(draft, { travelBefore: "6" });
+    draft = withTravelThere(draft, { travelBefore: "60" });
+    expect(draft).toMatchObject({ travelBefore: "60", travelAfterOn: true, travelAfter: "60" });
+  });
+
+  it("leaves a way back alone once it has a time of its own", () => {
+    const own = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: true, travelAfter: "15" };
+    expect(withTravelThere(own, { travelBefore: "60" })).toMatchObject({ travelAfter: "15" });
+    const later = { ...none, travelAfterOn: true, travelAfter: "15" };
+    expect(withTravelThere(later, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "15" });
+  });
+
+  it("still follows when the minutes agree but are spelled differently", () => {
+    const both = { travelBeforeOn: true, travelBefore: "060", travelAfterOn: true, travelAfter: "60" };
+    expect(withTravelThere(both, { travelBefore: "90" })).toMatchObject({ travelAfter: "90" });
+  });
+
+  it("does not count an empty field as zero minutes, whichever side it is on", () => {
+    const zero = { travelBeforeOn: true, travelBefore: "0", travelAfterOn: true, travelAfter: "" };
+    expect(withTravelThere(zero, { travelBefore: "60" })).toMatchObject({ travelAfter: "" });
+    const empty = { travelBeforeOn: true, travelBefore: "", travelAfterOn: true, travelAfter: "0" };
+    expect(withTravelThere(empty, { travelBefore: "60" })).toMatchObject({ travelAfter: "0" });
+  });
+
+  it("does not switch the way back on again once the reader switched it off", () => {
+    const off = { travelBeforeOn: true, travelBefore: "30", travelAfterOn: false, travelAfter: "30" };
+    expect(withTravelThere(off, { travelBefore: "60" })).toMatchObject({ travelAfterOn: false, travelAfter: "30" });
+  });
+
+  it("switches the way back off with the way there and keeps both minutes", () => {
+    const both = { travelBeforeOn: true, travelBefore: "60", travelAfterOn: true, travelAfter: "45" };
+    const off = withTravelThere(both, { travelBeforeOn: false });
+    expect(off).toEqual({ travelBeforeOn: false, travelBefore: "60", travelAfterOn: false, travelAfter: "45" });
+    expect(withTravelThere(off, { travelBeforeOn: true })).toMatchObject({ travelAfterOn: true, travelAfter: "60" });
+  });
+});
+
+describe("EventDialog travel time", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  const travelBox = (label: string) =>
+    Array.from(container.querySelectorAll("label"))
+      .find((item) => item.textContent?.includes(label))
+      ?.querySelector<HTMLInputElement>("input[type=checkbox]");
+  const minutes = (id: string) => container.querySelector<HTMLInputElement>(`#${id}`);
+  const type = (input: HTMLInputElement, value: string) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  it("ticks, fills and unticks the way back with the way there", () => {
+    act(() =>
+      root.render(
+        <EventDialog
+          event={null}
+          day={new Date(2026, 9, 27)}
+          calendars={[summary(1)]}
+          saving={false}
+          problem=""
+          onSave={() => undefined}
+          onDelete={() => undefined}
+          onRespond={() => undefined}
+          onClose={() => undefined}
+        />
+      )
+    );
+    act(() => travelBox("Travel there")?.click());
+    expect(travelBox("Travel back")?.checked).toBe(true);
+    const there = minutes("calendar-event-travel-before");
+    expect(there).not.toBeNull();
+    type(there as HTMLInputElement, "60");
+    expect(minutes("calendar-event-travel-after")?.value).toBe("60");
+    act(() => travelBox("Travel there")?.click());
+    expect(travelBox("Travel back")?.checked).toBe(false);
+  });
+});
 
 describe("withStartMoved", () => {
   it("carries the end along when the start date moves", () => {
