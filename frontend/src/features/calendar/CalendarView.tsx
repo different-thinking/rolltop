@@ -25,6 +25,8 @@ import {
 import { CalendarRoleChoices, writeBusyLabel, writeBusyTarget, writeCopyTarget } from "./CalendarRoles";
 import { EventContextMenu } from "./EventContextMenu";
 import { copyPrefill, EventDialog } from "./EventDialog";
+import { onNewCalendarEventRequest } from "./newEventRequest";
+import { useLongPress } from "./useLongPress";
 import type { EventPrefill } from "./EventDialog";
 import { ReminderSnoozeDialog } from "./ReminderSnoozeDialog";
 import { useWeekDrag } from "./useWeekDrag";
@@ -88,6 +90,7 @@ const nowLineInterval = 60_000;
 /** calendarSettingsPath is where the reader chooses which calendars the view
  * lists. */
 const calendarSettingsPath = "/settings/account/preferences/calendars";
+const noWritableCalendar = "No calendar you can write to is connected";
 
 /** initialScrollHour is where the grid opens. Starting at midnight would put
  * the working day below the fold on every visit. */
@@ -1076,6 +1079,34 @@ export function CalendarView({
     return writableCalendars.some((calendar) => calendar.id === calendarID) ? calendarID : 0;
   };
 
+  // New event, from the header button or the floating button the shell shows
+  // on a phone: on the three-day view the new event starts on the wide day.
+  const newEventInView = () => {
+    // Until the calendars have loaded there is nothing to judge yet, and "no
+    // calendar you can write to" would be untrue.
+    if (loading) return;
+    if (writableCalendars.length === 0) {
+      addToast(noWritableCalendar, "error");
+      return;
+    }
+    const day = days[Math.max(focusIndex, 0)];
+    setDialogProblem("");
+    setDialog({ event: null, day, formKey: `new-${day.getTime()}` });
+  };
+  const newEventInViewRef = useRef(newEventInView);
+  useLayoutEffect(() => {
+    newEventInViewRef.current = newEventInView;
+  });
+  useEffect(() => onNewCalendarEventRequest(() => newEventInViewRef.current()), []);
+
+  // A finger held still on free time is a touch screen's way to make an event
+  // there: pressing and pulling scrolls the day, and a double tap zooms.
+  const longPress = useLongPress((start: Date) => {
+    if (writableCalendars.length === 0) return;
+    setDialogProblem("");
+    setDialog({ event: null, day: start, formKey: `new-${start.getTime()}` });
+  });
+
   return (
     <div className="calendar-shell" onContextMenu={openEventMenu}>
       <section
@@ -1157,16 +1188,11 @@ export function CalendarView({
               className="calendar-new-event-button"
               disabled={writableCalendars.length === 0}
               title={
-                writableCalendars.length === 0 ? "No calendar you can write to is connected" : view ? "New event" : undefined
+                writableCalendars.length === 0 ? noWritableCalendar : view ? "New event" : undefined
               }
               // On a phone the button is its icon, like Sync beside it.
               aria-label={view ? "New event" : undefined}
-              onClick={() => {
-                // On the three-day view the new event starts on the wide day.
-                const day = days[Math.max(focusIndex, 0)];
-                setDialogProblem("");
-                setDialog({ event: null, day, formKey: `new-${day.getTime()}` });
-              }}
+              onClick={newEventInView}
             >
               <Icon name="add" />
               {view ? null : "New event"}
@@ -1423,6 +1449,7 @@ export function CalendarView({
                     // Pressing empty time and pulling draws a new event; the
                     // hour lines and the now line let the press through to here.
                     if (writableCalendars.length === 0 || pointerEvent.target !== pointerEvent.currentTarget) return;
+                    if (pointerEvent.pointerType === "touch") longPress.begin(pointerEvent, dayAtOffset(day, pointerEvent));
                     beginCreate(
                       pointerEvent,
                       index,
@@ -1966,8 +1993,8 @@ function resolveLensIndex(days: Date[], events: CalendarEvent[], chosenKey: stri
   return most > 0 ? busiest : -1;
 }
 
-/** dayAtOffset turns a double-click in a day column into the hour it landed on,
- * so a new event starts where the user pointed. */
+/** dayAtOffset turns a double-click or a long press in a day column into the
+ * hour it landed on, so a new event starts where the user pointed. */
 function dayAtOffset(day: Date, mouseEvent: { clientY: number; currentTarget: HTMLElement }): Date {
   const bounds = mouseEvent.currentTarget.getBoundingClientRect();
   const minutes = Math.max(0, Math.min(((mouseEvent.clientY - bounds.top) / hourHeight) * 60, 23 * 60));
