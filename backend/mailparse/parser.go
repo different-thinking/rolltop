@@ -248,6 +248,7 @@ func (p *ParsedMessage) classify(sent time.Time) {
 		Subject: p.Subject,
 		From:    p.From,
 		HTML:    p.HTML,
+		Text:    p.Text,
 		Files:   p.TravelFiles(),
 		Sent:    sent,
 	})

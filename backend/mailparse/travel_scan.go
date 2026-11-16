@@ -22,6 +22,8 @@ const (
 	maxTravelScanBytes = 8 << 20
 	// maxTravelHTMLBytes bounds the markup kept for the structured-data read.
 	maxTravelHTMLBytes = 1 << 20
+	// maxTravelTextBytes bounds the plain text kept for the layout readers.
+	maxTravelTextBytes = 256 << 10
 )
 
 // TravelBookingsReaderScan reads a stored message for the tickets it carries.
@@ -46,6 +48,12 @@ func TravelBookingsReaderScan(r io.Reader) ([]TravelBooking, error) {
 	scan := &travelScan{in: &in}
 	scan.walk(textproto.MIMEHeader(msg.Header), msg.Body, 0)
 	in.HTML = SanitizeText(in.HTML)
+	// The parser falls back to the markup's text when a message has no plain
+	// part, and cleans what it keeps the same way; the scan does likewise.
+	if strings.TrimSpace(in.Text) == "" && in.HTML != "" {
+		in.Text = stripHTML(in.HTML)
+	}
+	in.Text = SanitizeText(cleanIndexedText(in.Text))
 	return ExtractTravelBookings(in), nil
 }
 
@@ -90,6 +98,14 @@ func (s *travelScan) walk(header textproto.MIMEHeader, body io.Reader, depth int
 			return
 		}
 		s.in.Files = append(s.in.Files, TravelFile{Filename: name, ContentType: mediaType, Data: data})
+		return
+	}
+	if lower == "text/plain" && len(s.in.Text) < maxTravelTextBytes {
+		decoded, err := io.ReadAll(io.LimitReader(decodeTransfer(header, body), int64(maxTravelTextBytes-len(s.in.Text))))
+		if err != nil && !isTolerableEOF(err) && len(decoded) == 0 {
+			return
+		}
+		s.in.Text += "\n" + decodeTextBytes(decoded, params["charset"])
 		return
 	}
 	if lower == "text/html" && s.in.HTML == "" {

@@ -3,7 +3,7 @@
 // hold.
 //
 // The rule is the parcel rule: a ticket is only taken when something in the
-// message says what it is. Four things qualify, and nothing else does:
+// message says what it is. These things qualify, and nothing else does:
 //
 //   - schema.org reservations embedded in the HTML (travel_schema.go), which
 //     airlines, ticket shops and rail operators publish precisely so that mail
@@ -13,7 +13,11 @@
 //   - a Deutsche Bahn ticket or seat reservation PDF (travel_db.go), whose
 //     itinerary table is a fixed layout;
 //   - a published calendar object attached to a message that calls itself a
-//     ticket or booking (travel_ics.go).
+//     ticket or booking (travel_ics.go);
+//   - a ticket shop's add-to-calendar link beside an order number
+//     (travel_links.go);
+//   - the fixed text layout of a booking system this build knows, read only
+//     from mail that system sent (travel_shops.go: Reservix, atavolo).
 //
 // A subject line saying "Ihre Reise" is not one of them. Words are how a
 // newsletter advertises a trip; a booking states a departure.
@@ -53,6 +57,7 @@ const (
 	TravelSourcePDF    = "pdf"
 	TravelSourceICS    = "ics"
 	TravelSourceLink   = "link"
+	TravelSourceText   = "text"
 )
 
 const (
@@ -202,6 +207,9 @@ type TravelInput struct {
 	// HTML is the markup the structured data is embedded in. It is read for
 	// script blocks only.
 	HTML string
+	// Text is the plain-text body, line breaks kept. Only the booking systems
+	// whose fixed layout travel_shops.go knows read it.
+	Text string
 	// Files are the attachments a reader can use: passes, calendar objects and
 	// ticket PDFs, decoded. travelDocumentCandidate decides which.
 	Files []TravelFile
@@ -280,6 +288,7 @@ func ExtractTravelBookings(in TravelInput) []TravelBooking {
 		found = append(found, travelFromSchema(in.HTML)...)
 		found = append(found, travelFromCalendarLinks(in.HTML, in.Subject, in.From)...)
 	}
+	found = append(found, travelFromShopText(in)...)
 	// The documents go before the calendar objects: a leg takes each field
 	// from the first source that names it, and an operator's .ics may hold a
 	// whole journey with a change as one event, whose end is the journey's

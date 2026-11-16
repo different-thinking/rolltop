@@ -582,7 +582,7 @@ site and in review.
   extraction (`mailparse.ExtractTravelBookings`) produces trips in `trips`, with
   their legs in `trip_segments` and the messages behind them in
   `trip_messages`, on the parcel shape and for the parcel reason: the booking,
-  the ticket and the seat reservation are three messages about one journey. Five
+  the ticket and the seat reservation are three messages about one journey. Six
   sources count and nothing else does: schema.org reservations in the HTML
   (`travel_schema.go` -- reservations only, never a bare `Event`, which is an
   advertisement), a shop's Google Calendar / Outlook.com add-to-calendar link
@@ -603,7 +603,15 @@ site and in review.
   `sameTravelLeg` and the stored `segment_key` share): the sources do not spell
   a regional train alike ("RE 74824", "RE15 (74824)"); from anyone
   else only a published object in a mail that calls itself a ticket, never an
-  invitation, which the calendar card answers. A message with a trip shows the
+  invitation, which the calendar card answers. The sixth is the fixed
+  plain-text layout of a booking system this build knows (`travel_shops.go`):
+  Reservix's order confirmation, read only from Reservix's own domains and
+  only for an event line with a priced admission under it beside an order
+  number, and atavolo's reservation confirmation ("Datum:", "Uhrzeit:"), read
+  only from mail atavolo signed or linked its own calendar entry in, because it
+  is sent from the venue's address. A layout reader is a template of one
+  system, recognised by that system's own mark -- the DB rule, not a reader of
+  ticket words -- and a new one comes with the same gate. A message with a trip shows the
   trip card **instead of** the calendar card, or one train is offered twice. A
   leg keeps its calendar object's UID (`trip_segments.ical_uid`) and reads as
   added when the reader's calendar holds an event with that iCalUID -- Gmail
