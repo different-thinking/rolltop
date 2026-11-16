@@ -248,6 +248,76 @@ func TestRecipesCanBeMarkedCooked(t *testing.T) {
 	}
 }
 
+func TestRecipesCanBeDeletedCookedOrNot(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	f := newFixture(t, st, "delete@example.test")
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<d@x>", "delete@example.test", "delete@example.test", "x", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(context.Background(), st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	id := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	total := func() int {
+		rec := callAPI(t, p, host, http.MethodGet, apiPath+"/recipes", "")
+		var out struct {
+			Counts map[string]int `json:"counts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Counts["to_cook"] + out.Counts["cooked"] + out.Counts["dismissed"] + out.Counts["planned"]
+	}
+	deleteRecipe := func() int {
+		return callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d/delete", apiPath, id), `{}`).Code
+	}
+
+	// A cooked recipe is deleted like one still to cook.
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, id), `{"cooked":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("cooked = %d %s", rec.Code, rec.Body.String())
+	}
+	if code := deleteRecipe(); code != http.StatusOK {
+		t.Fatalf("delete cooked = %d", code)
+	}
+	if n := total(); n != 0 {
+		t.Fatalf("shelves after delete hold %d", n)
+	}
+	for _, path := range []string{fmt.Sprintf("/recipes/%d", id), fmt.Sprintf("/recipes/%d/image", id)} {
+		if rec := callAPI(t, p, host, http.MethodGet, apiPath+path, ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("reading deleted %s = %d", path, rec.Code)
+		}
+	}
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, id), `{"cooked":false}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("uncooking a deleted recipe = %d", rec.Code)
+	}
+	if code := deleteRecipe(); code != http.StatusNotFound {
+		t.Fatalf("deleting twice = %d", code)
+	}
+	// Its mail is still a recipe mail, not a note.
+	if notes := listNotes(t, p, host, ""); len(notes.Notes) != 0 {
+		t.Fatalf("deleted recipe's mail became a note: %+v", notes.Notes)
+	}
+
+	// Adding the link again brings it back, on the shelf to cook.
+	if rec := callAPI(t, p, host, http.MethodPost, apiPath+"/recipes", fmt.Sprintf(`{"url":%q}`, server.URL+"/carbonara")); rec.Code != http.StatusOK {
+		t.Fatalf("re-add = %d %s", rec.Code, rec.Body.String())
+	}
+	drain(t, p, host, f.user.ID)
+	if rec := callAPI(t, p, host, http.MethodGet, fmt.Sprintf("%s/recipes/%d", apiPath, id), ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"image_url":"/api/`) {
+		t.Fatalf("re-added recipe = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// And one never cooked is deleted the same way.
+	if code := deleteRecipe(); code != http.StatusOK {
+		t.Fatalf("delete to cook = %d", code)
+	}
+	if n := total(); n != 0 {
+		t.Fatalf("shelves after second delete hold %d", n)
+	}
+}
+
 func TestDeletingANoteMovesItsMailToTrash(t *testing.T) {
 	st := openRecipeStore(t)
 	ctx := context.Background()

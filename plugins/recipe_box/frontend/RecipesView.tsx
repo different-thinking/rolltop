@@ -466,6 +466,20 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
     }
   }
 
+  async function deleteRecipe() {
+    if (!recipe) return;
+    if (!window.confirm(`Delete "${recipe.title || hostOf(recipe.url)}" from the cookbook?`)) return;
+    setBusy(true);
+    try {
+      await recipeAPI.deleteRecipe(csrf, recipe.id);
+      addToast("Recipe deleted.");
+      navigate(recipesPath);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+      setBusy(false);
+    }
+  }
+
   async function unplan() {
     if (!recipe) return;
     setBusy(true);
@@ -549,7 +563,8 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
               <a className="button secondary" href={recipe.url} target="_blank" rel="noopener noreferrer"><Icon name="open_in_new" />Open original</a>
               {recipe.dismissed
                 ? <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(false)}>Put back in the cookbook</button>
-                : <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(true)}><Icon name="delete" />Not a recipe</button>}
+                : <button className="secondary" type="button" disabled={busy} onClick={() => void setDismissed(true)}>Not a recipe</button>}
+              <button className="secondary" type="button" disabled={busy} onClick={() => void deleteRecipe()}><Icon name="delete" />Delete</button>
             </div>
           </div>
         </header>

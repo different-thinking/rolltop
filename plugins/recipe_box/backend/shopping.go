@@ -195,7 +195,7 @@ func (p *recipeBoxBackend) apiAddShopping(host plugins.APIHost, db *sql.DB, user
 	var entries []shoppingEntry
 	if in.RecipeID > 0 {
 		var ingredientsJSON string
-		err := db.QueryRowContext(ctx, `SELECT title, ingredients_json FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ?`, userID, in.RecipeID).
+		err := db.QueryRowContext(ctx, `SELECT title, ingredients_json FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ? AND deleted_at = 0`, userID, in.RecipeID).
 			Scan(&title, &ingredientsJSON)
 		if errors.Is(err, sql.ErrNoRows) {
 			host.WriteAPIError(w, http.StatusNotFound, "recipe not found")

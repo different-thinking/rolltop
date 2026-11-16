@@ -255,7 +255,7 @@ func upsertRecipe(ctx context.Context, db *sql.DB, userID int64, canonical strin
 		images = []string{page.ImageURL}
 	}
 	var id int64
-	// A recipe the reader already dismissed stays dismissed, and a picture
+	// A recipe the reader already dismissed or deleted stays so, and a picture
 	// already stored is kept: the page is read again only to refresh the text.
 	// A recipe read from structured data is never overwritten by one filed by
 	// hand from a preview of the same page.
@@ -304,7 +304,8 @@ func (p *recipeBoxBackend) ensureImage(ctx context.Context, db *sql.DB, userID, 
 	if err := db.QueryRowContext(ctx, `SELECT image_status, image_urls_json FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ?`, userID, recipeID).Scan(&status, &urlsJSON); err != nil {
 		return err
 	}
-	if status == "ok" {
+	// A deleted recipe keeps no picture, whichever way its page is read again.
+	if status == "ok" || status == "deleted" {
 		return nil
 	}
 	var urls []string

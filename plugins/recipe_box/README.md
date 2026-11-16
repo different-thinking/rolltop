@@ -58,6 +58,14 @@ A recipe is **to cook** until the reader marks it cooked on its page; cooked
 recipes have a tab of their own and keep the date (`cooked_at`). Marking one
 does not count as an edit and does not reorder the cookbook.
 
+**Delete** on a recipe's page takes it off every shelf, cooked or not, planned
+or removed (`deleted_at`). It is not the same as **Not a recipe**: that says the
+page was something else, so its mail becomes a note; a deleted recipe's mail
+stays a recipe mail and does not turn up under Notes. Mail already filed stays
+in the recipe folder, mail not filed yet is no longer filed, lines on the
+shopping list stay, and the stored picture is dropped. Adding the same link
+again with **Add link** brings the recipe back.
+
 ## Notes
 
 A note is a recorded note-to-self that carries no recipe: a link that turned

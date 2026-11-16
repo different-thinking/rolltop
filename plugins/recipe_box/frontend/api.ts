@@ -181,6 +181,8 @@ export const recipeAPI = {
   },
   recipe: (id: number) => getJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`),
   setDismissed: (csrf: string, id: number, dismissed: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { dismissed }),
+  /** Deletes a recipe from every shelf, cooked or not. Adding its link again brings it back. */
+  deleteRecipe: (csrf: string, id: number) => postJSON<{ ok: boolean }>(`${base}/recipes/${id}/delete`, csrf, {}),
   setCooked: (csrf: string, id: number, cooked: boolean) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { cooked }),
   /** Takes a dish out of the plan. It is planned by putting its ingredients on the shopping list. */
   unplan: (csrf: string, id: number) => postJSON<{ recipe: RecipeDetail }>(`${base}/recipes/${id}`, csrf, { planned: false }),
