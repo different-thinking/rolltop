@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 var (
@@ -60,14 +59,7 @@ func travelFromCalendarLinks(markup, subject, from string) []TravelBooking {
 		!containsFold(markup, "outlook.office.com") {
 		return nil
 	}
-	text := stripHTML(markup)
-	if len(text) > maxTravelLinkText {
-		cut := maxTravelLinkText
-		for cut > 0 && !utf8.RuneStart(text[cut]) {
-			cut--
-		}
-		text = text[:cut]
-	}
+	text := truncateUTF8(stripHTML(markup), maxTravelLinkText)
 	if !ticketEvidence(subject, nil) && !ticketEvidence(text, nil) {
 		return nil
 	}

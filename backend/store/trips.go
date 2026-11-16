@@ -44,7 +44,10 @@ import (
 // a leg only this message named is dropped when it no longer names it.
 //
 // 6: a ticket shop's add-to-calendar links are read (EVENTIM).
-const TravelVersion = 6
+//
+// 7: the plain-text layouts of two booking systems are read (Reservix order
+// confirmations, atavolo reservation confirmations).
+const TravelVersion = 7
 
 // TravelBackfillLimit bounds one backfill pass. It is a quarter of the parcel
 // pass's because a ticket read opens attachment bodies -- a pass, a PDF run
