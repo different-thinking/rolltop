@@ -197,3 +197,16 @@ func TestTravelReservixAustrianMonth(t *testing.T) {
 		t.Fatalf("segment = %+v", booking.Segments[0])
 	}
 }
+
+// The venue's name can stand below its signature without an address under it.
+func TestTravelAtavoloAddressSkipsALaterMentionOfTheName(t *testing.T) {
+	text := "Datum: 14.11.2026\nUhrzeit: 18:00 Uhr - 18:00 Uhr\n\nHalle Nord\nHauptstraße 1\n01067 Dresden\n\n" +
+		"Halle Nord\nImpressum: siehe Webseite\n\npowered by atavolo.com\n"
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		From: "Halle Nord <info@example.com>", Subject: "Reservierungsbestätigung", Text: text,
+	}))
+	seg := booking.Segments[0]
+	if seg.Address != "Hauptstraße 1, 01067 Dresden" || seg.End != "2026-11-14T18:00" {
+		t.Fatalf("segment = %+v", seg)
+	}
+}

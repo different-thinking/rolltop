@@ -272,7 +272,7 @@ func travelFromAtavolo(lines []string, text, subject, from string) (TravelBookin
 		seg.Start = shopLocalTime(year, month, day, hour, minute)
 		if endHour >= 0 && endHour <= 23 && endMinute <= 59 {
 			seg.End = shopLocalTime(year, month, day, endHour, endMinute)
-			if endHour*60+endMinute <= hour*60+minute {
+			if endHour*60+endMinute < hour*60+minute {
 				// "22:00 Uhr - 01:00 Uhr" ends the next morning; a leg's end
 				// before its start would be dropped as unreadable.
 				seg.End = time.Date(year, time.Month(month), day+1, endHour, endMinute, 0, 0, time.UTC).Format(travelLocalLayout)
@@ -318,7 +318,9 @@ func signatureAddress(lines []string, name string) string {
 		}
 		street, town := strings.TrimSpace(lines[i+1]), strings.TrimSpace(lines[i+2])
 		if street == "" || strings.Contains(street, ":") || !strings.ContainsAny(street, "0123456789") || !postalCityRE.MatchString(town) {
-			return ""
+			// The name stands elsewhere too -- a footer, a disclaimer --
+			// without the address under it; the signature may be further up.
+			continue
 		}
 		return street + ", " + town
 	}
