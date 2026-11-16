@@ -28,16 +28,19 @@
 package mailparse
 
 import (
+	"fmt"
 	"net/mail"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 var (
 	// reservixEventLineRE is Reservix's event line. The time is optional: a
 	// day ticket names the day alone.
-	reservixEventLineRE = regexp.MustCompile(`^\s*(\S.*?),\s*(\d{1,2})\.\s*(Januar|Februar|März|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+(20\d{2})(?:,\s*(\d{1,2}):(\d{2})\s*Uhr)?\s*$`)
+	reservixEventLineRE = regexp.MustCompile(`^\s*(\S.*?),\s*(\d{1,2})\.\s*(Januar|Jänner|Februar|März|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+(20\d{2})(?:,\s*(\d{1,2}):(\d{2})\s*Uhr)?\s*$`)
 	// reservixTicketLineRE is one priced line of the order: "1 x 1. Kategorie
 	// - Normalpreis      23,50 EUR".
 	reservixTicketLineRE = regexp.MustCompile(`^\s*(\d{1,3})\s*x\s+(\S.*?)\s+\d{1,6}(?:\.\d{3})*,\d{2}\s*(?:EUR|€)\s*$`)
@@ -58,37 +61,44 @@ const (
 )
 
 var germanMonths = map[string]int{
-	"januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5, "juni": 6,
+	"januar": 1, "jänner": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5, "juni": 6,
 	"juli": 7, "august": 8, "september": 9, "oktober": 10, "november": 11, "dezember": 12,
 }
 
 // travelFromShopText runs the layout readers that apply to the message.
 func travelFromShopText(in TravelInput) []TravelBooking {
-	text := in.Text
+	text := truncateUTF8(in.Text, maxTravelShopText)
 	if text == "" {
 		return nil
 	}
-	if len(text) > maxTravelShopText {
-		text = truncateUTF8(text, maxTravelShopText)
+	// Almost every message is neither system's; the gates are asked before
+	// the text is split into lines.
+	reservix := reservixSender(in.From)
+	atavolo := !reservix && atavoloMail(text, in.HTML)
+	if !reservix && !atavolo {
+		return nil
 	}
 	lines := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
-	var out []TravelBooking
-	if reservixSender(in.From) {
-		if booking, ok := travelFromReservix(lines, text, in.Subject); ok {
-			out = append(out, booking)
-		}
+	var booking TravelBooking
+	var ok bool
+	if reservix {
+		booking, ok = travelFromReservix(lines, text, in.Subject)
+	} else {
+		booking, ok = travelFromAtavolo(lines, text, in.Subject, in.From)
 	}
-	if atavoloMail(text, in.HTML) {
-		if booking, ok := travelFromAtavolo(lines, in.Subject, in.From); ok {
-			out = append(out, booking)
-		}
+	if !ok {
+		return nil
 	}
-	return out
+	return []TravelBooking{booking}
 }
 
+// truncateUTF8 cuts text to at most limit bytes without splitting a rune.
 func truncateUTF8(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
 	cut := limit
-	for cut > 0 && cut < len(text) && (text[cut]&0xC0) == 0x80 {
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
 	return text[:cut]
@@ -201,7 +211,7 @@ func atavoloMail(text, markup string) bool {
 }
 
 // travelFromAtavolo reads an atavolo reservation confirmation.
-func travelFromAtavolo(lines []string, subject, from string) (TravelBooking, bool) {
+func travelFromAtavolo(lines []string, text, subject, from string) (TravelBooking, bool) {
 	lowerSubject := strings.ToLower(subject)
 	if !containsAnyWord(lowerSubject, "reservierung", "buchung", "reservation", "booking", "termin") {
 		return TravelBooking{}, false
@@ -237,14 +247,18 @@ func travelFromAtavolo(lines []string, subject, from string) (TravelBooking, boo
 	if year == 0 || month < 1 || month > 12 || day < 1 || day > 31 {
 		return TravelBooking{}, false
 	}
+	// The sender's name is the venue's only while the mail is the venue's: a
+	// reservation forwarded by a friend is still atavolo's text, but the From
+	// is the friend. atavolo signs with the same name it sends under.
 	name := senderDisplayName(from)
-	venue := strings.TrimSpace(strings.SplitN(name, "|", 2)[0])
-	if venue == "" {
-		venue = registrableDomain(addressOnly(from))
+	if !strings.Contains(text, name) {
+		name = ""
 	}
+	venue, _, _ := strings.Cut(name, "|")
+	venue = strings.TrimSpace(venue)
 	title := name
 	if title == "" {
-		title = "Reservierung " + venue
+		title = "Reservierung"
 	}
 	seg := TravelSegment{
 		Kind:      TravelEvent,
@@ -258,6 +272,11 @@ func travelFromAtavolo(lines []string, subject, from string) (TravelBooking, boo
 		seg.Start = shopLocalTime(year, month, day, hour, minute)
 		if endHour >= 0 && endHour <= 23 && endMinute <= 59 {
 			seg.End = shopLocalTime(year, month, day, endHour, endMinute)
+			if endHour*60+endMinute <= hour*60+minute {
+				// "22:00 Uhr - 01:00 Uhr" ends the next morning; a leg's end
+				// before its start would be dropped as unreadable.
+				seg.End = time.Date(year, time.Month(month), day+1, endHour, endMinute, 0, 0, time.UTC).Format(travelLocalLayout)
+			}
 		}
 	} else {
 		seg.Start = shopDay(year, month, day)
@@ -266,7 +285,11 @@ func travelFromAtavolo(lines []string, subject, from string) (TravelBooking, boo
 	if place != "" {
 		seat = append(seat, place)
 	}
-	if people != "" {
+	switch people {
+	case "":
+	case "1":
+		seat = append(seat, "1 Person")
+	default:
 		seat = append(seat, people+" Personen")
 	}
 	seg.Seat = strings.Join(seat, ", ")
@@ -302,17 +325,13 @@ func signatureAddress(lines []string, name string) string {
 	return ""
 }
 
+// shopLocalTime and shopDay spell a written date in the leg layouts. A day
+// the calendar does not have ("31.02.") is left as written, so
+// cleanTravelBooking drops it rather than a normalised date standing in for it.
 func shopLocalTime(year, month, day, hour, minute int) string {
-	return strconv.Itoa(year) + "-" + twoDigits(month) + "-" + twoDigits(day) + "T" + twoDigits(hour) + ":" + twoDigits(minute)
+	return fmt.Sprintf("%04d-%02d-%02dT%02d:%02d", year, month, day, hour, minute)
 }
 
 func shopDay(year, month, day int) string {
-	return strconv.Itoa(year) + "-" + twoDigits(month) + "-" + twoDigits(day)
-}
-
-func twoDigits(n int) string {
-	if n < 10 {
-		return "0" + strconv.Itoa(n)
-	}
-	return strconv.Itoa(n)
+	return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 }

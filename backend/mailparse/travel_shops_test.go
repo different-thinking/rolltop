@@ -164,3 +164,36 @@ func TestTravelAtavoloNeedsAtavolo(t *testing.T) {
 		t.Fatalf("travel = %+v", got)
 	}
 }
+
+// A booking past midnight ends the next morning rather than losing its end.
+func TestTravelAtavoloEndPastMidnightAndOnePerson(t *testing.T) {
+	text := "Datum: 31.12.2026\nUhrzeit: 22:00 Uhr - 01:00 Uhr\nPersonen: 1\n\npowered by atavolo.com\n"
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		From: "Bowling Center <info@example.com>", Subject: "Reservierungsbestätigung", Text: text,
+	}))
+	seg := booking.Segments[0]
+	if seg.Start != "2026-12-31T22:00" || seg.End != "2027-01-01T01:00" || seg.Seat != "1 Person" {
+		t.Fatalf("segment = %+v", seg)
+	}
+}
+
+// A reservation a friend forwarded is still atavolo's text, but the friend is
+// not the venue.
+func TestTravelAtavoloForwardedKeepsNoForwarderName(t *testing.T) {
+	text := "Datum: 14.11.2026\nUhrzeit: 18:00 Uhr\n\npowered by atavolo.com\n"
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{
+		From: "Max Freund <max@example.com>", Subject: "WG: Reservierungsbestätigung", Text: text,
+	}))
+	seg := booking.Segments[0]
+	if seg.Title != "Reservierung" || seg.Venue != "" || booking.Provider != "" {
+		t.Fatalf("booking = %+v", booking)
+	}
+}
+
+func TestTravelReservixAustrianMonth(t *testing.T) {
+	text := "Bestellnummer: 5550002\n\nNeujahrskonzert, 1. Jänner 2027, 11:00 Uhr\n1 x Kategorie A    80,00 EUR\n"
+	booking := onlyBooking(t, ExtractTravelBookings(TravelInput{From: "noreply@reservix.at", Subject: "Ihre Bestellung", Text: text}))
+	if booking.Segments[0].Start != "2027-01-01T11:00" {
+		t.Fatalf("segment = %+v", booking.Segments[0])
+	}
+}
