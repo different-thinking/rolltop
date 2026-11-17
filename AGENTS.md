@@ -434,7 +434,12 @@ site and in review.
   only unplans by hand (`planned: false`), it never plans without a shopping
   list.
 - **Deleting a recipe is not saying it was no recipe** (`apiDeleteRecipe`,
-  `recipes.deleted_at`). Any recipe can be deleted, cooked or not. The row stays
+  `recipes.deleted_at`). Any recipe can be deleted, cooked or not, and its mail
+  goes to Trash with it through `trashMail`, the one loop a note's Delete uses
+  too. The mail goes first and the recipe after it, so a refused move leaves the
+  recipe listed; a mail that also names another live recipe is kept
+  (`recipeMailsToTrash`), because deleting one recipe must not throw away the
+  mail another came in. The row stays
   as a marker and every shelf, read and write skips it, because the mail that
   shared it still names it: `carriesRecipe` keeps it a recipe mail, so it never
   turns up as a note, and only `carriesLiveRecipe` -- what decides filing --

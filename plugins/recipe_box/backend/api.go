@@ -607,16 +607,56 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 }
 
 // apiDeleteRecipe takes a recipe out of the cookbook for good, whichever shelf
-// it is on: still to cook, cooked, planned or removed. Unlike "Not a recipe" it
-// does not say the page was something else, so the mail that shared it stays a
-// recipe mail and does not reappear as a note; the row is kept as a marker for
-// that (see migration 006). The plan ends with it and its picture is dropped.
-// Lines already on the shopping list stay, because they carry their own copy
-// of where they came from and are the reader's to clear. The mail behind the
-// recipe is not touched: mail already filed stays where it is, and mail not
-// filed yet is no longer filed.
+// it is on -- still to cook, cooked, planned or removed -- and deletes the mail
+// that shared it: every copy goes to its own account's Trash, exactly as a
+// note's Delete does (trashMail), and nothing leaves the server until that
+// Trash is emptied. A mail that also names another recipe still in the
+// cookbook is left where it is, because deleting one recipe must not throw
+// away the mail another one came in.
+//
+// The mail goes first and the recipe after it, so a move that fails leaves the
+// recipe listed and pressing Delete again moves only what is still out of
+// Trash. Unlike "Not a recipe" this does not say the page was something else:
+// the row is kept as a marker (see migration 006) so the mail stays a recipe
+// mail and never turns up as a note. The plan ends with it and its picture is
+// dropped. Lines already on the shopping list stay, because they carry their
+// own copy of where they came from and are the reader's to clear.
 func (p *recipeBoxBackend) apiDeleteRecipe(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
-	res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes
+	ctx := r.Context()
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ? AND deleted_at = 0)`, userID, id).Scan(&exists); err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	if !exists {
+		host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
+		return
+	}
+	mails, kept, err := recipeMailsToTrash(ctx, db, userID, id)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	moved := 0
+	if len(mails) > 0 {
+		mover, ok := host.(plugins.StoredMessageHost)
+		if !ok {
+			host.WriteAPIError(w, http.StatusNotImplemented, "deleting mail is not available")
+			return
+		}
+		for _, mail := range mails {
+			n, err := trashMail(ctx, db, mover, userID, mail)
+			moved += n
+			if err != nil {
+				if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
+					notifier.NotifyUserChanged(userID)
+				}
+				writeTrashError(host, w, err)
+				return
+			}
+		}
+	}
+	res, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes
 		SET deleted_at = ?, planned_at = 0, image_data = NULL, image_type = '', image_status = 'deleted'
 		WHERE user_id = ? AND id = ? AND deleted_at = 0`, time.Now().UTC().Unix(), userID, id)
 	if err != nil {
@@ -627,7 +667,46 @@ func (p *recipeBoxBackend) apiDeleteRecipe(host plugins.APIHost, db *sql.DB, use
 		host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
 		return
 	}
-	host.WriteJSON(w, map[string]any{"ok": true})
+	if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
+		notifier.NotifyUserChanged(userID)
+	}
+	host.WriteJSON(w, map[string]any{"ok": true, "moved": moved, "kept": kept})
+}
+
+// recipeMailsToTrash lists the recorded mails that shared a recipe, and counts
+// the ones a delete of it leaves alone because they also name another recipe
+// still in the cookbook.
+func recipeMailsToTrash(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]pendingMail, int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts,
+			EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links oml
+				JOIN plugin_recipe_box_links ol ON ol.id = oml.link_id AND ol.user_id = oml.user_id
+				JOIN plugin_recipe_box_recipes o ON o.id = ol.recipe_id AND o.user_id = ol.user_id
+				WHERE oml.mail_id = m.id AND oml.user_id = m.user_id AND ol.status = 'recipe'
+					AND o.id <> ? AND o.dismissed = 0 AND o.deleted_at = 0)
+		FROM plugin_recipe_box_mails m
+		WHERE m.user_id = ? AND EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links ml
+			JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
+			WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.recipe_id = ?)
+		ORDER BY m.id`, recipeID, userID, recipeID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []pendingMail
+	kept := 0
+	for rows.Next() {
+		var mail pendingMail
+		var sharedWithAnother bool
+		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID, &mail.Attempts, &sharedWithAnother); err != nil {
+			return nil, 0, err
+		}
+		if sharedWithAnother {
+			kept++
+			continue
+		}
+		out = append(out, mail)
+	}
+	return out, kept, rows.Err()
 }
 
 // restoreRecipe puts a dismissed or deleted recipe back in the cookbook. A

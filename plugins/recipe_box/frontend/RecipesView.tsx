@@ -468,11 +468,23 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
 
   async function deleteRecipe() {
     if (!recipe) return;
-    if (!window.confirm(`Delete "${recipe.title || hostOf(recipe.url)}" from the cookbook?`)) return;
+    const name = recipe.title || hostOf(recipe.url);
+    const question = recipe.mails.length > 0
+      ? `Delete "${name}" and move the mail it came in to Trash?`
+      : `Delete "${name}" from the cookbook?`;
+    if (!window.confirm(question)) return;
     setBusy(true);
     try {
-      await recipeAPI.deleteRecipe(csrf, recipe.id);
-      addToast("Recipe deleted.");
+      const result = await recipeAPI.deleteRecipe(csrf, recipe.id);
+      addToast(
+        result.moved
+          ? result.kept
+            ? "Recipe deleted and its mail moved to Trash. A mail that also shares another recipe was kept."
+            : "Recipe deleted and its mail moved to Trash."
+          : result.kept
+            ? "Recipe deleted. Its mail also shares another recipe and was kept."
+            : "Recipe deleted."
+      );
       navigate(recipesPath);
     } catch (err) {
       addToast(messageFromError(err), "error");

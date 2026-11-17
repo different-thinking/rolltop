@@ -59,12 +59,16 @@ recipes have a tab of their own and keep the date (`cooked_at`). Marking one
 does not count as an edit and does not reorder the cookbook.
 
 **Delete** on a recipe's page takes it off every shelf, cooked or not, planned
-or removed (`deleted_at`). It is not the same as **Not a recipe**: that says the
-page was something else, so its mail becomes a note; a deleted recipe's mail
-stays a recipe mail and does not turn up under Notes. Mail already filed stays
-in the recipe folder, mail not filed yet is no longer filed, lines on the
-shopping list stay, and the stored picture is dropped. Adding the same link
-again with **Add link** brings the recipe back.
+or removed (`deleted_at`), and moves the mail it came in to Trash -- every copy
+to its own account's Trash, the same move a note's Delete makes, so nothing
+leaves the server until that Trash is emptied. A mail that also names another
+recipe still in the cookbook is kept, and goes once that recipe is deleted
+too. An account without a Trash folder refuses the delete and the recipe stays.
+It is not the same as **Not a recipe**: that says the page was something else,
+so its mail becomes a note; a deleted recipe's mail stays a recipe mail and
+never turns up under Notes. Lines on the shopping list stay, and the stored
+picture is dropped. Adding the same link again with **Add link** brings the
+recipe back.
 
 ## Notes
 
