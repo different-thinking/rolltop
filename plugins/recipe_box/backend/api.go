@@ -72,6 +72,12 @@ func (p *recipeBoxBackend) handleAPI(host plugins.APIHost, path string, w http.R
 		default:
 			host.WriteAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+	case len(parts) == 3 && parts[0] == "recipes" && parts[2] == "delete" && r.Method == http.MethodPost:
+		id, ok := parseID(host, w, parts[1])
+		if !ok {
+			return
+		}
+		p.apiDeleteRecipe(host, db, userID, id, w, r)
 	case len(parts) == 3 && parts[0] == "recipes" && parts[2] == "image" && r.Method == http.MethodGet:
 		id, ok := parseID(host, w, parts[1])
 		if !ok {
@@ -174,7 +180,7 @@ func loadStatus(ctx context.Context, db *sql.DB, userID int64, settings Settings
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails WHERE user_id = ?`, userID).Scan(&status.NotesFound); err != nil {
 		return status, err
 	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0`, userID).Scan(&status.Recipes); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND deleted_at = 0`, userID).Scan(&status.Recipes); err != nil {
 		return status, err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails m WHERE m.user_id = ? AND m.note_dismissed = 0 AND m.done_at = 0 AND NOT `+carriesRecipe, userID).Scan(&status.Notes); err != nil {
@@ -389,7 +395,7 @@ func jsonList(raw string) []string {
 // every word against what the dish is called, what goes in it and how the site
 // files it, and against the reader's own note on the mail that shared it.
 func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, userID int64, w http.ResponseWriter, r *http.Request) {
-	query := `SELECT ` + recipeColumns + ` FROM plugin_recipe_box_recipes r WHERE r.user_id = ? `
+	query := `SELECT ` + recipeColumns + ` FROM plugin_recipe_box_recipes r WHERE r.user_id = ? AND r.deleted_at = 0 `
 	view := r.URL.Query().Get("view")
 	switch view {
 	case "dismissed":
@@ -445,8 +451,8 @@ func (p *recipeBoxBackend) apiListRecipes(host plugins.APIHost, db *sql.DB, user
 	// those lead the shelf.
 	counts := map[string]int{"to_cook": 0, "cooked": 0, "dismissed": 0, "planned": 0}
 	if err := countInto(r.Context(), db, counts, `SELECT CASE WHEN dismissed <> 0 THEN 'dismissed' WHEN cooked_at > 0 THEN 'cooked' ELSE 'to_cook' END AS shelf, COUNT(*)
-		FROM plugin_recipe_box_recipes WHERE user_id = ? GROUP BY shelf
-		UNION ALL SELECT 'planned', COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND planned_at > 0`, userID, userID); err != nil {
+		FROM plugin_recipe_box_recipes WHERE user_id = ? AND deleted_at = 0 GROUP BY shelf
+		UNION ALL SELECT 'planned', COUNT(*) FROM plugin_recipe_box_recipes WHERE user_id = ? AND dismissed = 0 AND deleted_at = 0 AND planned_at > 0`, userID, userID); err != nil {
 		host.ServerError(w, err)
 		return
 	}
@@ -472,7 +478,7 @@ func loadRecipe(ctx context.Context, db *sql.DB, userID, id int64) (RecipeDetail
 	var d RecipeDetail
 	var instructions string
 	row := db.QueryRowContext(ctx, `SELECT `+recipeColumns+`, r.author, r.prep_minutes, r.cook_minutes, r.calories, r.instructions_json
-		FROM plugin_recipe_box_recipes r WHERE r.user_id = ? AND r.id = ?`, userID, id)
+		FROM plugin_recipe_box_recipes r WHERE r.user_id = ? AND r.id = ? AND r.deleted_at = 0`, userID, id)
 	summary, ingredients, err := scanSummary(row, &d.Author, &d.PrepMinutes, &d.CookMinutes, &d.Calories, &instructions)
 	if err != nil {
 		return d, err
@@ -553,12 +559,12 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		// Cooking ends the plan. Taking it back ("not cooked yet") plans the
 		// dish again when lines of it are still to buy on the list -- a
 		// cooked mark set by mistake must not cost the plan.
-		query := `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = 0 WHERE user_id = ? AND id = ?`
+		query := `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = 0 WHERE user_id = ? AND id = ? AND deleted_at = 0`
 		args := []any{cookedAt, userID, id}
 		if !*in.Cooked {
 			query = `UPDATE plugin_recipe_box_recipes SET cooked_at = ?, planned_at = COALESCE((SELECT MAX(s.created_at)
 				FROM plugin_recipe_box_shopping_sources s JOIN plugin_recipe_box_shopping_items i ON i.id = s.item_id AND i.user_id = s.user_id
-				WHERE s.user_id = ? AND s.recipe_id = ? AND i.checked_at = 0), 0) WHERE user_id = ? AND id = ?`
+				WHERE s.user_id = ? AND s.recipe_id = ? AND i.checked_at = 0), 0) WHERE user_id = ? AND id = ? AND deleted_at = 0`
 			args = []any{cookedAt, userID, id, userID, id}
 		}
 		res, err := db.ExecContext(r.Context(), query, args...)
@@ -572,7 +578,7 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		}
 	}
 	if in.Planned != nil {
-		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET planned_at = 0 WHERE user_id = ? AND id = ?`, userID, id)
+		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET planned_at = 0 WHERE user_id = ? AND id = ? AND deleted_at = 0`, userID, id)
 		if err != nil {
 			host.ServerError(w, err)
 			return
@@ -583,7 +589,7 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 		}
 	}
 	if in.Dismissed != nil {
-		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET dismissed = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+		res, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET dismissed = ?, updated_at = ? WHERE user_id = ? AND id = ? AND deleted_at = 0`,
 			boolInt(*in.Dismissed), time.Now().UTC().Unix(), userID, id)
 		if err != nil {
 			host.ServerError(w, err)
@@ -600,13 +606,121 @@ func (p *recipeBoxBackend) apiUpdateRecipe(host plugins.APIHost, db *sql.DB, use
 	p.apiRecipe(host, db, userID, id, w, r)
 }
 
+// apiDeleteRecipe takes a recipe out of the cookbook for good, whichever shelf
+// it is on -- still to cook, cooked, planned or removed -- and deletes the mail
+// that shared it: every copy goes to its own account's Trash, exactly as a
+// note's Delete does (trashMail), and nothing leaves the server until that
+// Trash is emptied. A mail that also names another recipe still in the
+// cookbook is left where it is, because deleting one recipe must not throw
+// away the mail another one came in.
+//
+// The mail goes first and the recipe after it, so a move that fails leaves the
+// recipe listed and pressing Delete again moves only what is still out of
+// Trash. Unlike "Not a recipe" this does not say the page was something else:
+// the row is kept as a marker (see migration 006) so the mail stays a recipe
+// mail and never turns up as a note. The plan ends with it and its picture is
+// dropped. Lines already on the shopping list stay, because they carry their
+// own copy of where they came from and are the reader's to clear.
+func (p *recipeBoxBackend) apiDeleteRecipe(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ? AND deleted_at = 0)`, userID, id).Scan(&exists); err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	if !exists {
+		host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
+		return
+	}
+	mails, kept, err := recipeMailsToTrash(ctx, db, userID, id)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	moved := 0
+	if len(mails) > 0 {
+		mover, ok := host.(plugins.StoredMessageHost)
+		if !ok {
+			host.WriteAPIError(w, http.StatusNotImplemented, "deleting mail is not available")
+			return
+		}
+		for _, mail := range mails {
+			n, err := trashMail(ctx, db, mover, userID, mail)
+			moved += n
+			if err != nil {
+				if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
+					notifier.NotifyUserChanged(userID)
+				}
+				writeTrashError(host, w, err)
+				return
+			}
+		}
+	}
+	res, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes
+		SET deleted_at = ?, planned_at = 0, image_data = NULL, image_type = '', image_status = 'deleted'
+		WHERE user_id = ? AND id = ? AND deleted_at = 0`, time.Now().UTC().Unix(), userID, id)
+	if err != nil {
+		host.ServerError(w, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		host.WriteAPIError(w, http.StatusNotFound, "recipe not found")
+		return
+	}
+	if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
+		notifier.NotifyUserChanged(userID)
+	}
+	host.WriteJSON(w, map[string]any{"ok": true, "moved": moved, "kept": kept})
+}
+
+// recipeMailsToTrash lists the recorded mails that shared a recipe, and counts
+// the ones a delete of it leaves alone because they also name another recipe
+// still in the cookbook.
+func recipeMailsToTrash(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]pendingMail, int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts,
+			EXISTS (`+mailRecipes+` AND r.deleted_at = 0 AND r.id <> ?)
+		FROM plugin_recipe_box_mails m
+		WHERE m.user_id = ? AND EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links ml
+			JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
+			WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.recipe_id = ?)
+		ORDER BY m.id`, recipeID, userID, recipeID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []pendingMail
+	kept := 0
+	for rows.Next() {
+		var mail pendingMail
+		var sharedWithAnother bool
+		if err := rows.Scan(&mail.ID, &mail.Key, &mail.Message, &mail.Header, &mail.ContentSHA, &mail.AccountID, &mail.Attempts, &sharedWithAnother); err != nil {
+			return nil, 0, err
+		}
+		if sharedWithAnother {
+			kept++
+			continue
+		}
+		out = append(out, mail)
+	}
+	return out, kept, rows.Err()
+}
+
+// restoreRecipe puts a dismissed or deleted recipe back in the cookbook. A
+// deleted one lost its picture, so it is fetched again.
+func restoreRecipe(ctx context.Context, db *sql.DB, userID, recipeID int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes SET dismissed = 0, deleted_at = 0,
+			image_status = CASE WHEN image_status = 'deleted' THEN '' ELSE image_status END, updated_at = ?
+		WHERE user_id = ? AND id = ?`, time.Now().UTC().Unix(), userID, recipeID)
+	return err
+}
+
 // apiRecipeImage serves a stored picture. It is served only as the raster type
 // its bytes are, sniffed again here rather than trusted from the row, with
 // sniffing and scripts switched off: these bytes came from somebody else's
 // server and are now answered from Rolltop's own origin.
 func (p *recipeBoxBackend) apiRecipeImage(host plugins.APIHost, db *sql.DB, userID, id int64, w http.ResponseWriter, r *http.Request) {
 	var data []byte
-	err := db.QueryRowContext(r.Context(), `SELECT image_data FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ? AND image_status = 'ok'`, userID, id).Scan(&data)
+	err := db.QueryRowContext(r.Context(), `SELECT image_data FROM plugin_recipe_box_recipes WHERE user_id = ? AND id = ? AND image_status = 'ok' AND deleted_at = 0`, userID, id).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && len(data) == 0) {
 		host.WriteAPIError(w, http.StatusNotFound, "picture not found")
 		return
@@ -659,9 +773,9 @@ func (p *recipeBoxBackend) apiAddRecipe(host plugins.APIHost, db *sql.DB, userID
 		return
 	}
 	if status == linkRecipe && recipeID > 0 {
-		// Already in the cookbook. A dismissed recipe the reader adds again is
-		// one they changed their mind about.
-		if _, err := db.ExecContext(r.Context(), `UPDATE plugin_recipe_box_recipes SET dismissed = 0, updated_at = ? WHERE user_id = ? AND id = ?`, now, userID, recipeID); err != nil {
+		// Already in the cookbook. A dismissed or deleted recipe the reader
+		// adds again is one they changed their mind about.
+		if err := restoreRecipe(r.Context(), db, userID, recipeID); err != nil {
 			host.ServerError(w, err)
 			return
 		}
@@ -726,7 +840,7 @@ func (p *recipeBoxBackend) recordPromoted(ctx context.Context, db *sql.DB, userI
 	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'recipe', kind = 'recipe', recipe_id = ?, updated_at = ? WHERE user_id = ? AND id = ?`, recipeID, now, userID, link.ID); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_recipes SET dismissed = 0 WHERE user_id = ? AND id = ?`, userID, recipeID); err != nil {
+	if err := restoreRecipe(ctx, db, userID, recipeID); err != nil {
 		return err
 	}
 	return refreshFirstSeen(ctx, db, userID, recipeID)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,10 @@ func notesServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/carbonara", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(carbonaraMarkup))
+	})
+	mux.HandleFunc("/gulasch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><title>Gulasch</title></head><script type="application/ld+json">{"@type":"Recipe","name":"Gulasch","recipeIngredient":["500 g Rindfleisch"]}</script></html>`))
 	})
 	mux.HandleFunc("/pfanne", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -245,6 +250,209 @@ func TestRecipesCanBeMarkedCooked(t *testing.T) {
 	}
 	if n, _ := list(""); n != 1 {
 		t.Fatalf("to cook after uncooking = %d", n)
+	}
+}
+
+func TestRecipesCanBeDeletedCookedOrNot(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	f := newFixture(t, st, "delete@example.test")
+	trash, err := st.GetOrCreateMailboxWithRole(context.Background(), f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<d@x>", "delete@example.test", "delete@example.test", "x", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(context.Background(), st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	id := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	total := func() int {
+		rec := callAPI(t, p, host, http.MethodGet, apiPath+"/recipes", "")
+		var out struct {
+			Counts map[string]int `json:"counts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Counts["to_cook"] + out.Counts["cooked"] + out.Counts["dismissed"] + out.Counts["planned"]
+	}
+	deleteRecipe := func() int {
+		return callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d/delete", apiPath, id), `{}`).Code
+	}
+
+	// A cooked recipe is deleted like one still to cook.
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, id), `{"cooked":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("cooked = %d %s", rec.Code, rec.Body.String())
+	}
+	if code := deleteRecipe(); code != http.StatusOK {
+		t.Fatalf("delete cooked = %d", code)
+	}
+	if n := total(); n != 0 {
+		t.Fatalf("shelves after delete hold %d", n)
+	}
+	// The mail it came in went to Trash with it.
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<d@x>"); len(got) != 1 || got[0] != trash.ID {
+		t.Fatalf("deleted recipe's mail is in %v, want Trash %d", got, trash.ID)
+	}
+	for _, path := range []string{fmt.Sprintf("/recipes/%d", id), fmt.Sprintf("/recipes/%d/image", id)} {
+		if rec := callAPI(t, p, host, http.MethodGet, apiPath+path, ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("reading deleted %s = %d", path, rec.Code)
+		}
+	}
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d", apiPath, id), `{"cooked":false}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("uncooking a deleted recipe = %d", rec.Code)
+	}
+	if code := deleteRecipe(); code != http.StatusNotFound {
+		t.Fatalf("deleting twice = %d", code)
+	}
+	// Its mail is still a recipe mail, not a note.
+	if notes := listNotes(t, p, host, ""); len(notes.Notes) != 0 {
+		t.Fatalf("deleted recipe's mail became a note: %+v", notes.Notes)
+	}
+
+	// Adding the link again brings it back, on the shelf to cook.
+	if rec := callAPI(t, p, host, http.MethodPost, apiPath+"/recipes", fmt.Sprintf(`{"url":%q}`, server.URL+"/carbonara")); rec.Code != http.StatusOK {
+		t.Fatalf("re-add = %d %s", rec.Code, rec.Body.String())
+	}
+	drain(t, p, host, f.user.ID)
+	if rec := callAPI(t, p, host, http.MethodGet, fmt.Sprintf("%s/recipes/%d", apiPath, id), ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"image_url":"/api/`) {
+		t.Fatalf("re-added recipe = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// And one never cooked is deleted the same way.
+	if code := deleteRecipe(); code != http.StatusOK {
+		t.Fatalf("delete to cook = %d", code)
+	}
+	if n := total(); n != 0 {
+		t.Fatalf("shelves after second delete hold %d", n)
+	}
+}
+
+// mailboxesOf lists the folders the mail with this Message-ID is stored in.
+func mailboxesOf(t *testing.T, db *sql.DB, userID int64, header string) []int64 {
+	t.Helper()
+	rows, err := db.Query(`SELECT mailbox_id FROM messages WHERE user_id = ? AND message_id_header = ? ORDER BY mailbox_id`, userID, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func TestDeletingARecipeKeepsMailThatSharesAnotherRecipe(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	ctx := context.Background()
+	me := "share@example.test"
+	f := newFixture(t, st, me)
+	trash, err := st.GetOrCreateMailboxWithRole(ctx, f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<both@x>", me, me, "zwei", server.URL+"/carbonara\n"+server.URL+"/gulasch", time.Now().Add(-time.Hour))
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<one@x>", me, me, "eins", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(ctx, st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true, MoveEnabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	carbonara := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	gulasch := recipeIDByTitle(t, st.DB(), f.user.ID, "Gulasch")
+
+	rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d/delete", apiPath, carbonara), `{}`)
+	var out struct {
+		Moved int `json:"moved"`
+		Kept  int `json:"kept"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Moved != 1 || out.Kept != 1 {
+		t.Fatalf("delete carbonara = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<one@x>"); len(got) != 1 || got[0] != trash.ID {
+		t.Fatalf("carbonara's own mail is in %v, want Trash", got)
+	}
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<both@x>"); len(got) != 1 || got[0] == trash.ID {
+		t.Fatalf("mail shared with gulasch is in %v, want it kept", got)
+	}
+
+	// Once the other recipe goes too, nothing holds the shared mail back.
+	rec = callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d/delete", apiPath, gulasch), `{}`)
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Moved != 1 || out.Kept != 0 {
+		t.Fatalf("delete gulasch = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<both@x>"); len(got) != 1 || got[0] != trash.ID {
+		t.Fatalf("shared mail is in %v, want Trash", got)
+	}
+}
+
+func TestDeletingARecipeKeepsItListedWhenAMoveFails(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	me := "refused@example.test"
+	f := newFixture(t, st, me)
+	trash, err := st.GetOrCreateMailboxWithRole(context.Background(), f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<r@x>", me, me, "x", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(context.Background(), st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	id := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	target := fmt.Sprintf("%s/recipes/%d/delete", apiPath, id)
+
+	host.moveErr = fmt.Errorf("server busy")
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete with a refused move = %d %s", rec.Code, rec.Body.String())
+	}
+	// The mail did not go, so neither does the recipe.
+	if rec := callAPI(t, p, host, http.MethodGet, fmt.Sprintf("%s/recipes/%d", apiPath, id), ""); rec.Code != http.StatusOK {
+		t.Fatalf("recipe after refused move = %d", rec.Code)
+	}
+
+	// Asked again once the server answers, both go.
+	host.moveErr = nil
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusOK {
+		t.Fatalf("delete retried = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<r@x>"); len(got) != 1 || got[0] != trash.ID {
+		t.Fatalf("mail after retried delete is in %v, want Trash", got)
+	}
+}
+
+func TestDeletingARecipeRefusesAnAccountWithoutTrash(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	me := "notrash@example.test"
+	f := newFixture(t, st, me)
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<n@x>", me, me, "x", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(context.Background(), st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	id := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	if rec := callAPI(t, p, host, http.MethodPost, fmt.Sprintf("%s/recipes/%d/delete", apiPath, id), `{}`); rec.Code != http.StatusConflict {
+		t.Fatalf("delete without Trash = %d %s", rec.Code, rec.Body.String())
+	}
+	// A delete that could not take the mail leaves the recipe where it was.
+	if rec := callAPI(t, p, host, http.MethodGet, fmt.Sprintf("%s/recipes/%d", apiPath, id), ""); rec.Code != http.StatusOK {
+		t.Fatalf("recipe after refused delete = %d", rec.Code)
 	}
 }
 

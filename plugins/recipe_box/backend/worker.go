@@ -149,7 +149,7 @@ func (p *recipeBoxBackend) runUser(ctx context.Context, host plugins.BackendHost
 // a page the reader filed by hand, whose preview named a picture the request
 // that filed it did not wait for.
 func (p *recipeBoxBackend) fillMissingImages(ctx context.Context, db *sql.DB, userID int64) error {
-	rows, err := db.QueryContext(ctx, `SELECT id FROM plugin_recipe_box_recipes WHERE user_id = ? AND image_status = '' AND dismissed = 0 ORDER BY id LIMIT 5`, userID)
+	rows, err := db.QueryContext(ctx, `SELECT id FROM plugin_recipe_box_recipes WHERE user_id = ? AND image_status = '' AND dismissed = 0 AND deleted_at = 0 ORDER BY id LIMIT 5`, userID)
 	if err != nil {
 		return err
 	}

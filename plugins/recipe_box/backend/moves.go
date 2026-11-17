@@ -46,11 +46,21 @@ type pendingMail struct {
 // not taken out of the cookbook; it assumes the mails table aliased m. It is
 // the one line between the two shelves: a mail it holds for is a recipe mail,
 // every other one is a note.
-const carriesRecipe = `EXISTS (
-	SELECT 1 FROM plugin_recipe_box_mail_links ml
+const carriesRecipe = `EXISTS (` + mailRecipes + `)`
+
+// carriesLiveRecipe is carriesRecipe narrowed to recipes still in the
+// cookbook. A deleted recipe's mail stays a recipe mail -- deleting the recipe
+// does not make the mail a note -- but it is no longer filed into the recipe
+// folder for a recipe that is gone.
+const carriesLiveRecipe = `EXISTS (` + mailRecipes + ` AND r.deleted_at = 0)`
+
+// mailRecipes selects the recipes a mail (aliased m) named that the reader has
+// not taken out of the cookbook, with the recipe aliased r. It is the one
+// definition of a recipe mail; callers narrow it by appending predicates on r.
+const mailRecipes = `SELECT 1 FROM plugin_recipe_box_mail_links ml
 	JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id
 	JOIN plugin_recipe_box_recipes r ON r.id = l.recipe_id AND r.user_id = l.user_id
-	WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'recipe' AND r.dismissed = 0)`
+	WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'recipe' AND r.dismissed = 0`
 
 // awaitsPage is the SQL test for a mail with a link whose page has not
 // answered yet: it may still turn out to be a recipe, so it is not a note to
@@ -61,9 +71,9 @@ const awaitsPage = `EXISTS (
 	WHERE ml.mail_id = m.id AND ml.user_id = m.user_id AND l.status = 'pending')`
 
 // mailsToFile lists the mails that carried a recipe the reader has not
-// dismissed and that are not filed yet.
+// dismissed or deleted and that are not filed yet.
 func mailsToFile(ctx context.Context, db *sql.DB, userID int64, limit int) ([]pendingMail, error) {
-	return pendingMails(ctx, db, userID, `AND `+carriesRecipe, limit)
+	return pendingMails(ctx, db, userID, `AND `+carriesLiveRecipe, limit)
 }
 
 // notesToFile lists the notes that are not filed yet: mails that carried no

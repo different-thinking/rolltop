@@ -435,9 +435,13 @@ func TestRecipeRoutesStayInsideTheTenant(t *testing.T) {
 	if rec := call(bob.user.ID, http.MethodPost, apiPath+fmt.Sprintf("/recipes/%d", aliceRecipe), `{"dismissed":true}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("bob dismissing alice's recipe = %d", rec.Code)
 	}
+	if rec := call(bob.user.ID, http.MethodPost, apiPath+fmt.Sprintf("/recipes/%d/delete", aliceRecipe), `{}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("bob deleting alice's recipe = %d", rec.Code)
+	}
 	var dismissed int
-	if err := st.DB().QueryRow(`SELECT dismissed FROM plugin_recipe_box_recipes WHERE id = ?`, aliceRecipe).Scan(&dismissed); err != nil || dismissed != 0 {
-		t.Fatalf("alice's recipe dismissed=%d err=%v", dismissed, err)
+	var deletedAt int64
+	if err := st.DB().QueryRow(`SELECT dismissed, deleted_at FROM plugin_recipe_box_recipes WHERE id = ?`, aliceRecipe).Scan(&dismissed, &deletedAt); err != nil || dismissed != 0 || deletedAt != 0 {
+		t.Fatalf("alice's recipe dismissed=%d deleted_at=%d err=%v", dismissed, deletedAt, err)
 	}
 }
 

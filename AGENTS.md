@@ -433,6 +433,19 @@ site and in review.
   and cooking clears `planned_at`, so the two are never set together; the API
   only unplans by hand (`planned: false`), it never plans without a shopping
   list.
+- **Deleting a recipe is not saying it was no recipe** (`apiDeleteRecipe`,
+  `recipes.deleted_at`). Any recipe can be deleted, cooked or not, and its mail
+  goes to Trash with it through `trashMail`, the one loop a note's Delete uses
+  too. The mail goes first and the recipe after it, so a refused move leaves the
+  recipe listed; a mail that also names another live recipe is kept
+  (`recipeMailsToTrash`), because deleting one recipe must not throw away the
+  mail another came in. The row stays
+  as a marker and every shelf, read and write skips it, because the mail that
+  shared it still names it: `carriesRecipe` keeps it a recipe mail, so it never
+  turns up as a note, and only `carriesLiveRecipe` -- what decides filing --
+  lets it go. Dropping the row instead would have moved every deleted recipe's
+  mail onto the Notes shelf. Adding the link by hand (`restoreRecipe`) is the
+  only way back.
 - **A note is its mail, so deleting the mail anywhere deletes the note**
   (`ObserveMessageMove` in `plugins/recipe_box/backend/observe.go`). A move into
   Trash dismisses the note once no copy is left outside Trash, Junk, Sent and
