@@ -396,6 +396,44 @@ func TestDeletingARecipeKeepsMailThatSharesAnotherRecipe(t *testing.T) {
 	}
 }
 
+func TestDeletingARecipeKeepsItListedWhenAMoveFails(t *testing.T) {
+	st := openRecipeStore(t)
+	server := notesServer(t)
+	me := "refused@example.test"
+	f := newFixture(t, st, me)
+	trash, err := st.GetOrCreateMailboxWithRole(context.Background(), f.user.ID, f.account.ID, "Trash", "trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<r@x>", me, me, "x", server.URL+"/carbonara", time.Now())
+	if _, err := saveSettings(context.Background(), st.DB(), f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+	id := recipeIDByTitle(t, st.DB(), f.user.ID, "Spaghetti Carbonara")
+	target := fmt.Sprintf("%s/recipes/%d/delete", apiPath, id)
+
+	host.moveErr = fmt.Errorf("server busy")
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete with a refused move = %d %s", rec.Code, rec.Body.String())
+	}
+	// The mail did not go, so neither does the recipe.
+	if rec := callAPI(t, p, host, http.MethodGet, fmt.Sprintf("%s/recipes/%d", apiPath, id), ""); rec.Code != http.StatusOK {
+		t.Fatalf("recipe after refused move = %d", rec.Code)
+	}
+
+	// Asked again once the server answers, both go.
+	host.moveErr = nil
+	if rec := callAPI(t, p, host, http.MethodPost, target, `{}`); rec.Code != http.StatusOK {
+		t.Fatalf("delete retried = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := mailboxesOf(t, st.DB(), f.user.ID, "<r@x>"); len(got) != 1 || got[0] != trash.ID {
+		t.Fatalf("mail after retried delete is in %v, want Trash", got)
+	}
+}
+
 func TestDeletingARecipeRefusesAnAccountWithoutTrash(t *testing.T) {
 	st := openRecipeStore(t)
 	server := notesServer(t)

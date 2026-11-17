@@ -678,11 +678,7 @@ func (p *recipeBoxBackend) apiDeleteRecipe(host plugins.APIHost, db *sql.DB, use
 // still in the cookbook.
 func recipeMailsToTrash(ctx context.Context, db *sql.DB, userID, recipeID int64) ([]pendingMail, int, error) {
 	rows, err := db.QueryContext(ctx, `SELECT m.id, m.message_key, m.message_id, m.message_id_header, m.content_sha, m.account_id, m.move_attempts,
-			EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links oml
-				JOIN plugin_recipe_box_links ol ON ol.id = oml.link_id AND ol.user_id = oml.user_id
-				JOIN plugin_recipe_box_recipes o ON o.id = ol.recipe_id AND o.user_id = ol.user_id
-				WHERE oml.mail_id = m.id AND oml.user_id = m.user_id AND ol.status = 'recipe'
-					AND o.id <> ? AND o.dismissed = 0 AND o.deleted_at = 0)
+			EXISTS (`+mailRecipes+` AND r.deleted_at = 0 AND r.id <> ?)
 		FROM plugin_recipe_box_mails m
 		WHERE m.user_id = ? AND EXISTS (SELECT 1 FROM plugin_recipe_box_mail_links ml
 			JOIN plugin_recipe_box_links l ON l.id = ml.link_id AND l.user_id = ml.user_id

@@ -315,6 +315,10 @@ func (p *recipeBoxBackend) apiDeleteNote(host plugins.APIHost, db *sql.DB, userI
 	}
 	moved, err := trashMail(ctx, db, mover, userID, mail)
 	if err != nil {
+		// What did move before the refusal is mail the lists must stop showing.
+		if notifier, ok := host.(plugins.UserChangeHost); ok && moved > 0 {
+			notifier.NotifyUserChanged(userID)
+		}
 		writeTrashError(host, w, err)
 		return
 	}
@@ -372,7 +376,7 @@ func trashMail(ctx context.Context, db *sql.DB, mover plugins.StoredMessageHost,
 		if len(targets) == 0 {
 			return moved, nil
 		}
-		if round >= deleteNoteRounds {
+		if round >= trashMailRounds {
 			return moved, errMailKeptMoving
 		}
 		for _, c := range targets {
@@ -441,10 +445,10 @@ func deleteKeeps(c storedCopy, noteAccountID int64) bool {
 	return false
 }
 
-// deleteNoteRounds bounds how many times a delete reads the note's copies
-// again after moving them: a copy that keeps turning up somewhere new is mail
+// trashMailRounds bounds how many times a delete -- of a note or of a recipe --
+// reads a mail's copies again after moving them: a copy that keeps turning up somewhere new is mail
 // something else is moving at the same time, and the reader is told so.
-const deleteNoteRounds = 3
+const trashMailRounds = 3
 
 // trashMailboxID answers one account's Trash folder, zero when it has none.
 func trashMailboxID(ctx context.Context, db *sql.DB, userID, accountID int64) (int64, error) {

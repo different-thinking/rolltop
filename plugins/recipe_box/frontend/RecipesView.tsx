@@ -469,7 +469,8 @@ function RecipePage({ id, csrf, navigate, addToast, datePrefs, mailGeneration }:
   async function deleteRecipe() {
     if (!recipe) return;
     const name = recipe.title || hostOf(recipe.url);
-    const question = recipe.mails.length > 0
+    // A mail whose stored copy is already gone has nothing left to move.
+    const question = recipe.mails.some((mail) => mail.message_id > 0)
       ? `Delete "${name}" and move the mail it came in to Trash?`
       : `Delete "${name}" from the cookbook?`;
     if (!window.confirm(question)) return;
