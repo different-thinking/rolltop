@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,58 @@ func TestHostKindAndNoFetch(t *testing.T) {
 	}
 	if NoFetch("https://www.booking.com/hotel/x") || NoFetch("https://github.com/acme/tool") {
 		t.Fatal("a public page is not fetched")
+	}
+}
+
+// hr-fernsehen.de publishes a Recipe block holding only the dish's name and
+// picture and prints the ingredients and the method as the article's text.
+// The page is fetched as it was served on 2026-11-25.
+func TestParsePageCompletesNameOnlyRecipeFromItsCopy(t *testing.T) {
+	markup, err := os.ReadFile("testdata/hr-fernsehen-rote-linsen-suppe.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := ParsePage(string(markup), "https://www.hr-fernsehen.de/sendungen-a-z/hallo-hessen/rezepte/rezept-tuerkische-rote-linsen-suppe-v1,kochen-11880.html")
+	if page.Recipe == nil {
+		t.Fatal("a page declaring a Recipe was not taken for one")
+	}
+	r := page.Recipe
+	if r.Name != "Türkische Rote-Linsen-Suppe" || len(r.ImageURLs) == 0 {
+		t.Fatalf("recipe = %#v", r)
+	}
+	sections := IngredientSections(r.Ingredients)
+	if len(sections) != 3 || sections[0].Name != "Rote-Linsen-Suppe" || len(sections[0].Items) != 13 ||
+		sections[1].Name != "Toppings (je nach persönlichem Geschmack)" || sections[2].Name != "Beilagen" {
+		t.Fatalf("sections = %#v", sections)
+	}
+	if sections[0].Items[0].Text != "1 Zwiebel, mittelgroß" || sections[0].Items[11].Text != "je 1 Prise Salz & Pfeffer, zum Abschmecken" {
+		t.Fatalf("ingredients = %#v", r.Ingredients)
+	}
+	if len(r.Instructions) != 1 || r.Instructions[0].Name != "Rote-Linsen-Suppe" || len(r.Instructions[0].Steps) != 12 ||
+		r.Instructions[0].Steps[0] != "die roten Linsen unter fließendem, kaltem Wasser waschen" {
+		t.Fatalf("instructions = %#v", r.Instructions)
+	}
+}
+
+func TestParsePageReadsCopyOnlyForADeclaredRecipe(t *testing.T) {
+	copyText := `<h2>Zutaten für 4 Personen</h2><ul><li>200 g Mehl</li><li>1 Ei</li></ul>
+		<p>Ein Tipp vom Koch.</p><h2>Zubereitung</h2><ol><li>Mischen.</li><li>Backen.</li></ol><h2>Mehr Rezepte</h2><ul><li>Kuchen</li></ul>`
+	if page := ParsePage(`<html><head><title>Kuchen</title></head><body>`+copyText+`</body></html>`, "https://example.test/"); page.Recipe != nil {
+		t.Fatal("a page without a Recipe block was taken for a recipe because of its headings")
+	}
+	declared := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body>` + copyText + `</body></html>`
+	page := ParsePage(declared, "https://example.test/")
+	if page.Recipe == nil || strings.Join(page.Recipe.Ingredients, "|") != "200 g Mehl|1 Ei" ||
+		len(page.Recipe.Instructions) != 1 || strings.Join(page.Recipe.Instructions[0].Steps, "|") != "Mischen.|Backen." {
+		t.Fatalf("recipe = %#v", page.Recipe)
+	}
+	nameOnly := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body><p>Lecker.</p></body></html>`
+	if page := ParsePage(nameOnly, "https://example.test/"); page.Recipe != nil {
+		t.Fatal("a Recipe block naming nothing to cook was taken for a recipe")
+	}
+	structured := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen","recipeIngredient":["250 g Mehl"]}</script></head><body>` + copyText + `</body></html>`
+	page = ParsePage(structured, "https://example.test/")
+	if page.Recipe == nil || strings.Join(page.Recipe.Ingredients, "|") != "250 g Mehl" || len(page.Recipe.Instructions) != 0 {
+		t.Fatalf("the copy was read beside the page's own structured ingredients: %#v", page.Recipe)
 	}
 }
