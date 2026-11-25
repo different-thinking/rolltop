@@ -361,6 +361,21 @@ site and in review.
   every announcement turns a five-second poll into several a second for as long
   as the work lasts — against the database the work is competing with, which is
   the cost this whole area exists to remove.
+- **Returning to a list puts it where it was left** (`lib/scrollMemory.ts`,
+  called from App's `navigate`). The document is what scrolls, shared by the
+  list and an open message, and every in-app return - Back, Delete, Archive,
+  Send - pushes the `back` URL rather than stepping history, so the browser's
+  own restoration never runs: the list used to remount at the offset the reader
+  had scrolled the *message* to. A push to the view the current route was
+  opened from restores that view's remembered offset, opening a message or the
+  composer starts at the top, and every other push leaves the page where it
+  is. The offset is remembered under the opened route's `back` as well as the
+  address bar's URL, because the list spells its own return and the return
+  pushes that spelling - and only a list may write under a `back`, or a
+  message moving on to the composer, or a notification opening mail from the
+  calendar, hands the list somebody else's offset. A history step remembers
+  the offset the last scroll event reported, not `window.scrollY`: a browser
+  may have restored the entry it is stepping to before popstate fires.
 - Settling a claimed message transfer outlives the context that failed it
   (`context.WithoutCancel`), on the failure path as much as the success path.
   A batch is claimed before it is dispatched, so one cancelled request strands

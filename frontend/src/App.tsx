@@ -17,6 +17,7 @@ import { recordFiledMessages, releaseFiledMessages } from "./lib/filedMessages";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
+import { cancelScrollRestore, locationKey, rememberScroll, rememberScrollLeaving, rememberedScroll, restoreScroll, scrollAfterNavigation } from "./lib/scrollMemory";
 import { appIconURL, syncDocumentIcon, syncDocumentManifest } from "./lib/appIcon";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
@@ -265,14 +266,32 @@ export default function App() {
 
   // Navigation is intentionally tiny and local: Go serves every SPA route, so
   // the client only needs to update history and reparse LocationState.
+  // The route on screen as far as scroll memory is concerned. Every navigation
+  // sets it the moment it changes the URL, not when React next renders, so a
+  // second step taken before that render remembers the right route.
+  const shownLocationKeyRef = useRef(locationKey(location));
+  const lastScrollYRef = useRef(0);
+
   const replaceRoute = useCallback((url: string) => {
     window.history.replaceState({}, "", url);
-    setLocation(currentLocation());
+    const to = currentLocation();
+    shownLocationKeyRef.current = locationKey(to);
+    setLocation(to);
   }, []);
 
   const navigate = useCallback((url: string) => {
+    const from = currentLocation();
+    const leftAt = window.scrollY;
     window.history.pushState({}, "", url);
-    setLocation(currentLocation());
+    const to = currentLocation();
+    rememberScrollLeaving(from, to, leftAt);
+    shownLocationKeyRef.current = locationKey(to);
+    setLocation(to);
+    const scrollTo = scrollAfterNavigation(from, to);
+    // A restore still running for the page being left must not go on to
+    // scroll the next one once it has loaded.
+    if (scrollTo !== null) restoreScroll(scrollTo);
+    else cancelScrollRestore();
   }, []);
 
   // The tab icon names the area on screen, so a calendar window and a mail
@@ -283,10 +302,35 @@ export default function App() {
     syncDocumentManifest(location.path);
   }, [location.path]);
 
+  // A history step is the browser's to restore, and it does - but only as far
+  // as the page reaches at that moment, and a list that is still loading is
+  // short. Where this session remembers the position, it is restored again
+  // once the list is tall enough. The page being left is still drawn when the
+  // event fires, so its own offset is still the one to remember.
+  // The offset is the last one a scroll event reported rather than
+  // `window.scrollY` at the event: a browser may already have restored the
+  // entry it is stepping to by the time popstate fires, while the scroll event
+  // that restoration causes is only dispatched on the next frame.
   useEffect(() => {
-    const onPop = () => setLocation(currentLocation());
+    lastScrollYRef.current = window.scrollY;
+    const onScroll = () => {
+      lastScrollYRef.current = window.scrollY;
+    };
+    const onPop = () => {
+      rememberScroll(shownLocationKeyRef.current, lastScrollYRef.current);
+      const to = currentLocation();
+      shownLocationKeyRef.current = locationKey(to);
+      setLocation(to);
+      const remembered = rememberedScroll(locationKey(to));
+      if (remembered !== undefined) restoreScroll(remembered);
+      else cancelScrollRestore();
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("popstate", onPop);
+    };
   }, []);
 
   // Bootstrap is the shared chrome contract: auth state, CSRF token, folder
