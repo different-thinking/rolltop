@@ -387,3 +387,35 @@ func TestParsePageReadsCopyOnlyForADeclaredRecipe(t *testing.T) {
 		t.Fatalf("the copy was read beside the page's own structured ingredients: %#v", page.Recipe)
 	}
 }
+
+func TestCopyIsReadAsHTMLWritesIt(t *testing.T) {
+	declared := func(body string) *Recipe {
+		t.Helper()
+		page := ParsePage(`<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body>`+body+`</body></html>`, "https://example.test/")
+		if page.Recipe == nil {
+			t.Fatalf("no recipe read from %s", body)
+		}
+		return page.Recipe
+	}
+	// </li> and </p> are optional in HTML.
+	r := declared(`<p>Vorweg<h2>Zutaten</h2><ul><li>1 Ei<li>2 g Salz</ul><h2>Zubereitung</h2><ol><li>Mischen<li>Backen</ol>`)
+	if strings.Join(r.Ingredients, "|") != "1 Ei|2 g Salz" || strings.Join(r.Instructions[0].Steps, "|") != "Mischen|Backen" {
+		t.Fatalf("unclosed items: %q %#v", r.Ingredients, r.Instructions)
+	}
+	// A part opened by a bold paragraph keeps its bold sub-headings.
+	r = declared(`<p><strong>Zutaten</strong></p><p><strong>Teig:</strong></p><ul><li>1 Ei</li></ul><p><b>Belag:</b></p><ul><li>2 Äpfel</li></ul><p><b>Zubereitung</b></p><ol><li>Backen</li></ol>`)
+	if strings.Join(r.Ingredients, "|") != "Teig:|1 Ei|Belag:|2 Äpfel" || len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {
+		t.Fatalf("bold parts: %q %#v", r.Ingredients, r.Instructions)
+	}
+	// A facts line naming the part holds nothing; the heading after it is the part.
+	r = declared(`<p><strong>Zubereitung: 30 Minuten</strong></p><h2>Zutaten</h2><ul><li>1 Ei</li></ul><h2>Zubereitung</h2><ol><li>Backen</li></ol>`)
+	if len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {
+		t.Fatalf("facts line took the part: %#v", r.Instructions)
+	}
+	// A heading never stands at the end of a full list with nothing under it.
+	items := strings.Repeat("<li>1 g Salz</li>", maxListItems-1)
+	r = declared(`<h2>Zutaten</h2><ul>` + items + `</ul><p><b>Deko:</b></p><ul><li>1 Blatt</li></ul><h2>Zubereitung</h2><ol><li>x</li></ol>`)
+	if len(r.Ingredients) > maxListItems || strings.HasSuffix(r.Ingredients[len(r.Ingredients)-1], ":") {
+		t.Fatalf("capped list ends %q (%d lines)", r.Ingredients[len(r.Ingredients)-1], len(r.Ingredients))
+	}
+}

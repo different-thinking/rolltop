@@ -16,21 +16,20 @@ package recipe
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
-// copyBlockRE finds, in document order, the three things the copy is read
-// for: headings, paragraphs (a bold one is a sub-heading) and lists. Lists
-// are matched lazily, so a nested list ends its parent early -- an ingredient
-// list with a nested list is rare enough that losing its tail is the price.
-var copyBlockRE = regexp.MustCompile(`(?is)<h([1-6])\b[^>]*>(.*?)</h[1-6]\s*>|<p\b[^>]*>(.*?)</p\s*>|<(ul|ol)\b[^>]*>(.*?)</(?:ul|ol)\s*>`)
+// copyTagRE finds the tags the copy is read by: headings, paragraphs, lists
+// and their items. Everything between them is text (with inline markup that
+// cleanText strips). The copy is read as a stream of these tags rather than
+// by matching elements whole, because HTML lets a page leave out </p> and
+// </li>, and an element match then swallows every list that follows it.
+var copyTagRE = regexp.MustCompile(`(?is)<(/?)(h[1-6]|p|ul|ol|li)\b[^>]*>`)
 
 var (
-	listItemRE   = regexp.MustCompile(`(?is)<li\b[^>]*>(.*?)(?:</li\s*>|$)`)
 	boldOnlyRE   = regexp.MustCompile(`(?is)^\s*<(strong|b)\b[^>]*>(.*?)</(?:strong|b)\s*>\s*:?\s*$`)
-	copySkipRE   = regexp.MustCompile(`(?is)<(script|style|noscript|template|nav|header|footer|aside|form)\b[^>]*>.*?</(?:script|style|noscript|template|nav|header|footer|aside|form)\s*>`)
+	copySkipRE   = regexp.MustCompile(`(?is)<(script|style|noscript|template|nav|header|footer|aside)\b[^>]*>.*?</(?:script|style|noscript|template|nav|header|footer|aside)\s*>`)
 	copyKeywords = map[string][]string{
 		"ingredients":  {"zutaten", "zutatenliste", "ingredients"},
 		"instructions": {"zubereitung", "anleitung", "so geht's", "so geht’s", "instructions", "directions", "method", "preparation"},
@@ -65,54 +64,120 @@ func copyBlocks(markup string) []copyBlock {
 	}
 	body = copySkipRE.ReplaceAllString(body, " ")
 	var blocks []copyBlock
-	for _, match := range copyBlockRE.FindAllStringSubmatch(body, -1) {
-		switch {
-		case match[1] != "":
-			level, _ := strconv.Atoi(match[1])
-			blocks = append(blocks, copyBlock{level: level, text: cleanText(match[2], maxShortRunes)})
-		case match[4] != "":
-			block := copyBlock{}
-			for _, item := range listItemRE.FindAllStringSubmatch(match[5], -1) {
-				if text := cleanText(item[1], maxTextRunes); text != "" {
-					block.items = append(block.items, text)
-				}
-			}
-			if len(block.items) > 0 {
-				blocks = append(blocks, block)
-			}
-		default:
-			if bold := boldOnlyRE.FindStringSubmatch(match[3]); bold != nil {
+	// What is being read: a heading (its level), a paragraph, or a list item
+	// of the list being read.
+	var (
+		textKind  string // "h", "p", "li" or ""
+		textLevel int
+		textStart int
+		list      *copyBlock
+		listDepth int
+	)
+	endText := func(at int) {
+		raw := body[textStart:at]
+		switch textKind {
+		case "h":
+			blocks = append(blocks, copyBlock{level: textLevel, text: cleanText(raw, maxShortRunes)})
+		case "p":
+			if bold := boldOnlyRE.FindStringSubmatch(raw); bold != nil {
 				blocks = append(blocks, copyBlock{level: 7, text: cleanText(bold[2], maxShortRunes)})
+			} else if text := cleanText(raw, maxTextRunes); text != "" {
+				blocks = append(blocks, copyBlock{text: text})
+			}
+		case "li":
+			if text := cleanText(raw, maxTextRunes); text != "" && list != nil {
+				list.items = append(list.items, text)
+			}
+		}
+		textKind = ""
+	}
+	endList := func() {
+		if list != nil && len(list.items) > 0 {
+			blocks = append(blocks, *list)
+		}
+		list, listDepth = nil, 0
+	}
+	for _, loc := range copyTagRE.FindAllStringSubmatchIndex(body, -1) {
+		closing := loc[3] > loc[2]
+		name := strings.ToLower(body[loc[4]:loc[5]])
+		switch {
+		case name == "li":
+			// An item ends at its own end tag or where the next one begins.
+			if textKind != "" {
+				endText(loc[0])
+			}
+			if !closing && list != nil {
+				textKind, textStart = "li", loc[1]
+			}
+		case name == "ul" || name == "ol":
+			if textKind != "" {
+				endText(loc[0])
+			}
+			if !closing {
+				// A nested list's items are read as items of the list around it.
+				if list == nil {
+					list = &copyBlock{}
+				}
+				listDepth++
+				continue
+			}
+			if listDepth--; listDepth <= 0 {
+				endList()
+			}
+		default: // a heading or a paragraph ends whatever text was open
+			if textKind == "li" && list != nil && listDepth > 0 && name == "p" {
+				// A paragraph inside an item is part of the item.
+				continue
+			}
+			if textKind != "" {
+				endText(loc[0])
+			}
+			if list != nil && !(name == "p" && listDepth > 0) {
+				endList()
+			}
+			if closing {
+				continue
+			}
+			if name == "p" {
+				textKind, textStart = "p", loc[1]
 			} else {
-				blocks = append(blocks, copyBlock{text: cleanText(match[3], maxTextRunes)})
+				textKind, textLevel, textStart = "h", int(name[1]-'0'), loc[1]
 			}
 		}
 	}
+	if textKind != "" {
+		endText(len(body))
+	}
+	endList()
 	return blocks
 }
 
-// copyPart returns the blocks between the heading that opens part (the first
-// one naming it) and the next heading at its level or above, or the heading
-// that opens the other part.
+// copyPart returns the blocks between a heading that opens part and the next
+// heading at its level or above, or the heading that opens the other part. A
+// bold paragraph is a sub-heading and never ends a part, even one a bold
+// paragraph opened. The first heading whose part holds a list is the one: a
+// recipe's facts line ("Zubereitung: 30 Minuten") names the part too, and
+// holds nothing.
 func copyPart(blocks []copyBlock, part string) []copyBlock {
-	start, level := -1, 0
-	for i, block := range blocks {
-		if block.level > 0 && copyHeadingNames(block.text, part) {
-			start, level = i, block.level
-			break
+	for start, opener := range blocks {
+		if opener.level == 0 || !copyHeadingNames(opener.text, part) {
+			continue
+		}
+		var out []copyBlock
+		lists := false
+		for _, block := range blocks[start+1:] {
+			if block.level > 0 && ((block.level < 7 && block.level <= opener.level) ||
+				copyHeadingNames(block.text, "ingredients") || copyHeadingNames(block.text, "instructions")) {
+				break
+			}
+			lists = lists || len(block.items) > 0
+			out = append(out, block)
+		}
+		if lists {
+			return out
 		}
 	}
-	if start < 0 {
-		return nil
-	}
-	var out []copyBlock
-	for _, block := range blocks[start+1:] {
-		if block.level > 0 && (block.level <= level || copyHeadingNames(block.text, "ingredients") || copyHeadingNames(block.text, "instructions")) {
-			break
-		}
-		out = append(out, block)
-	}
-	return out
+	return nil
 }
 
 // copyHeadingNames reports whether a heading opens the given part: it is one
@@ -149,10 +214,10 @@ func copyIngredients(blocks []copyBlock) []string {
 		if len(block.items) == 0 {
 			continue
 		}
-		if heading != "" {
+		if heading != "" && len(out) < maxListItems-1 {
 			out = append(out, heading)
-			heading = ""
 		}
+		heading = ""
 		for _, item := range block.items {
 			if len(out) >= maxListItems {
 				return out

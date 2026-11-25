@@ -6,5 +6,10 @@
 -- the pages it could have been are read once more: the links answered as an
 -- article or a plain link. The loop fetches them at its usual pace, and a page
 -- that is still no recipe is filed exactly as before.
-UPDATE plugin_recipe_box_links SET status = 'pending', attempts = 0, next_attempt_at = 0, error = ''
+--
+-- A re-read is marked (reread), because it may only ever improve an answer: a
+-- page that answered once and fails now -- gone, or busy -- goes back to the
+-- answer it had instead of becoming a failed link.
+ALTER TABLE plugin_recipe_box_links ADD COLUMN IF NOT EXISTS reread INTEGER NOT NULL DEFAULT 0;
+UPDATE plugin_recipe_box_links SET status = 'pending', reread = 1, attempts = 0, next_attempt_at = 0, error = ''
 WHERE status = 'page' AND forced = 0 AND kind IN ('article', 'link');
