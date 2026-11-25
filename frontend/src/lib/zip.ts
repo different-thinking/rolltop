@@ -53,9 +53,13 @@ export async function zipEntries(entries: ZipEntry[], archiveName: string): Prom
   const central: Uint8Array<ArrayBuffer>[] = [];
   let offset = 0;
 
+  // So is the entry count in the end record; ZIP64 would be needed beyond it.
+  if (entries.length > 0xffff) throw new Error("Too many files for one archive.");
   for (const entry of entries) {
     if (entry.data.size >= ZIP32_LIMIT) throw new Error(`${entry.name} is too large to zip.`);
     const name = encoder.encode(entry.name);
+    // The name length is a 16-bit field in both headers.
+    if (name.length > 0xffff) throw new Error(`The name of ${entry.name.slice(0, 40)}... is too long to zip.`);
     const { crc, compressed } = await deflateBlob(entry.data);
     if (compressed.size >= ZIP32_LIMIT || offset >= ZIP32_LIMIT) throw new Error("The archive is too large.");
     const { time, date } = dosDateTime(entry.lastModified ?? Date.now());

@@ -67,6 +67,10 @@ describe("zip", () => {
     expect(entries[0].crc).toBe(nodeCRC32(entries[0].content));
   });
 
+  it("refuses a name its 16-bit length field cannot hold", async () => {
+    await expect(zipEntries([{ name: "a".repeat(0x10000), data: new Blob(["x"]) }], "long.zip")).rejects.toThrow(/too long/);
+  });
+
   it("keeps several entries and their offsets apart", async () => {
     const random = new Uint8Array(70_000);
     for (let index = 0; index < random.length; index += 1) random[index] = (index * 2654435761) >>> 24;
