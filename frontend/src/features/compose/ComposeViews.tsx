@@ -11,6 +11,7 @@ import { Icon, LogoMark } from "../../components/Icon";
 import { formatAddress, splitAddressList } from "../../lib/addresses";
 import { messageFromError } from "../../lib/errors";
 import { isSendChord } from "../../lib/keyboard";
+import { zipArchiveName, zipFile, zipSupported } from "../../lib/zip";
 import { composeTextFromHTML, convertTextNewlinesToBreaks, textToHTML } from "../../lib/html";
 import { defaultMailURL, messageBackURL } from "../../lib/routes";
 import {
@@ -47,6 +48,19 @@ export type ComposeSendOutcome = { archived: boolean };
 const ATTACHMENT_WARNING_BYTES = 20 * 1024 * 1024;
 const RESIZE_PHOTO_MAX_EDGE = 1920;
 const RESIZE_PHOTO_QUALITY = 0.82;
+// A file attached above this size is offered as a ZIP first. The reader decides:
+// a ZIP is smaller for documents and spreadsheets and barely smaller for photos
+// and videos, and some recipients would rather get the file itself.
+const ZIP_OFFER_BYTES = 10 * 1024 * 1024;
+// A ZIP that saves less than this is not worth the extra step for the
+// recipient, so the original is attached instead and the reader is told why.
+const ZIP_MIN_SAVING = 0.05;
+// ZIP without ZIP64 cannot describe an entry this large, and no provider would
+// accept the message anyway.
+const ZIP_MAX_BYTES = 0xffffffff - 1;
+const ARCHIVE_EXTENSIONS = new Set(["zip", "7z", "rar", "gz", "tgz", "bz2", "xz", "zst"]);
+
+type ZipInProgress = { id: string; filename: string; size: number };
 
 type ComposeAttachment = ComposeAttachmentUpload & {
   id: string;
@@ -273,6 +287,13 @@ export function ComposeBox({
   const [savingDraft, setSavingDraft] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
+  // Large files waiting for the reader to answer whether they should be zipped,
+  // and the ones being zipped right now. Neither is an attachment yet, so the
+  // send and the draft wait for both.
+  const [zipOffer, setZipOffer] = useState<File[] | null>(null);
+  const [zipping, setZipping] = useState<ZipInProgress[]>([]);
+  const [fileDragActive, setFileDragActive] = useState(false);
+  const fileDragDepth = useRef(0);
   const [pendingRecovery, setPendingRecovery] = useState<LocalComposeRecovery | null>(null);
   const [recoveryReady, setRecoveryReady] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -309,6 +330,7 @@ export function ComposeBox({
     return uploadBytes + existingBytes + forwardedBytes;
   }, [attachments, includedExistingAttachments, forwardedMessageAttachment]);
   const hasAttachmentWarning = totalAttachmentBytes > ATTACHMENT_WARNING_BYTES;
+  const attachmentsPending = zipOffer !== null || zipping.length > 0;
   // Only a reply has something to file, so only a reply can send and archive.
   const canSendAndArchive = initial.in_reply_to_id > 0;
   const canResizePhotos = attachments.some((attachment) => isResizablePhoto(attachment.file));
@@ -393,6 +415,22 @@ export function ComposeBox({
   useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
+
+  // A file dropped just beside the composer would otherwise be opened by the
+  // browser in place of the app, taking the unsent message with it. Drop zones
+  // elsewhere in the app handle their drops before the event reaches window.
+  useEffect(() => {
+    function holdFileDrop(event: globalThis.DragEvent) {
+      if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+      event.preventDefault();
+    }
+    window.addEventListener("dragover", holdFileDrop);
+    window.addEventListener("drop", holdFileDrop);
+    return () => {
+      window.removeEventListener("dragover", holdFileDrop);
+      window.removeEventListener("drop", holdFileDrop);
+    };
+  }, []);
 
   useEffect(() => () => {
     revokeAttachmentObjectURLs(attachmentsRef.current);
@@ -555,10 +593,53 @@ export function ComposeBox({
   function addFiles(fileList: FileList | File[], inline = false) {
     const files = Array.from(fileList).filter((file) => file.size > 0 || file.name);
     if (files.length === 0) return;
+    if (inline) {
+      attachFiles(files, true);
+      return;
+    }
+    const large = zipSupported() ? files.filter(isZipCandidate) : [];
+    const direct = files.filter((file) => !large.includes(file));
+    if (direct.length > 0) attachFiles(direct, false);
+    if (large.length > 0) setZipOffer((current) => [...(current || []), ...large]);
+  }
+
+  function attachFiles(files: File[], inline: boolean) {
     const nextAttachments = files.map((file) => createComposeAttachment(file, inline));
     setAttachments((current) => [...current, ...nextAttachments]);
     if (inline) {
       nextAttachments.forEach((attachment) => insertInlineAttachment(attachment));
+    }
+  }
+
+  // The reader's answer to the ZIP offer. Cancelling attaches none of the large
+  // files: the reader picked them, but said no to both ways of sending them.
+  async function answerZipOffer(answer: "zip" | "original" | "cancel") {
+    const files = zipOffer || [];
+    setZipOffer(null);
+    if (files.length === 0 || answer === "cancel") return;
+    if (answer === "original") {
+      attachFiles(files, false);
+      return;
+    }
+    const pending = files.map((file) => ({ id: randomAttachmentID(), filename: zipArchiveName(file.name), size: file.size }));
+    setZipping((current) => [...current, ...pending]);
+    // One file at a time: each one is read twice and held compressed in memory
+    // until it is attached, and a handful of large videos at once is a lot of it.
+    for (const [index, file] of files.entries()) {
+      try {
+        const archive = await zipFile(file);
+        if (archive.size <= file.size * (1 - ZIP_MIN_SAVING)) {
+          attachFiles([archive], false);
+        } else {
+          attachFiles([file], false);
+          addToast(`${file.name || "The file"} hardly gets smaller as a ZIP, so it was attached as it is.`);
+        }
+      } catch (err) {
+        attachFiles([file], false);
+        addToast(`Could not zip ${file.name || "the file"} (${messageFromError(err)}). It was attached as it is.`, "error");
+      } finally {
+        setZipping((current) => current.filter((item) => item.id !== pending[index].id));
+      }
     }
   }
 
@@ -659,10 +740,36 @@ export function ComposeBox({
     addFiles(files, true);
   }
 
-  function handleComposeDrop(event: DragEvent<HTMLDivElement>) {
+  // Files can be dropped anywhere on the composer, not just on the text. Only a
+  // drag carrying files is taken: text dragged inside the editor keeps moving
+  // the way the browser moves it.
+  function handleFileDragEnter(event: DragEvent<HTMLFormElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    fileDragDepth.current += 1;
+    setFileDragActive(true);
+  }
+
+  function handleFileDragOver(event: DragEvent<HTMLFormElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = sending ? "none" : "copy";
+  }
+
+  function handleFileDragLeave(event: DragEvent<HTMLFormElement>) {
+    if (!isFileDrag(event)) return;
+    fileDragDepth.current = Math.max(0, fileDragDepth.current - 1);
+    if (fileDragDepth.current === 0) setFileDragActive(false);
+  }
+
+  function handleComposeDrop(event: DragEvent<HTMLFormElement>) {
+    fileDragDepth.current = 0;
+    setFileDragActive(false);
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
     event.preventDefault();
+    if (sending) return;
+    if (minimized) onMinimize?.();
     addFiles(files, false);
   }
 
@@ -722,7 +829,7 @@ export function ComposeBox({
   function handleComposeKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
     if (!isSendChord(event)) return;
     event.preventDefault();
-    if (event.repeat || sendInFlight.current || sending || savingDraft || resizing) return;
+    if (event.repeat || sendInFlight.current || sending || savingDraft || resizing || attachmentsPending) return;
     archiveOnSend.current = canSendAndArchive;
     // The recipient fields see this keystroke first and hand over whatever they
     // were still holding -- a highlighted suggestion, a typed address -- which
@@ -736,6 +843,10 @@ export function ComposeBox({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (sendInFlight.current) return;
+    if (attachmentsPending) {
+      addToast("Wait until the attachments are ready.", "error");
+      return;
+    }
     if (!composeSecurity.beginSubmit(formRef)) return;
     sendInFlight.current = true;
     const editor = editorRef.current;
@@ -789,6 +900,7 @@ export function ComposeBox({
   }
 
   async function saveDraft() {
+    if (attachmentsPending) return;
     const editor = editorRef.current;
     const preparedHTML = prepareComposeHTML(editor?.innerHTML || "", attachments);
     const uploadAttachments = attachments.filter((attachment) => !attachment.inline || preparedHTML.inlineIDs.has(attachment.id));
@@ -823,6 +935,10 @@ export function ComposeBox({
       className={`${inline ? "inline-reply" : "compose-window"}${minimized ? " minimized" : ""}`}
       onSubmit={submit}
       onKeyDown={handleComposeKeyDown}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleComposeDrop}
     >
       {!inline ? (
         <div className="compose-head">
@@ -948,8 +1064,6 @@ export function ComposeBox({
         ) : null}
         <div
           className={`compose-body ${composeSecurity.transform.active ? `pgp-transforming pgp-transform-${composeSecurity.transform.phase}` : ""}`}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={handleComposeDrop}
         >
           <div
             ref={editorRef}
@@ -967,7 +1081,7 @@ export function ComposeBox({
             </pre>
           ) : null}
         </div>
-        {attachments.length > 0 || includedExistingAttachments.length > 0 || forwardedMessageAttachment || remainingExistingAttachmentCount > 0 || hasAttachmentWarning ? (
+        {attachments.length > 0 || zipping.length > 0 || includedExistingAttachments.length > 0 || forwardedMessageAttachment || remainingExistingAttachmentCount > 0 || hasAttachmentWarning ? (
           <div className="compose-attachments" aria-live="polite">
             {remainingExistingAttachmentCount > 0 ? (
               <button className="compose-existing-attachment-link ghost text-link" type="button" onClick={includeExistingAttachments}>
@@ -975,7 +1089,7 @@ export function ComposeBox({
                 Include previous {remainingExistingAttachmentCount === 1 ? "attachment" : "attachments"}
               </button>
             ) : null}
-            {includedExistingAttachments.length > 0 || attachments.length > 0 ? (
+            {includedExistingAttachments.length > 0 || attachments.length > 0 || zipping.length > 0 ? (
               <div className="compose-attachment-list">
                 {includedExistingAttachments.map((attachment) => (
                   <div className="compose-attachment compose-attachment-existing" key={`existing-${attachment.id}`}>
@@ -1011,6 +1125,15 @@ export function ComposeBox({
                     <button className="ghost" type="button" title="Remove attachment" onClick={() => removeAttachment(attachment.id)}>
                       <Icon name="close" />
                     </button>
+                  </div>
+                ))}
+                {zipping.map((item) => (
+                  <div className="compose-attachment compose-attachment-pending" key={item.id} aria-busy="true">
+                    <Icon name="file_zip" />
+                    <span>
+                      <strong>{item.filename}</strong>
+                      <small>Zipping {formatBytes(item.size)}...</small>
+                    </span>
                   </div>
                 ))}
               </div>
@@ -1102,12 +1225,22 @@ export function ComposeBox({
         }}
       />
       {composeSecurity.renderSendChoice(formRef)}
+      {fileDragActive ? (
+        <div className="compose-drop-overlay" aria-hidden="true">
+          <Icon name="attach_file" />
+          <strong>Drop files to attach</strong>
+          {zipSupported() ? <small>Files over {formatBytes(ZIP_OFFER_BYTES)} can be zipped first</small> : null}
+        </div>
+      ) : null}
+      {zipOffer && zipOffer.length > 0 ? (
+        <ZipOfferDialog files={zipOffer} onAnswer={(answer) => void answerZipOffer(answer)} />
+      ) : null}
       <div className="compose-sendbar">
         <div className="compose-send-actions">
           <button
             className="send-button"
             title={canSendAndArchive ? "Send this reply and leave the message it answers where it is" : "Send this message (Ctrl+Enter)"}
-            disabled={sending || savingDraft || resizing}
+            disabled={sending || savingDraft || resizing || attachmentsPending}
             onClick={() => { archiveOnSend.current = false; }}
           >
             <Icon name="send" />
@@ -1120,14 +1253,14 @@ export function ComposeBox({
             <button
               className="send-archive-button"
               title="Send this reply and file the message it answers (Ctrl+Enter)"
-              disabled={sending || savingDraft || resizing}
+              disabled={sending || savingDraft || resizing || attachmentsPending}
               onClick={() => { archiveOnSend.current = true; }}
             >
               <Icon name="archive" />
               <span>Send &amp; archive</span>
             </button>
           ) : null}
-          <button className="secondary save-draft-button" type="button" title="Save draft" aria-label={savingDraft ? "Saving draft" : "Save draft"} disabled={sending || savingDraft || resizing} onClick={() => void saveDraft()}>
+          <button className="secondary save-draft-button" type="button" title="Save draft" aria-label={savingDraft ? "Saving draft" : "Save draft"} disabled={sending || savingDraft || resizing || attachmentsPending} onClick={() => void saveDraft()}>
             <Icon name="draft" />
             <span>{savingDraft ? "Saving..." : "Save draft"}</span>
           </button>
@@ -1141,6 +1274,73 @@ export function ComposeBox({
       </div>
     </form>
   );
+}
+
+/** Asks whether attachments over ZIP_OFFER_BYTES should be zipped first. */
+function ZipOfferDialog({ files, onAnswer }: { files: File[]; onAnswer: (answer: "zip" | "original" | "cancel") => void }) {
+  const zipButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    zipButtonRef.current?.focus();
+  }, []);
+  const single = files.length === 1 ? files[0] : null;
+  return (
+    <div
+      className="compose-zip-offer"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="compose-zip-offer-title"
+      onKeyDown={(event) => {
+        // Escape belongs to this question while it is open; the composer behind
+        // it must not read it as anything else.
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onAnswer("cancel");
+      }}
+    >
+      <div className="compose-zip-offer-card">
+        <Icon name="file_zip" />
+        <div className="compose-zip-offer-text">
+          <strong id="compose-zip-offer-title">
+            {single
+              ? `${single.name || "This file"} is ${formatBytes(single.size)}. Zip it before attaching?`
+              : `${files.length} files are larger than ${formatBytes(ZIP_OFFER_BYTES)}. Zip them before attaching?`}
+          </strong>
+          {single ? null : (
+            <ul>
+              {files.map((file, index) => (
+                <li key={`${file.name}-${index}`}>
+                  <span>{file.name || "Attachment"}</span>
+                  <small>{formatBytes(file.size)}</small>
+                </li>
+              ))}
+            </ul>
+          )}
+          <small>Each file becomes its own ZIP. Photos and videos barely shrink; a file a ZIP does not make smaller is attached as it is.</small>
+        </div>
+        <div className="compose-zip-offer-actions">
+          <button ref={zipButtonRef} type="button" onClick={() => onAnswer("zip")}>
+            <Icon name="file_zip" />
+            Zip
+          </button>
+          <button className="secondary" type="button" onClick={() => onAnswer("original")}>Attach as is</button>
+          <button className="ghost" type="button" onClick={() => onAnswer("cancel")}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function isFileDrag(event: DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function isZipCandidate(file: File): boolean {
+  if (file.size <= ZIP_OFFER_BYTES || file.size > ZIP_MAX_BYTES) return false;
+  const name = (file.name || "").toLowerCase();
+  const extension = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  if (ARCHIVE_EXTENSIONS.has(extension)) return false;
+  return file.type !== "application/zip" && file.type !== "application/x-zip-compressed";
 }
 
 function composeExistingAttachmentName(attachment: ComposeExistingAttachment): string {
