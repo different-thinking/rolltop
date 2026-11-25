@@ -295,19 +295,32 @@ export default function App() {
   // short. Where this session remembers the position, it is restored again
   // once the list is tall enough. The page being left is still drawn when the
   // event fires, so its own offset is still the one to remember.
+  // The offset is the last one a scroll event reported rather than
+  // `window.scrollY` at the event: a browser may already have restored the
+  // entry it is stepping to by the time popstate fires, while the scroll event
+  // that restoration causes is only dispatched on the next frame.
   const shownLocationKeyRef = useRef(locationKey(location));
   shownLocationKeyRef.current = locationKey(location);
+  const lastScrollYRef = useRef(0);
   useEffect(() => {
+    lastScrollYRef.current = window.scrollY;
+    const onScroll = () => {
+      lastScrollYRef.current = window.scrollY;
+    };
     const onPop = () => {
-      rememberScroll(shownLocationKeyRef.current, window.scrollY);
+      rememberScroll(shownLocationKeyRef.current, lastScrollYRef.current);
       const to = currentLocation();
       setLocation(to);
       const remembered = rememberedScroll(locationKey(to));
       if (remembered !== undefined) restoreScroll(remembered);
       else cancelScrollRestore();
     };
+    window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("popstate", onPop);
+    };
   }, []);
 
   // Bootstrap is the shared chrome contract: auth state, CSRF token, folder

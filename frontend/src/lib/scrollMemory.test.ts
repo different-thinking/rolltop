@@ -39,11 +39,31 @@ describe("scrollAfterNavigation", () => {
 
   it("does not restore a remembered list reached some other way", () => {
     rememberScroll("/mail/archive", 900);
-    expect(scrollAfterNavigation(at(messageURL(42, "", [], "/mail/inbox")), at("/mail/archive"))).toBe(0);
+    expect(scrollAfterNavigation(at(messageURL(42, "", [], "/mail/inbox")), at("/mail/archive"))).toBeNull();
   });
 
   it("leaves the page alone when only the query of the same view changes", () => {
     expect(scrollAfterNavigation(at("/calendar"), at("/calendar?remind=7"))).toBeNull();
+  });
+
+  it("leaves the page alone between views that open no message", () => {
+    expect(scrollAfterNavigation(at("/calendar/2026-11-23"), at("/calendar/2026-11-30"))).toBeNull();
+    expect(scrollAfterNavigation(at("/settings/account/mail"), at("/settings/account/google"))).toBeNull();
+  });
+
+  it("finds the list again when its back carries a fragment", () => {
+    rememberScrollLeaving(at("/mail/inbox"), at(messageURL(42, "", [], "/mail/inbox#top")), 410);
+    expect(scrollAfterNavigation(at(messageURL(42, "", [], "/mail/inbox#top")), at("/mail/inbox"))).toBe(410);
+  });
+
+  it("lets only the list write under the back an opened message carries", () => {
+    rememberScroll("/mail/inbox", 300);
+    // A notification opening a message from the calendar names the inbox as
+    // its way back; the calendar's offset is not the inbox's.
+    rememberScrollLeaving(at("/calendar/2026-11-23"), at(messageURL(42, "", [], "/mail/inbox")), 2200);
+    // Nor is the offset of a message moving on to the composer.
+    rememberScrollLeaving(at(messageURL(42, "", [], "/mail/inbox")), at("/compose?reply=42&back=%2Fmail%2Finbox"), 1700);
+    expect(rememberedScroll("/mail/inbox")).toBe(300);
   });
 
   it("forgets the oldest routes beyond its bound", () => {
