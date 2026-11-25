@@ -48,10 +48,13 @@ type dueLink struct {
 	URL    string
 	Forced bool
 	Tries  int
+	// Reread is a page that had already answered and is asked again (see
+	// migration 007): it may improve its answer, never lose it.
+	Reread bool
 }
 
 func dueLinks(ctx context.Context, db *sql.DB, userID int64, limit int) ([]dueLink, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, url, forced, attempts FROM plugin_recipe_box_links
+	rows, err := db.QueryContext(ctx, `SELECT id, url, forced, attempts, reread FROM plugin_recipe_box_links
 		WHERE user_id = ? AND status = 'pending' AND next_attempt_at <= ?
 		ORDER BY next_attempt_at, id LIMIT ?`, userID, time.Now().UTC().Unix(), limit)
 	if err != nil {
@@ -61,11 +64,12 @@ func dueLinks(ctx context.Context, db *sql.DB, userID int64, limit int) ([]dueLi
 	var out []dueLink
 	for rows.Next() {
 		var link dueLink
-		var forced int
-		if err := rows.Scan(&link.ID, &link.URL, &forced, &link.Tries); err != nil {
+		var forced, reread int
+		if err := rows.Scan(&link.ID, &link.URL, &forced, &link.Tries, &reread); err != nil {
 			return nil, err
 		}
 		link.Forced = forced != 0
+		link.Reread = reread != 0
 		out = append(out, link)
 	}
 	return out, rows.Err()
@@ -139,12 +143,19 @@ func (p *recipeBoxBackend) waitForHost(ctx context.Context, link string) {
 
 func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID int64, link dueLink, page recipe.Page, finalURL string, fetchErr error) error {
 	now := time.Now().UTC()
+	if fetchErr != nil && link.Reread && !link.Forced {
+		// The page answered before and this was only a second look: it keeps
+		// the answer, kind and preview it had.
+		_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', reread = 0, attempts = 0, next_attempt_at = 0, error = '', updated_at = ? WHERE user_id = ? AND id = ?`,
+			now.Unix(), userID, link.ID)
+		return err
+	}
 	if fetchErr != nil {
 		var status recipe.HTTPStatusError
 		permanent := errors.Is(fetchErr, recipe.ErrNotHTML) || (errors.As(fetchErr, &status) && status.Permanent())
 		attempts := link.Tries + 1
 		if permanent || attempts >= maxFetchAttempts {
-			_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'failed', kind = ?, attempts = ?, error = ?, fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
+			_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'failed', reread = 0, kind = ?, attempts = ?, error = ?, fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
 				hostKindOrLink(link.URL), attempts, fetchErrorText(fetchErr), now.Unix(), now.Unix(), userID, link.ID)
 			return err
 		}
@@ -154,7 +165,7 @@ func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID 
 		return err
 	}
 	preview := previewOf(page)
-	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET final_url = ?, title = ?, description = ?, image_url = ?, site_name = ?, fetched_at = ?, error = '', updated_at = ?
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET final_url = ?, title = ?, description = ?, image_url = ?, site_name = ?, fetched_at = ?, error = '', reread = 0, updated_at = ?
 		WHERE user_id = ? AND id = ?`, clean(finalURL), preview.Title, preview.Description, preview.ImageURL, preview.SiteName, now.Unix(), now.Unix(), userID, link.ID); err != nil {
 		return err
 	}
@@ -194,7 +205,7 @@ func (p *recipeBoxBackend) recordAnswer(ctx context.Context, db *sql.DB, userID 
 // recordUnfetched files a link that is not fetched by its platform.
 func recordUnfetched(ctx context.Context, db *sql.DB, userID int64, link dueLink) error {
 	now := time.Now().UTC().Unix()
-	_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', kind = ?, detail = '', site_name = CASE WHEN site_name = '' THEN ? ELSE site_name END,
+	_, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'page', reread = 0, kind = ?, detail = '', site_name = CASE WHEN site_name = '' THEN ? ELSE site_name END,
 			error = '', fetched_at = ?, updated_at = ? WHERE user_id = ? AND id = ?`,
 		hostKindOrLink(link.URL), hostLabel(link.URL), now, now, userID, link.ID)
 	return err

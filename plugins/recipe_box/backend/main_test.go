@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -618,5 +619,65 @@ func TestHeaderlessNoteDraggedBackIsNotFiledAgain(t *testing.T) {
 	var mails int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_recipe_box_mails WHERE user_id = ?`, f.user.ID).Scan(&mails); err != nil || mails != 1 {
 		t.Fatalf("mails = %d err %v", mails, err)
+	}
+}
+
+// Migration 007 asks article and plain-link pages once more. A page that now
+// declares its recipe is filed as one; a page that fails the second look keeps
+// the answer it had rather than turning into a failed link.
+func TestRereadImprovesAnAnswerAndNeverLosesIt(t *testing.T) {
+	st := openRecipeStore(t)
+	ctx := context.Background()
+	db := st.DB()
+	var mu sync.Mutex
+	pages := map[string]string{
+		"/soup":  `<html><head><title>Suppe</title><meta property="og:type" content="article"></head><body></body></html>`,
+		"/stale": `<html><head><title>Alt</title><meta property="og:type" content="article"></head><body></body></html>`,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		body, ok := pages[r.URL.Path]
+		mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(body))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	f := newFixture(t, st, "reread@example.test")
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<soup@example.test>", "reread@example.test", "reread@example.test", "Suppe", server.URL+"/soup", time.Now())
+	createMessage(t, st, f.user.ID, f.account.ID, f.inbox.ID, "<stale@example.test>", "reread@example.test", "reread@example.test", "Alt", server.URL+"/stale", time.Now())
+	if _, err := saveSettings(ctx, db, f.user.ID, Settings{Enabled: true, OwnRecipientsOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := testBackend()
+	host := &fakeHost{t: t, store: st, userID: f.user.ID}
+	drain(t, p, host, f.user.ID)
+
+	mu.Lock()
+	pages["/soup"] = `<html><head><title>Suppe</title><script type="application/ld+json">{"@type":"Recipe","name":"Linsensuppe"}</script></head>
+		<body><h2>Zutaten</h2><ul><li>400 g Linsen</li></ul><h2>Zubereitung</h2><ol><li>Kochen.</li></ol></body></html>`
+	delete(pages, "/stale")
+	mu.Unlock()
+	if _, err := db.ExecContext(ctx, `UPDATE plugin_recipe_box_links SET status = 'pending', reread = 1, attempts = 0, next_attempt_at = 0, error = ''
+		WHERE user_id = ? AND status = 'page' AND forced = 0 AND kind IN ('article', 'link')`, f.user.ID); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, p, host, f.user.ID)
+
+	if recipeIDByTitle(t, db, f.user.ID, "Linsensuppe") == 0 {
+		t.Fatal("a page now declaring its recipe was not filed as one")
+	}
+	var status, kind, title string
+	var reread int
+	if err := db.QueryRowContext(ctx, `SELECT status, kind, title, reread FROM plugin_recipe_box_links WHERE user_id = ? AND url LIKE ?`, f.user.ID, "%/stale").Scan(&status, &kind, &title, &reread); err != nil {
+		t.Fatal(err)
+	}
+	if status != "page" || kind != "article" || title != "Alt" || reread != 0 {
+		t.Fatalf("stale link = %s %s %q reread=%d, want the answer it had", status, kind, title, reread)
 	}
 }

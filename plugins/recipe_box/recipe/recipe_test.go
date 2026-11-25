@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,95 @@ func TestHostKindAndNoFetch(t *testing.T) {
 	}
 	if NoFetch("https://www.booking.com/hotel/x") || NoFetch("https://github.com/acme/tool") {
 		t.Fatal("a public page is not fetched")
+	}
+}
+
+// hr-fernsehen.de publishes a Recipe block holding only the dish's name and
+// picture and prints the ingredients and the method as the article's text.
+// The page is fetched as it was served on 2026-11-25.
+func TestParsePageCompletesNameOnlyRecipeFromItsCopy(t *testing.T) {
+	markup, err := os.ReadFile("testdata/hr-fernsehen-rote-linsen-suppe.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := ParsePage(string(markup), "https://www.hr-fernsehen.de/sendungen-a-z/hallo-hessen/rezepte/rezept-tuerkische-rote-linsen-suppe-v1,kochen-11880.html")
+	if page.Recipe == nil {
+		t.Fatal("a page declaring a Recipe was not taken for one")
+	}
+	r := page.Recipe
+	if r.Name != "Türkische Rote-Linsen-Suppe" || len(r.ImageURLs) == 0 {
+		t.Fatalf("recipe = %#v", r)
+	}
+	sections := IngredientSections(r.Ingredients)
+	if len(sections) != 3 || sections[0].Name != "Rote-Linsen-Suppe" || len(sections[0].Items) != 13 ||
+		sections[1].Name != "Toppings (je nach persönlichem Geschmack)" || sections[2].Name != "Beilagen" {
+		t.Fatalf("sections = %#v", sections)
+	}
+	if sections[0].Items[0].Text != "1 Zwiebel, mittelgroß" || sections[0].Items[11].Text != "je 1 Prise Salz & Pfeffer, zum Abschmecken" {
+		t.Fatalf("ingredients = %#v", r.Ingredients)
+	}
+	if len(r.Instructions) != 1 || r.Instructions[0].Name != "Rote-Linsen-Suppe" || len(r.Instructions[0].Steps) != 12 ||
+		r.Instructions[0].Steps[0] != "die roten Linsen unter fließendem, kaltem Wasser waschen" {
+		t.Fatalf("instructions = %#v", r.Instructions)
+	}
+}
+
+func TestParsePageReadsCopyOnlyForADeclaredRecipe(t *testing.T) {
+	copyText := `<h2>Zutaten für 4 Personen</h2><ul><li>200 g Mehl</li><li>1 Ei</li></ul>
+		<p>Ein Tipp vom Koch.</p><h2>Zubereitung</h2><ol><li>Mischen.</li><li>Backen.</li></ol><h2>Mehr Rezepte</h2><ul><li>Kuchen</li></ul>`
+	if page := ParsePage(`<html><head><title>Kuchen</title></head><body>`+copyText+`</body></html>`, "https://example.test/"); page.Recipe != nil {
+		t.Fatal("a page without a Recipe block was taken for a recipe because of its headings")
+	}
+	declared := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body>` + copyText + `</body></html>`
+	page := ParsePage(declared, "https://example.test/")
+	if page.Recipe == nil || strings.Join(page.Recipe.Ingredients, "|") != "200 g Mehl|1 Ei" ||
+		len(page.Recipe.Instructions) != 1 || strings.Join(page.Recipe.Instructions[0].Steps, "|") != "Mischen.|Backen." {
+		t.Fatalf("recipe = %#v", page.Recipe)
+	}
+	nameOnly := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body><p>Lecker.</p></body></html>`
+	if page := ParsePage(nameOnly, "https://example.test/"); page.Recipe != nil {
+		t.Fatal("a Recipe block naming nothing to cook was taken for a recipe")
+	}
+	structured := `<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen","recipeIngredient":["250 g Mehl"]}</script></head><body>` + copyText + `</body></html>`
+	page = ParsePage(structured, "https://example.test/")
+	if page.Recipe == nil || strings.Join(page.Recipe.Ingredients, "|") != "250 g Mehl" || len(page.Recipe.Instructions) != 0 {
+		t.Fatalf("the copy was read beside the page's own structured ingredients: %#v", page.Recipe)
+	}
+}
+
+func TestCopyIsReadAsHTMLWritesIt(t *testing.T) {
+	declared := func(body string) *Recipe {
+		t.Helper()
+		page := ParsePage(`<html><head><script type="application/ld+json">{"@type":"Recipe","name":"Kuchen"}</script></head><body>`+body+`</body></html>`, "https://example.test/")
+		if page.Recipe == nil {
+			t.Fatalf("no recipe read from %s", body)
+		}
+		return page.Recipe
+	}
+	// </li> and </p> are optional in HTML.
+	r := declared(`<p>Vorweg<h2>Zutaten</h2><ul><li>1 Ei<li>2 g Salz</ul><h2>Zubereitung</h2><ol><li>Mischen<li>Backen</ol>`)
+	if strings.Join(r.Ingredients, "|") != "1 Ei|2 g Salz" || strings.Join(r.Instructions[0].Steps, "|") != "Mischen|Backen" {
+		t.Fatalf("unclosed items: %q %#v", r.Ingredients, r.Instructions)
+	}
+	// A part opened by a bold paragraph keeps its bold sub-headings.
+	r = declared(`<p><strong>Zutaten</strong></p><p><strong>Teig:</strong></p><ul><li>1 Ei</li></ul><p><b>Belag:</b></p><ul><li>2 Äpfel</li></ul><p><b>Zubereitung</b></p><ol><li>Backen</li></ol>`)
+	if strings.Join(r.Ingredients, "|") != "Teig:|1 Ei|Belag:|2 Äpfel" || len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {
+		t.Fatalf("bold parts: %q %#v", r.Ingredients, r.Instructions)
+	}
+	// A sub-heading naming the part is a section of it, not its end.
+	r = declared(`<h2>Zutaten</h2><h3>Zutaten für den Teig</h3><ul><li>1 Ei</li></ul><h2>Zubereitung</h2><h3>Zubereitung des Teigs</h3><ol><li>Kneten</li></ol>`)
+	if strings.Join(r.Ingredients, "|") != "Zutaten für den Teig:|1 Ei" || len(r.Instructions) != 1 || r.Instructions[0].Name != "Zubereitung des Teigs" {
+		t.Fatalf("sub-headings naming the part: %q %#v", r.Ingredients, r.Instructions)
+	}
+	// A facts line naming the part holds nothing; the heading after it is the part.
+	r = declared(`<p><strong>Zubereitung: 30 Minuten</strong></p><h2>Zutaten</h2><ul><li>1 Ei</li></ul><h2>Zubereitung</h2><ol><li>Backen</li></ol>`)
+	if len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {
+		t.Fatalf("facts line took the part: %#v", r.Instructions)
+	}
+	// A heading never stands at the end of a full list with nothing under it.
+	items := strings.Repeat("<li>1 g Salz</li>", maxListItems-1)
+	r = declared(`<h2>Zutaten</h2><ul>` + items + `</ul><p><b>Deko:</b></p><ul><li>1 Blatt</li></ul><h2>Zubereitung</h2><ol><li>x</li></ol>`)
+	if len(r.Ingredients) > maxListItems || strings.HasSuffix(r.Ingredients[len(r.Ingredients)-1], ":") {
+		t.Fatalf("capped list ends %q (%d lines)", r.Ingredients[len(r.Ingredients)-1], len(r.Ingredients))
 	}
 }

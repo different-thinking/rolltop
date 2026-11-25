@@ -121,6 +121,9 @@ func ParsePage(markup string, pageURL string) Page {
 		if len(recipe.ImageURLs) == 0 && page.ImageURL != "" {
 			recipe.ImageURLs = []string{page.ImageURL}
 		}
+		// A block that names the dish but not what goes into it is completed
+		// from the page's own "Zutaten" and "Zubereitung" lists.
+		fillFromCopy(recipe, markup)
 		// A structured block with neither a name nor an ingredient is a theme's
 		// empty template, not a recipe the page publishes.
 		if recipe.Name != "" && (len(recipe.Ingredients) > 0 || len(recipe.Instructions) > 0) {

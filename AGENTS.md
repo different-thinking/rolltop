@@ -402,7 +402,13 @@ site and in review.
   and what a spoof can reach is bounded to one guarded fetch per link, a card
   of text and a sniffed raster image, and the move of that mail. A link is a recipe only
   when its page publishes a schema.org `Recipe` (JSON-LD or microdata); a page
-  that does not is a preview the reader can file by hand, never a guess. Every
+  that does not is a preview the reader can file by hand, never a guess. A
+  declared `Recipe` that names the dish but carries neither ingredients nor
+  steps -- hr-fernsehen.de prints every recipe that way -- is completed from the
+  lists under the page's own "Zutaten"/"Zubereitung" headings
+  (`recipe.fillFromCopy`); those headings never make a page a recipe by
+  themselves, and a block with ingredients or steps of its own is never read
+  there. Every
   fetch goes through `remoteimages.SafeDialContext` with no proxy, cookie or
   referrer and is bounded in time and bytes, a picture is stored only as a
   raster type sniffed from its bytes and served with `nosniff` and a sandboxing
