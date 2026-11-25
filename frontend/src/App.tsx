@@ -266,9 +266,17 @@ export default function App() {
 
   // Navigation is intentionally tiny and local: Go serves every SPA route, so
   // the client only needs to update history and reparse LocationState.
+  // The route on screen as far as scroll memory is concerned. Every navigation
+  // sets it the moment it changes the URL, not when React next renders, so a
+  // second step taken before that render remembers the right route.
+  const shownLocationKeyRef = useRef(locationKey(location));
+  const lastScrollYRef = useRef(0);
+
   const replaceRoute = useCallback((url: string) => {
     window.history.replaceState({}, "", url);
-    setLocation(currentLocation());
+    const to = currentLocation();
+    shownLocationKeyRef.current = locationKey(to);
+    setLocation(to);
   }, []);
 
   const navigate = useCallback((url: string) => {
@@ -277,9 +285,13 @@ export default function App() {
     window.history.pushState({}, "", url);
     const to = currentLocation();
     rememberScrollLeaving(from, to, leftAt);
+    shownLocationKeyRef.current = locationKey(to);
     setLocation(to);
     const scrollTo = scrollAfterNavigation(from, to);
+    // A restore still running for the page being left must not go on to
+    // scroll the next one once it has loaded.
     if (scrollTo !== null) restoreScroll(scrollTo);
+    else cancelScrollRestore();
   }, []);
 
   // The tab icon names the area on screen, so a calendar window and a mail
@@ -299,9 +311,6 @@ export default function App() {
   // `window.scrollY` at the event: a browser may already have restored the
   // entry it is stepping to by the time popstate fires, while the scroll event
   // that restoration causes is only dispatched on the next frame.
-  const shownLocationKeyRef = useRef(locationKey(location));
-  shownLocationKeyRef.current = locationKey(location);
-  const lastScrollYRef = useRef(0);
   useEffect(() => {
     lastScrollYRef.current = window.scrollY;
     const onScroll = () => {
@@ -310,6 +319,7 @@ export default function App() {
     const onPop = () => {
       rememberScroll(shownLocationKeyRef.current, lastScrollYRef.current);
       const to = currentLocation();
+      shownLocationKeyRef.current = locationKey(to);
       setLocation(to);
       const remembered = rememberedScroll(locationKey(to));
       if (remembered !== undefined) restoreScroll(remembered);
