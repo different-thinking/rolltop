@@ -56,7 +56,7 @@ export async function zipEntries(entries: ZipEntry[], archiveName: string): Prom
   for (const entry of entries) {
     if (entry.data.size >= ZIP32_LIMIT) throw new Error(`${entry.name} is too large to zip.`);
     const name = encoder.encode(entry.name);
-    const [crc, compressed] = await Promise.all([crc32OfBlob(entry.data), deflateBlob(entry.data)]);
+    const { crc, compressed } = await deflateBlob(entry.data);
     if (compressed.size >= ZIP32_LIMIT || offset >= ZIP32_LIMIT) throw new Error("The archive is too large.");
     const { time, date } = dosDateTime(entry.lastModified ?? Date.now());
 
@@ -106,20 +106,20 @@ export async function zipEntries(entries: ZipEntry[], archiveName: string): Prom
   return new File([...parts, ...central, end.buffer], archiveName, { type: "application/zip" });
 }
 
-async function deflateBlob(blob: Blob): Promise<Blob> {
-  const stream = blob.stream().pipeThrough(new CompressionStream("deflate-raw"));
-  return new Response(stream).blob();
-}
-
-async function crc32OfBlob(blob: Blob): Promise<number> {
-  const reader = blob.stream().getReader();
+// deflateBlob reads the data once and takes the CRC of exactly the bytes it
+// compressed: two separate reads of a file that changes in between would store
+// a CRC that does not match the entry, which every unzip tool rejects.
+async function deflateBlob(blob: Blob): Promise<{ crc: number; compressed: Blob }> {
   let crc = 0xffffffff;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    crc = crc32Update(crc, value);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
+  const checksum = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+    transform(chunk, controller) {
+      crc = crc32Update(crc, chunk);
+      controller.enqueue(chunk);
+    }
+  });
+  const stream = blob.stream().pipeThrough(checksum).pipeThrough(new CompressionStream("deflate-raw"));
+  const compressed = await new Response(stream).blob();
+  return { crc: (crc ^ 0xffffffff) >>> 0, compressed };
 }
 
 let crcTable: Uint32Array | null = null;

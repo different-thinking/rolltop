@@ -294,6 +294,10 @@ export function ComposeBox({
   const [zipping, setZipping] = useState<ZipInProgress[]>([]);
   const [fileDragActive, setFileDragActive] = useState(false);
   const fileDragDepth = useRef(0);
+  // Bumped whenever the composer starts over on another message or goes away,
+  // so a ZIP that finishes afterwards is not attached to a message it was never
+  // dropped on.
+  const attachmentGeneration = useRef(0);
   const [pendingRecovery, setPendingRecovery] = useState<LocalComposeRecovery | null>(null);
   const [recoveryReady, setRecoveryReady] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -377,6 +381,11 @@ export function ComposeBox({
       revokeAttachmentObjectURLs(current);
       return [];
     });
+    attachmentGeneration.current += 1;
+    setZipOffer(null);
+    setZipping([]);
+    fileDragDepth.current = 0;
+    setFileDragActive(false);
     if (editorRef.current) {
       editorRef.current.innerHTML = initialHTML;
       // Answering an existing message lands in the body: the recipient and
@@ -422,6 +431,9 @@ export function ComposeBox({
   useEffect(() => {
     function holdFileDrop(event: globalThis.DragEvent) {
       if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+      // A file input elsewhere on the page takes a dropped file by itself, and
+      // cancelling the drop would take that away from it.
+      if (event.target instanceof HTMLInputElement && event.target.type === "file") return;
       event.preventDefault();
     }
     window.addEventListener("dragover", holdFileDrop);
@@ -433,6 +445,7 @@ export function ComposeBox({
   }, []);
 
   useEffect(() => () => {
+    attachmentGeneration.current += 1;
     revokeAttachmentObjectURLs(attachmentsRef.current);
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
   }, []);
@@ -566,7 +579,7 @@ export function ComposeBox({
   }
 
   function discardCompose() {
-    const changed = Boolean(pendingRecovery) || composeIsDirty(form, editorRef.current, baselineRef.current) ||
+    const changed = Boolean(pendingRecovery) || attachmentsPending || composeIsDirty(form, editorRef.current, baselineRef.current) ||
       composeAttachmentStateKey(form, attachments) !== baselineAttachmentStateRef.current;
     if (changed && !window.confirm("Discard this unsent message?")) return;
     clearLocalComposeRecovery();
@@ -621,13 +634,16 @@ export function ComposeBox({
       attachFiles(files, false);
       return;
     }
+    const generation = attachmentGeneration.current;
     const pending = files.map((file) => ({ id: randomAttachmentID(), filename: zipArchiveName(file.name), size: file.size }));
     setZipping((current) => [...current, ...pending]);
     // One file at a time: each one is read twice and held compressed in memory
     // until it is attached, and a handful of large videos at once is a lot of it.
     for (const [index, file] of files.entries()) {
+      if (attachmentGeneration.current !== generation) return;
       try {
         const archive = await zipFile(file);
+        if (attachmentGeneration.current !== generation) return;
         if (archive.size <= file.size * (1 - ZIP_MIN_SAVING)) {
           attachFiles([archive], false);
         } else {
@@ -635,10 +651,13 @@ export function ComposeBox({
           addToast(`${file.name || "The file"} hardly gets smaller as a ZIP, so it was attached as it is.`);
         }
       } catch (err) {
+        if (attachmentGeneration.current !== generation) return;
         attachFiles([file], false);
         addToast(`Could not zip ${file.name || "the file"} (${messageFromError(err)}). It was attached as it is.`, "error");
       } finally {
-        setZipping((current) => current.filter((item) => item.id !== pending[index].id));
+        if (attachmentGeneration.current === generation) {
+          setZipping((current) => current.filter((item) => item.id !== pending[index].id));
+        }
       }
     }
   }
@@ -765,10 +784,14 @@ export function ComposeBox({
   function handleComposeDrop(event: DragEvent<HTMLFormElement>) {
     fileDragDepth.current = 0;
     setFileDragActive(false);
-    const files = Array.from(event.dataTransfer.files);
-    if (files.length === 0) return;
+    const { files, folders } = droppedFiles(event.dataTransfer);
+    if (files.length === 0 && folders === 0) return;
     event.preventDefault();
     if (sending) return;
+    // A folder arrives as a file with a name and nothing that can be read, and
+    // would only fail once the send tries to upload it.
+    if (folders > 0) addToast(folders === 1 ? "Folders cannot be attached. Zip the folder first." : `${folders} folders cannot be attached. Zip them first.`, "error");
+    if (files.length === 0) return;
     if (minimized) onMinimize?.();
     addFiles(files, false);
   }
@@ -1292,6 +1315,17 @@ function ZipOfferDialog({ files, onAnswer }: { files: File[]; onAnswer: (answer:
       onKeyDown={(event) => {
         // Escape belongs to this question while it is open; the composer behind
         // it must not read it as anything else.
+        if (event.key === "Tab") {
+          // The composer behind the question is covered; focus must not wander
+          // into fields the reader cannot see.
+          const buttons = Array.from(event.currentTarget.querySelectorAll("button"));
+          if (buttons.length === 0) return;
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.shiftKey ? (index <= 0 ? buttons.length - 1 : index - 1) : (index + 1) % buttons.length;
+          event.preventDefault();
+          buttons[next].focus();
+          return;
+        }
         if (event.key !== "Escape") return;
         event.preventDefault();
         event.stopPropagation();
@@ -1329,6 +1363,21 @@ function ZipOfferDialog({ files, onAnswer }: { files: File[]; onAnswer: (answer:
       </div>
     </div>
   );
+}
+
+// droppedFiles separates the files of a drop from the folders in it. Only the
+// items list can tell them apart, and only while the drop event is running.
+function droppedFiles(transfer: DataTransfer): { files: File[]; folders: number } {
+  const files = Array.from(transfer.files);
+  const items = Array.from(transfer.items || []).filter((item) => item.kind === "file");
+  if (items.length !== files.length) return { files, folders: 0 };
+  const kept: File[] = [];
+  let folders = 0;
+  items.forEach((item, index) => {
+    if (item.webkitGetAsEntry?.()?.isDirectory) folders += 1;
+    else kept.push(files[index]);
+  });
+  return { files: kept, folders };
 }
 
 function isFileDrag(event: DragEvent<HTMLElement>): boolean {
