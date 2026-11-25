@@ -722,6 +722,139 @@
   background: var(--accent-soft);
 }
 
+.compose-attachment-pending {
+  grid-template-columns: 28px minmax(0, 1fr);
+  border-style: dashed;
+
+  small {
+    animation: compose-zip-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes compose-zip-pulse {
+  50% {
+    opacity: .45;
+  }
+}
+
+// Both overlays cover the composer they belong to, so the composer is their
+// positioning context, whether it is the popover or an inline reply.
+.compose-window,
+.inline-reply {
+  position: relative;
+}
+
+// Drawn while files are dragged over the composer. It never takes the pointer:
+// the drag events have to keep reaching the composer beneath it, or entering
+// the overlay would count as leaving the composer and it would flicker.
+.compose-drop-overlay {
+  position: absolute;
+  inset: 6px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 2px dashed var(--active-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-soft) 85%, transparent);
+  color: var(--text);
+  pointer-events: none;
+  text-align: center;
+
+  svg {
+    width: 32px;
+    height: 32px;
+  }
+
+  small {
+    color: var(--muted);
+  }
+}
+
+.compose-zip-offer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+.compose-zip-offer-card {
+  width: min(440px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 12px 10px;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-raised, var(--surface));
+  box-shadow: var(--shadow-raised);
+  color: var(--text);
+
+  > svg {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+.compose-zip-offer-text {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+
+  strong {
+    overflow-wrap: anywhere;
+  }
+
+  > small {
+    color: var(--muted);
+  }
+
+  ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 4px;
+  }
+
+  li {
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+
+    span {
+      @include truncate;
+    }
+
+    small {
+      flex: none;
+      color: var(--muted);
+    }
+  }
+}
+
+.compose-zip-offer-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+
+  button:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+}
+
 .compose-attachment-warning {
   min-height: 42px;
   display: flex;
