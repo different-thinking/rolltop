@@ -17,6 +17,7 @@ import { recordFiledMessages, releaseFiledMessages } from "./lib/filedMessages";
 import { messageCountLabel } from "./lib/format";
 import { loadMailSortOrder } from "./lib/mailSort";
 import { currentLocation, defaultMailURL, mailRoute, mailViewCategory, messageURL } from "./lib/routes";
+import { cancelScrollRestore, locationKey, rememberScroll, rememberScrollLeaving, rememberedScroll, restoreScroll, scrollAfterNavigation } from "./lib/scrollMemory";
 import { appIconURL, syncDocumentIcon, syncDocumentManifest } from "./lib/appIcon";
 import { androidNativeAvailable, androidPushSubscription, registerAndroidPush, unregisterAndroidPush } from "./lib/androidNative";
 import { serverBuildIdentity, serverShellDiffers } from "./lib/shellFreshness";
@@ -271,8 +272,14 @@ export default function App() {
   }, []);
 
   const navigate = useCallback((url: string) => {
+    const from = currentLocation();
+    const leftAt = window.scrollY;
     window.history.pushState({}, "", url);
-    setLocation(currentLocation());
+    const to = currentLocation();
+    rememberScrollLeaving(from, to, leftAt);
+    setLocation(to);
+    const scrollTo = scrollAfterNavigation(from, to);
+    if (scrollTo !== null) restoreScroll(scrollTo);
   }, []);
 
   // The tab icon names the area on screen, so a calendar window and a mail
@@ -283,8 +290,22 @@ export default function App() {
     syncDocumentManifest(location.path);
   }, [location.path]);
 
+  // A history step is the browser's to restore, and it does - but only as far
+  // as the page reaches at that moment, and a list that is still loading is
+  // short. Where this session remembers the position, it is restored again
+  // once the list is tall enough. The page being left is still drawn when the
+  // event fires, so its own offset is still the one to remember.
+  const shownLocationKeyRef = useRef(locationKey(location));
+  shownLocationKeyRef.current = locationKey(location);
   useEffect(() => {
-    const onPop = () => setLocation(currentLocation());
+    const onPop = () => {
+      rememberScroll(shownLocationKeyRef.current, window.scrollY);
+      const to = currentLocation();
+      setLocation(to);
+      const remembered = rememberedScroll(locationKey(to));
+      if (remembered !== undefined) restoreScroll(remembered);
+      else cancelScrollRestore();
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
