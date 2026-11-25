@@ -407,6 +407,11 @@ func TestCopyIsReadAsHTMLWritesIt(t *testing.T) {
 	if strings.Join(r.Ingredients, "|") != "Teig:|1 Ei|Belag:|2 Äpfel" || len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {
 		t.Fatalf("bold parts: %q %#v", r.Ingredients, r.Instructions)
 	}
+	// A sub-heading naming the part is a section of it, not its end.
+	r = declared(`<h2>Zutaten</h2><h3>Zutaten für den Teig</h3><ul><li>1 Ei</li></ul><h2>Zubereitung</h2><h3>Zubereitung des Teigs</h3><ol><li>Kneten</li></ol>`)
+	if strings.Join(r.Ingredients, "|") != "Zutaten für den Teig:|1 Ei" || len(r.Instructions) != 1 || r.Instructions[0].Name != "Zubereitung des Teigs" {
+		t.Fatalf("sub-headings naming the part: %q %#v", r.Ingredients, r.Instructions)
+	}
 	// A facts line naming the part holds nothing; the heading after it is the part.
 	r = declared(`<p><strong>Zubereitung: 30 Minuten</strong></p><h2>Zutaten</h2><ul><li>1 Ei</li></ul><h2>Zubereitung</h2><ol><li>Backen</li></ol>`)
 	if len(r.Instructions) != 1 || r.Instructions[0].Steps[0] != "Backen" {

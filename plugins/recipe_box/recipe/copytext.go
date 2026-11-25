@@ -159,6 +159,12 @@ func copyBlocks(markup string) []copyBlock {
 // recipe's facts line ("Zubereitung: 30 Minuten") names the part too, and
 // holds nothing.
 func copyPart(blocks []copyBlock, part string) []copyBlock {
+	// A sub-heading naming this part ("Zutaten für den Teig") is one of its
+	// sections; only the other part's heading ends it.
+	other := "instructions"
+	if part == "instructions" {
+		other = "ingredients"
+	}
 	for start, opener := range blocks {
 		if opener.level == 0 || !copyHeadingNames(opener.text, part) {
 			continue
@@ -166,8 +172,7 @@ func copyPart(blocks []copyBlock, part string) []copyBlock {
 		var out []copyBlock
 		lists := false
 		for _, block := range blocks[start+1:] {
-			if block.level > 0 && ((block.level < 7 && block.level <= opener.level) ||
-				copyHeadingNames(block.text, "ingredients") || copyHeadingNames(block.text, "instructions")) {
+			if block.level > 0 && ((block.level < 7 && block.level <= opener.level) || copyHeadingNames(block.text, other)) {
 				break
 			}
 			lists = lists || len(block.items) > 0
@@ -241,6 +246,9 @@ func copyInstructions(blocks []copyBlock) []StepSection {
 		}
 	}
 	for _, block := range copyPart(blocks, "instructions") {
+		if steps >= maxListItems {
+			break
+		}
 		if block.level > 0 {
 			flush()
 			current = StepSection{Name: strings.TrimSpace(strings.TrimRight(block.text, ":"))}
